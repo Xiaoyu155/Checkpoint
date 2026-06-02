@@ -1,0 +1,19 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: screen_click_demo_yaml
+version: 1
+steps:
+  - id: observe
+    action: observe_screen
+  - id: resolve_login
+    action: resolve
+    target:
+      text: 登录
+      preferred:
+        - dom
+        - uia
+        - ocr
+        - vision
+        - mock
+  - id: click_login
+    action: click

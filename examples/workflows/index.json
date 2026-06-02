@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "groups": [
+    {
+      "id": "readonly",
+      "title": "Read-only workflows",
+      "workflows": [
+        "readonly/minimal_testable_workflow.yaml",
+        "readonly/vision_mock_workflow.yaml"
+      ]
+    },
+    {
+      "id": "form-fill",
+      "title": "Form fill workflows",
+      "workflows": [
+        "form-fill/local_html_form_workflow.yaml",
+        "form-fill/browser_form_workflow.yaml"
+      ]
+    },
+    {
+      "id": "download",
+      "title": "Download workflows",
+      "workflows": [
+        "download/browser_download_workflow.yaml"
+      ]
+    },
+    {
+      "id": "auth",
+      "title": "Auth state workflows",
+      "workflows": [
+        "auth/browser_auth_save_workflow.yaml",
+        "auth/browser_auth_restore_workflow.yaml"
+      ]
+    }
+  ]
+}

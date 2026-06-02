@@ -1,0 +1,22 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: browser_auth_save_workflow
+version: 1
+steps:
+  - id: observe_browser
+    action: observe_browser
+    url: https://example.test/auth-demo
+    routes:
+      - url: "**/auth-demo"
+        status: 200
+        content_type: text/html
+        body_from_file: examples/web/auth_demo.html
+  - id: click_login
+    action: click
+    target:
+      test_id: login-button
+      role: button
+      preferred: [dom, mock]
+  - id: save_auth_state
+    action: save_storage_state
+    path: .agent-auth/demo-auth-state.json

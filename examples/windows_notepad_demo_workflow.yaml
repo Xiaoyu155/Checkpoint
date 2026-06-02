@@ -1,0 +1,37 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: windows_notepad_demo_workflow
+version: 1
+steps:
+  - id: observe_notepad
+    action: observe_fixture
+    path: examples/fixtures/windows_notepad_observation.json
+  - id: assert_notepad_window
+    action: assert_text
+    text: 业务备忘录
+  - id: fill_subject
+    action: paste
+    target:
+      text: 主题输入框
+      role: edit
+      preferred:
+        - uia
+        - mock
+    value: 今日订单复核
+  - id: fill_body
+    action: paste
+    target:
+      text: 内容编辑区
+      role: edit
+      preferred:
+        - uia
+        - mock
+    value: A2002 缺少收货地址，需人工确认后再提交。
+  - id: click_save
+    action: click
+    target:
+      text: 保存
+      role: button
+      preferred:
+        - uia
+        - mock

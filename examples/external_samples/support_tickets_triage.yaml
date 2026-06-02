@@ -1,0 +1,39 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: external_support_tickets_triage
+version: 1
+steps:
+  - id: observe_tickets
+    action: observe_browser
+    url: https://support.sandbox.example.com/tickets
+    headed: false
+    routes:
+      - url: "**/tickets"
+        status: 200
+        content_type: text/html
+        body_from_file: examples/external_samples/fixtures/support_tickets_demo.html
+  - id: assert_tickets_page
+    action: assert_text
+    text: Tickets
+  - id: wait_priority_queue
+    action: wait_for
+    condition: target
+    target:
+      contains_text: Priority
+      preferred:
+        - dom
+        - mock
+    timeout_seconds: 3
+  - id: dry_run_open_high_priority
+    action: click
+    dry_run: true
+    target:
+      text: Open
+      row_contains_text: TK-1002
+      column_header: Action
+      preferred:
+        - dom
+        - mock
+  - id: assert_ticket_queue_visible
+    action: assert_text
+    text: Priority

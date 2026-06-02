@@ -1,0 +1,45 @@
+name: Visual Agent Quality Gate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  quality-gate:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test,web,mcp]"
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install chromium
+
+      - name: Run CI quality gate
+        run: |
+          python -m visual_agent.cli init-workspace --root .agent-workspace --overwrite
+          python -m visual_agent.cli workspace-risk-policy-check --root .agent-workspace
+          python -m visual_agent.cli quality-gate --profile ci --workspace-root .agent-workspace --run --fail-on-secret-leak
+
+      - name: Upload quality reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-agent-quality-reports
+          path: |
+            .runs/quality_gates/**
+            .agent-workspace/reports/quality_gates/**
+            .agent-workspace/reports/regression_runs/**
+          if-no-files-found: ignore

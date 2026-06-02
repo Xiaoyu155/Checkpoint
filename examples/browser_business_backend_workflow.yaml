@@ -1,0 +1,98 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: browser_business_backend_workflow
+version: 1
+steps:
+  - id: observe_backend
+    action: observe_browser
+    url: https://example.test/business-backend
+    routes:
+      - url: "**/business-backend"
+        status: 200
+        content_type: text/html
+        body_from_file: examples/web/business_backend_browser_demo.html
+      - url: "**/api/orders/A2002/process"
+        status: 409
+        content_type: application/json
+        body: '{"ok":false,"order_id":"A2002","reason":"missing_shipping_address"}'
+      - url: "**/exports/A2002.csv"
+        status: 200
+        content_type: text/csv
+        headers:
+          content-disposition: attachment; filename="A2002.csv"
+        body: |
+          order_id,customer,status
+          A2002,Globex,exception
+  - id: assert_spa_loaded
+    action: assert_text
+    text: SPA 页面已加载
+  - id: fill_customer_filter
+    action: paste
+    target:
+      role: input
+      near_text: 客户名称
+      preferred: [dom, mock]
+    value: Globex
+  - id: click_exception_process
+    action: click
+    target:
+      test_id: row-action
+      role: button
+      row_contains_text: A2002
+      column_header: 处理
+      preferred: [dom, mock]
+  - id: assert_process_response
+    action: assert_response
+    url_contains: /api/orders/A2002/process
+    method: POST
+    status: 409
+    ok: false
+    timeout_seconds: 2
+  - id: observe_exception_state
+    action: observe_browser
+    reuse_page: true
+  - id: assert_exception_dialog
+    action: assert_text
+    text: 缺少收货地址
+  - id: dismiss_exception_dialog
+    action: click
+    target:
+      text: 我知道了
+      role: button
+      scope_role: dialog
+      scope_contains_text: 缺少收货地址
+      preferred: [dom, mock]
+  - id: observe_dismissed_state
+    action: observe_browser
+    reuse_page: true
+  - id: assert_dialog_closed
+    action: assert_text
+    text: 异常弹窗已关闭
+  - id: click_next_page
+    action: click
+    target:
+      text: 下一页
+      role: button
+      near_contains_text: 第 2 页
+      preferred: [dom, mock]
+  - id: observe_page_changed
+    action: observe_browser
+    reuse_page: true
+  - id: assert_page_changed
+    action: assert_text
+    text: 第 3 页
+  - id: download_exception_order
+    action: expect_download
+    target:
+      test_id: row-action
+      role: link
+      row_contains_text: A2002
+      column_header: 下载
+      preferred: [dom, mock]
+    save_as: A2002.csv
+    timeout_seconds: 5
+  - id: assert_downloaded_file
+    action: assert_file_exists
+    from_download: download_exception_order
+    extension: csv
+    min_bytes: 20

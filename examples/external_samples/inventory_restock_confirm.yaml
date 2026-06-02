@@ -1,0 +1,41 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: external_inventory_restock_confirm
+version: 1
+steps:
+  - id: observe_inventory
+    action: observe_browser
+    url: https://inventory.sandbox.example.com/stock
+    storage_state: .agent-auth/inventory-sandbox-state.json
+    headed: false
+    routes:
+      - url: "**/stock"
+        status: 200
+        content_type: text/html
+        body_from_file: examples/external_samples/fixtures/inventory_restock_demo.html
+  - id: assert_inventory_page
+    action: assert_text
+    text: Inventory
+  - id: dry_run_filter_sku
+    action: type
+    dry_run: true
+    target:
+      text: SKU Search
+      role: textbox
+      preferred:
+        - dom
+        - mock
+    value: SKU-2042
+  - id: confirm_queue_restock
+    action: click
+    require_confirm: true
+    target:
+      text: Queue Restock
+      row_contains_text: SKU-2042
+      column_header: Action
+      preferred:
+        - dom
+        - mock
+  - id: assert_low_stock_visible
+    action: assert_text
+    text: Low Stock

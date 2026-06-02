@@ -1,0 +1,21 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: minimal_testable_dom_workflow
+version: 1
+steps:
+  - id: observe_fixture
+    action: observe_fixture
+    path: examples/fixtures/login_page_observation.json
+  - id: assert_login_page
+    action: assert_text
+    text: 客户管理系统
+  - id: resolve_login
+    action: resolve
+    target:
+      text: 登录
+      role: button
+      preferred:
+        - dom
+        - mock
+  - id: click_login
+    action: click

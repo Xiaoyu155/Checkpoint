@@ -1,0 +1,104 @@
+# Visual Agent MCP Server
+
+Turn AI assistant commands into auditable local workflows.
+
+Playwright MCP gives you a browser remote control. Windows-MCP gives you a desktop remote control. Visual Agent MCP gives you a local workflow runtime with permissions, audit trails, reports, and failure recovery.
+
+## What You Get
+
+| Feature | Playwright MCP | Windows-MCP | Visual Agent MCP |
+| --- | --- | --- | --- |
+| Browser automation | yes | no | yes |
+| Windows desktop UIA | no | yes | yes |
+| Workflow YAML persistence | no | no | yes |
+| dry-run / supervised / approved | no | no | yes |
+| Screenshot and failure diagnosis | partial | partial | yes |
+| Audit log for calls | no | no | yes |
+| Regression test export | no | no | yes |
+| Local-first execution | yes | yes | yes |
+
+## Install
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e .[mcp]
+```
+
+Before connecting a client, run the release check plan and MCP smoke tests:
+
+```powershell
+.\.venv\Scripts\python.exe -m visual_agent.cli release-check --format markdown
+.\.venv\Scripts\python.exe -m visual_agent.cli mcp-client-config --workspace-root .agent-workspace --client cursor --format json
+.\.venv\Scripts\python.exe -m visual_agent.cli mcp-smoke --workspace-root .agent-workspace --format markdown
+.\.venv\Scripts\python.exe -m pytest tests\test_mcp_server.py
+```
+
+## Claude Desktop
+
+Example config:
+
+```json
+{
+  "mcpServers": {
+    "visual-agent": {
+      "command": "visual-agent-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+For source checkouts, use `examples/mcp_config/claude_desktop_config.json` and set `PYTHONPATH` to this repository's `src` directory.
+
+## Tools
+
+- `list_workflows`: list available workflows and latest run status.
+- `validate_workflow`: run workflow validation and preflight checks without execution.
+- `run_workflow`: run a workflow. Defaults to `dry-run`.
+- `get_run_report`: return markdown or redacted JSON for a completed run.
+- `list_run_artifacts`: list reports, screenshots, downloads, and run artifacts under the workspace.
+
+## Safety Defaults
+
+- `run_workflow` defaults to `dry-run`.
+- `approved` is rejected unless the workflow is listed in `workspace.json` under `mcp.approved_workflows`.
+- `mcp.max_run_profile` limits the highest profile MCP can use.
+- MCP calls are audited in `gui/actions.jsonl` when `mcp.audit_all_calls` is true.
+- Reports are scrubbed before JSON responses.
+- Artifact paths must stay inside the workspace.
+- MCP does not need cloud browser infrastructure; workflow reports, screenshots, queue data, auth-state metadata, and GUI action history stay under the local workspace.
+- Secret-like strings in reports can be checked with `quality-gate --fail-on-secret-leak`.
+
+Example `workspace.json` section:
+
+```json
+{
+  "mcp": {
+    "approved_workflows": [],
+    "audit_all_calls": true,
+    "max_run_profile": "supervised"
+  }
+}
+```
+
+## Example Prompts
+
+- "List my workflows."
+- "Validate the order entry workflow."
+- "Run local_html_form_workflow as a dry-run."
+- "Show the report for run 20260602-123456-abcd1234."
+
+## Client Config Files
+
+Ready-to-edit examples live under `examples/mcp_config/`:
+
+- `claude_desktop_config.json`
+- `cursor_mcp.json`
+
+You can also generate a config for the current checkout:
+
+```powershell
+.\.venv\Scripts\python.exe -m visual_agent.cli mcp-client-config --workspace-root .agent-workspace --client cursor --format markdown
+.\.venv\Scripts\python.exe -m visual_agent.cli mcp-client-config --workspace-root .agent-workspace --client claude-desktop --format markdown
+```
+
+Keep the configured workspace path local and avoid pointing MCP clients at directories that contain real credentials unless the workflow policy and audit settings are already reviewed.

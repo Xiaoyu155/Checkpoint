@@ -1,0 +1,23 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: ocr_mock_workflow
+version: 1
+steps:
+  - id: observe_ocr
+    action: observe_ocr
+    mock_text: 登录
+    mock_bounds:
+      left: 500
+      top: 320
+      width: 180
+      height: 48
+  - id: assert_ocr_text
+    action: assert_text
+    text: 登录
+  - id: resolve_login
+    action: resolve
+    target:
+      contains_text: 登录
+      preferred: [ocr, mock]
+  - id: click_login
+    action: click

@@ -1,0 +1,51 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: external_finance_reconciliation_export
+version: 1
+steps:
+  - id: observe_reconciliation
+    action: observe_browser
+    url: https://finance.sandbox.example.com/reconciliation
+    storage_state: .agent-auth/finance-sandbox-state.json
+    headed: false
+    routes:
+      - url: "**/reconciliation"
+        status: 200
+        content_type: text/html
+        body_from_file: examples/external_samples/fixtures/finance_reconciliation_demo.html
+      - url: "**/exports/reconciliation.csv"
+        status: 200
+        content_type: text/csv
+        headers:
+          content-disposition: attachment; filename="reconciliation-export.csv"
+        body: |
+          reference,channel,status
+          RC-3001,Marketplace,Unmatched
+  - id: assert_reconciliation_page
+    action: assert_text
+    text: Reconciliation
+  - id: wait_unmatched_table
+    action: wait_for
+    condition: target
+    target:
+      contains_text: Unmatched
+      preferred:
+        - dom
+        - mock
+    timeout_seconds: 3
+  - id: confirm_export_reconciliation
+    action: expect_download
+    require_confirm: true
+    target:
+      text: Export CSV
+      role: button
+      near_contains_text: Reconciliation
+      preferred:
+        - dom
+        - mock
+    save_as: reconciliation-export.csv
+  - id: assert_export_placeholder
+    action: assert_file_exists
+    from_download: confirm_export_reconciliation
+    extension: .csv
+    min_bytes: 1

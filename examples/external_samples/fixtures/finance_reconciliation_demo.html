@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Finance Reconciliation Sandbox</title>
+  </head>
+  <body>
+    <main>
+      <h1>Reconciliation</h1>
+      <section aria-label="Reconciliation Summary">
+        <p>Unmatched transactions require finance review.</p>
+        <button data-testid="export-reconciliation" id="export-csv">Export CSV</button>
+      </section>
+      <table aria-label="Unmatched Transactions">
+        <thead>
+          <tr>
+            <th>Reference</th>
+            <th>Channel</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>RC-3001</td>
+            <td>Marketplace</td>
+            <td>Unmatched</td>
+          </tr>
+          <tr>
+            <td>RC-3002</td>
+            <td>Payment Gateway</td>
+            <td>Matched</td>
+          </tr>
+        </tbody>
+      </table>
+    </main>
+    <script>
+      document.getElementById("export-csv").addEventListener("click", () => {
+        window.location.href = "/exports/reconciliation.csv";
+      });
+    </script>
+  </body>
+</html>

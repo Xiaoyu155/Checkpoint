@@ -1,0 +1,11 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: failure_diagnosis_demo
+version: 1
+steps:
+  - id: observe_login
+    action: observe_fixture
+    path: examples/fixtures/login_page_observation.json
+  - id: assert_missing_text
+    action: assert_text
+    text: 不存在的成功提示

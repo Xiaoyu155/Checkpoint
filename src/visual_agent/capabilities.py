@@ -1,0 +1,429 @@
+from __future__ import annotations
+
+import importlib.util
+from dataclasses import dataclass
+from typing import Any, Literal
+
+from .dispatcher import ActionDispatcher
+from .providers import default_provider_registry
+
+
+CapabilityKind = Literal["provider", "action", "assertion", "file", "auth", "extractor", "command", "dependency"]
+RiskLevel = Literal["low", "medium", "high"]
+
+
+@dataclass(frozen=True)
+class Capability:
+    name: str
+    kind: CapabilityKind
+    available: bool
+    description: str
+    required: bool = True
+    dependency: str | None = None
+    install_hint: str | None = None
+    input_schema: dict[str, Any] | None = None
+    output_schema: dict[str, Any] | None = None
+    dry_run_supported: bool = False
+    risk_level: RiskLevel = "low"
+    planner_visible: bool = False
+
+
+@dataclass(frozen=True)
+class CapabilityManifest:
+    capabilities: tuple[Capability, ...]
+
+    @property
+    def available_count(self) -> int:
+        return sum(1 for capability in self.capabilities if capability.available)
+
+    @property
+    def missing_count(self) -> int:
+        return sum(1 for capability in self.capabilities if not capability.available)
+
+
+def build_capability_manifest() -> CapabilityManifest:
+    capabilities: list[Capability] = []
+    capabilities.extend(provider_capabilities())
+    capabilities.extend(action_capabilities())
+    capabilities.extend(workflow_atomic_capabilities())
+    capabilities.extend(command_capabilities())
+    capabilities.extend(dependency_capabilities())
+    return CapabilityManifest(capabilities=tuple(capabilities))
+
+
+def build_atomic_capability_manifest() -> CapabilityManifest:
+    capabilities = [
+        capability
+        for capability in build_capability_manifest().capabilities
+        if capability.planner_visible and capability.kind != "dependency"
+    ]
+    return CapabilityManifest(capabilities=tuple(capabilities))
+
+
+def provider_capabilities() -> tuple[Capability, ...]:
+    registry = default_provider_registry()
+    descriptions = {
+        "observe_screen": "Capture the primary screen into an Observation.",
+        "observe_browser": "Open a persistent Playwright browser page for native DOM actions.",
+        "observe_dom": "Read live web DOM with Playwright.",
+        "observe_uia": "Read Windows UI Automation controls.",
+        "observe_ocr": "Extract text boxes from a screenshot or image.",
+        "observe_vision": "Describe screenshot state with a VLM provider.",
+        "observe_fixture": "Replay a saved Observation fixture.",
+        "observe_html": "Read deterministic local HTML into DOM-like Observation.",
+    }
+    dependency_by_action = {
+        "observe_dom": "playwright",
+        "observe_browser": "playwright",
+        "observe_uia": "uiautomation",
+    }
+    install_hint_by_dependency = {
+        "playwright": "pip install -e .[web] && python -m playwright install chromium",
+        "uiautomation": "pip install -e .[desktop]",
+    }
+
+    result = []
+    for action in registry.actions:
+        dependency = dependency_by_action.get(action)
+        available = module_available(dependency) if dependency else True
+        result.append(
+            Capability(
+                name=action,
+                kind="provider",
+                available=available,
+                description=descriptions.get(action, action),
+                required=False if dependency else True,
+                dependency=dependency,
+                install_hint=install_hint_by_dependency.get(dependency or ""),
+                input_schema=provider_input_schema(action),
+                output_schema={"type": "object", "fields": {"observation": "Observation"}},
+                dry_run_supported=False,
+                risk_level="low",
+                planner_visible=action
+                in {"observe_browser", "observe_dom", "observe_html", "observe_uia", "observe_ocr", "observe_vision"},
+            )
+        )
+    return tuple(result)
+
+
+def action_capabilities() -> tuple[Capability, ...]:
+    dispatcher = ActionDispatcher()
+    descriptions = {
+        "click": "Click a resolved target.",
+        "type": "Type text into a resolved target.",
+        "paste": "Paste text into a resolved target.",
+    }
+    return tuple(
+        Capability(
+            name=action,
+            kind="action",
+            available=True,
+                description=descriptions.get(action, action),
+                required=True,
+                input_schema=action_input_schema(action),
+                output_schema={"type": "object", "fields": {"action_result": "ActionResult"}},
+                dry_run_supported=True,
+                risk_level="medium" if action == "click" else "low",
+                planner_visible=True,
+            )
+        for action in dispatcher.actions_available
+    )
+
+
+def workflow_atomic_capabilities() -> tuple[Capability, ...]:
+    specs = [
+        Capability(
+            name="resolve",
+            kind="extractor",
+            available=True,
+            description="Resolve a semantic Target against the latest or named observation.",
+            input_schema={"type": "object", "required": ["target"], "fields": {"target": "Target", "observation": "string?"}},
+            output_schema={"type": "object", "fields": {"resolved_target": "ResolvedTarget"}},
+            dry_run_supported=True,
+            risk_level="low",
+            planner_visible=True,
+        ),
+        Capability(
+            name="assert_text",
+            kind="assertion",
+            available=True,
+            description="Assert that the latest or named observation contains text.",
+            input_schema={"type": "object", "required": ["text"], "fields": {"text": "string", "observation": "string?"}},
+            output_schema={"type": "object", "fields": {"status": "success|failed"}},
+            dry_run_supported=False,
+            risk_level="low",
+            planner_visible=True,
+        ),
+        Capability(
+            name="assert_response",
+            kind="assertion",
+            available=True,
+            description="Assert that a captured browser network response matches URL/method/status constraints.",
+            input_schema={
+                "type": "object",
+                "fields": {
+                    "url_contains": "string?",
+                    "method": "string?",
+                    "status": "integer?",
+                    "status_min": "integer?",
+                    "status_max": "integer?",
+                    "ok": "boolean?",
+                    "timeout_seconds": "number?",
+                },
+            },
+            output_schema={"type": "object", "fields": {"event": "NetworkEvent"}},
+            dry_run_supported=False,
+            risk_level="low",
+            planner_visible=True,
+        ),
+        Capability(
+            name="expect_download",
+            kind="file",
+            available=True,
+            description="Click a DOM target and save the resulting browser download into the run directory.",
+            input_schema={
+                "type": "object",
+                "required": ["target"],
+                "fields": {"target": "Target", "save_as": "string?", "timeout_seconds": "number?"},
+            },
+            output_schema={"type": "object", "fields": {"path": "string", "size_bytes": "integer"}},
+            dry_run_supported=True,
+            risk_level="medium",
+            planner_visible=True,
+        ),
+        Capability(
+            name="assert_file_exists",
+            kind="file",
+            available=True,
+            description="Assert that a file exists and optionally verify extension and minimum size.",
+            input_schema={
+                "type": "object",
+                "fields": {"path": "string?", "from_download": "string?", "extension": "string?", "min_bytes": "integer?"},
+            },
+            output_schema={"type": "object", "fields": {"path": "string", "size_bytes": "integer"}},
+            dry_run_supported=False,
+            risk_level="low",
+            planner_visible=True,
+        ),
+        Capability(
+            name="save_storage_state",
+            kind="auth",
+            available=True,
+            description="Save Playwright browser context storage state for later authenticated runs.",
+            input_schema={"type": "object", "fields": {"path": "string?"}},
+            output_schema={"type": "object", "fields": {"path": "string", "size_bytes": "integer"}},
+            dry_run_supported=False,
+            risk_level="high",
+            planner_visible=True,
+        ),
+        Capability(
+            name="wait_for",
+            kind="assertion",
+            available=True,
+            description="Poll until text, target, selector, URL, or network response conditions are satisfied.",
+            input_schema={
+                "type": "object",
+                "required": ["condition|conditions"],
+                "fields": {
+                    "condition": "text|target|selector|url|response?",
+                    "conditions": "WaitCondition[]?",
+                    "match": "all|any?",
+                    "text": "string?",
+                    "target": "Target?",
+                    "selector": "string?",
+                    "url": "string?",
+                    "url_contains": "string?",
+                    "url_regex": "string?",
+                    "method": "GET|POST|PUT|PATCH|DELETE?",
+                    "status": "integer?",
+                    "status_min": "integer?",
+                    "status_max": "integer?",
+                    "ok": "boolean?",
+                    "observation": "string?",
+                    "timeout_seconds": "number?",
+                    "interval_seconds": "number?",
+                },
+            },
+            output_schema={"type": "object", "fields": {"status": "success|failed", "attempts": "integer"}},
+            dry_run_supported=False,
+            risk_level="low",
+            planner_visible=True,
+        ),
+        Capability(
+            name="locate_table_cell",
+            kind="extractor",
+            available=True,
+            description="Locate a DOM target constrained by table row and column semantics.",
+            input_schema={
+                "type": "object",
+                "required": ["target"],
+                "fields": {
+                    "target.row_contains_text": "string?",
+                    "target.row_text_regex": "string?",
+                    "target.column_header": "string?",
+                    "target.column_text_regex": "string?",
+                },
+            },
+            output_schema={"type": "object", "fields": {"resolved_target": "ResolvedTarget"}},
+            dry_run_supported=True,
+            risk_level="low",
+            planner_visible=True,
+        ),
+        Capability(
+            name="locate_relative_target",
+            kind="extractor",
+            available=True,
+            description="Locate a DOM target constrained by nearby text or dialog scope.",
+            input_schema={
+                "type": "object",
+                "required": ["target"],
+                "fields": {
+                    "target.near_text": "string?",
+                    "target.near_contains_text": "string?",
+                    "target.near_text_regex": "string?",
+                    "target.scope_role": "string?",
+                    "target.scope_text": "string?",
+                    "target.scope_contains_text": "string?",
+                },
+            },
+            output_schema={"type": "object", "fields": {"resolved_target": "ResolvedTarget"}},
+            dry_run_supported=True,
+            risk_level="low",
+            planner_visible=True,
+        ),
+    ]
+    return tuple(specs)
+
+
+def command_capabilities() -> tuple[Capability, ...]:
+    commands = {
+        "run-workflow": "Run an audited workflow.",
+        "preflight-workflow": "Run validation and capability checks without executing.",
+        "validate-workflow": "Validate workflow structure without running it.",
+        "list-runs": "List audited workflow runs.",
+        "show-run": "Show a run summary.",
+        "report-run": "Show a schema-versioned detailed run report.",
+        "inspect-dom": "Inspect live web DOM.",
+        "inspect-uia": "Inspect Windows UIA controls.",
+        "workspace-record-browser": "Record a headed browser session into a workflow draft.",
+    }
+    return tuple(
+        Capability(name=name, kind="command", available=True, description=description)
+        for name, description in sorted(commands.items())
+    )
+
+
+def provider_input_schema(action: str) -> dict[str, Any]:
+    schemas = {
+        "observe_browser": {
+            "type": "object",
+            "required": ["url|reuse_page"],
+            "fields": {
+                "url": "string",
+                "reuse_page": "boolean?",
+                "storage_state": "string?",
+                "routes": "RouteMock[]?",
+                "headed": "boolean?",
+                "timeout_ms": "integer?",
+            },
+        },
+        "observe_dom": {"type": "object", "required": ["url"], "fields": {"url": "string", "headed": "boolean?"}},
+        "observe_html": {"type": "object", "required": ["path"], "fields": {"path": "string"}},
+        "observe_uia": {"type": "object", "fields": {"max_depth": "integer?"}},
+        "observe_ocr": {
+            "type": "object",
+            "fields": {
+                "path": "string?",
+                "engine": "auto|tesseract|mock?",
+                "mock_text": "string?",
+                "mock_bounds": "Bounds?",
+                "min_confidence": "number?",
+            },
+        },
+        "observe_vision": {
+            "type": "object",
+            "fields": {
+                "path": "string?",
+                "screenshot_from": "latest|step_id|page?",
+                "engine": "auto|mock|qwen2-vl|moondream?",
+                "local_engine": "qwen2-vl|moondream?",
+                "model_path": "string?",
+                "adapter": "diagnostic?",
+                "prompt": "string?",
+                "mock_description": "string?",
+                "mock_status": "string?",
+                "mock_bounds": "Bounds?",
+                "parse_targets": "boolean?",
+                "candidate_labels": "string[]|string?",
+                "fallback_local_engine": "qwen2-vl|moondream?",
+                "fallback_mock": "boolean?",
+                "fallback_mock_description": "string?",
+            },
+        },
+        "observe_fixture": {"type": "object", "required": ["path"], "fields": {"path": "string"}},
+        "observe_screen": {"type": "object", "fields": {"synthetic_on_capture_fail": "boolean?"}},
+    }
+    return schemas.get(action, {"type": "object", "fields": {}})
+
+
+def action_input_schema(action: str) -> dict[str, Any]:
+    if action == "click":
+        return {
+            "type": "object",
+            "required": ["target"],
+            "fields": {"target": "Target", "dry_run": "boolean?", "allow_mock_target": "boolean?"},
+        }
+    if action in {"type", "paste"}:
+        return {
+            "type": "object",
+            "required": ["target", "value|value_from"],
+            "fields": {
+                "target": "Target",
+                "value": "string?",
+                "value_from": "input.path?",
+                "sensitive": "boolean?",
+                "dry_run": "boolean?",
+                "allow_mock_target": "boolean?",
+            },
+        }
+    return {"type": "object", "fields": {}}
+
+
+def dependency_capabilities() -> tuple[Capability, ...]:
+    from .ocr import detect_tesseract
+
+    tesseract_status = detect_tesseract()
+    dependencies = {
+        "mss": ("Screen capture dependency.", True, None),
+        "PIL": ("Image processing dependency.", True, "pip install Pillow"),
+        "pyautogui": ("Mouse and keyboard automation dependency.", True, None),
+        "pyperclip": ("Clipboard dependency.", True, None),
+        "yaml": ("YAML workflow parser.", True, "pip install PyYAML"),
+        "playwright": ("Live browser DOM automation dependency.", False, "pip install -e .[web]"),
+        "uiautomation": ("Windows UI Automation dependency.", False, "pip install -e .[desktop]"),
+        "pytesseract": ("Optional OCR Python wrapper; also requires the Tesseract binary.", False, "pip install pytesseract"),
+        "tesseract": ("Optional Tesseract OCR binary for real OCR.", False, tesseract_status["install_hint"]),
+        "torch": ("Optional local VLM runtime dependency.", False, "pip install torch"),
+        "transformers": ("Optional local VLM model loading dependency.", False, "pip install transformers"),
+    }
+    capabilities = []
+    for name, (description, required, install_hint) in sorted(dependencies.items()):
+        available = bool(tesseract_status["available"]) if name == "tesseract" else module_available(name)
+        capabilities.append(
+            Capability(
+                name=name,
+                kind="dependency",
+                available=available,
+                description=description,
+                required=required,
+                dependency=name,
+                install_hint=install_hint,
+            )
+        )
+    return tuple(capabilities)
+
+
+def module_available(module_name: str | None) -> bool:
+    if not module_name:
+        return True
+    return importlib.util.find_spec(module_name) is not None

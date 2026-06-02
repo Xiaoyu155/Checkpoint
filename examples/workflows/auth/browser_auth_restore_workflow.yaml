@@ -1,0 +1,17 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: browser_auth_restore_workflow
+version: 1
+steps:
+  - id: observe_browser
+    action: observe_browser
+    url: https://example.test/auth-demo
+    storage_state: .agent-auth/demo-auth-state.json
+    routes:
+      - url: "**/auth-demo"
+        status: 200
+        content_type: text/html
+        body_from_file: examples/web/auth_demo.html
+  - id: assert_logged_in
+    action: assert_text
+    text: 已登录

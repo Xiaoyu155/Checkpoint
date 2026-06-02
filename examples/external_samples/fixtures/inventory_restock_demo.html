@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Inventory Sandbox</title>
+  </head>
+  <body>
+    <main>
+      <h1>Inventory</h1>
+      <label for="sku-search">SKU Search</label>
+      <input id="sku-search" data-testid="sku-search" role="textbox" />
+      <table aria-label="Inventory Stock">
+        <thead>
+          <tr>
+            <th>SKU</th>
+            <th>Product</th>
+            <th>Status</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>SKU-1024</td>
+            <td>Demo Charger</td>
+            <td>In Stock</td>
+            <td><button data-testid="queue-restock">Queue Restock</button></td>
+          </tr>
+          <tr>
+            <td>SKU-2042</td>
+            <td>Sample Headset</td>
+            <td>Low Stock</td>
+            <td><button data-testid="queue-restock">Queue Restock</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </main>
+  </body>
+</html>

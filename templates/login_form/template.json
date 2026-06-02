@@ -1,0 +1,9 @@
+{
+  "id": "login_form",
+  "name": "网页登录表单",
+  "description": "本地 HTML 登录表单 dry-run 模板，用于验证输入、等待、点击、审计闭环。",
+  "workflow": "login_form.yaml",
+  "inputs": "login_form_inputs.json",
+  "fixtures": ["login_form.html"],
+  "tags": ["web", "form", "demo"]
+}

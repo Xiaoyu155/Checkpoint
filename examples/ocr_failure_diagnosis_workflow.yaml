@@ -1,0 +1,16 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: ocr_failure_diagnosis_demo
+version: 1
+steps:
+  - id: observe_ocr_page
+    action: observe_ocr
+    mock_text: 当前页面
+    mock_bounds:
+      left: 240
+      top: 180
+      width: 260
+      height: 60
+  - id: assert_missing_text
+    action: assert_text
+    text: 不存在的成功提示

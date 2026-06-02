@@ -1,0 +1,25 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: vision_mock_workflow
+version: 1
+steps:
+  - id: observe_vision
+    action: observe_vision
+    prompt: 登录是否成功？
+    mock_description: 页面显示已登录状态
+    mock_status: success
+    mock_bounds:
+      left: 0
+      top: 0
+      width: 1280
+      height: 720
+  - id: assert_vision_text
+    action: assert_text
+    text: 已登录
+  - id: resolve_status_area
+    action: resolve
+    target:
+      contains_text: 已登录
+      preferred: [vision, mock]
+  - id: click_status_area
+    action: click

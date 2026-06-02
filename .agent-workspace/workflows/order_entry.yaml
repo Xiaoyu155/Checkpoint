@@ -1,0 +1,56 @@
+name: order_entry
+version: 1
+steps:
+  - id: observe_order_form
+    action: observe_html
+    path: fixtures/erp_order_form.html
+  - id: wait_order_page
+    action: wait_for
+    condition: text
+    text: 新增销售订单
+    timeout_seconds: 1
+  - id: fill_customer
+    action: paste
+    target:
+      label: 客户名称
+      role: input
+      preferred: [dom, mock]
+    value_from: input.customer.name
+  - id: fill_phone
+    action: paste
+    target:
+      label: 联系电话
+      role: input
+      preferred: [dom, mock]
+    value_from: input.customer.phone
+  - id: fill_sku
+    action: paste
+    target:
+      label: 商品编码
+      role: input
+      preferred: [dom, mock]
+    value_from: input.order.sku
+  - id: fill_quantity
+    action: paste
+    target:
+      label: 数量
+      role: input
+      preferred: [dom, mock]
+    value_from: input.order.quantity
+  - id: fill_note
+    action: paste
+    target:
+      label: 备注
+      role: input
+      preferred: [dom, mock]
+    value_from: input.order.note
+  - id: wait_save
+    action: wait_for
+    condition: target
+    target:
+      text: 保存订单
+      role: button
+      preferred: [dom, mock]
+    timeout_seconds: 1
+  - id: click_save
+    action: click

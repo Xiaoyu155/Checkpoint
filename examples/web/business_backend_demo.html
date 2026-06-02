@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <title>订单运营后台</title>
+  </head>
+  <body>
+    <main data-viewport="1280,720">
+      <h1>订单运营后台</h1>
+      <section aria-label="SPA 状态">
+        <div role="status" data-bounds="40,32,280,32">SPA 页面已加载：订单列表</div>
+      </section>
+
+      <section aria-label="筛选条件">
+        <label for="customer-filter" data-bounds="40,96,96,28">客户名称</label>
+        <input
+          id="customer-filter"
+          name="customer"
+          placeholder="输入客户名称"
+          data-bounds="152,92,260,36"
+        >
+        <label for="order-filter" data-bounds="440,96,80,28">订单号</label>
+        <input
+          id="order-filter"
+          name="order_id"
+          placeholder="输入订单号"
+          data-bounds="536,92,220,36"
+        >
+        <button id="search-orders" data-bounds="784,92,96,36">查询</button>
+      </section>
+
+      <section aria-label="订单分页">
+        <div role="status" data-bounds="40,152,240,28">第 2 页，共 8 页</div>
+        <button id="prev-page" data-bounds="928,152,88,32">上一页</button>
+        <button id="next-page" data-bounds="1032,152,88,32">下一页</button>
+      </section>
+
+      <table aria-label="订单列表">
+        <thead>
+          <tr>
+            <th>订单号</th>
+            <th>客户</th>
+            <th>状态</th>
+            <th>下载</th>
+            <th>处理</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>A2001</td>
+            <td>Acme</td>
+            <td>待处理</td>
+            <td>
+              <button
+                data-testid="row-action"
+                data-row-text="A2001 Acme 待处理 下载 处理"
+                data-row-index="1"
+                data-row-selector="#row-a2001"
+                data-column-header="下载"
+                data-column-index="3"
+                data-bounds="700,236,72,32"
+              >下载</button>
+            </td>
+            <td>
+              <button
+                data-testid="row-action"
+                data-row-text="A2001 Acme 待处理 下载 处理"
+                data-row-index="1"
+                data-row-selector="#row-a2001"
+                data-column-header="处理"
+                data-column-index="4"
+                data-bounds="800,236,72,32"
+              >处理</button>
+            </td>
+          </tr>
+          <tr>
+            <td>A2002</td>
+            <td>Globex</td>
+            <td>异常</td>
+            <td>
+              <button
+                data-testid="row-action"
+                data-row-text="A2002 Globex 异常 下载 处理"
+                data-row-index="2"
+                data-row-selector="#row-a2002"
+                data-column-header="下载"
+                data-column-index="3"
+                data-bounds="700,286,72,32"
+              >下载</button>
+            </td>
+            <td>
+              <button
+                data-testid="row-action"
+                data-row-text="A2002 Globex 异常 下载 处理"
+                data-row-index="2"
+                data-row-selector="#row-a2002"
+                data-column-header="处理"
+                data-column-index="4"
+                data-bounds="800,286,72,32"
+              >处理</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <dialog
+        id="error-dialog"
+        open
+        role="dialog"
+        aria-label="异常提示"
+        data-bounds="360,420,440,180"
+      >
+        <h2>异常弹窗</h2>
+        <p>订单 A2002 缺少收货地址，请人工复核。</p>
+        <button
+          id="dismiss-error"
+          data-scope-selector="#error-dialog"
+          data-scope-role="dialog"
+          data-scope-text="异常弹窗 订单 A2002 缺少收货地址，请人工复核。 我知道了"
+          data-bounds="620,548,120,36"
+        >我知道了</button>
+      </dialog>
+    </main>
+  </body>
+</html>

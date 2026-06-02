@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>客户后台</title>
+  </head>
+  <body>
+    <main>
+      <h1>客户后台</h1>
+      <button id="login" data-testid="login-button">登录</button>
+      <div id="status" role="status" aria-label="登录状态">未登录</div>
+      <script>
+        const status = document.getElementById("status");
+        const login = document.getElementById("login");
+        function render() {
+          const token = localStorage.getItem("demo_session_token");
+          status.textContent = token ? "已登录" : "未登录";
+          login.hidden = Boolean(token);
+        }
+        login.addEventListener("click", () => {
+          localStorage.setItem("demo_session_token", "demo-token-001");
+          render();
+        });
+        render();
+      </script>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,43 @@
+[project]
+name = "visual-agent"
+version = "0.1.0"
+description = "Local-first workflow automation runtime for AI assistants with MCP, audit trails, and safety profiles."
+requires-python = ">=3.10"
+authors = [
+    { name = "Visual Agent contributors" },
+]
+readme = "README.md"
+license = { file = "LICENSE" }
+dependencies = [
+    "mss>=9.0.1",
+    "Pillow>=10.0.0",
+    "portalocker>=2.7",
+    "pyautogui>=0.9.54",
+    "PyYAML>=6.0.0",
+]
+
+[project.optional-dependencies]
+web = [
+    "playwright>=1.44.0",
+]
+desktop = [
+    "uiautomation>=2.0.20",
+]
+test = [
+    "pytest>=8.0.0",
+]
+mcp = [
+    "mcp>=1.0.0",
+]
+
+[project.scripts]
+visual-agent-mcp = "visual_agent.mcp_server:main"
+
+[project.urls]
+Homepage = "https://github.com/Xiaoyu155/visual-agent"
+Repository = "https://github.com/Xiaoyu155/visual-agent"
+Issues = "https://github.com/Xiaoyu155/visual-agent/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

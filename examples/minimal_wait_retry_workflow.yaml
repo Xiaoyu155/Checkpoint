@@ -1,0 +1,30 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: minimal_wait_retry_workflow
+version: 1
+steps:
+  - id: observe_fixture
+    action: observe_fixture
+    path: examples/fixtures/login_page_observation.json
+  - id: wait_login_text
+    action: wait_for
+    condition: text
+    text: 客户管理系统
+    timeout_seconds: 1
+    interval_seconds: 0.05
+  - id: wait_login_button
+    action: wait_for
+    condition: target
+    target:
+      text: 登录
+      role: button
+      preferred:
+        - dom
+        - mock
+    timeout_seconds: 1
+    interval_seconds: 0.05
+  - id: click_login
+    action: click
+    retry:
+      count: 1
+      delay_seconds: 0

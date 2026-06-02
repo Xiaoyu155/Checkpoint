@@ -1,0 +1,11 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: failing_regression_demo
+version: 1
+steps:
+  - id: observe_html
+    action: observe_html
+    path: fixtures/login_demo.html
+  - id: assert_missing
+    action: assert_text
+    text: 不存在的文本

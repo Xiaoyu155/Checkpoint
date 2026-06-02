@@ -1,0 +1,9 @@
+{
+  "id": "external_readonly_probe",
+  "name": "外部页面只读探测",
+  "description": "对一个 HTTPS URL 执行只读 observe/assert 探测，不提交表单、不点击按钮、不下载文件。",
+  "workflow": "external_readonly_probe.yaml",
+  "inputs": "external_readonly_probe_inputs.json",
+  "fixtures": ["external_readonly_probe.html"],
+  "tags": ["external", "readonly", "probe", "browser"]
+}

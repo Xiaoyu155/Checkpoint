@@ -1,0 +1,41 @@
+name: local_html_form_workflow
+version: 1
+steps:
+  - id: observe_html
+    action: observe_html
+    path: fixtures/login_demo.html
+  - id: wait_page
+    action: wait_for
+    condition: text
+    text: 客户管理系统
+    timeout_seconds: 1
+  - id: fill_username
+    action: paste
+    target:
+      label: 请输入用户名
+      role: input
+      preferred:
+        - dom
+        - mock
+    value_from: input.username
+  - id: fill_password
+    action: paste
+    target:
+      label: 请输入密码
+      role: input
+      preferred:
+        - dom
+        - mock
+    value_from: input.password
+  - id: wait_login_button
+    action: wait_for
+    condition: target
+    target:
+      text: 登录
+      role: button
+      preferred:
+        - dom
+        - mock
+    timeout_seconds: 1
+  - id: click_login
+    action: click

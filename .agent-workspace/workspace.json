@@ -1,0 +1,11 @@
+{
+  "name": ".agent-workspace",
+  "version": 1,
+  "dirs": [
+    "workflows",
+    "inputs",
+    "fixtures",
+    "runs",
+    "reports"
+  ]
+}

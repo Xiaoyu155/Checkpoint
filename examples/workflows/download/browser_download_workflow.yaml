@@ -1,0 +1,40 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: browser_download_workflow
+version: 1
+steps:
+  - id: observe_browser
+    action: observe_browser
+    url: https://example.test/download-demo
+    routes:
+      - url: "**/download-demo"
+        status: 200
+        content_type: text/html
+        body_from_file: examples/web/download_demo.html
+      - url: "**/exports/orders.csv"
+        status: 200
+        content_type: text/csv
+        headers:
+          content-disposition: attachment; filename="orders.csv"
+        body: |
+          order_id,customer,total
+          A1001,Acme,128.50
+          A1002,Globex,256.00
+  - id: wait_page
+    action: wait_for
+    condition: text
+    text: 报表下载系统
+    timeout_seconds: 1
+  - id: download_orders
+    action: expect_download
+    target:
+      test_id: download-orders
+      role: link
+      preferred: [dom, mock]
+    save_as: orders.csv
+    timeout_seconds: 5
+  - id: assert_orders_file
+    action: assert_file_exists
+    from_download: download_orders
+    extension: csv
+    min_bytes: 20

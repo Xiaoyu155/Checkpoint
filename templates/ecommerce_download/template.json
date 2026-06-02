@@ -1,0 +1,9 @@
+{
+  "id": "ecommerce_download",
+  "name": "电商订单下载",
+  "description": "模拟电商后台订单筛选、下载、导出的操作流程。",
+  "workflow": "ecommerce_download.yaml",
+  "inputs": "ecommerce_download_inputs.json",
+  "fixtures": ["ecommerce_orders.html"],
+  "tags": ["ecommerce", "orders", "download"]
+}

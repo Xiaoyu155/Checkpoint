@@ -1,0 +1,45 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: browser_table_row_workflow
+version: 1
+steps:
+  - id: observe_browser
+    action: observe_browser
+    url: https://example.test/table-demo
+    routes:
+      - url: "**/table-demo"
+        status: 200
+        content_type: text/html
+        body_from_file: examples/web/table_demo.html
+      - url: "**/api/orders/A1002/view"
+        status: 202
+        content_type: application/json
+        body: '{"ok":true,"order_id":"A1002","action":"view"}'
+      - url: "**/api/orders/A1002/download"
+        status: 409
+        content_type: application/json
+        body: '{"ok":false,"order_id":"A1002","action":"download"}'
+      - url: "**/api/orders/A1001/view"
+        status: 409
+        content_type: application/json
+        body: '{"ok":false,"order_id":"A1001","action":"view"}'
+  - id: wait_page
+    action: wait_for
+    condition: text
+    text: 订单列表
+    timeout_seconds: 1
+  - id: click_row_download
+    action: click
+    target:
+      test_id: row-action
+      role: button
+      row_contains_text: A1002
+      column_header: 查看
+      preferred: [dom, mock]
+  - id: assert_download_request
+    action: assert_response
+    url_contains: /api/orders/A1002/view
+    method: POST
+    status: 202
+    ok: true
+    timeout_seconds: 2

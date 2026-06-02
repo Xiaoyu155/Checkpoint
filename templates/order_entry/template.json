@@ -1,0 +1,9 @@
+{
+  "id": "order_entry",
+  "name": "订单录入 ERP",
+  "description": "模拟微信/Excel 订单录入 ERP 的表单填写流程，覆盖客户、商品、数量、备注和保存。",
+  "workflow": "order_entry.yaml",
+  "inputs": "order_entry_inputs.json",
+  "fixtures": ["erp_order_form.html"],
+  "tags": ["erp", "order", "form"]
+}

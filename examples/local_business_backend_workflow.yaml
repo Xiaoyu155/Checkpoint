@@ -1,0 +1,49 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: local_business_backend_workflow
+version: 1
+steps:
+  - id: observe_backend
+    action: observe_html
+    path: examples/web/business_backend_demo.html
+  - id: assert_spa_loaded
+    action: assert_text
+    text: SPA 页面已加载
+  - id: fill_customer_filter
+    action: paste
+    target:
+      role: input
+      near_text: 客户名称
+      preferred:
+        - dom
+        - mock
+    value: Globex
+  - id: click_order_download
+    action: click
+    target:
+      test_id: row-action
+      role: button
+      row_contains_text: A2002
+      column_header: 下载
+      preferred:
+        - dom
+        - mock
+  - id: click_next_page
+    action: click
+    target:
+      text: 下一页
+      role: button
+      near_contains_text: 第 2 页
+      preferred:
+        - dom
+        - mock
+  - id: dismiss_exception_dialog
+    action: click
+    target:
+      text: 我知道了
+      role: button
+      scope_role: dialog
+      scope_contains_text: 缺少收货地址
+      preferred:
+        - dom
+        - mock

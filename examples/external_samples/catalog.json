@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "allowed_domains": [],
+    "storage_state_policy": "optional",
+    "download_policy": "forbidden",
+    "mutating_action_policy": "dry-run-or-confirm",
+    "live_execution_allowed": false
+  },
+  "samples": [
+    {
+      "id": "external_ecommerce_orders_readonly",
+      "name": "External ecommerce orders readonly validation",
+      "owner": "sample-owner-required",
+      "data_classification": "test-account-only",
+      "account_environment": "sandbox",
+      "allowed_domains": [
+        "seller.sandbox.example.com"
+      ],
+      "storage_state_policy": "required",
+      "download_policy": "dry-run-only",
+      "workflow": "ecommerce_orders_readonly.yaml",
+      "live_execution_allowed": false,
+      "notes": "Replace the URL with a controlled test/staging merchant account before running outside dry-run."
+    },
+    {
+      "id": "external_support_tickets_triage",
+      "name": "External support tickets triage readonly validation",
+      "owner": "sample-owner-required",
+      "data_classification": "test-account-only",
+      "account_environment": "sandbox",
+      "allowed_domains": [
+        "support.sandbox.example.com"
+      ],
+      "storage_state_policy": "optional",
+      "download_policy": "forbidden",
+      "workflow": "support_tickets_triage.yaml",
+      "live_execution_allowed": false,
+      "notes": "Readonly ticket triage sample for table row disambiguation and dry-run action planning."
+    },
+    {
+      "id": "external_inventory_restock_confirm",
+      "name": "External inventory restock supervised validation",
+      "owner": "sample-owner-required",
+      "data_classification": "test-account-only",
+      "account_environment": "sandbox",
+      "allowed_domains": [
+        "inventory.sandbox.example.com"
+      ],
+      "storage_state_policy": "required",
+      "download_policy": "forbidden",
+      "workflow": "inventory_restock_confirm.yaml",
+      "live_execution_allowed": false,
+      "notes": "Inventory restock sample that requires storage_state and confirm-gated mutating actions."
+    },
+    {
+      "id": "external_finance_reconciliation_export",
+      "name": "External finance reconciliation export validation",
+      "owner": "sample-owner-required",
+      "data_classification": "test-account-only",
+      "account_environment": "sandbox",
+      "allowed_domains": [
+        "finance.sandbox.example.com"
+      ],
+      "storage_state_policy": "required",
+      "download_policy": "confirm-required",
+      "workflow": "finance_reconciliation_export.yaml",
+      "live_execution_allowed": false,
+      "notes": "Finance reconciliation sample with confirm-gated CSV export and required storage_state."
+    }
+  ]
+}

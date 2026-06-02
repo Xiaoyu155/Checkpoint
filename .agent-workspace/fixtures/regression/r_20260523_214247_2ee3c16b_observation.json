@@ -1,0 +1,74 @@
+{
+  "provider": "dom",
+  "source": "fixtures\\login_demo.html",
+  "timestamp": 1779543767.4701805,
+  "screenshot_path": null,
+  "width": 1280,
+  "height": 720,
+  "elements": [
+    {
+      "index": 0,
+      "tag": "input",
+      "role": "input",
+      "selector": "#username",
+      "text": "",
+      "label": "",
+      "aria_label": "",
+      "placeholder": "请输入用户名",
+      "name": "username",
+      "value": "",
+      "test_id": "",
+      "bounds": {
+        "left": 460,
+        "top": 240,
+        "width": 360,
+        "height": 44
+      }
+    },
+    {
+      "index": 1,
+      "tag": "input",
+      "role": "input",
+      "selector": "#password",
+      "text": "",
+      "label": "",
+      "aria_label": "",
+      "placeholder": "请输入密码",
+      "name": "password",
+      "value": "",
+      "test_id": "",
+      "bounds": {
+        "left": 460,
+        "top": 292,
+        "width": 360,
+        "height": 44
+      }
+    },
+    {
+      "index": 2,
+      "tag": "button",
+      "role": "button",
+      "selector": "#login",
+      "text": "登录",
+      "label": "",
+      "aria_label": "",
+      "placeholder": "",
+      "name": "",
+      "value": "",
+      "test_id": "",
+      "bounds": {
+        "left": 520,
+        "top": 340,
+        "width": 240,
+        "height": 48
+      }
+    }
+  ],
+  "metadata": {
+    "title": "客户管理系统",
+    "provider": "html_file",
+    "regression_source_run_id": "20260523-214247-2ee3c16b",
+    "regression_source_workflow": "failing_regression_demo",
+    "regression_failed_step": "assert_missing"
+  }
+}

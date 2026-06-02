@@ -1,0 +1,91 @@
+{
+  "provider": "uia",
+  "source": "fixture://windows-notepad-demo",
+  "width": 1280,
+  "height": 720,
+  "elements": [
+    {
+      "name": "业务备忘录 - 记事本",
+      "automation_id": "notepadWindow",
+      "control_type": "window",
+      "class_name": "Notepad",
+      "depth": 0,
+      "bounds": {
+        "left": 120,
+        "top": 80,
+        "width": 880,
+        "height": 560
+      }
+    },
+    {
+      "name": "主题",
+      "automation_id": "subjectLabel",
+      "control_type": "text",
+      "class_name": "TextBlock",
+      "depth": 1,
+      "bounds": {
+        "left": 180,
+        "top": 150,
+        "width": 80,
+        "height": 28
+      }
+    },
+    {
+      "name": "主题输入框",
+      "automation_id": "subjectEdit",
+      "control_type": "edit",
+      "class_name": "Edit",
+      "depth": 1,
+      "bounds": {
+        "left": 280,
+        "top": 146,
+        "width": 420,
+        "height": 36
+      }
+    },
+    {
+      "name": "内容",
+      "automation_id": "bodyLabel",
+      "control_type": "text",
+      "class_name": "TextBlock",
+      "depth": 1,
+      "bounds": {
+        "left": 180,
+        "top": 210,
+        "width": 80,
+        "height": 28
+      }
+    },
+    {
+      "name": "内容编辑区",
+      "automation_id": "bodyEdit",
+      "control_type": "edit",
+      "class_name": "Edit",
+      "depth": 1,
+      "bounds": {
+        "left": 280,
+        "top": 206,
+        "width": 560,
+        "height": 260
+      }
+    },
+    {
+      "name": "保存",
+      "automation_id": "saveButton",
+      "control_type": "button",
+      "class_name": "Button",
+      "depth": 1,
+      "bounds": {
+        "left": 740,
+        "top": 520,
+        "width": 100,
+        "height": 38
+      }
+    }
+  ],
+  "metadata": {
+    "title": "业务备忘录 - 记事本",
+    "app": "notepad-demo",
+    "fixture_kind": "windows_software"
+  }
+}

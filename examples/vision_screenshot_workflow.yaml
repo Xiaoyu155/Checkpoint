@@ -1,0 +1,17 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: vision_screenshot_demo
+version: 1
+steps:
+  - id: screen
+    action: observe_screen
+  - id: describe_screen
+    action: observe_vision
+    screenshot_from: screen
+    prompt: Describe the current screenshot.
+    mock_description: Screenshot shows the application dashboard.
+    mock_status: success
+  - id: assert_description
+    action: assert_text
+    observation: describe_screen
+    text: dashboard

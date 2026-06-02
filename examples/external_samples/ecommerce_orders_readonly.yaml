@@ -1,0 +1,38 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: external_ecommerce_orders_readonly
+version: 1
+steps:
+  - id: observe_orders
+    action: observe_browser
+    url: https://seller.sandbox.example.com/orders
+    storage_state: .agent-auth/seller-sandbox-state.json
+    headed: false
+    routes:
+      - url: "**/orders"
+        status: 200
+        content_type: text/html
+        body_from_file: examples/external_samples/fixtures/ecommerce_orders_demo.html
+  - id: assert_orders_page
+    action: assert_text
+    text: Orders
+  - id: wait_order_table
+    action: wait_for
+    condition: target
+    target:
+      contains_text: Orders
+      preferred:
+        - dom
+        - mock
+    timeout_seconds: 3
+  - id: dry_run_download_first_page
+    action: expect_download
+    dry_run: true
+    target:
+      text: Export
+      role: button
+      near_contains_text: Orders
+      preferred:
+        - dom
+        - mock
+    save_as: external-orders.csv

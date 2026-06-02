@@ -1,0 +1,36 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: browser_network_workflow
+version: 1
+steps:
+  - id: observe_browser
+    action: observe_browser
+    url: https://example.test/network-demo
+    routes:
+      - url: "**/network-demo"
+        status: 200
+        content_type: text/html
+        body_from_file: examples/web/network_demo.html
+      - url: "**/api/orders/export"
+        status: 201
+        content_type: application/json
+        body: '{"ok":true,"download_id":"demo-001"}'
+  - id: wait_page
+    action: wait_for
+    condition: text
+    text: 订单下载系统
+    timeout_seconds: 1
+  - id: click_export
+    action: click
+    target:
+      test_id: export-orders
+      role: button
+      preferred: [dom, mock]
+  - id: assert_export_response
+    action: assert_response
+    url_contains: /api/orders/export
+    method: POST
+    status_min: 200
+    status_max: 299
+    ok: true
+    timeout_seconds: 2
