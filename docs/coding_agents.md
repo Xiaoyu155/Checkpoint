@@ -13,8 +13,8 @@ Run this from the repository root:
 .\.venv\Scripts\python.exe -m visual_agent.cli coding-agent-brief --client codex --workspace-root .agent-workspace --format markdown
 ```
 
-Use `--client claude-code` or `--client cursor` for client-specific wording and
-MCP config shape.
+Use `--client claude-code`, `--client cursor`, or `--client vscode` for
+client-specific wording and MCP config shape.
 
 ## What The Agent Should Do
 
@@ -24,6 +24,8 @@ MCP config shape.
 4. Prefer existing workflows over ad hoc browser actions.
 5. Run workflows as `dry-run` unless a human explicitly approves escalation.
 6. Read `get_run_report` before claiming success.
+7. Use `get_workspace_dashboard` before and after risky changes.
+8. Use `get_latest_failure` when a run fails and no run id is obvious.
 
 ## Useful Prompts
 
@@ -39,6 +41,11 @@ Use visual-agent to validate every workflow before suggesting changes.
 ```text
 If a workflow fails, use get_run_report and list_run_artifacts before editing
 code.
+```
+
+```text
+Use visual-agent to get the workspace dashboard, find the latest failed run,
+and explain the failure diagnosis.
 ```
 
 ## Safety Rules

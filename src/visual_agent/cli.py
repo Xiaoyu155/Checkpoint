@@ -275,15 +275,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     mcp_client_config = subparsers.add_parser("mcp-client-config", help="Generate MCP client configuration for this checkout.")
     mcp_client_config.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root passed to the MCP server.")
-    mcp_client_config.add_argument("--client", choices=["cursor", "claude-desktop"], default="cursor", help="Client config shape to generate.")
+    mcp_client_config.add_argument("--client", choices=["cursor", "claude-desktop", "vscode"], default="cursor", help="Client config shape to generate.")
     mcp_client_config.add_argument("--python", default=".\\.venv\\Scripts\\python.exe", help="Python executable used by the MCP client.")
     mcp_client_config.add_argument("--repo-root", default=".", help="Repository root used for cwd and PYTHONPATH.")
     mcp_client_config.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
-    coding_agent_brief = subparsers.add_parser("coding-agent-brief", help="Generate a Codex/Claude Code/Cursor onboarding brief.")
+    coding_agent_brief = subparsers.add_parser("coding-agent-brief", help="Generate a Codex/Claude Code/Cursor/VS Code onboarding brief.")
     coding_agent_brief.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root passed to the MCP server.")
     coding_agent_brief.add_argument("--repo-root", default=".", help="Repository root used for cwd and PYTHONPATH.")
-    coding_agent_brief.add_argument("--client", choices=["codex", "claude-code", "cursor"], default="codex", help="Coding agent target.")
+    coding_agent_brief.add_argument("--client", choices=["codex", "claude-code", "cursor", "vscode"], default="codex", help="Coding agent target.")
     coding_agent_brief.add_argument("--python", default=".\\.venv\\Scripts\\python.exe", help="Python executable used by the MCP client.")
     coding_agent_brief.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 

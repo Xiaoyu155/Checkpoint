@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .console import build_report_detail, report_detail_to_markdown
+from .console import build_report_detail, build_workspace_dashboard, dashboard_to_markdown, report_detail_to_markdown
 from .gui import write_gui_action_event
 from .models import to_jsonable
 from .preflight import run_preflight
@@ -14,7 +14,7 @@ from .reports import list_run_summaries
 from .security import scrub_secrets
 from .validation import validate_workflow_file
 from .workflow import parse_workflow_file
-from .workspace import Workspace, discover_workflows, find_workflow, load_workspace_inputs, run_workspace_workflow
+from .workspace import Workspace, build_workspace_report_index, discover_workflows, find_workflow, load_workspace_inputs, run_workspace_workflow
 
 
 APP_NAME = "visual-agent"
@@ -106,6 +106,31 @@ def mcp_tools() -> list[Tool]:
                 "required": ["workspace_root", "run_id"],
             },
         ),
+        Tool(
+            name="get_workspace_dashboard",
+            description="Return a compact workspace health dashboard for coding agents.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_root": {"type": "string"},
+                    "format": {"type": "string", "enum": ["markdown", "json"], "default": "markdown"},
+                    "limit": {"type": "integer", "default": 5},
+                },
+                "required": ["workspace_root"],
+            },
+        ),
+        Tool(
+            name="get_latest_failure",
+            description="Return the latest failed workflow report, including diagnosis when available.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_root": {"type": "string"},
+                    "format": {"type": "string", "enum": ["markdown", "json"], "default": "markdown"},
+                },
+                "required": ["workspace_root"],
+            },
+        ),
     ]
 
 
@@ -131,6 +156,8 @@ async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> list[
             "run_workflow": run_workflow_payload,
             "get_run_report": get_run_report_payload,
             "list_run_artifacts": list_run_artifacts_payload,
+            "get_workspace_dashboard": get_workspace_dashboard_payload,
+            "get_latest_failure": get_latest_failure_payload,
         }
         if name not in handlers:
             raise ValueError(f"Unknown tool: {name}")
@@ -257,6 +284,65 @@ def list_run_artifacts_payload(args: dict[str, Any]) -> dict[str, Any]:
         "run_id": run_id,
         "artifact_count": len(artifacts),
         "artifacts": artifacts,
+    }
+
+
+def get_workspace_dashboard_payload(args: dict[str, Any]) -> dict[str, Any]:
+    workspace = require_workspace(args)
+    fmt = str(args.get("format") or "markdown")
+    limit = int(args.get("limit") or 5)
+    dashboard = scrub_secrets(build_workspace_dashboard(workspace, limit=max(1, min(limit, 25))))
+    if fmt == "markdown":
+        return {
+            "schema_version": 1,
+            "workspace": str(workspace.root),
+            "format": "markdown",
+            "content": dashboard_to_markdown(dashboard),
+        }
+    if fmt != "json":
+        raise ValueError(f"Unsupported dashboard format: {fmt}")
+    return {
+        "schema_version": 1,
+        "workspace": str(workspace.root),
+        "format": "json",
+        "dashboard": dashboard,
+    }
+
+
+def get_latest_failure_payload(args: dict[str, Any]) -> dict[str, Any]:
+    workspace = require_workspace(args)
+    fmt = str(args.get("format") or "markdown")
+    index = build_workspace_report_index(workspace, failed_only=True)
+    entries = index.get("entries") if isinstance(index.get("entries"), list) else []
+    if not entries:
+        return {
+            "schema_version": 1,
+            "workspace": str(workspace.root),
+            "status": "none",
+            "message": "No failed workflow reports found.",
+            "report": None,
+        }
+    latest = entries[0]
+    run_id = str(latest.get("run_id") or "")
+    detail = scrub_secrets(build_report_detail(workspace, run_id))
+    if fmt == "markdown":
+        return {
+            "schema_version": 1,
+            "workspace": str(workspace.root),
+            "status": "found",
+            "run_id": run_id,
+            "format": "markdown",
+            "content": report_detail_to_markdown(detail),
+        }
+    if fmt != "json":
+        raise ValueError(f"Unsupported report format: {fmt}")
+    return {
+        "schema_version": 1,
+        "workspace": str(workspace.root),
+        "status": "found",
+        "run_id": run_id,
+        "format": "json",
+        "report": detail,
     }
 
 
@@ -394,6 +480,7 @@ def _audit_mcp_call(workspace: Workspace | None, tool_name: str, args: dict[str,
                 "workflow": payload.get("workflow"),
                 "artifact_count": payload.get("artifact_count"),
                 "workflow_count": payload.get("workflow_count"),
+                "workspace": payload.get("workspace"),
             },
         },
     )

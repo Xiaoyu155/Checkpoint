@@ -705,6 +705,9 @@ def build_release_check_plan(*, workspace_root: str | Path = ".agent-workspace")
             "docs/release_checklist.md",
             "docs/coding_agents.md",
             "docs/vlm_setup.md",
+            "docs/codex.md",
+            "docs/vscode.md",
+            "docs/mcp_vscode.md",
             "README_MCP.md",
             "examples/workflows/README.md",
         ],
@@ -808,6 +811,9 @@ def build_mcp_client_config(
     elif client_key == "cursor":
         config = {"mcpServers": {"visual-agent": server}}
         target = "cursor_mcp.json"
+    elif client_key in {"vscode", "vs-code", "visual-studio-code"}:
+        config = {"servers": {"visual-agent": server}}
+        target = ".vscode/mcp.json"
     else:
         raise ValueError(f"Unsupported MCP client: {client}")
     return {
@@ -854,10 +860,10 @@ def build_coding_agent_brief(
     workspace = str(workspace_root)
     repo = str(Path(repo_root).resolve())
     client_key = str(client or "codex").strip().lower().replace("_", "-")
-    supported_clients = {"codex", "claude-code", "cursor"}
+    supported_clients = {"codex", "claude-code", "cursor", "vscode"}
     if client_key not in supported_clients:
         raise ValueError(f"Unsupported coding agent client: {client}")
-    config_client = "cursor" if client_key in {"codex", "cursor"} else "claude-desktop"
+    config_client = "claude-desktop" if client_key == "claude-code" else ("cursor" if client_key == "codex" else client_key)
     mcp_config = build_mcp_client_config(
         workspace_root=workspace,
         client=config_client,
@@ -890,6 +896,16 @@ def build_coding_agent_brief(
             "purpose": "List screenshots, step JSON, downloads, and other workspace-owned artifacts.",
             "safe_default": True,
         },
+        {
+            "name": "get_workspace_dashboard",
+            "purpose": "Read workspace health, queue, recent reports, and quality-gate status before claiming success.",
+            "safe_default": True,
+        },
+        {
+            "name": "get_latest_failure",
+            "purpose": "Fetch the newest failed report and diagnosis without asking the human to find a run id.",
+            "safe_default": True,
+        },
     ]
     commands = [
         {"id": "bootstrap", "command": "powershell -ExecutionPolicy Bypass -File scripts\\bootstrap.ps1"},
@@ -915,6 +931,8 @@ def build_coding_agent_brief(
         "Use visual-agent to list workflows, run local_html_form_workflow as a dry-run, then summarize the report.",
         "Use visual-agent to validate every workflow before suggesting changes.",
         "If a workflow fails, use get_run_report and list_run_artifacts before editing code.",
+        "Before and after risky changes, call get_workspace_dashboard and summarize any attention items.",
+        "When a run fails, call get_latest_failure first, then inspect artifacts if needed.",
         "Never request approved run_profile unless the workspace policy explicitly allows it and the human asked for it.",
     ]
     rules = [
@@ -944,6 +962,9 @@ def build_coding_agent_brief(
             "README_MCP.md",
             "docs/mcp_claude_code.md",
             "docs/mcp_cursor.md",
+            "docs/mcp_vscode.md",
+            "docs/codex.md",
+            "docs/vscode.md",
             "docs/quickstart.md",
         ],
     }

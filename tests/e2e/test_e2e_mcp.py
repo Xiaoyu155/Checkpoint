@@ -42,6 +42,12 @@ def test_mcp_client_can_discover_validate_run_and_read_report(e2e_workspace: Pat
         path = Path(str(artifact["path"])).resolve()
         path.relative_to(e2e_workspace.resolve())
 
+    dashboard = call_mcp("get_workspace_dashboard", workspace_arg | {"format": "markdown"})
+    assert "Workspace Dashboard" in str(dashboard["content"])
+
+    latest_failure = call_mcp("get_latest_failure", workspace_arg | {"format": "json"})
+    assert latest_failure["status"] in {"none", "found"}
+
 
 def test_mcp_returns_structured_errors_for_agent_recovery(e2e_workspace: Path) -> None:
     missing = call_mcp(

@@ -23,7 +23,7 @@ After running `bootstrap.ps1`, the following are ready with no extra configurati
 | --- | --- | --- |
 | DOM browser automation | **Ready** | Playwright Chromium installed by bootstrap |
 | YAML workflow execution | **Ready** | dry-run, supervised, approved profiles |
-| MCP server (5 tools) | **Ready** | Claude Code, Cursor, Claude Desktop |
+| MCP server (7 tools) | **Ready** | Codex, Claude Code, Cursor, VS Code, Claude Desktop |
 | Run reports and audit logs | **Ready** | Screenshots, failure diagnosis, queue |
 | Windows UIA desktop automation | **Ready** | Windows only, no extra install needed |
 
@@ -106,6 +106,15 @@ Available MCP tools:
 - `run_workflow`
 - `get_run_report`
 - `list_run_artifacts`
+- `get_workspace_dashboard`
+- `get_latest_failure`
+
+Generate a coding-agent brief:
+
+```powershell
+.\.venv\Scripts\python.exe -m visual_agent.cli coding-agent-brief --client codex --workspace-root .agent-workspace --format markdown
+.\.venv\Scripts\python.exe -m visual_agent.cli coding-agent-brief --client vscode --workspace-root .agent-workspace --format markdown
+```
 
 Safety defaults:
 
@@ -137,6 +146,9 @@ Safety defaults:
 - [Claude Desktop MCP setup](docs/mcp_claude_desktop.md)
 - [Cursor MCP setup](docs/mcp_cursor.md)
 - [Claude Code MCP setup](docs/mcp_claude_code.md)
+- [VS Code MCP setup](docs/mcp_vscode.md)
+- [Visual Agent for Codex](docs/codex.md)
+- [Visual Agent for VS Code](docs/vscode.md)
 - [Release checklist](docs/release_checklist.md)
 - [Product positioning](docs/product_positioning.md)
 - [Example workflows](examples/workflows/README.md)

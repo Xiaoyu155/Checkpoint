@@ -14,6 +14,8 @@ from visual_agent.mcp_server import (
     mcp_tools,
     mcp_workspace_root_allowed,
     require_workspace,
+    get_latest_failure_payload,
+    get_workspace_dashboard_payload,
     run_workflow_payload,
     validate_workflow_payload,
 )
@@ -33,6 +35,8 @@ def test_mcp_tools_include_expected_names() -> None:
         "run_workflow",
         "get_run_report",
         "list_run_artifacts",
+        "get_workspace_dashboard",
+        "get_latest_failure",
     }
 
 
@@ -230,6 +234,52 @@ def test_mcp_list_run_artifacts_skips_symlink_that_escapes_workspace(tmp_path) -
 
     assert all("outside-link.txt" not in artifact["relative_path"] for artifact in result["artifacts"])
     assert all(str(outside.resolve()) != artifact["path"] for artifact in result["artifacts"])
+
+
+def test_mcp_workspace_dashboard_returns_agent_readable_health(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace")
+    run_workflow_payload({"workspace_root": str(workspace.root), "workflow_name": "local_html_form_workflow", "inputs_file": "demo_login.json"})
+
+    result = get_workspace_dashboard_payload({"workspace_root": str(workspace.root), "format": "markdown"})
+
+    assert result["format"] == "markdown"
+    assert "Workspace Dashboard" in result["content"]
+    assert "Workflows" in result["content"]
+
+
+def test_mcp_latest_failure_returns_none_when_clean(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace")
+
+    result = get_latest_failure_payload({"workspace_root": str(workspace.root), "format": "json"})
+
+    assert result["status"] == "none"
+    assert result["report"] is None
+
+
+def test_mcp_latest_failure_returns_failed_report_with_diagnosis(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace")
+    failure_workflow = workspace.workflows_dir / "failure.yaml"
+    failure_workflow.write_text(
+        "schema_version: 1\n"
+        "min_runtime_version: '0.1.0'\n"
+        "name: failure\n"
+        "version: 1\n"
+        "steps:\n"
+        "  - id: observe\n"
+        "    action: observe_fixture\n"
+        "    path: examples/fixtures/login_page_observation.json\n"
+        "  - id: assert_missing\n"
+        "    action: assert_text\n"
+        "    text: missing text\n",
+        encoding="utf-8",
+    )
+    run_workflow_payload({"workspace_root": str(workspace.root), "workflow_name": "failure"})
+
+    result = get_latest_failure_payload({"workspace_root": str(workspace.root), "format": "json"})
+
+    assert result["status"] == "found"
+    assert result["report"]["status"] == "failed"
+    assert result["report"]["failure"]["diagnosis"]["expected"]
 
 
 def test_mcp_workspace_root_rejects_path_traversal(tmp_path) -> None:

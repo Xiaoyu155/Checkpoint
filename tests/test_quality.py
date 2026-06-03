@@ -76,8 +76,15 @@ def test_mcp_client_config_generates_local_python_server() -> None:
     assert "approved run_profile" in markdown
 
 
+def test_mcp_client_config_generates_vscode_shape() -> None:
+    payload = build_mcp_client_config(workspace_root=".agent-workspace", client="vscode", python="python", repo_root=".")
+
+    assert payload["target_filename"] == ".vscode/mcp.json"
+    assert payload["config"]["servers"]["visual-agent"]["command"] == "python"
+
+
 def test_coding_agent_brief_targets_codex_claude_code_and_cursor(tmp_path) -> None:
-    for client in ("codex", "claude-code", "cursor"):
+    for client in ("codex", "claude-code", "cursor", "vscode"):
         brief = build_coding_agent_brief(
             workspace_root=".agent-workspace",
             client=client,
@@ -89,6 +96,8 @@ def test_coding_agent_brief_targets_codex_claude_code_and_cursor(tmp_path) -> No
         assert brief["client"] == client
         assert brief["mcp"]["server_name"] == "visual-agent"
         assert "list_workflows" in {tool["name"] for tool in brief["tools"]}
+        assert "get_workspace_dashboard" in {tool["name"] for tool in brief["tools"]}
+        assert "get_latest_failure" in {tool["name"] for tool in brief["tools"]}
         assert any("dry-run" in rule for rule in brief["rules"])
         assert "Coding Agent Brief" in markdown
         assert "run_workflow" in markdown

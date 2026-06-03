@@ -64,7 +64,7 @@ Use visual-agent to list my workflows.
 Expected result:
 
 - Claude Desktop detects the `visual-agent` MCP server.
-- The available tools include `list_workflows`, `validate_workflow`, `run_workflow`, `get_run_report`, and `list_run_artifacts`.
+- The available tools include `list_workflows`, `validate_workflow`, `run_workflow`, `get_run_report`, `list_run_artifacts`, `get_workspace_dashboard`, and `get_latest_failure`.
 - `list_workflows` returns at least `local_html_form_workflow`.
 
 ## 5. Safety Notes

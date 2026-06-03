@@ -56,6 +56,8 @@ For source checkouts, use `examples/mcp_config/claude_desktop_config.json` and s
 - `run_workflow`: run a workflow. Defaults to `dry-run`.
 - `get_run_report`: return markdown or redacted JSON for a completed run.
 - `list_run_artifacts`: list reports, screenshots, downloads, and run artifacts under the workspace.
+- `get_workspace_dashboard`: return workspace health, queue, reports, and quality status.
+- `get_latest_failure`: return the latest failed workflow report and diagnosis.
 
 ## Safety Defaults
 
@@ -86,6 +88,8 @@ Example `workspace.json` section:
 - "Validate the order entry workflow."
 - "Run local_html_form_workflow as a dry-run."
 - "Show the report for run 20260602-123456-abcd1234."
+- "Show the workspace dashboard and summarize any attention items."
+- "Fetch the latest failed workflow report and explain the recovery suggestion."
 
 ## Client Config Files
 
@@ -99,6 +103,7 @@ You can also generate a config for the current checkout:
 ```powershell
 .\.venv\Scripts\python.exe -m visual_agent.cli mcp-client-config --workspace-root .agent-workspace --client cursor --format markdown
 .\.venv\Scripts\python.exe -m visual_agent.cli mcp-client-config --workspace-root .agent-workspace --client claude-desktop --format markdown
+.\.venv\Scripts\python.exe -m visual_agent.cli mcp-client-config --workspace-root .agent-workspace --client vscode --format markdown
 ```
 
 Keep the configured workspace path local and avoid pointing MCP clients at directories that contain real credentials unless the workflow policy and audit settings are already reviewed.
