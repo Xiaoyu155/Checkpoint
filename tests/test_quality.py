@@ -4,9 +4,11 @@ from os import utime
 from visual_agent.quality import (
     QualityGateStep,
     apply_quality_gate_strict_policy,
+    build_coding_agent_brief,
     build_install_check_plan,
     build_mcp_client_config,
     build_release_check_plan,
+    coding_agent_brief_to_markdown,
     build_quality_gate_index,
     build_quality_gate_plan,
     build_quality_gate_risk_summary,
@@ -27,6 +29,7 @@ from visual_agent.quality import (
     scan_workspace_secret_artifacts,
     write_quality_gate_index,
 )
+from visual_agent.cli import main
 from visual_agent.gui import build_gui_action_plan, execute_gui_action, safe_execute_gui_action
 from visual_agent.scheduler import submit_queue_task
 from visual_agent.workspace import init_workspace
@@ -71,6 +74,47 @@ def test_mcp_client_config_generates_local_python_server() -> None:
     assert "visual_agent.mcp_server" in server["args"]
     assert "PYTHONPATH" in server["env"]
     assert "approved run_profile" in markdown
+
+
+def test_coding_agent_brief_targets_codex_claude_code_and_cursor(tmp_path) -> None:
+    for client in ("codex", "claude-code", "cursor"):
+        brief = build_coding_agent_brief(
+            workspace_root=".agent-workspace",
+            client=client,
+            python="python",
+            repo_root=tmp_path,
+        )
+        markdown = coding_agent_brief_to_markdown(brief)
+
+        assert brief["client"] == client
+        assert brief["mcp"]["server_name"] == "visual-agent"
+        assert "list_workflows" in {tool["name"] for tool in brief["tools"]}
+        assert any("dry-run" in rule for rule in brief["rules"])
+        assert "Coding Agent Brief" in markdown
+        assert "run_workflow" in markdown
+        assert "Never request approved run_profile" in markdown
+
+
+def test_coding_agent_brief_cli_renders_markdown(capsys) -> None:
+    code = main(
+        [
+            "coding-agent-brief",
+            "--client",
+            "cursor",
+            "--workspace-root",
+            ".agent-workspace",
+            "--python",
+            "python",
+            "--format",
+            "markdown",
+        ]
+    )
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert "# Coding Agent Brief" in output
+    assert "visual_agent.mcp_server" in output
+    assert "mcp-smoke" in output
 
 
 def test_demo_workspace_check_runs_local_demo(tmp_path) -> None:

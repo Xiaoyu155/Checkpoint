@@ -56,9 +56,11 @@ from .planner_generate import (
 )
 from .preflight import run_preflight
 from .quality import (
+    build_coding_agent_brief,
     build_install_check_plan,
     build_mcp_client_config,
     build_release_check_plan,
+    coding_agent_brief_to_markdown,
     demo_workspace_check_to_markdown,
     install_check_plan_to_markdown,
     list_quality_gate_reports,
@@ -277,6 +279,13 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_client_config.add_argument("--python", default=".\\.venv\\Scripts\\python.exe", help="Python executable used by the MCP client.")
     mcp_client_config.add_argument("--repo-root", default=".", help="Repository root used for cwd and PYTHONPATH.")
     mcp_client_config.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    coding_agent_brief = subparsers.add_parser("coding-agent-brief", help="Generate a Codex/Claude Code/Cursor onboarding brief.")
+    coding_agent_brief.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root passed to the MCP server.")
+    coding_agent_brief.add_argument("--repo-root", default=".", help="Repository root used for cwd and PYTHONPATH.")
+    coding_agent_brief.add_argument("--client", choices=["codex", "claude-code", "cursor"], default="codex", help="Coding agent target.")
+    coding_agent_brief.add_argument("--python", default=".\\.venv\\Scripts\\python.exe", help="Python executable used by the MCP client.")
+    coding_agent_brief.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     mcp_smoke = subparsers.add_parser("mcp-smoke", help="Run local MCP tool smoke checks through the in-process MCP adapter.")
     mcp_smoke.add_argument("--workspace-root", required=True, help="Workspace root containing demo workflows.")
@@ -693,6 +702,53 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_perception_status(manifest: Any, vlm_summary: dict[str, Any]) -> dict[str, Any]:
+    """Summarise which perception providers are actually usable right now."""
+    available_names = {
+        str(getattr(c, "name", ""))
+        for c in manifest.capabilities
+        if getattr(c, "available", False)
+    }
+    dom_ok = "observe_browser" in available_names or "observe_dom" in available_names
+    uia_ok = "observe_uia" in available_names
+    ocr_ok = "observe_ocr" in available_names and "pytesseract" in available_names
+    vlm_ok = bool(vlm_summary.get("ok")) or (
+        vlm_summary.get("cloud", {}).get("available") is True
+        or any(
+            v.get("available") for v in vlm_summary.get("local", {}).values()
+            if isinstance(v, dict)
+        )
+    )
+
+    warnings: list[str] = []
+    if not dom_ok:
+        warnings.append(
+            "Browser/DOM provider unavailable. Run: pip install -e .[web] && python -m playwright install chromium"
+        )
+    if not vlm_ok:
+        warnings.append(
+            "No VLM (visual fallback) is configured. "
+            "Options: (A) set an API key in model_api_keys.txt for cloud VLM, "
+            "(B) install torch/transformers and a local model for on-device VLM, "
+            "(C) workflows that only use DOM/UIA work without VLM."
+        )
+    if not ocr_ok:
+        warnings.append(
+            "OCR provider unavailable (optional). "
+            "Install pytesseract and the Tesseract binary for text-extraction fallback."
+        )
+
+    return {
+        "dom_browser": dom_ok,
+        "windows_uia": uia_ok,
+        "ocr": ocr_ok,
+        "vlm": vlm_ok,
+        "ready_for_dom_workflows": dom_ok,
+        "ready_for_visual_workflows": dom_ok and vlm_ok,
+        "warnings": warnings,
+    }
+
+
 def doctor_recommendations(missing: list[Any], *, strict: bool = False) -> list[dict[str, Any]]:
     priority_rank = {"P0": 0, "P1": 1, "P2": 2}
     recommendations = []
@@ -832,11 +888,14 @@ def main(argv: list[str] | None = None) -> int:
         missing = [capability for capability in manifest.capabilities if not capability.available]
         blocking = missing if args.strict else [capability for capability in missing if capability.required]
         recommendations = doctor_recommendations(missing, strict=args.strict)
+        vlm_summary = vlm_doctor_summary()
+        perception = _build_perception_status(manifest, vlm_summary)
         payload = {
             "ok": not blocking,
             "available_count": manifest.available_count,
             "missing_count": manifest.missing_count,
             "blocking_missing_count": len(blocking),
+            "perception": perception,
             "missing": missing,
             "recommendations": recommendations,
             "vlm": {
@@ -845,7 +904,7 @@ def main(argv: list[str] | None = None) -> int:
                     "moondream": detect_vlm_backend("moondream"),
                 },
                 "cloud": public_engine_status(detect_cloud_vision_backend()),
-                "doctor_summary": vlm_doctor_summary(),
+                "doctor_summary": vlm_summary,
             },
         }
         print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
@@ -1199,6 +1258,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.format == "markdown":
             print(mcp_client_config_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "coding-agent-brief":
+        payload = build_coding_agent_brief(
+            workspace_root=args.workspace_root,
+            repo_root=args.repo_root,
+            client=args.client,
+            python=args.python,
+        )
+        if args.format == "markdown":
+            print(coding_agent_brief_to_markdown(payload))
         else:
             print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
         return 0

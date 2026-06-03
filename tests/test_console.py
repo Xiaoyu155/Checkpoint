@@ -41,6 +41,8 @@ def test_doctor_includes_vlm_summary_without_secret(monkeypatch, capsys) -> None
     assert payload["vlm"]["doctor_summary"]["recommended_engine"] == "cloud"
     assert payload["vlm"]["doctor_summary"]["cloud"]["api_key_configured"] is True
     assert payload["vlm"]["doctor_summary"]["cloud"]["base_url"] == "https://api.openai.test/v1"
+    assert payload["perception"]["vlm"] is True
+    assert "ready_for_dom_workflows" in payload["perception"]
     assert "sk-test-secret-value-123456" not in output
 
 

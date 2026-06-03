@@ -9,6 +9,8 @@ model_api_keys.txt
 .agent-workspace/runs/
 .agent-workspace/reports/
 .agent-workspace/gui/
+.agent-workspace/queue/
+.agent-workspace/workflows/external_samples/
 smoke_results/
 .pytest_cache/
 *.egg-info/

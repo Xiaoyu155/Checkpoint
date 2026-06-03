@@ -15,6 +15,34 @@ It is not another one-step browser remote control. It is a local execution layer
 - Exposes high-level workflow tools through MCP.
 - Provides CLI, Tkinter GUI, queue worker, regression export, and quality gates.
 
+## What Works Out of the Box
+
+After running `bootstrap.ps1`, the following are ready with no extra configuration:
+
+| Capability | Status | Notes |
+| --- | --- | --- |
+| DOM browser automation | **Ready** | Playwright Chromium installed by bootstrap |
+| YAML workflow execution | **Ready** | dry-run, supervised, approved profiles |
+| MCP server (5 tools) | **Ready** | Claude Code, Cursor, Claude Desktop |
+| Run reports and audit logs | **Ready** | Screenshots, failure diagnosis, queue |
+| Windows UIA desktop automation | **Ready** | Windows only, no extra install needed |
+
+The following require additional setup:
+
+| Capability | Status | How to Enable |
+| --- | --- | --- |
+| Visual fallback (VLM) — cloud | Needs API key | Add key to `model_api_keys.txt`, see [VLM setup](docs/vlm_setup.md) |
+| Visual fallback (VLM) — local | Needs model | `pip install torch transformers` + download model |
+| OCR text extraction | Needs Tesseract | `pip install pytesseract` + install Tesseract binary |
+
+**Practical note:** Most browser and desktop automation workflows work without VLM or OCR. VLM is only used as a fallback when DOM and UIA selectors cannot locate a target — which is uncommon for well-structured pages. Check your setup with:
+
+```powershell
+.\.venv\Scripts\python.exe -m visual_agent.cli doctor
+```
+
+Look for the `perception` section in the output to see which providers are active on your machine.
+
 ## Install
 
 From a source checkout on Windows:

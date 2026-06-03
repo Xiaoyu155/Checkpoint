@@ -700,7 +700,14 @@ def build_release_check_plan(*, workspace_root: str | Path = ".agent-workspace")
         "status": "planned",
         "check_count": len(checks),
         "checks": checks,
-        "docs": ["docs/quickstart.md", "docs/release_checklist.md", "README_MCP.md", "examples/workflows/README.md"],
+        "docs": [
+            "docs/quickstart.md",
+            "docs/release_checklist.md",
+            "docs/coding_agents.md",
+            "docs/vlm_setup.md",
+            "README_MCP.md",
+            "examples/workflows/README.md",
+        ],
     }
 
 
@@ -833,6 +840,158 @@ def mcp_client_config_to_markdown(payload: dict[str, Any]) -> str:
     ]
     for note in payload.get("security_notes", []) if isinstance(payload.get("security_notes"), list) else []:
         lines.append(f"- {note}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_coding_agent_brief(
+    *,
+    workspace_root: str | Path = ".agent-workspace",
+    repo_root: str | Path = ".",
+    client: str = "codex",
+    python: str = ".\\.venv\\Scripts\\python.exe",
+) -> dict[str, Any]:
+    workspace = str(workspace_root)
+    repo = str(Path(repo_root).resolve())
+    client_key = str(client or "codex").strip().lower().replace("_", "-")
+    supported_clients = {"codex", "claude-code", "cursor"}
+    if client_key not in supported_clients:
+        raise ValueError(f"Unsupported coding agent client: {client}")
+    config_client = "cursor" if client_key in {"codex", "cursor"} else "claude-desktop"
+    mcp_config = build_mcp_client_config(
+        workspace_root=workspace,
+        client=config_client,
+        python=python,
+        repo_root=repo,
+    )
+    tools = [
+        {
+            "name": "list_workflows",
+            "purpose": "Discover reusable local automation workflows before proposing new code or scripts.",
+            "safe_default": True,
+        },
+        {
+            "name": "validate_workflow",
+            "purpose": "Check YAML workflow structure and preflight capability requirements.",
+            "safe_default": True,
+        },
+        {
+            "name": "run_workflow",
+            "purpose": "Run an existing workflow under dry-run by default, then inspect the audited result.",
+            "safe_default": True,
+        },
+        {
+            "name": "get_run_report",
+            "purpose": "Read the redacted Markdown or JSON run report after execution.",
+            "safe_default": True,
+        },
+        {
+            "name": "list_run_artifacts",
+            "purpose": "List screenshots, step JSON, downloads, and other workspace-owned artifacts.",
+            "safe_default": True,
+        },
+    ]
+    commands = [
+        {"id": "bootstrap", "command": "powershell -ExecutionPolicy Bypass -File scripts\\bootstrap.ps1"},
+        {"id": "doctor", "command": f"{python} -m visual_agent.cli doctor"},
+        {
+            "id": "mcp_smoke",
+            "command": f"{python} -m visual_agent.cli mcp-smoke --workspace-root {workspace} --format markdown",
+        },
+        {
+            "id": "demo_workspace",
+            "command": f"{python} -m visual_agent.cli demo-workspace-check --root {workspace} --format markdown",
+        },
+        {
+            "id": "dashboard",
+            "command": f"{python} -m visual_agent.cli workspace-dashboard --root {workspace} --format markdown",
+        },
+        {
+            "id": "quality_gate",
+            "command": f"{python} -m visual_agent.cli quality-gate --profile ci --workspace-root {workspace} --run --fail-on-secret-leak",
+        },
+    ]
+    prompts = [
+        "Use visual-agent to list workflows, run local_html_form_workflow as a dry-run, then summarize the report.",
+        "Use visual-agent to validate every workflow before suggesting changes.",
+        "If a workflow fails, use get_run_report and list_run_artifacts before editing code.",
+        "Never request approved run_profile unless the workspace policy explicitly allows it and the human asked for it.",
+    ]
+    rules = [
+        "Start with dry-run. Escalate to supervised or approved only after explicit human approval.",
+        "Treat missing auth_state as a blocker, not as a reason to bypass login or scrape protected data.",
+        "Read run reports before claiming success; the report is the source of truth.",
+        "Do not print secrets from inputs, storage_state, cookies, tokens, or model credentials.",
+        "Prefer existing workflows over one-off browser clicking when a workflow exists.",
+    ]
+    return {
+        "schema_version": 1,
+        "client": client_key,
+        "repo_root": repo,
+        "workspace_root": workspace,
+        "positioning": "Visual Agent is the local execution layer for coding agents: persistent workflows, permission profiles, and audited reports.",
+        "mcp": {
+            "server_name": "visual-agent",
+            "config_client_shape": config_client,
+            "config": mcp_config["config"],
+        },
+        "tools": tools,
+        "commands": commands,
+        "prompts": prompts,
+        "rules": rules,
+        "docs": [
+            "README.md",
+            "README_MCP.md",
+            "docs/mcp_claude_code.md",
+            "docs/mcp_cursor.md",
+            "docs/quickstart.md",
+        ],
+    }
+
+
+def coding_agent_brief_to_markdown(brief: dict[str, Any]) -> str:
+    lines = [
+        "# Coding Agent Brief",
+        "",
+        f"- Client: `{brief.get('client')}`",
+        f"- Repo root: `{brief.get('repo_root')}`",
+        f"- Workspace root: `{brief.get('workspace_root')}`",
+        f"- Positioning: {brief.get('positioning')}",
+        "",
+        "## MCP Configuration",
+        "",
+        "```json",
+        json.dumps(brief.get("mcp", {}).get("config", {}), ensure_ascii=False, indent=2),
+        "```",
+        "",
+        "## Tools",
+        "",
+        "| tool | purpose | safe default |",
+        "| --- | --- | --- |",
+    ]
+    for tool in brief.get("tools", []) if isinstance(brief.get("tools"), list) else []:
+        if isinstance(tool, dict):
+            lines.append(
+                "| "
+                + " | ".join(
+                    markdown_cell(value)
+                    for value in (tool.get("name"), tool.get("purpose"), tool.get("safe_default"))
+                )
+                + " |"
+            )
+    lines.extend(["", "## First Commands", "", "| id | command |", "| --- | --- |"])
+    for command in brief.get("commands", []) if isinstance(brief.get("commands"), list) else []:
+        if isinstance(command, dict):
+            lines.append("| " + " | ".join(markdown_cell(value) for value in (command.get("id"), command.get("command"))) + " |")
+    lines.extend(["", "## Prompts To Try", ""])
+    for prompt in brief.get("prompts", []) if isinstance(brief.get("prompts"), list) else []:
+        lines.append(f"- {prompt}")
+    lines.extend(["", "## Rules For Coding Agents", ""])
+    for rule in brief.get("rules", []) if isinstance(brief.get("rules"), list) else []:
+        lines.append(f"- {rule}")
+    lines.extend(["", "## Docs", ""])
+    for path in brief.get("docs", []) if isinstance(brief.get("docs"), list) else []:
+        lines.append(f"- `{path}`")
     lines.append("")
     return "\n".join(lines)
 
