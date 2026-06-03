@@ -1,7 +1,7 @@
 from PIL import Image
 
 from visual_agent.models import ProviderKind
-from visual_agent.ocr import detect_tesseract, observe_ocr
+from visual_agent.ocr import detect_tesseract, observe_ocr, tesseract_language
 
 
 def test_detect_tesseract_returns_diagnostic_shape() -> None:
@@ -72,3 +72,15 @@ def test_ocr_tesseract_runtime_error_is_captured(tmp_path, monkeypatch) -> None:
     assert observation.elements == ()
     assert observation.metadata["engine_available"] is False
     assert "ocr failed" in observation.metadata["engine_status"]["error"]
+
+
+def test_tesseract_language_prefers_chinese_and_english(monkeypatch) -> None:
+    monkeypatch.setattr("visual_agent.ocr.available_tesseract_languages", lambda: {"eng", "chi_sim"})
+
+    assert tesseract_language({}) == "chi_sim+eng"
+
+
+def test_tesseract_language_allows_explicit_override(monkeypatch) -> None:
+    monkeypatch.setattr("visual_agent.ocr.available_tesseract_languages", lambda: {"eng", "chi_sim"})
+
+    assert tesseract_language({"language": "eng"}) == "eng"

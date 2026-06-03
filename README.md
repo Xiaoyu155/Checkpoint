@@ -77,6 +77,11 @@ changes. After the dry-run demo passes, try the verification loop:
 
 See [docs/quickstart.md](docs/quickstart.md) for the full walkthrough.
 
+For WeChat Mini Program work, see
+[docs/miniprogram_verification.md](docs/miniprogram_verification.md). Visual
+Agent can capture the DevTools simulator region and, with OCR or VLM configured,
+assert real page text instead of only checking the DevTools shell.
+
 Inspect the workspace:
 
 ```powershell

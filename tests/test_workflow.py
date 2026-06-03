@@ -10,6 +10,7 @@ from visual_agent.models import ActionResult, ActionStatus, Observation, Provide
 from visual_agent.providers import ProviderRegistry
 from visual_agent.state import StateStore
 from visual_agent.workflow import (
+    Workflow,
     WorkflowRuntime,
     WorkflowStep,
     close_context_resources,
@@ -752,6 +753,81 @@ def test_workflow_runtime_passes_screenshot_to_vision_step(tmp_path) -> None:
     assert screen.screenshot_path == vision.screenshot_path
     assert vision.source == str(screen.screenshot_path)
     assert vision.metadata["description"] == "screenshot shows dashboard"
+
+
+def test_workflow_resolves_nested_input_refs_with_default(tmp_path) -> None:
+    workflow = Workflow(
+        name="nested-input-default",
+        version=1,
+        steps=(
+            WorkflowStep(
+                "observe",
+                "observe_ocr",
+                {
+                    "mock_text_from": "input.missing_text",
+                    "mock_text_default": "填分数",
+                    "mock_bounds": {"left_from": "input.left", "left_default": 12, "top": 0, "width": 100, "height": 20},
+                },
+            ),
+            WorkflowStep("assert", "assert_text", {"text": "填分数"}),
+        ),
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path).run(workflow, dry_run=True, inputs={})
+
+    assert result.steps[-1].status == ActionStatus.SUCCESS
+    assert result.steps[0].observation.elements[0]["bounds"]["left"] == 12
+
+
+def test_assert_text_reports_unavailable_ocr_engine(tmp_path) -> None:
+    registry = ProviderRegistry()
+    registry.register(
+        "observe_ocr_unavailable",
+        lambda _params, _context: Observation(
+            provider=ProviderKind.OCR,
+            source="screen.png",
+            metadata={"engine_available": False, "install_hint": "Install Tesseract."},
+        ),
+    )
+    workflow = Workflow(
+        name="ocr-unavailable",
+        version=1,
+        steps=(
+            WorkflowStep("observe", "observe_ocr_unavailable", {}),
+            WorkflowStep("assert", "assert_text", {"text": "填分数"}),
+        ),
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, providers=registry).run(workflow, dry_run=True)
+
+    assert result.steps[-1].status == ActionStatus.FAILED
+    assert "OCR engine unavailable" in result.steps[-1].message
+    assert result.steps[-1].metadata["failure_diagnosis"]["expected"] == "expected text: 填分数"
+
+
+def test_assert_text_matches_joined_ocr_chinese_fragments(tmp_path) -> None:
+    registry = ProviderRegistry()
+    registry.register(
+        "observe_ocr_fragments",
+        lambda _params, _context: Observation(
+            provider=ProviderKind.OCR,
+            source="screen.png",
+            metadata={"engine_available": True},
+            elements=tuple({"text": item, "role": "text"} for item in ["我", "遇", "到", "了", "什", "么"]),
+        ),
+    )
+    workflow = Workflow(
+        name="ocr-fragments",
+        version=1,
+        steps=(
+            WorkflowStep("observe", "observe_ocr_fragments", {}),
+            WorkflowStep("assert", "assert_text", {"text": "我遇到了什么"}),
+        ),
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, providers=registry).run(workflow, dry_run=True)
+
+    assert result.steps[-1].status == ActionStatus.SUCCESS
 
 
 def test_workflow_runtime_stops_on_failed_step(tmp_path) -> None:

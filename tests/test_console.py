@@ -21,7 +21,7 @@ def test_workspace_dashboard_summarizes_empty_workspace(tmp_path) -> None:
     assert dashboard["health"]["status"] == "ok"
     assert dashboard["risk_policy_check"]["status"] == "warning"
     assert dashboard["risk_policy_check"]["warning_count"] == 1
-    assert dashboard["workspace"]["workflow_count"] == 2
+    assert dashboard["workspace"]["workflow_count"] == 5
     assert dashboard["reports"]["total"] == 0
     assert dashboard["quality_gates"]["total"] == 0
     assert dashboard["queue"]["total"] == 0

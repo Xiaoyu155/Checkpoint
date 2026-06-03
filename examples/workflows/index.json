@@ -43,6 +43,30 @@
           "description": "Verify checkout page copy and structure."
         }
       ]
+    },
+    {
+      "id": "miniprogram",
+      "title": "WeChat Mini Program workflows",
+      "workflows": [
+        {
+          "name": "wechat_devtools_shell",
+          "path": "workflows/miniprogram/wechat_devtools_shell.yaml",
+          "tags": ["verification", "miniprogram"],
+          "description": "Verify WeChat DevTools is open and the miniprogram project shell is visible."
+        },
+        {
+          "name": "miniprogram_simulator_capture",
+          "path": "workflows/miniprogram/miniprogram_simulator_capture.yaml",
+          "tags": ["verification", "miniprogram"],
+          "description": "Capture the WeChat DevTools simulator region as visual evidence."
+        },
+        {
+          "name": "miniprogram_visual_text_contract",
+          "path": "workflows/miniprogram/miniprogram_visual_text_contract.yaml",
+          "tags": ["miniprogram", "visual-contract"],
+          "description": "OCR the simulator region and assert a required mini program text."
+        }
+      ]
     }
   ]
 }

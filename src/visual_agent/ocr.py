@@ -7,12 +7,12 @@ from typing import Any
 
 from PIL import Image
 
-from .capture import ScreenCapture
+from .capture import ScreenCapture, apply_capture_region
 from .models import Bounds, Observation, ProviderKind
 
 
 def observe_ocr(params: dict[str, Any], run_dir: Path, *, synthetic_on_capture_fail: bool = False) -> Observation:
-    image, path = load_or_capture_image(params, run_dir, synthetic_on_capture_fail=synthetic_on_capture_fail)
+    image, path, region_metadata = load_or_capture_image(params, run_dir, synthetic_on_capture_fail=synthetic_on_capture_fail)
     engine = str(params.get("engine") or "auto").lower()
     min_confidence = float(params.get("min_confidence", 0.5))
 
@@ -35,7 +35,9 @@ def observe_ocr(params: dict[str, Any], run_dir: Path, *, synthetic_on_capture_f
         engine_available = bool(engine_status["available"])
         if engine_available:
             try:
-                elements = tesseract_elements(image, min_confidence=min_confidence)
+                language = tesseract_language(params)
+                elements = tesseract_elements(image, min_confidence=min_confidence, language=language)
+                engine_status = {**engine_status, "language": language}
             except Exception as exc:
                 elements = ()
                 engine_available = False
@@ -74,6 +76,7 @@ def observe_ocr(params: dict[str, Any], run_dir: Path, *, synthetic_on_capture_f
             "engine_available": engine_available,
             "engine_status": engine_status,
             "install_hint": None if engine_available else TESSERACT_INSTALL_HINT,
+            **region_metadata,
         },
     )
 
@@ -82,11 +85,12 @@ TESSERACT_INSTALL_HINT = "Install pytesseract and the Tesseract OCR binary, or p
 
 
 def detect_tesseract() -> dict[str, Any]:
+    binary_path = find_tesseract_binary()
     status: dict[str, Any] = {
         "engine": "tesseract",
         "available": False,
         "module_available": module_available("pytesseract"),
-        "binary_path": shutil.which("tesseract"),
+        "binary_path": str(binary_path) if binary_path else None,
         "version": None,
         "error": None,
         "install_hint": TESSERACT_INSTALL_HINT,
@@ -97,6 +101,8 @@ def detect_tesseract() -> dict[str, Any]:
     try:
         import pytesseract
 
+        if binary_path is not None:
+            pytesseract.pytesseract.tesseract_cmd = str(binary_path)
         version = pytesseract.get_tesseract_version()
     except Exception as exc:
         status["error"] = f"{type(exc).__name__}: {exc}"
@@ -107,16 +113,44 @@ def detect_tesseract() -> dict[str, Any]:
     return status
 
 
+def tesseract_language(params: dict[str, Any]) -> str | None:
+    explicit = params.get("language") or params.get("lang")
+    if explicit:
+        return str(explicit)
+    languages = available_tesseract_languages()
+    if "chi_sim" in languages and "eng" in languages:
+        return "chi_sim+eng"
+    if "chi_sim" in languages:
+        return "chi_sim"
+    if "eng" in languages:
+        return "eng"
+    return None
+
+
+def available_tesseract_languages() -> set[str]:
+    binary_path = find_tesseract_binary()
+    if binary_path is None or not module_available("pytesseract"):
+        return set()
+    try:
+        import pytesseract
+
+        pytesseract.pytesseract.tesseract_cmd = str(binary_path)
+        return {str(language) for language in pytesseract.get_languages(config="")}
+    except Exception:
+        return set()
+
+
 def load_or_capture_image(
     params: dict[str, Any],
     run_dir: Path,
     *,
     synthetic_on_capture_fail: bool,
-) -> tuple[Image.Image, Path]:
+) -> tuple[Image.Image, Path, dict[str, Any]]:
     if params.get("path"):
         path = Path(str(params["path"]))
         image = Image.open(path).convert("RGB")
-        return image, path
+        image, path, metadata = apply_capture_region(image, path, params, output_dir=run_dir, label="ocr-region")
+        return image, path, metadata
 
     if "mock_text" in params:
         width = int(params.get("mock_width", 1280))
@@ -124,7 +158,8 @@ def load_or_capture_image(
         image = Image.new("RGB", (width, height), color=(245, 247, 250))
         path = run_dir / "ocr-mock.png"
         image.save(path)
-        return image, path
+        image, path, metadata = apply_capture_region(image, path, params, output_dir=run_dir, label="ocr-region")
+        return image, path, metadata
 
     capture = ScreenCapture(output_dir=run_dir)
     try:
@@ -133,7 +168,14 @@ def load_or_capture_image(
         if not synthetic_on_capture_fail:
             raise
         screenshot = capture.capture_synthetic()
-    return screenshot.image, screenshot.path
+    image, path, metadata = apply_capture_region(
+        screenshot.image,
+        screenshot.path,
+        params,
+        output_dir=run_dir,
+        label="ocr-region",
+    )
+    return image, path, metadata
 
 
 def mock_ocr_elements(text: str, params: dict[str, Any], image: Image.Image) -> tuple[dict[str, Any], ...]:
@@ -158,10 +200,14 @@ def mock_ocr_elements(text: str, params: dict[str, Any], image: Image.Image) -> 
     )
 
 
-def tesseract_elements(image: Image.Image, *, min_confidence: float) -> tuple[dict[str, Any], ...]:
+def tesseract_elements(image: Image.Image, *, min_confidence: float, language: str | None = None) -> tuple[dict[str, Any], ...]:
     import pytesseract
 
-    data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
+    binary_path = find_tesseract_binary()
+    if binary_path is not None:
+        pytesseract.pytesseract.tesseract_cmd = str(binary_path)
+    kwargs = {"lang": language} if language else {}
+    data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT, **kwargs)
     elements = []
     for index, text in enumerate(data.get("text", [])):
         normalized = str(text or "").strip()
@@ -196,3 +242,14 @@ def tesseract_elements(image: Image.Image, *, min_confidence: float) -> tuple[di
 
 def module_available(module_name: str) -> bool:
     return importlib.util.find_spec(module_name) is not None
+
+
+def find_tesseract_binary() -> Path | None:
+    path = shutil.which("tesseract")
+    if path:
+        return Path(path)
+    candidates = (
+        Path("C:/Program Files/Tesseract-OCR/tesseract.exe"),
+        Path("C:/Program Files (x86)/Tesseract-OCR/tesseract.exe"),
+    )
+    return next((candidate for candidate in candidates if candidate.exists()), None)

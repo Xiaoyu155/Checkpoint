@@ -108,7 +108,9 @@ def _has_tag(ref: Any, tags: tuple[str, ...]) -> bool:
         workflow = parse_workflow_file(ref.path)
     except Exception:
         return False
-    return bool(set(getattr(workflow, "tags", ())) & set(tags))
+    workflow_tags = set(getattr(workflow, "tags", ()))
+    requested_tags = set(tags)
+    return bool(requested_tags) and requested_tags.issubset(workflow_tags)
 
 
 def _failure_hint(failed: Any) -> str | None:

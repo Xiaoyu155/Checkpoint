@@ -1,8 +1,10 @@
 from pathlib import Path
 
+from PIL import Image
 from visual_agent.models import Observation, ProviderKind
 import pytest
 
+from visual_agent.capture import crop_image
 from visual_agent.providers import ProviderContext, ProviderRegistry, default_provider_registry, normalize_url, route_handler
 
 
@@ -48,6 +50,51 @@ def test_ocr_provider_supports_deterministic_mock_text(tmp_path) -> None:
     assert observation.elements[0]["bounds"]["left"] == 10
 
 
+def test_ocr_provider_applies_relative_crop_to_image(tmp_path) -> None:
+    registry = default_provider_registry()
+    observation = registry.observe(
+        "observe_ocr",
+        {
+            "mock_text": "填分数",
+            "mock_width": 1000,
+            "mock_height": 800,
+            "simulator_crop": {
+                "left_percent": 0.1,
+                "top_percent": 0.25,
+                "width_percent": 0.5,
+                "height_percent": 0.5,
+            },
+        },
+        ProviderContext(run_dir=tmp_path, synthetic_on_capture_fail=True),
+    )
+
+    assert observation.width == 500
+    assert observation.height == 400
+    assert observation.metadata["crop_region"] == {"left": 100, "top": 200, "width": 500, "height": 400}
+    assert observation.screenshot_path == tmp_path / "ocr-mock-ocr-region.png"
+
+
+def test_screen_provider_can_fallback_to_screen_when_uia_window_missing(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "visual_agent.uia.find_uia_element_bounds",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("missing")),
+    )
+    registry = default_provider_registry()
+    observation = registry.observe(
+        "observe_screen",
+        {
+            "window": {"title_contains": "missing-window"},
+            "fallback_to_screen": True,
+            "simulator_crop": {"left_percent": 0.0, "top_percent": 0.0, "width_percent": 0.5, "height_percent": 1.0},
+        },
+        ProviderContext(run_dir=tmp_path, synthetic_on_capture_fail=True),
+    )
+
+    assert observation.width == observation.metadata["crop_region"]["width"]
+    assert observation.metadata["crop_region"]["width"] > 0
+    assert observation.metadata["uia_window_fallback"]["used"] is True
+
+
 def test_vision_provider_supports_deterministic_mock_description(tmp_path) -> None:
     registry = default_provider_registry()
     observation = registry.observe(
@@ -66,6 +113,15 @@ def test_vision_provider_supports_deterministic_mock_description(tmp_path) -> No
     assert observation.metadata["status"] == "success"
     assert observation.screenshot_path == tmp_path / "vision-mock.png"
     assert observation.elements[0]["text"] == "页面显示已登录状态"
+
+
+def test_crop_image_clamps_region_to_image_bounds() -> None:
+    image = Image.new("RGB", (200, 100), color=(255, 255, 255))
+
+    cropped, region = crop_image(image, {"left": 150, "top": 80, "width": 200, "height": 50})
+
+    assert cropped.size == (50, 20)
+    assert region == {"left": 150, "top": 80, "width": 50, "height": 20}
 
 
 def test_route_handler_rejects_absolute_system_path(tmp_path) -> None:

@@ -1,0 +1,17 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: wechat_devtools_shell
+version: 1
+tags:
+  - verification
+  - miniprogram
+steps:
+  - id: observe_desktop
+    action: observe_uia
+    max_depth: 4
+  - id: assert_devtools_open
+    action: assert_text
+    text: "微信开发者工具"
+  - id: assert_project_loaded
+    action: assert_text
+    text: "miniprogram"

@@ -1,6 +1,6 @@
 from visual_agent.models import Observation, ProviderKind, Target
 from visual_agent.selector import SelectorResolver
-from visual_agent.uia import element_accessible_name, element_bounds, normalize_control_type
+from visual_agent.uia import UIAutomationProvider, element_accessible_name, element_bounds, find_uia_element_bounds, normalize_control_type
 from visual_agent.fixtures import load_observation_fixture
 
 
@@ -88,3 +88,34 @@ def test_uia_fixture_resolves_notepad_demo_controls() -> None:
     assert observation.provider == ProviderKind.UIA
     assert subject.evidence.handle == "subjectEdit"
     assert save.evidence.handle == "saveButton"
+
+
+def test_find_uia_element_bounds_matches_window_title(monkeypatch) -> None:
+    observation = Observation(
+        provider=ProviderKind.UIA,
+        source="windows-desktop",
+        elements=(
+            {
+                "name": "微信开发者工具 - miniprogram",
+                "automation_id": "",
+                "control_type": "window",
+                "class_name": "WeChatDevTools",
+                "bounds": {"left": 120, "top": 100, "width": 300, "height": 200},
+            },
+            {
+                "name": "微信开发者工具 - miniprogram",
+                "automation_id": "",
+                "control_type": "window",
+                "class_name": "WeChatDevTools",
+                "bounds": {"left": 100, "top": 80, "width": 1200, "height": 900},
+            },
+        ),
+    )
+    monkeypatch.setattr(UIAutomationProvider, "observe_desktop", lambda _self: observation)
+
+    bounds = find_uia_element_bounds({"title_contains": "微信开发者工具", "control_type": "window"})
+
+    assert bounds.left == 100
+    assert bounds.top == 80
+    assert bounds.width == 1200
+    assert bounds.height == 900

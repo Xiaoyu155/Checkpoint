@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import sleep
 from typing import Any
 
 from .models import Bounds, Observation, ProviderKind
@@ -106,7 +107,10 @@ def safe_attr(control: Any, attr: str) -> str:
     return str(value or "")
 
 
-def element_bounds(element: dict[str, Any]) -> Bounds | None:
+def element_bounds(element: dict[str, Any], *, bring_to_front: bool = False) -> Bounds | None:
+    handle_bounds = hwnd_bounds(element, bring_to_front=bring_to_front)
+    if handle_bounds is not None:
+        return handle_bounds
     raw = element.get("bounds")
     if not isinstance(raw, dict):
         return None
@@ -125,6 +129,123 @@ def element_bounds(element: dict[str, Any]) -> Bounds | None:
         return None
 
 
+def hwnd_bounds(element: dict[str, Any], *, bring_to_front: bool = False) -> Bounds | None:
+    raw_handle = str(element.get("native_window_handle") or "").strip()
+    if not raw_handle:
+        return None
+    try:
+        handle = int(raw_handle)
+    except ValueError:
+        return None
+    if handle <= 0:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        rect = wintypes.RECT()
+        if bring_to_front:
+            ctypes.windll.user32.ShowWindow(wintypes.HWND(handle), 9)
+            ctypes.windll.user32.SetForegroundWindow(wintypes.HWND(handle))
+            sleep(0.2)
+        ok = ctypes.windll.user32.GetWindowRect(wintypes.HWND(handle), ctypes.byref(rect))
+        if not ok:
+            return None
+        if int(rect.left) < -10000 or int(rect.top) < -10000 or int(rect.right - rect.left) < 200 or int(rect.bottom - rect.top) < 100:
+            ctypes.windll.user32.ShowWindow(wintypes.HWND(handle), 9)
+            ctypes.windll.user32.SetForegroundWindow(wintypes.HWND(handle))
+            sleep(0.2)
+            ok = ctypes.windll.user32.GetWindowRect(wintypes.HWND(handle), ctypes.byref(rect))
+            if not ok:
+                return None
+        width = int(rect.right - rect.left)
+        height = int(rect.bottom - rect.top)
+        if width <= 0 or height <= 0:
+            return None
+        return Bounds(left=int(rect.left), top=int(rect.top), width=width, height=height)
+    except Exception:
+        return None
+
+
+def find_uia_element_bounds(
+    params: dict[str, Any],
+    *,
+    max_depth: int = 3,
+    max_elements: int = 800,
+) -> Bounds:
+    provider = UIAutomationProvider(max_depth=max_depth, max_elements=max_elements)
+    observation = provider.observe_desktop()
+    title_contains = normalized_match_text(params.get("window_title_contains") or params.get("title_contains"))
+    title_contains_any = tuple(
+        item
+        for item in (
+            normalized_match_text(value)
+            for value in list_param(params.get("window_title_contains_any") or params.get("title_contains_any"))
+        )
+        if item
+    )
+    name_contains = normalized_match_text(params.get("uia_name_contains") or params.get("name_contains"))
+    class_contains = normalized_match_text(params.get("uia_class_name_contains") or params.get("class_name_contains"))
+    control_type = normalized_match_text(params.get("uia_control_type") or params.get("control_type"))
+    bring_to_front = bool(params.get("bring_to_front") or params.get("foreground"))
+
+    title_candidates = (title_contains,) if title_contains else title_contains_any or (None,)
+    for title_candidate in title_candidates:
+        matches = matching_uia_bounds(
+            observation.elements,
+            title_contains=title_candidate,
+            name_contains=name_contains,
+            class_contains=class_contains,
+            control_type=control_type,
+            bring_to_front=bring_to_front,
+        )
+        if matches:
+            return max(matches, key=lambda item: item.width * item.height)
+
+    label = title_contains or ", ".join(title_contains_any) or name_contains or class_contains or control_type or "matching UIA element"
+    raise RuntimeError(f"Could not find UIA bounds for {label}.")
+
+
+def matching_uia_bounds(
+    elements: tuple[dict[str, Any], ...],
+    *,
+    title_contains: str | None,
+    name_contains: str,
+    class_contains: str,
+    control_type: str,
+    bring_to_front: bool = False,
+) -> list[Bounds]:
+    matches: list[Bounds] = []
+    for element in elements:
+        if control_type and control_type not in normalize_control_type(element.get("control_type")):
+            continue
+        name = str(element.get("name") or "").lower()
+        class_name = str(element.get("class_name") or "").lower()
+        accessible = element_accessible_name(element)
+        if title_contains and title_contains not in accessible:
+            continue
+        if name_contains and name_contains not in name:
+            continue
+        if class_contains and class_contains not in class_name:
+            continue
+        bounds = element_bounds(element, bring_to_front=bring_to_front)
+        if bounds is not None:
+            matches.append(bounds)
+    return matches
+
+
+def normalized_match_text(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def list_param(value: Any) -> tuple[Any, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (list, tuple)):
+        return tuple(value)
+    return (value,)
+
+
 def element_accessible_name(element: dict[str, Any]) -> str:
     candidates = [
         element.get("name"),
@@ -132,4 +253,3 @@ def element_accessible_name(element: dict[str, Any]) -> str:
         element.get("class_name"),
     ]
     return " ".join(str(item).strip().lower() for item in candidates if item)
-

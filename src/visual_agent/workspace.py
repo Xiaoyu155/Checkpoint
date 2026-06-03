@@ -160,7 +160,20 @@ def copy_demo_assets(workspace: Workspace, *, overwrite: bool = False) -> None:
             repo_root / "examples" / "workflows" / "checkout" / "checkout_verification.yaml",
             workspace.workflows_dir / "checkout_verification.yaml",
         ),
+        (
+            repo_root / "examples" / "workflows" / "miniprogram" / "wechat_devtools_shell.yaml",
+            workspace.workflows_dir / "wechat_devtools_shell.yaml",
+        ),
+        (
+            repo_root / "examples" / "workflows" / "miniprogram" / "miniprogram_simulator_capture.yaml",
+            workspace.workflows_dir / "miniprogram_simulator_capture.yaml",
+        ),
+        (
+            repo_root / "examples" / "workflows" / "miniprogram" / "miniprogram_visual_text_contract.yaml",
+            workspace.workflows_dir / "miniprogram_visual_text_contract.yaml",
+        ),
         (repo_root / "examples" / "inputs" / "demo_login.json", workspace.inputs_dir / "demo_login.json"),
+        (repo_root / "examples" / "inputs" / "miniprogram_default.json", workspace.inputs_dir / "miniprogram_default.json"),
         (repo_root / "examples" / "web" / "login_demo.html", workspace.fixtures_dir / "login_demo.html"),
     ]
     for source, target in copies:

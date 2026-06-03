@@ -1,0 +1,27 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: miniprogram_simulator_capture
+version: 1
+tags:
+  - verification
+  - miniprogram
+steps:
+  - id: capture_devtools_window
+    action: observe_screen
+    window:
+      title_contains_any_from: input.window_title_candidates
+      title_contains_any_default:
+        - "微信开发者工具"
+        - "alipay-miniprogram"
+      max_depth: 6
+      max_elements: 2000
+      min_width: 300
+      min_height: 400
+      bring_to_front: true
+    fallback_to_screen: true
+    # Adjust this crop if your simulator is not in the left side of DevTools.
+    simulator_crop:
+      left_percent: 0.0
+      top_percent: 0.0
+      width_percent: 0.7
+      height_percent: 1.0

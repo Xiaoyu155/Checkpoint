@@ -11,7 +11,7 @@ import urllib.request
 
 from PIL import Image
 
-from .capture import ScreenCapture
+from .capture import ScreenCapture, apply_capture_region
 from .model_credentials import (
     normalize_provider,
     resolve_model_provider_config,
@@ -28,7 +28,7 @@ SUPPORTED_CLOUD_ENGINES = {"cloud", "openai", "qwen", "xiaomimimo", "kimi", "dee
 
 
 def observe_vision(params: dict[str, Any], run_dir: Path, *, synthetic_on_capture_fail: bool = False) -> Observation:
-    image, path = load_or_capture_image(params, run_dir, synthetic_on_capture_fail=synthetic_on_capture_fail)
+    image, path, region_metadata = load_or_capture_image(params, run_dir, synthetic_on_capture_fail=synthetic_on_capture_fail)
     engine = str(params.get("engine") or "mock").lower()
     prompt = str(params.get("prompt") or "Describe the current screen state.")
     fallback_chain: list[dict[str, Any]] = []
@@ -149,6 +149,7 @@ def observe_vision(params: dict[str, Any], run_dir: Path, *, synthetic_on_captur
             "engine_status": public_engine_status(engine_status),
             "install_hint": install_hint,
             "fallback_chain": fallback_chain,
+            **region_metadata,
         },
     )
 
@@ -670,10 +671,12 @@ def load_or_capture_image(
     run_dir: Path,
     *,
     synthetic_on_capture_fail: bool,
-) -> tuple[Image.Image, Path]:
+) -> tuple[Image.Image, Path, dict[str, Any]]:
     if params.get("path"):
         path = Path(str(params["path"]))
-        return Image.open(path).convert("RGB"), path
+        image = Image.open(path).convert("RGB")
+        image, path, metadata = apply_capture_region(image, path, params, output_dir=run_dir, label="vision-region")
+        return image, path, metadata
 
     if "mock_description" in params or "mock_text" in params:
         width = int(params.get("mock_width", 1280))
@@ -681,7 +684,8 @@ def load_or_capture_image(
         image = Image.new("RGB", (width, height), color=(242, 244, 248))
         path = run_dir / "vision-mock.png"
         image.save(path)
-        return image, path
+        image, path, metadata = apply_capture_region(image, path, params, output_dir=run_dir, label="vision-region")
+        return image, path, metadata
 
     capture = ScreenCapture(output_dir=run_dir)
     try:
@@ -690,7 +694,14 @@ def load_or_capture_image(
         if not synthetic_on_capture_fail:
             raise
         screenshot = capture.capture_synthetic()
-    return screenshot.image, screenshot.path
+    image, path, metadata = apply_capture_region(
+        screenshot.image,
+        screenshot.path,
+        params,
+        output_dir=run_dir,
+        label="vision-region",
+    )
+    return image, path, metadata
 
 
 def vision_bounds(params: dict[str, Any], image: Image.Image) -> dict[str, int]:

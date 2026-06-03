@@ -250,10 +250,14 @@ class WorkflowRuntime:
                     sleep(retry["delay_seconds"])
 
         elapsed = monotonic() - started
+        try:
+            diagnosis_params = resolve_step_params(step.params, context)
+        except Exception:
+            diagnosis_params = step.params
         diagnosis = diagnose_failure(
             step_id=step.id,
             action=step.action,
-            params=step.params,
+            params=diagnosis_params,
             error=last_error,
             context=context,
         )
@@ -342,6 +346,9 @@ class WorkflowRuntime:
         if action == "assert_text":
             observation = context.observations.get(str(params.get("observation", ""))) or context.latest_observation
             text = normalize_text(require_param(params, "text"))
+            if observation is not None and observation.provider == ProviderKind.OCR and observation.metadata.get("engine_available") is False:
+                install_hint = observation.metadata.get("install_hint") or "Install and configure OCR before asserting screen text."
+                raise AssertionError(f"OCR engine unavailable; cannot assert text: {params['text']}. {install_hint}")
             if not observation_contains_text(observation, text):
                 raise AssertionError(f"Text not found in observation: {params['text']}")
             return WorkflowStepResult(
@@ -896,10 +903,25 @@ def observation_contains_text(observation: Observation, normalized_text: str) ->
         return True
     if normalize_text(observation.metadata).find(normalized_text) >= 0:
         return True
+    text_parts: list[str] = []
     for element in observation.elements:
-        if normalize_text(element).find(normalized_text) >= 0:
+        element_text = normalize_text(element)
+        if element_text.find(normalized_text) >= 0:
             return True
+        if isinstance(element, dict):
+            raw_text = element.get("text")
+            if raw_text not in (None, ""):
+                text_parts.append(str(raw_text))
+        else:
+            text_parts.append(str(element))
+    compact_expected = compact_text(normalized_text)
+    if compact_expected and compact_text("".join(text_parts)).find(compact_expected) >= 0:
+        return True
     return False
+
+
+def compact_text(value: Any) -> str:
+    return "".join(str(value).lower().split())
 
 
 def find_network_response(events: Any, params: dict[str, Any]) -> dict[str, Any] | None:
@@ -960,18 +982,42 @@ def network_assertion_label(params: dict[str, Any]) -> str:
 
 
 def resolve_step_params(params: dict[str, Any], context: WorkflowContext) -> dict[str, Any]:
-    resolved = dict(params)
-    for key, target_key in (("url_from", "url"), ("text_from", "text"), ("path_from", "path")):
-        if key not in params or target_key in resolved:
-            continue
-        value_from = str(params[key])
-        if value_from.startswith("input."):
-            resolved[target_key] = read_path(context.inputs, value_from.removeprefix("input."))
-            continue
-        raise ValueError(f"Unsupported {key} path: {value_from}")
+    resolved = resolve_input_refs(params, context)
     if "screenshot_from" in params and "path" not in resolved:
         resolved["path"] = str(resolve_screenshot_source(params["screenshot_from"], context))
     return resolved
+
+
+def resolve_input_refs(value: Any, context: WorkflowContext) -> Any:
+    if isinstance(value, dict):
+        resolved: dict[str, Any] = {}
+        for key, item in value.items():
+            if key.endswith("_from"):
+                if not str(item).startswith("input."):
+                    resolved[key] = resolve_input_refs(item, context)
+                    continue
+                target_key = key[: -len("_from")]
+                if target_key in value:
+                    continue
+                try:
+                    resolved[target_key] = resolve_input_ref(str(item), key, context)
+                except KeyError:
+                    default_key = f"{target_key}_default"
+                    if default_key not in value:
+                        raise
+                    resolved[target_key] = resolve_input_refs(value[default_key], context)
+                continue
+            resolved[key] = resolve_input_refs(item, context)
+        return resolved
+    if isinstance(value, list):
+        return [resolve_input_refs(item, context) for item in value]
+    return value
+
+
+def resolve_input_ref(value_from: str, key: str, context: WorkflowContext) -> Any:
+    if value_from.startswith("input."):
+        return read_path(context.inputs, value_from.removeprefix("input."))
+    raise ValueError(f"Unsupported {key} path: {value_from}")
 
 
 def resolve_screenshot_source(value: Any, context: WorkflowContext) -> Path:

@@ -48,6 +48,19 @@ def test_run_verify_runs_tagged_workflows_only(tmp_path) -> None:
     assert len(markdown) <= 3200
 
 
+def test_run_verify_requires_all_requested_tags(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_workflow(workspace, "verification", tagged=True)
+    path = write_workflow(workspace, "miniprogram_verification", tagged=True)
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace("  - verification\n", "  - verification\n  - miniprogram\n"), encoding="utf-8")
+
+    report = run_verify(workspace, tags=("verification", "miniprogram"))
+
+    assert report.total == 1
+    assert report.results[0].name == "miniprogram_verification"
+
+
 def test_run_verify_with_failing_workflow_reports_failure(tmp_path) -> None:
     workspace = init_workspace(tmp_path / "workspace", with_demo=False)
     write_workflow(workspace, "verification", failing=True)
