@@ -43,6 +43,8 @@ def test_capabilities_include_planner_visible_atomic_specs() -> None:
     assert by_name["observe_vision"].planner_visible is True
     assert by_name["observe_browser"].input_schema is not None
     assert by_name["click"].dry_run_supported is True
+    assert by_name["press_key"].dry_run_supported is True
+    assert by_name["press_key"].input_schema["required"] == ["target", "keys"]
     assert by_name["save_storage_state"].risk_level == "high"
     assert by_name["assert_response"].kind == "assertion"
     assert by_name["resolve"].kind == "extractor"
@@ -57,6 +59,7 @@ def test_atomic_capability_manifest_excludes_dependencies_and_hidden_commands() 
     kinds = {capability.kind for capability in manifest.capabilities}
 
     assert "click" in names
+    assert "press_key" in names
     assert "assert_response" in names
     assert "expect_download" in names
     assert "resolve" in names

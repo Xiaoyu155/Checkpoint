@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .capture import ScreenCapture, apply_capture_region, finalize_capture_window, prepare_capture_window
+from .capture import capture_visual_region
 from .dom import DomProvider, INTERACTIVE_SELECTOR, _COLLECT_ELEMENTS_SCRIPT
 from .fixtures import load_observation_fixture
 from .html_provider import HtmlFileProvider
@@ -55,23 +55,12 @@ def default_provider_registry() -> ProviderRegistry:
 
 
 def observe_screen(params: dict[str, Any], context: ProviderContext) -> Observation:
-    pre_capture_metadata = prepare_capture_window(params)
-    capture = ScreenCapture(output_dir=context.run_dir)
-    try:
-        screenshot = capture.capture_primary()
-    except Exception:
-        if not context.synthetic_on_capture_fail:
-            raise
-        screenshot = capture.capture_synthetic()
-    image, path, region_metadata = apply_capture_region(
-        screenshot.image,
-        screenshot.path,
+    image, path, region_metadata = capture_visual_region(
         params,
         output_dir=context.run_dir,
         label="screen-region",
+        synthetic_on_capture_fail=context.synthetic_on_capture_fail,
     )
-    region_metadata = {**pre_capture_metadata, **region_metadata}
-    region_metadata.update(finalize_capture_window(params, region_metadata))
 
     return Observation(
         provider=ProviderKind.SCREEN,

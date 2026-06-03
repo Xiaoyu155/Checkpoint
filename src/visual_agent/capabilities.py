@@ -112,6 +112,7 @@ def action_capabilities() -> tuple[Capability, ...]:
         "click": "Click a resolved target.",
         "type": "Type text into a resolved target.",
         "paste": "Paste text into a resolved target.",
+        "press_key": "Press a key or hotkey against a resolved target.",
     }
     return tuple(
         Capability(
@@ -123,7 +124,7 @@ def action_capabilities() -> tuple[Capability, ...]:
                 input_schema=action_input_schema(action),
                 output_schema={"type": "object", "fields": {"action_result": "ActionResult"}},
                 dry_run_supported=True,
-                risk_level="medium" if action == "click" else "low",
+                risk_level="medium" if action in {"click", "press_key"} else "low",
                 planner_visible=True,
             )
         for action in dispatcher.actions_available
@@ -437,6 +438,17 @@ def action_input_schema(action: str) -> dict[str, Any]:
                 "value": "string?",
                 "value_from": "input.path?",
                 "sensitive": "boolean?",
+                "dry_run": "boolean?",
+                "allow_mock_target": "boolean?",
+            },
+        }
+    if action == "press_key":
+        return {
+            "type": "object",
+            "required": ["target", "keys"],
+            "fields": {
+                "target": "Target",
+                "keys": "string|string[]",
                 "dry_run": "boolean?",
                 "allow_mock_target": "boolean?",
             },

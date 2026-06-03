@@ -55,6 +55,42 @@ class DesktopActions:
             metadata=text_metadata(text, sensitive=sensitive),
         )
 
+    def press_key(
+        self,
+        keys: str | list[str],
+        target: Target,
+        *,
+        provider: ProviderKind | None = None,
+        dry_run: bool = False,
+    ) -> ActionResult:
+        """Press a single key or a key combination.
+
+        ``keys`` accepts:
+        - a single key name: ``"enter"``, ``"escape"``, ``"tab"``
+        - a hotkey string with ``+`` separators: ``"ctrl+c"``, ``"alt+f4"``
+        - a list of key names: ``["ctrl", "shift", "s"]``
+        """
+        if isinstance(keys, list):
+            keys_repr = "+".join(keys)
+            key_list = keys
+        else:
+            keys_repr = str(keys)
+            key_list = [k.strip() for k in keys_repr.split("+")] if "+" in keys_repr else None
+        if not dry_run:
+            if key_list is not None:
+                pyautogui.hotkey(*key_list)
+            else:
+                pyautogui.press(keys_repr)
+        return ActionResult(
+            action="press_key",
+            status=ActionStatus.DRY_RUN if dry_run else ActionStatus.SUCCESS,
+            target=target.display_name,
+            point=None,
+            provider=provider,
+            message="press_key skipped by dry-run" if dry_run else f"pressed {keys_repr}",
+            metadata={"keys": keys_repr},
+        )
+
     def paste_text(
         self,
         text: str,

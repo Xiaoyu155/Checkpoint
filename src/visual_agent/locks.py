@@ -186,6 +186,79 @@ def queue_to_dict(info: RunQueueInfo) -> dict[str, object]:
     }
 
 
+class VisualLock:
+    """System-wide named mutex that serializes all screen-capture and foreground-window operations.
+
+    A single physical desktop can only be safely accessed by one process at a time.
+    Wrap every screenshot/OCR/VLM step (and any bring-to-front call) with this lock
+    so that concurrent agent runs queue instead of fighting over the screen.
+
+    Usage::
+
+        with VisualLock():
+            screenshot = capture.capture_primary()
+            ...
+
+    The lock is a Win32 named kernel object (``CreateMutexW``), so it works across
+    processes on the same machine without any shared file or server.
+    On non-Windows platforms the acquire always succeeds (no-op).
+    """
+
+    _WAIT_OBJECT_0 = 0x00000000
+    _WAIT_ABANDONED = 0x00000080
+    _WAIT_TIMEOUT = 0x00000102
+
+    def __init__(self, name: str = "Global\\VisualAgentScreenLock", *, ttl_ms: int = 60_000) -> None:
+        self.name = name
+        self.ttl_ms = ttl_ms
+        self._handle: int | None = None
+
+    def acquire(self, *, timeout_ms: int | None = None) -> bool:
+        """Acquire the mutex.  Returns True on success, False on timeout.
+
+        Raises RuntimeError if the OS call fails unexpectedly.
+        """
+        wait_ms = self.ttl_ms if timeout_ms is None else timeout_ms
+        try:
+            import ctypes
+        except ImportError:
+            return True  # non-Windows graceful no-op
+        handle = ctypes.windll.kernel32.CreateMutexW(None, False, self.name)
+        if not handle:
+            raise RuntimeError(f"CreateMutexW failed for {self.name!r}")
+        result = ctypes.windll.kernel32.WaitForSingleObject(handle, wait_ms)
+        if result in (self._WAIT_OBJECT_0, self._WAIT_ABANDONED):
+            self._handle = handle
+            return True
+        ctypes.windll.kernel32.CloseHandle(handle)
+        if result == self._WAIT_TIMEOUT:
+            return False
+        raise RuntimeError(f"WaitForSingleObject returned {result:#010x} for {self.name!r}")
+
+    def release(self) -> None:
+        if self._handle is None:
+            return
+        try:
+            import ctypes
+
+            ctypes.windll.kernel32.ReleaseMutex(self._handle)
+            ctypes.windll.kernel32.CloseHandle(self._handle)
+        except Exception:
+            pass
+        self._handle = None
+
+    def __enter__(self) -> "VisualLock":
+        if not self.acquire():
+            raise TimeoutError(
+                f"Could not acquire visual lock within {self.ttl_ms} ms: {self.name!r}. "
+                "Another process may be using the screen."
+            )
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.release()
+
+
 def unlink_with_retries(path: Path, *, attempts: int = 5, delay_seconds: float = 0.02) -> None:
     for attempt in range(attempts):
         try:

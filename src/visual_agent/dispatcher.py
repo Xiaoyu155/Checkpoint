@@ -25,6 +25,7 @@ class ActionDispatcher:
         self.register("click", self._click)
         self.register("type", self._type)
         self.register("paste", self._paste)
+        self.register("press_key", self._press_key)
 
     def register(self, action: str, handler: ActionHandler) -> None:
         self._handlers[action] = handler
@@ -138,6 +139,24 @@ class ActionDispatcher:
             provider=resolved.evidence.provider,
             dry_run=bool(params.get("dry_run", context.dry_run)),
             sensitive=sensitive,
+        )
+
+
+    def _press_key(
+        self,
+        resolved: ResolvedTarget,
+        params: dict[str, Any],
+        context: ActionDispatchContext,
+    ) -> ActionResult:
+        keys_raw = params.get("keys") or params.get("key")
+        if keys_raw is None:
+            raise ValueError("press_key requires a 'keys' parameter (e.g. 'enter', 'ctrl+c', or ['ctrl','shift','s'])")
+        keys: str | list[str] = keys_raw if isinstance(keys_raw, list) else str(keys_raw)
+        return self.actions.press_key(
+            keys,
+            resolved.target,
+            provider=resolved.evidence.provider,
+            dry_run=bool(params.get("dry_run", context.dry_run)),
         )
 
 

@@ -8,6 +8,118 @@ from .models import Bounds, Observation, ProviderKind
 
 
 @dataclass(frozen=True)
+class WindowPlacement:
+    """Snapshot of a window's position, size, and show state (via WINDOWPLACEMENT)."""
+
+    handle: int
+    show_cmd: int
+    min_pt: tuple[int, int]
+    max_pt: tuple[int, int]
+    normal_rect: tuple[int, int, int, int]
+
+
+def get_foreground_window() -> int | None:
+    """Return the HWND of the current foreground window, or None on failure."""
+    try:
+        import ctypes
+
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        return int(hwnd) if hwnd else None
+    except Exception:
+        return None
+
+
+def save_window_placement(handle: int) -> WindowPlacement | None:
+    """Capture full placement state (position + show_cmd) for later restore."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _PT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+        class _RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        class _WP(ctypes.Structure):
+            _fields_ = [
+                ("length", ctypes.c_uint),
+                ("flags", ctypes.c_uint),
+                ("showCmd", ctypes.c_uint),
+                ("ptMinPosition", _PT),
+                ("ptMaxPosition", _PT),
+                ("rcNormalPosition", _RECT),
+            ]
+
+        wp = _WP()
+        wp.length = ctypes.sizeof(_WP)
+        if not ctypes.windll.user32.GetWindowPlacement(wintypes.HWND(handle), ctypes.byref(wp)):
+            return None
+        return WindowPlacement(
+            handle=handle,
+            show_cmd=wp.showCmd,
+            min_pt=(wp.ptMinPosition.x, wp.ptMinPosition.y),
+            max_pt=(wp.ptMaxPosition.x, wp.ptMaxPosition.y),
+            normal_rect=(
+                wp.rcNormalPosition.left,
+                wp.rcNormalPosition.top,
+                wp.rcNormalPosition.right,
+                wp.rcNormalPosition.bottom,
+            ),
+        )
+    except Exception:
+        return None
+
+
+def restore_window_placement(placement: WindowPlacement) -> bool:
+    """Restore a window to the state captured by save_window_placement."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _PT(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+        class _RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        class _WP(ctypes.Structure):
+            _fields_ = [
+                ("length", ctypes.c_uint),
+                ("flags", ctypes.c_uint),
+                ("showCmd", ctypes.c_uint),
+                ("ptMinPosition", _PT),
+                ("ptMaxPosition", _PT),
+                ("rcNormalPosition", _RECT),
+            ]
+
+        wp = _WP()
+        wp.length = ctypes.sizeof(_WP)
+        wp.showCmd = placement.show_cmd
+        wp.ptMinPosition.x, wp.ptMinPosition.y = placement.min_pt
+        wp.ptMaxPosition.x, wp.ptMaxPosition.y = placement.max_pt
+        (
+            wp.rcNormalPosition.left,
+            wp.rcNormalPosition.top,
+            wp.rcNormalPosition.right,
+            wp.rcNormalPosition.bottom,
+        ) = placement.normal_rect
+        return bool(ctypes.windll.user32.SetWindowPlacement(wintypes.HWND(placement.handle), ctypes.byref(wp)))
+    except Exception:
+        return False
+
+
+@dataclass(frozen=True)
 class UIAutomationProvider:
     """Read structured Windows UI Automation controls.
 

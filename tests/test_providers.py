@@ -97,7 +97,15 @@ def test_screen_provider_can_fallback_to_screen_when_uia_window_missing(tmp_path
 
 
 def test_screen_provider_foregrounds_before_capture_and_minimizes_after(tmp_path, monkeypatch) -> None:
-    calls = {"find": 0, "minimize": []}
+    calls = {"find": 0, "minimize": [], "lock": []}
+
+    class FakeVisualLock:
+        def __enter__(self):
+            calls["lock"].append("enter")
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            calls["lock"].append("exit")
 
     def fake_match(*_args, **_kwargs):
         calls["find"] += 1
@@ -107,6 +115,7 @@ def test_screen_provider_foregrounds_before_capture_and_minimizes_after(tmp_path
             name="Target App",
         )
 
+    monkeypatch.setattr("visual_agent.locks.VisualLock", FakeVisualLock)
     monkeypatch.setattr("visual_agent.uia.find_uia_window_match", fake_match)
     monkeypatch.setattr("visual_agent.uia.minimize_window", lambda handle: calls["minimize"].append(handle) or True)
 
@@ -119,6 +128,7 @@ def test_screen_provider_foregrounds_before_capture_and_minimizes_after(tmp_path
         ProviderContext(run_dir=tmp_path, synthetic_on_capture_fail=True),
     )
 
+    assert calls["lock"] == ["enter", "exit"]
     assert calls["find"] >= 2
     assert calls["minimize"] == [123]
     assert observation.metadata["uia_window_pre_capture"]["foregrounded"] is True

@@ -344,6 +344,8 @@ def run_report_to_markdown(report: RunReport) -> str:
                 lines.append("- Window fallback: `" + str(summary["uia_window_fallback"].get("reason")) + "`")
             if summary.get("uia_window_post_capture"):
                 lines.append("- Window post-capture: `" + json.dumps(summary["uia_window_post_capture"], ensure_ascii=False) + "`")
+            if summary.get("uia_window_scene_restore"):
+                lines.append("- Window scene restore: `" + json.dumps(summary["uia_window_scene_restore"], ensure_ascii=False) + "`")
         if step.failure_diagnosis:
             lines.append("- Failure expected: " + str(step.failure_diagnosis.get("expected")))
             lines.append("- Failure actual: " + str(step.failure_diagnosis.get("actual")))
@@ -416,6 +418,7 @@ def step_observation_summary(step: dict[str, Any]) -> dict[str, Any] | None:
         "uia_window_region": metadata.get("uia_window_region"),
         "uia_window_fallback": metadata.get("uia_window_fallback"),
         "uia_window_post_capture": metadata.get("uia_window_post_capture"),
+        "uia_window_scene_restore": metadata.get("uia_window_scene_restore"),
         "engine": metadata.get("engine"),
         "engine_available": metadata.get("engine_available"),
     }

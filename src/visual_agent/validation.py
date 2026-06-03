@@ -21,6 +21,7 @@ SUPPORTED_ACTIONS = {
     "click",
     "type",
     "paste",
+    "press_key",
     "assert_text",
     "assert_text_contract",
     "assert_response",
@@ -45,7 +46,7 @@ REQUIRED_PARAMS = {
 
 ASSERTION_ACTIONS = {"assert_text", "assert_text_contract", "assert_response", "assert_file_exists"}
 HIGH_RISK_ACTIONS = {"save_storage_state"}
-MUTATING_ACTIONS = {"click", "type", "paste", "expect_download", "save_storage_state"}
+MUTATING_ACTIONS = {"click", "type", "paste", "press_key", "expect_download", "save_storage_state"}
 SENSITIVE_NAME_HINTS = ("password", "passwd", "pwd", "token", "secret", "key", "cookie", "id_card", "ssn")
 
 
@@ -112,7 +113,7 @@ def validate_workflow(
         if step.action == "wait_for" and wait_for_has_target_condition(step.params):
             has_resolved_target = True
 
-        if step.action in {"click", "type", "paste", "expect_download"} and "target" not in step.params and not has_resolved_target:
+        if step.action in {"click", "type", "paste", "press_key", "expect_download"} and "target" not in step.params and not has_resolved_target:
             issues.append(
                 ValidationIssue(
                     "error",
@@ -126,6 +127,7 @@ def validate_workflow(
             "click",
             "type",
             "paste",
+            "press_key",
             "expect_download",
             "assert_text",
             "assert_text_contract",
@@ -143,6 +145,7 @@ def validate_workflow(
 
         validate_target_like_params(step.id, step.params, issues)
         validate_value_params(step.id, step.action, step.params, issues)
+        validate_press_key(step.id, step.action, step.params, issues)
         validate_text_contract(step.id, step.action, step.params, issues)
         validate_wait_for(step.id, step.action, step.params, issues)
         validate_retry_safety(step.id, step.action, step.params, issues)
@@ -207,6 +210,13 @@ def validate_value_params(step_id: str, action: str, params: dict[str, Any], iss
         issues.append(ValidationIssue("error", step_id, "Missing required parameter: value or value_from"))
     if has_value_from and not str(params["value_from"]).startswith("input."):
         issues.append(ValidationIssue("error", step_id, "value_from must start with input."))
+
+
+def validate_press_key(step_id: str, action: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:
+    if action != "press_key":
+        return
+    if missing_param(params, "keys") and missing_param(params, "key"):
+        issues.append(ValidationIssue("error", step_id, "Missing required parameter: keys or key"))
 
 
 def validate_text_contract(step_id: str, action: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:

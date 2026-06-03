@@ -36,6 +36,55 @@ def test_validate_workflow_rejects_action_without_target_or_resolve() -> None:
     assert any("requires a target" in issue.message for issue in result.issues)
 
 
+def test_validate_workflow_accepts_press_key_with_target_and_keys() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "press-key",
+            "steps": [
+                {"id": "observe", "action": "observe_html", "path": "examples/web/login_demo.html"},
+                {"id": "submit", "action": "press_key", "target": "登录", "keys": "enter"},
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert result.valid
+
+
+def test_validate_workflow_accepts_press_key_key_alias() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "press-key-alias",
+            "steps": [
+                {"id": "observe", "action": "observe_html", "path": "examples/web/login_demo.html"},
+                {"id": "submit", "action": "press_key", "target": "登录", "key": "enter"},
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert result.valid
+
+
+def test_validate_workflow_rejects_press_key_without_keys() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "press-key-bad",
+            "steps": [
+                {"id": "observe", "action": "observe_html", "path": "examples/web/login_demo.html"},
+                {"id": "submit", "action": "press_key", "target": "登录"},
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert not result.valid
+    assert any("Missing required parameter: keys or key" in issue.message for issue in result.issues)
+
+
 def test_validate_workflow_flags_invalid_wait_condition() -> None:
     workflow = workflow_from_dict(
         {

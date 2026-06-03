@@ -7,7 +7,7 @@ from typing import Any
 
 from PIL import Image
 
-from .capture import ScreenCapture, apply_capture_region, finalize_capture_window, prepare_capture_window
+from .capture import apply_capture_region, capture_visual_region
 from .models import Bounds, Observation, ProviderKind
 
 
@@ -161,23 +161,12 @@ def load_or_capture_image(
         image, path, metadata = apply_capture_region(image, path, params, output_dir=run_dir, label="ocr-region")
         return image, path, metadata
 
-    capture = ScreenCapture(output_dir=run_dir)
-    pre_capture_metadata = prepare_capture_window(params)
-    try:
-        screenshot = capture.capture_primary()
-    except Exception:
-        if not synthetic_on_capture_fail:
-            raise
-        screenshot = capture.capture_synthetic()
-    image, path, metadata = apply_capture_region(
-        screenshot.image,
-        screenshot.path,
+    image, path, metadata = capture_visual_region(
         params,
         output_dir=run_dir,
         label="ocr-region",
+        synthetic_on_capture_fail=synthetic_on_capture_fail,
     )
-    metadata = {**pre_capture_metadata, **metadata}
-    metadata.update(finalize_capture_window(params, metadata))
     return image, path, metadata
 
 
