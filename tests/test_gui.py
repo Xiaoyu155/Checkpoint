@@ -67,9 +67,6 @@ def test_console_window_model_handles_empty_workspace(tmp_path) -> None:
     assert {option["name"] for option in model["workflow_options"]} == {
         "checkout_verification",
         "local_html_form_workflow",
-        "miniprogram_simulator_capture",
-        "miniprogram_visual_text_contract",
-        "wechat_devtools_shell",
     }
     assert [button["id"] for button in model["action_buttons"]] == [
         "run_workflow",
@@ -114,7 +111,7 @@ def test_console_window_model_handles_empty_workspace(tmp_path) -> None:
     assert model["summary_cards"][-1]["id"] == "gui_action_risk"
     assert model["summary_cards"][-1]["value"] == "ok"
     assert [column["id"] for column in model["primary_columns"]] == ["workflows", "runs", "queue"]
-    assert model["primary_columns"][0]["option_count"] == 5
+    assert model["primary_columns"][0]["option_count"] == 2
     assert model["primary_columns"][1]["option_count"] == 0
     assert model["primary_columns"][2]["empty_state"] == "No queue tasks."
     assert "run_workflow" in model["primary_columns"][0]["primary_actions"]

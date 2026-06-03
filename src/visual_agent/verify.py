@@ -32,13 +32,18 @@ def run_verify(
     workspace: Workspace,
     *,
     tags: tuple[str, ...] = ("verification",),
+    workflow_names: tuple[str, ...] = (),
+    max_workflows: int = 10,
     run_profile: str = "dry-run",
     wait_lock: bool = False,
     lock_wait_seconds: float = 30.0,
 ) -> VerificationReport:
     workflows = [ref for ref in discover_workflows(workspace) if _has_tag(ref, tags)]
+    if workflow_names:
+        requested = set(workflow_names)
+        workflows = [ref for ref in workflows if ref.name in requested or ref.relative_path in requested]
     results: list[WorkflowVerifyResult] = []
-    for ref in workflows[:10]:
+    for ref in workflows[:max(0, max_workflows)]:
         try:
             result = run_workspace_workflow(
                 workspace,
@@ -132,7 +137,7 @@ def _failure_hint(failed: Any) -> str | None:
 def _build_verify_prompt(results: list[WorkflowVerifyResult]) -> str:
     failed = [item for item in results if not item.passed]
     if not results:
-        return "No verification-tagged workflows found. Add tags: [verification] to workflows that should gate code changes."
+        return "No matching verification workflows found. Add tags: [verification] or pass --workflow with an existing workflow name."
     if not failed:
         return "All verification workflows passed. Code changes look good."
     parts = []

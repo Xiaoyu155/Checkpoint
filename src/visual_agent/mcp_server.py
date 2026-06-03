@@ -170,6 +170,13 @@ def mcp_tools() -> list[Tool]:
                 "properties": {
                     "workspace_root": {"type": "string"},
                     "tags": {"type": "array", "items": {"type": "string"}, "default": ["verification"]},
+                    "workflow": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "default": [],
+                        "description": "Optional workflow names or workspace-relative paths to run.",
+                    },
+                    "max_workflows": {"type": "integer", "default": 10},
                     "run_profile": {"type": "string", "enum": ["dry-run", "supervised"], "default": "dry-run"},
                 },
                 "required": ["workspace_root"],
@@ -464,7 +471,19 @@ def run_verification_payload(args: dict[str, Any]) -> dict[str, Any]:
     raw_tags = args.get("tags") or ["verification"]
     if not isinstance(raw_tags, list):
         raise ValueError("tags must be an array of strings")
-    report = run_verify(workspace, tags=tuple(str(item) for item in raw_tags), run_profile=run_profile)
+    raw_workflows = args.get("workflow") or []
+    if isinstance(raw_workflows, str):
+        raw_workflows = [raw_workflows]
+    if not isinstance(raw_workflows, list):
+        raise ValueError("workflow must be a string or an array of strings")
+    max_workflows = int(args.get("max_workflows") or 10)
+    report = run_verify(
+        workspace,
+        tags=tuple(str(item) for item in raw_tags),
+        workflow_names=tuple(str(item) for item in raw_workflows),
+        max_workflows=max_workflows,
+        run_profile=run_profile,
+    )
     content = verify_to_markdown(report)
     return {
         "schema_version": 1,

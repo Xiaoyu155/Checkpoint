@@ -417,6 +417,41 @@ def test_mcp_run_verification_returns_ai_ready_report(tmp_path) -> None:
     assert "Verification Report" in payload["content"]
 
 
+def test_mcp_run_verification_can_target_one_workflow(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    for name in ("slow_visual_contract", "fast_smoke_contract"):
+        (workspace.workflows_dir / f"{name}.yaml").write_text(
+            "schema_version: 1\n"
+            "min_runtime_version: '0.1.0'\n"
+            f"name: {name}\n"
+            "version: 1\n"
+            "tags:\n"
+            "  - verification\n"
+            "steps:\n"
+            "  - id: observe\n"
+            "    action: observe_fixture\n"
+            f"    path: {str(ROOT / 'examples' / 'fixtures' / 'login_page_observation.json').replace(chr(92), '/')}\n",
+            encoding="utf-8",
+        )
+
+    payload = content_payload(
+        asyncio.run(
+            call_tool(
+                "run_verification",
+                {
+                    "workspace_root": str(workspace.root),
+                    "workflow": ["fast_smoke_contract"],
+                    "max_workflows": 1,
+                },
+            )
+        )
+    )
+
+    assert payload["total"] == 1
+    assert "fast_smoke_contract" in payload["content"]
+    assert "slow_visual_contract" not in payload["content"]
+
+
 def test_mcp_workspace_root_rejects_path_traversal(tmp_path) -> None:
     with pytest.raises(ValueError):
         require_workspace({"workspace_root": str(tmp_path / ".." / "workspace")})

@@ -310,6 +310,8 @@ def build_parser() -> argparse.ArgumentParser:
     verify = subparsers.add_parser("verify", help="Run verification-tagged workspace workflows.")
     verify.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
     verify.add_argument("--tags", default="verification", help="Comma-separated workflow tags to run. Default: verification.")
+    verify.add_argument("--workflow", action="append", default=[], help="Workflow name or workspace-relative path to verify. Can be used multiple times.")
+    verify.add_argument("--max-workflows", type=int, default=10, help="Maximum matching workflows to run. Default: 10.")
     verify.add_argument("--run-profile", choices=["dry-run", "supervised"], default="dry-run")
     verify.add_argument("--wait-lock", action="store_true", help="Wait for workflow locks instead of failing immediately.")
     verify.add_argument("--lock-wait-seconds", type=float, default=30.0, help="Maximum seconds to wait when queued. Default: 30.")
@@ -1343,6 +1345,8 @@ def main(argv: list[str] | None = None) -> int:
         report = run_verify(
             workspace,
             tags=tags or ("verification",),
+            workflow_names=tuple(args.workflow or ()),
+            max_workflows=args.max_workflows,
             run_profile=args.run_profile,
             wait_lock=args.wait_lock,
             lock_wait_seconds=args.lock_wait_seconds,

@@ -63,6 +63,17 @@ Run the local dry-run demo:
 .\.venv\Scripts\python.exe -m visual_agent.cli demo-workspace-check --root .agent-workspace --format markdown
 ```
 
+For real work, use one `.agent-workspace` per project. Multiple Codex/Cursor
+windows can use Visual Agent at the same time as long as each window points at
+its own project workspace.
+
+For fast checks, target the relevant workflow instead of running every visual
+contract:
+
+```powershell
+.\.venv\Scripts\python.exe -m visual_agent.cli verify --workspace-root .agent-workspace --workflow checkout_verification --wait-lock --format markdown
+```
+
 ### Verification Loop
 
 Visual Agent's core value is detecting regressions automatically after code

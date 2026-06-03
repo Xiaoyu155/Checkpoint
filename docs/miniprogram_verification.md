@@ -4,9 +4,18 @@ Visual Agent can verify a WeChat Mini Program from the outside of WeChat
 DevTools. It first uses Windows UI Automation to find the DevTools/project
 window, then captures the simulator region for screenshots, OCR, or VLM checks.
 
-## Default Workflows
+## Optional Workflows
 
-New workspaces include three mini program workflows:
+Mini program workflows are optional examples. They are not copied into every
+new workspace because OCR/window-capture checks are slower and project-specific.
+Copy only the workflows your project needs:
+
+```powershell
+Copy-Item examples\workflows\miniprogram\*.yaml .agent-workspace\workflows\
+Copy-Item examples\inputs\miniprogram_default.json .agent-workspace\inputs\
+```
+
+The examples include:
 
 - `wechat_devtools_shell` checks that WeChat DevTools is open and the current
   project shell is visible.
@@ -18,7 +27,9 @@ New workspaces include three mini program workflows:
 ## Run The Useful Baseline
 
 ```powershell
-python -m visual_agent.cli init-workspace --root .agent-workspace --overwrite
+python -m visual_agent.cli init-workspace --root .agent-workspace
+Copy-Item examples\workflows\miniprogram\*.yaml .agent-workspace\workflows\
+Copy-Item examples\inputs\miniprogram_default.json .agent-workspace\inputs\
 python -m visual_agent.cli workspace-run --root .agent-workspace --workflow miniprogram_simulator_capture --run-profile dry-run
 python -m visual_agent.cli context-snapshot --workspace-root .agent-workspace --format markdown
 ```

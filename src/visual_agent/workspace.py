@@ -76,6 +76,10 @@ class Workspace:
     def queue_dir(self) -> Path:
         return self.root / "queue"
 
+    @property
+    def project_root(self) -> Path:
+        return infer_project_root(self.root)
+
 
 @dataclass(frozen=True)
 class WorkspaceReportExport:
@@ -125,6 +129,7 @@ def init_workspace(root: str | Path, *, with_demo: bool = True, overwrite: bool 
                 {
                     "name": workspace.root.name,
                     "version": 1,
+                    "project_root": str(workspace.project_root),
                     "dirs": list(WORKSPACE_DIRS),
                     "mcp": {
                         "approved_workflows": [],
@@ -141,6 +146,12 @@ def init_workspace(root: str | Path, *, with_demo: bool = True, overwrite: bool 
     if with_demo:
         copy_demo_assets(workspace, overwrite=overwrite)
     return workspace
+
+
+def infer_project_root(workspace_root: Path) -> Path:
+    if workspace_root.name.startswith(".agent-workspace"):
+        return workspace_root.parent
+    return workspace_root.parent
 
 
 def open_workspace(root: str | Path) -> Workspace:
@@ -160,20 +171,7 @@ def copy_demo_assets(workspace: Workspace, *, overwrite: bool = False) -> None:
             repo_root / "examples" / "workflows" / "checkout" / "checkout_verification.yaml",
             workspace.workflows_dir / "checkout_verification.yaml",
         ),
-        (
-            repo_root / "examples" / "workflows" / "miniprogram" / "wechat_devtools_shell.yaml",
-            workspace.workflows_dir / "wechat_devtools_shell.yaml",
-        ),
-        (
-            repo_root / "examples" / "workflows" / "miniprogram" / "miniprogram_simulator_capture.yaml",
-            workspace.workflows_dir / "miniprogram_simulator_capture.yaml",
-        ),
-        (
-            repo_root / "examples" / "workflows" / "miniprogram" / "miniprogram_visual_text_contract.yaml",
-            workspace.workflows_dir / "miniprogram_visual_text_contract.yaml",
-        ),
         (repo_root / "examples" / "inputs" / "demo_login.json", workspace.inputs_dir / "demo_login.json"),
-        (repo_root / "examples" / "inputs" / "miniprogram_default.json", workspace.inputs_dir / "miniprogram_default.json"),
         (repo_root / "examples" / "web" / "login_demo.html", workspace.fixtures_dir / "login_demo.html"),
     ]
     for source, target in copies:
@@ -1008,6 +1006,7 @@ def workspace_status(workspace: Workspace) -> dict[str, Any]:
     queue = list_queue_tasks(workspace)
     return {
         "root": str(workspace.root),
+        "project_root": str(workspace.project_root),
         "workflow_count": len(workflows),
         "run_count_shown": len(runs),
         "report_count": load_workspace_report_index(workspace)["total_reports"],

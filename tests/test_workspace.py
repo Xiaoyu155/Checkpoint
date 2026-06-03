@@ -44,14 +44,12 @@ def test_init_workspace_creates_dirs_and_demo(tmp_path) -> None:
     assert workspace.inputs_dir.exists()
     assert workspace.fixtures_dir.exists()
     assert (workspace.root / "workspace.json").exists()
-    assert (workspace.inputs_dir / "miniprogram_default.json").exists()
     assert {workflow.name for workflow in discover_workflows(workspace)} == {
         "checkout_verification",
         "local_html_form_workflow",
-        "miniprogram_simulator_capture",
-        "miniprogram_visual_text_contract",
-        "wechat_devtools_shell",
     }
+    manifest = json.loads((workspace.root / "workspace.json").read_text(encoding="utf-8"))
+    assert manifest["project_root"] == str(workspace.project_root)
 
 
 def test_find_workflow_accepts_name_and_relative_path(tmp_path) -> None:
@@ -68,7 +66,7 @@ def test_validate_workspace_accepts_demo(tmp_path) -> None:
 
     results = validate_workspace(workspace)
 
-    assert len(results) == 5
+    assert len(results) == 2
     assert all(result.valid for result in results)
 
 
@@ -379,10 +377,11 @@ def test_workspace_status_reports_counts(tmp_path) -> None:
 
     status = workspace_status(workspace)
 
-    assert status["workflow_count"] == 5
+    assert status["project_root"] == str(workspace.project_root)
+    assert status["workflow_count"] == 2
     assert status["report_count"] == 0
     assert status["regression_test_count"] == 0
-    assert status["valid_workflows"] == 5
+    assert status["valid_workflows"] == 2
     assert status["invalid_workflows"] == 0
 
 

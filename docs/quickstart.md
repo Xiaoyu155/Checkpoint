@@ -41,6 +41,45 @@ This opens a local HTML fixture and runs the workflow in dry-run mode. No
 external service is contacted. Reports are written to
 `.agent-workspace/reports/`.
 
+## Multi-Project Workspaces
+
+Use one workspace per project. Do not share one `.agent-workspace` across
+unrelated repos or coding-agent windows.
+
+```text
+D:\project-a\.agent-workspace
+D:\project-b\.agent-workspace
+D:\project-c\.agent-workspace
+```
+
+From each project root:
+
+```powershell
+python -m visual_agent.cli init-workspace --root .agent-workspace
+python -m visual_agent.cli workspace-status --root .agent-workspace
+```
+
+`workspace-status` shows the workspace root and project root so an agent can
+confirm it is using the right project before running visual checks.
+
+## Fast Verification
+
+Run only the workflow that protects the code you changed:
+
+```powershell
+python -m visual_agent.cli verify --workspace-root .agent-workspace --workflow checkout_verification --wait-lock --format markdown
+```
+
+Use broad tag verification when you really want the full local contract suite:
+
+```powershell
+python -m visual_agent.cli verify --workspace-root .agent-workspace --tags verification --max-workflows 10 --wait-lock --format markdown
+```
+
+Keep OCR/VLM workflows in their own tags, such as `visual` or `miniprogram`,
+and run them explicitly. They are much slower than DOM/UIA/file checks because
+they capture windows and extract visual text.
+
 ## Verification Loop Demo
 
 This demo shows the core loop: write a verification workflow, make a breaking

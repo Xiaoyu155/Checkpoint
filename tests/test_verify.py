@@ -83,7 +83,7 @@ def test_run_verify_no_tagged_workflows_returns_empty(tmp_path) -> None:
     assert report.total == 0
     assert report.passed == 0
     assert report.failed == 0
-    assert "No verification-tagged workflows found" in report.suggested_prompt
+    assert "No matching verification workflows found" in report.suggested_prompt
 
 
 def test_verify_to_markdown_contains_failed_section_when_failure(tmp_path) -> None:
@@ -140,6 +140,27 @@ def test_run_verify_caps_at_ten_workflows(tmp_path) -> None:
 
     assert report.total == 10
     assert report.passed == 10
+
+
+def test_run_verify_can_target_specific_workflow(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_workflow(workspace, "slow_visual_contract")
+    write_workflow(workspace, "fast_smoke_contract")
+
+    report = run_verify(workspace, workflow_names=("fast_smoke_contract",))
+
+    assert report.total == 1
+    assert report.results[0].name == "fast_smoke_contract"
+
+
+def test_run_verify_respects_custom_max_workflows(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    for index in range(3):
+        write_workflow(workspace, f"verification_{index:02d}")
+
+    report = run_verify(workspace, max_workflows=1)
+
+    assert report.total == 1
 
 
 def test_run_verify_supervised_profile(tmp_path) -> None:
