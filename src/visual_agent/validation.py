@@ -22,6 +22,7 @@ SUPPORTED_ACTIONS = {
     "type",
     "paste",
     "assert_text",
+    "assert_text_contract",
     "assert_response",
     "expect_download",
     "assert_file_exists",
@@ -42,7 +43,7 @@ REQUIRED_PARAMS = {
     "wait_for": ("condition",),
 }
 
-ASSERTION_ACTIONS = {"assert_text", "assert_response", "assert_file_exists"}
+ASSERTION_ACTIONS = {"assert_text", "assert_text_contract", "assert_response", "assert_file_exists"}
 HIGH_RISK_ACTIONS = {"save_storage_state"}
 MUTATING_ACTIONS = {"click", "type", "paste", "expect_download", "save_storage_state"}
 SENSITIVE_NAME_HINTS = ("password", "passwd", "pwd", "token", "secret", "key", "cookie", "id_card", "ssn")
@@ -127,6 +128,7 @@ def validate_workflow(
             "paste",
             "expect_download",
             "assert_text",
+            "assert_text_contract",
             "assert_response",
             "save_storage_state",
             "wait_for",
@@ -141,6 +143,7 @@ def validate_workflow(
 
         validate_target_like_params(step.id, step.params, issues)
         validate_value_params(step.id, step.action, step.params, issues)
+        validate_text_contract(step.id, step.action, step.params, issues)
         validate_wait_for(step.id, step.action, step.params, issues)
         validate_retry_safety(step.id, step.action, step.params, issues)
         if strict:
@@ -206,6 +209,33 @@ def validate_value_params(step_id: str, action: str, params: dict[str, Any], iss
         issues.append(ValidationIssue("error", step_id, "value_from must start with input."))
 
 
+def validate_text_contract(step_id: str, action: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:
+    if action != "assert_text_contract":
+        return
+    if not any(
+        key in params
+        for key in (
+            "text",
+            "text_from",
+            "required_all",
+            "required_all_from",
+            "required_any",
+            "required_any_from",
+            "forbidden_any",
+            "forbidden_any_from",
+            "forbidden_text",
+            "forbidden_text_from",
+        )
+    ):
+        issues.append(
+            ValidationIssue(
+                "error",
+                step_id,
+                "assert_text_contract requires text, required_all, required_any, or forbidden_any.",
+            )
+        )
+
+
 def missing_param(params: dict[str, Any], param: str) -> bool:
     if param in params and params[param] not in (None, ""):
         return False
@@ -264,7 +294,7 @@ def validate_retry_safety(step_id: str, action: str, params: dict[str, Any], iss
         return
     if retry_count(params) <= 0:
         return
-    if action.startswith("observe_") or action == "wait_for" or action in {"assert_text", "assert_response", "assert_file_exists"}:
+    if action.startswith("observe_") or action == "wait_for" or action in {"assert_text", "assert_text_contract", "assert_response", "assert_file_exists"}:
         return
     issues.append(
         ValidationIssue(

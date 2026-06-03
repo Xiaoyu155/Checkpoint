@@ -57,6 +57,8 @@ def test_run_report_includes_steps_schema_and_markdown(tmp_path) -> None:
     assert payload["steps"][-1]["failure_diagnosis"]["expected"] == "expected text: 不存在的成功提示"
     assert payload["steps"][-1]["failure_artifacts"]["screenshot"]
     assert payload["steps"][-1]["failure_artifacts"]["dom_excerpt"]
+    assert payload["steps"][0]["observation_summary"]["screenshot_path"]
+    assert payload["steps"][0]["observation_summary"]["visible_text"]
     assert payload["run_lock"]["owner"].startswith("ocr_failure_diagnosis_demo:")
     assert payload["steps"][-1]["artifact_paths"]
     assert "# Run Report: ocr_failure_diagnosis_demo" in markdown
@@ -64,6 +66,8 @@ def test_run_report_includes_steps_schema_and_markdown(tmp_path) -> None:
     assert "Failure expected" in markdown
     assert "Failure screenshot" in markdown
     assert "DOM excerpt" in markdown
+    assert "Visible text" in markdown
+    assert "Screenshot" in markdown
 
 
 def test_run_report_surfaces_selector_resolution_metadata(tmp_path) -> None:

@@ -33,6 +33,8 @@ def run_verify(
     *,
     tags: tuple[str, ...] = ("verification",),
     run_profile: str = "dry-run",
+    wait_lock: bool = False,
+    lock_wait_seconds: float = 30.0,
 ) -> VerificationReport:
     workflows = [ref for ref in discover_workflows(workspace) if _has_tag(ref, tags)]
     results: list[WorkflowVerifyResult] = []
@@ -44,6 +46,8 @@ def run_verify(
                 dry_run=run_profile == "dry-run",
                 run_profile=run_profile,
                 export_report=True,
+                queue_when_locked=wait_lock,
+                lock_wait_seconds=lock_wait_seconds,
             )
             steps = list(result.steps)
             failed = next((step for step in steps if getattr(step, "status", None) == ActionStatus.FAILED), None)

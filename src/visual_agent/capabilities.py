@@ -155,6 +155,28 @@ def workflow_atomic_capabilities() -> tuple[Capability, ...]:
             planner_visible=True,
         ),
         Capability(
+            name="assert_text_contract",
+            kind="assertion",
+            available=True,
+            description="Assert required/forbidden text contracts against an observation with optional region and confidence filters.",
+            input_schema={
+                "type": "object",
+                "fields": {
+                    "text": "string?",
+                    "required_all": "string[]|string?",
+                    "required_any": "string[]|string?",
+                    "forbidden_any": "string[]|string?",
+                    "text_region": "CropRegion?",
+                    "min_confidence": "number?",
+                    "observation": "string?",
+                },
+            },
+            output_schema={"type": "object", "fields": {"text_contract": "TextContractResult"}},
+            dry_run_supported=False,
+            risk_level="low",
+            planner_visible=True,
+        ),
+        Capability(
             name="assert_response",
             kind="assertion",
             available=True,

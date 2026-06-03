@@ -830,6 +830,134 @@ def test_assert_text_matches_joined_ocr_chinese_fragments(tmp_path) -> None:
     assert result.steps[-1].status == ActionStatus.SUCCESS
 
 
+def test_assert_text_contract_supports_required_any_all_and_forbidden(tmp_path) -> None:
+    registry = ProviderRegistry()
+    registry.register(
+        "observe_contract",
+        lambda _params, _context: Observation(
+            provider=ProviderKind.OCR,
+            source="screen.png",
+            metadata={"engine_available": True},
+            elements=(
+                {"text": "录取数据", "role": "text", "confidence": 0.92},
+                {"text": "填分数", "role": "text", "confidence": 0.88},
+            ),
+        ),
+    )
+    workflow = Workflow(
+        name="text-contract",
+        version=1,
+        steps=(
+            WorkflowStep("observe", "observe_contract", {}),
+            WorkflowStep(
+                "assert",
+                "assert_text_contract",
+                {
+                    "required_all": ["录取数据"],
+                    "required_any": ["填分数", "购买服务"],
+                    "forbidden_any": ["终端输出"],
+                },
+            ),
+        ),
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, providers=registry).run(workflow, dry_run=True)
+
+    assert result.steps[-1].status == ActionStatus.SUCCESS
+    contract = result.steps[-1].metadata["text_contract"]
+    assert contract["matched_required"] == ["录取数据"]
+    assert contract["matched_any"] == ["填分数"]
+
+
+def test_assert_text_contract_fails_on_forbidden_text(tmp_path) -> None:
+    registry = ProviderRegistry()
+    registry.register(
+        "observe_contract",
+        lambda _params, _context: Observation(
+            provider=ProviderKind.OCR,
+            source="screen.png",
+            metadata={"engine_available": True},
+            elements=({"text": "Terminal 录取数据", "role": "text", "confidence": 0.95},),
+        ),
+    )
+    workflow = Workflow(
+        name="text-contract-forbidden",
+        version=1,
+        steps=(
+            WorkflowStep("observe", "observe_contract", {}),
+            WorkflowStep("assert", "assert_text_contract", {"required_all": ["录取数据"], "forbidden_any": ["Terminal"]}),
+        ),
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, providers=registry).run(workflow, dry_run=True)
+
+    assert result.steps[-1].status == ActionStatus.FAILED
+    assert "forbidden text matched" in result.steps[-1].message
+
+
+def test_assert_text_contract_filters_text_region(tmp_path) -> None:
+    registry = ProviderRegistry()
+    registry.register(
+        "observe_contract",
+        lambda _params, _context: Observation(
+            provider=ProviderKind.OCR,
+            source="screen.png",
+            width=400,
+            height=800,
+            metadata={"engine_available": True},
+            elements=(
+                {"text": "终端里的录取数据", "role": "text", "confidence": 0.95, "bounds": {"left": 300, "top": 20, "width": 80, "height": 20}},
+                {"text": "我遇到了什么", "role": "text", "confidence": 0.90, "bounds": {"left": 40, "top": 120, "width": 120, "height": 20}},
+            ),
+        ),
+    )
+    workflow = Workflow(
+        name="text-contract-region",
+        version=1,
+        steps=(
+            WorkflowStep("observe", "observe_contract", {}),
+            WorkflowStep(
+                "assert",
+                "assert_text_contract",
+                {
+                    "required_all": ["我遇到了什么"],
+                    "forbidden_any": ["终端"],
+                    "text_region": {"left": 0, "top": 0, "width": 220, "height": 800},
+                },
+            ),
+        ),
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, providers=registry).run(workflow, dry_run=True)
+
+    assert result.steps[-1].status == ActionStatus.SUCCESS
+
+
+def test_assert_text_contract_matches_joined_ocr_fragments(tmp_path) -> None:
+    registry = ProviderRegistry()
+    registry.register(
+        "observe_fragments",
+        lambda _params, _context: Observation(
+            provider=ProviderKind.OCR,
+            source="screen.png",
+            metadata={"engine_available": True},
+            elements=tuple({"text": item, "role": "text", "confidence": 0.8} for item in ["我", "遇", "到", "了", "什", "么"]),
+        ),
+    )
+    workflow = Workflow(
+        name="text-contract-fragments",
+        version=1,
+        steps=(
+            WorkflowStep("observe", "observe_fragments", {}),
+            WorkflowStep("assert", "assert_text_contract", {"required_all": ["我遇到了什么"]}),
+        ),
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, providers=registry).run(workflow, dry_run=True)
+
+    assert result.steps[-1].status == ActionStatus.SUCCESS
+
+
 def test_workflow_runtime_stops_on_failed_step(tmp_path) -> None:
     workflow = workflow_from_dict(
         {

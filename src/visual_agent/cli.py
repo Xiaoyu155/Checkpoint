@@ -189,6 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_workflow.add_argument("--allow-high-risk", action="store_true", help="Allow high-risk actions during strict preflight.")
     run_workflow.add_argument("--no-lock", action="store_true", help="Disable run lock for controlled debugging.")
     run_workflow.add_argument("--lock-ttl-seconds", type=float, default=3600.0, help="Run lock TTL. Default: 3600.")
+    run_workflow.add_argument("--wait-lock", action="store_true", help="Wait for the run lock instead of failing immediately.")
     run_workflow.add_argument("--queue-when-locked", action="store_true", help="Wait for the run lock instead of failing immediately.")
     run_workflow.add_argument("--lock-wait-seconds", type=float, default=30.0, help="Maximum seconds to wait when queued. Default: 30.")
     run_workflow.add_argument("--lock-poll-seconds", type=float, default=0.5, help="Seconds between lock checks when queued. Default: 0.5.")
@@ -310,6 +311,8 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
     verify.add_argument("--tags", default="verification", help="Comma-separated workflow tags to run. Default: verification.")
     verify.add_argument("--run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    verify.add_argument("--wait-lock", action="store_true", help="Wait for workflow locks instead of failing immediately.")
+    verify.add_argument("--lock-wait-seconds", type=float, default=30.0, help="Maximum seconds to wait when queued. Default: 30.")
     verify.add_argument("--for", dest="target_agent", default="codex", help="Target coding agent label.")
     verify.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
@@ -559,6 +562,7 @@ def build_parser() -> argparse.ArgumentParser:
     ws_run.add_argument("--allow-high-risk", action="store_true", help="Allow high-risk actions during strict preflight.")
     ws_run.add_argument("--no-lock", action="store_true", help="Disable run lock for controlled debugging.")
     ws_run.add_argument("--lock-ttl-seconds", type=float, default=3600.0, help="Run lock TTL. Default: 3600.")
+    ws_run.add_argument("--wait-lock", action="store_true", help="Wait for the run lock instead of failing immediately.")
     ws_run.add_argument("--queue-when-locked", action="store_true", help="Wait for the run lock instead of failing immediately.")
     ws_run.add_argument("--lock-wait-seconds", type=float, default=30.0, help="Maximum seconds to wait when queued. Default: 30.")
     ws_run.add_argument("--lock-poll-seconds", type=float, default=0.5, help="Seconds between lock checks when queued. Default: 0.5.")
@@ -856,7 +860,7 @@ def main(argv: list[str] | None = None) -> int:
             resume_from=args.resume_from,
             use_lock=not args.no_lock,
             lock_ttl_seconds=args.lock_ttl_seconds,
-            queue_when_locked=args.queue_when_locked,
+            queue_when_locked=args.queue_when_locked or args.wait_lock,
             lock_wait_seconds=args.lock_wait_seconds,
             lock_poll_seconds=args.lock_poll_seconds,
         )
@@ -1336,7 +1340,13 @@ def main(argv: list[str] | None = None) -> int:
 
         workspace = open_workspace(args.workspace_root)
         tags = tuple(item.strip() for item in str(args.tags).split(",") if item.strip())
-        report = run_verify(workspace, tags=tags or ("verification",), run_profile=args.run_profile)
+        report = run_verify(
+            workspace,
+            tags=tags or ("verification",),
+            run_profile=args.run_profile,
+            wait_lock=args.wait_lock,
+            lock_wait_seconds=args.lock_wait_seconds,
+        )
         if args.format == "markdown":
             print(verify_to_markdown(report))
         else:

@@ -32,6 +32,7 @@ class StepReport:
     provider: str | None
     target: str | None
     selector_resolution: dict[str, Any] | None
+    observation_summary: dict[str, Any] | None
     artifact_paths: tuple[str, ...]
     failure_artifacts: dict[str, Any] | None
     failure_diagnosis: dict[str, Any] | None
@@ -133,6 +134,7 @@ def step_report(step: dict[str, Any]) -> StepReport:
         provider=str(action_result.get("provider") or evidence.get("provider") or "") or None,
         target=target_display_name(target) or action_result.get("target"),
         selector_resolution=evidence_metadata.get("selector_resolution") if isinstance(evidence_metadata.get("selector_resolution"), dict) else None,
+        observation_summary=step_observation_summary(step),
         artifact_paths=tuple(step_artifact_paths(step, failure_diagnosis)),
         failure_artifacts=failure_artifacts_from_diagnosis(failure_diagnosis),
         failure_diagnosis=failure_diagnosis,
@@ -267,6 +269,7 @@ def run_report_to_dict(report: RunReport) -> dict[str, Any]:
                 "provider": step.provider,
                 "target": step.target,
                 "selector_resolution": step.selector_resolution,
+                "observation_summary": step.observation_summary,
                 "artifact_paths": list(step.artifact_paths),
                 "failure_artifacts": step.failure_artifacts,
                 "failure_diagnosis": step.failure_diagnosis,
@@ -327,6 +330,18 @@ def run_report_to_markdown(report: RunReport) -> str:
             lines.append(f"- Message: {step.message}")
         if step.artifact_paths:
             lines.append("- Artifacts: " + ", ".join(f"`{path}`" for path in step.artifact_paths))
+        if step.observation_summary:
+            summary = step.observation_summary
+            if summary.get("screenshot_path"):
+                lines.append(f"- Screenshot: `{summary.get('screenshot_path')}`")
+            if summary.get("visible_text"):
+                lines.append("- Visible text: " + " | ".join(str(item) for item in summary["visible_text"][:12]))
+            if summary.get("crop_region"):
+                lines.append("- Crop region: `" + json.dumps(summary["crop_region"], ensure_ascii=False) + "`")
+            if summary.get("uia_window_region"):
+                lines.append("- Window region: `" + json.dumps(summary["uia_window_region"], ensure_ascii=False) + "`")
+            if summary.get("uia_window_fallback"):
+                lines.append("- Window fallback: `" + str(summary["uia_window_fallback"].get("reason")) + "`")
         if step.failure_diagnosis:
             lines.append("- Failure expected: " + str(step.failure_diagnosis.get("expected")))
             lines.append("- Failure actual: " + str(step.failure_diagnosis.get("actual")))
@@ -371,3 +386,33 @@ def compact_selector_summary(summary: dict[str, Any]) -> str:
     if isinstance(resolution, dict) and resolution.get("fallback_path"):
         parts.append("fallback_path=`" + " -> ".join(str(item) for item in resolution.get("fallback_path") or []) + "`")
     return ", ".join(parts) if parts else str(summary)
+
+
+def step_observation_summary(step: dict[str, Any]) -> dict[str, Any] | None:
+    observation = step.get("observation") if isinstance(step.get("observation"), dict) else None
+    if not isinstance(observation, dict):
+        return None
+    metadata = observation.get("metadata") if isinstance(observation.get("metadata"), dict) else {}
+    elements = observation.get("elements") if isinstance(observation.get("elements"), list) else []
+    visible_text = []
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        text = str(element.get("text") or "").strip()
+        if text:
+            visible_text.append(text)
+        if len(visible_text) >= 30:
+            break
+    return {
+        "provider": observation.get("provider"),
+        "source": observation.get("source"),
+        "screenshot_path": observation.get("screenshot_path"),
+        "width": observation.get("width"),
+        "height": observation.get("height"),
+        "visible_text": visible_text,
+        "crop_region": metadata.get("crop_region"),
+        "uia_window_region": metadata.get("uia_window_region"),
+        "uia_window_fallback": metadata.get("uia_window_fallback"),
+        "engine": metadata.get("engine"),
+        "engine_available": metadata.get("engine_available"),
+    }

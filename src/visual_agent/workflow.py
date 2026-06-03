@@ -358,6 +358,19 @@ class WorkflowRuntime:
                 message=f"text found: {params['text']}",
             )
 
+        if action == "assert_text_contract":
+            observation = context.observations.get(str(params.get("observation", ""))) or context.latest_observation
+            contract = evaluate_text_contract(observation, params)
+            if not contract["passed"]:
+                raise AssertionError(text_contract_failure_message(contract))
+            return WorkflowStepResult(
+                id=step.id,
+                action=action,
+                status=ActionStatus.SUCCESS,
+                message="text contract matched",
+                metadata={"text_contract": contract},
+            )
+
         if action == "assert_response":
             event = wait_for_network_response(
                 context.resources.get("network_events", []),
@@ -922,6 +935,162 @@ def observation_contains_text(observation: Observation, normalized_text: str) ->
 
 def compact_text(value: Any) -> str:
     return "".join(str(value).lower().split())
+
+
+def evaluate_text_contract(observation: Observation, params: dict[str, Any]) -> dict[str, Any]:
+    if observation.provider == ProviderKind.OCR and observation.metadata.get("engine_available") is False:
+        install_hint = observation.metadata.get("install_hint") or "Install and configure OCR before asserting screen text."
+        return {
+            "passed": False,
+            "failure_type": "ocr_unavailable",
+            "reason": f"OCR engine unavailable. {install_hint}",
+            "required_all": list(text_list(params.get("required_all") or params.get("text"))),
+            "required_any": list(text_list(params.get("required_any"))),
+            "forbidden_any": list(text_list(params.get("forbidden_any") or params.get("forbidden_text"))),
+            "matched_required": [],
+            "missing_required": [],
+            "matched_forbidden": [],
+            "visible_text": [],
+            "screenshot_path": str(observation.screenshot_path) if observation.screenshot_path else None,
+        }
+
+    region = normalize_text_region(params.get("text_region") or params.get("region"), observation)
+    min_confidence = optional_float(params.get("min_confidence") or params.get("confidence_min"))
+    entries = observation_text_entries(observation, region=region, min_confidence=min_confidence)
+    visible_text = [entry["text"] for entry in entries[:30]]
+    required_all = tuple(text_list(params.get("required_all") or params.get("text")))
+    required_any = tuple(text_list(params.get("required_any")))
+    forbidden_any = tuple(text_list(params.get("forbidden_any") or params.get("forbidden_text")))
+
+    matched_required = [text for text in required_all if text_matches_entries(text, entries, observation)]
+    missing_required = [text for text in required_all if text not in matched_required]
+    matched_any = [text for text in required_any if text_matches_entries(text, entries, observation)]
+    matched_forbidden = [text for text in forbidden_any if text_matches_entries(text, entries, observation)]
+    required_any_ok = not required_any or bool(matched_any)
+    passed = not missing_required and required_any_ok and not matched_forbidden
+    reason = "text contract matched"
+    if missing_required:
+        reason = "missing required text: " + ", ".join(missing_required)
+    elif not required_any_ok:
+        reason = "none of required_any matched: " + ", ".join(required_any)
+    elif matched_forbidden:
+        reason = "forbidden text matched: " + ", ".join(matched_forbidden)
+
+    return {
+        "passed": passed,
+        "reason": reason,
+        "required_all": list(required_all),
+        "required_any": list(required_any),
+        "forbidden_any": list(forbidden_any),
+        "matched_required": matched_required,
+        "matched_any": matched_any,
+        "missing_required": missing_required,
+        "matched_forbidden": matched_forbidden,
+        "visible_text": visible_text,
+        "text_region": region,
+        "min_confidence": min_confidence,
+        "screenshot_path": str(observation.screenshot_path) if observation.screenshot_path else None,
+        "provider": str(observation.provider.value if hasattr(observation.provider, "value") else observation.provider),
+        "source": observation.source,
+    }
+
+
+def text_contract_failure_message(contract: dict[str, Any]) -> str:
+    parts = [str(contract.get("reason") or "text contract failed")]
+    if contract.get("visible_text"):
+        parts.append("visible_text=" + " | ".join(str(item) for item in contract["visible_text"][:8]))
+    if contract.get("screenshot_path"):
+        parts.append(f"screenshot={contract['screenshot_path']}")
+    return "; ".join(parts)
+
+
+def text_list(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value if str(item).strip())
+    return (str(value),)
+
+
+def observation_text_entries(
+    observation: Observation,
+    *,
+    region: dict[str, int] | None,
+    min_confidence: float | None,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for element in observation.elements:
+        if not isinstance(element, dict):
+            continue
+        raw_text = str(element.get("text") or "").strip()
+        if not raw_text:
+            continue
+        confidence = optional_float(element.get("confidence"))
+        if min_confidence is not None and confidence is not None and confidence < min_confidence:
+            continue
+        bounds = element.get("bounds") if isinstance(element.get("bounds"), dict) else None
+        if region is not None and not bounds_in_region(bounds, region):
+            continue
+        entries.append({"text": raw_text, "confidence": confidence, "bounds": bounds})
+    if region is None:
+        metadata_text = normalize_text(observation.metadata)
+        if metadata_text:
+            entries.append({"text": metadata_text, "confidence": None, "bounds": None})
+    return entries
+
+
+def text_matches_entries(text: str, entries: list[dict[str, Any]], observation: Observation) -> bool:
+    expected = normalize_text(text)
+    if not expected:
+        return True
+    for entry in entries:
+        if normalize_text(entry.get("text", "")).find(expected) >= 0:
+            return True
+    joined = "".join(str(entry.get("text") or "") for entry in entries)
+    if compact_text(joined).find(compact_text(expected)) >= 0:
+        return True
+    if entries:
+        return False
+    return observation_contains_text(observation, expected)
+
+
+def normalize_text_region(region: Any, observation: Observation) -> dict[str, int] | None:
+    if not isinstance(region, dict):
+        return None
+    width = int(observation.width or 0)
+    height = int(observation.height or 0)
+    if any(key in region for key in ("left_percent", "top_percent", "width_percent", "height_percent")) and width > 0 and height > 0:
+        return {
+            "left": int(float(region.get("left_percent", 0.0)) * width),
+            "top": int(float(region.get("top_percent", 0.0)) * height),
+            "width": int(float(region.get("width_percent", 1.0)) * width),
+            "height": int(float(region.get("height_percent", 1.0)) * height),
+        }
+    try:
+        return {
+            "left": int(region.get("left", 0)),
+            "top": int(region.get("top", 0)),
+            "width": int(region.get("width", width)),
+            "height": int(region.get("height", height)),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def bounds_in_region(bounds: Any, region: dict[str, int]) -> bool:
+    if not isinstance(bounds, dict):
+        return False
+    try:
+        center_x = int(bounds.get("left", 0)) + int(bounds.get("width", 0)) // 2
+        center_y = int(bounds.get("top", 0)) + int(bounds.get("height", 0)) // 2
+    except (TypeError, ValueError):
+        return False
+    return (
+        region["left"] <= center_x <= region["left"] + region["width"]
+        and region["top"] <= center_y <= region["top"] + region["height"]
+    )
 
 
 def find_network_response(events: Any, params: dict[str, Any]) -> dict[str, Any] | None:

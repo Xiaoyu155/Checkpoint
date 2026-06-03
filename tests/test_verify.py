@@ -150,3 +150,26 @@ def test_run_verify_supervised_profile(tmp_path) -> None:
 
     assert report.total == 1
     assert report.results[0].passed is True
+
+
+def test_run_verify_passes_wait_lock_options(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_workflow(workspace, "verification")
+    calls = []
+
+    def fake_run_workspace_workflow(*_args, **kwargs):
+        calls.append(kwargs)
+
+        class Result:
+            run_id = "run"
+            steps = []
+
+        return Result()
+
+    monkeypatch.setattr("visual_agent.verify.run_workspace_workflow", fake_run_workspace_workflow)
+
+    report = run_verify(workspace, wait_lock=True, lock_wait_seconds=12.0)
+
+    assert report.total == 1
+    assert calls[0]["queue_when_locked"] is True
+    assert calls[0]["lock_wait_seconds"] == 12.0

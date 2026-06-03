@@ -128,6 +128,39 @@ def test_validate_workflow_accepts_ocr_observation() -> None:
     assert result.valid
 
 
+def test_validate_workflow_accepts_text_contract_assertion() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "text-contract",
+            "steps": [
+                {"id": "observe", "action": "observe_ocr", "mock_text": "我遇到了什么"},
+                {"id": "assert", "action": "assert_text_contract", "required_all": ["我遇到了什么"]},
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert result.valid
+
+
+def test_validate_workflow_rejects_empty_text_contract() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "empty-text-contract",
+            "steps": [
+                {"id": "observe", "action": "observe_ocr", "mock_text": "ready"},
+                {"id": "assert", "action": "assert_text_contract"},
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert result.valid is False
+    assert any(issue.message.startswith("assert_text_contract requires") for issue in result.issues)
+
+
 def test_validate_workflow_accepts_vision_observation() -> None:
     workflow = workflow_from_dict(
         {

@@ -30,5 +30,10 @@ steps:
       width_percent: 0.7
       height_percent: 1.0
   - id: assert_required_text
-    action: assert_text
-    text_from: input.required_text
+    action: assert_text_contract
+    required_all_from: input.required_text
+    text_region:
+      left_percent: 0.0
+      top_percent: 0.0
+      width_percent: 1.0
+      height_percent: 1.0
