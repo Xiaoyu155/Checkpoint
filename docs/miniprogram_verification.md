@@ -56,7 +56,9 @@ avoid broad words that also appear in your code editor.
 
 The default mini program workflows also request `bring_to_front: true`, so
 Visual Agent tries to restore and foreground the matched DevTools window before
-capturing the simulator.
+capturing the simulator. The visual capture examples also set
+`post_capture: minimize`, so the DevTools window is minimized after the
+screenshot/OCR evidence is collected.
 
 ## Tune The Simulator Crop
 

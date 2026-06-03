@@ -22,6 +22,7 @@ steps:
       min_width: 300
       min_height: 400
       bring_to_front: true
+      post_capture: minimize
     fallback_to_screen: true
     # Adjust this crop if your simulator is not in the left side of DevTools.
     simulator_crop:

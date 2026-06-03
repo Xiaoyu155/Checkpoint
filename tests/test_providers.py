@@ -1,7 +1,8 @@
 from pathlib import Path
 
 from PIL import Image
-from visual_agent.models import Observation, ProviderKind
+from visual_agent.models import Bounds, Observation, ProviderKind
+from visual_agent.uia import UIAWindowMatch
 import pytest
 
 from visual_agent.capture import crop_image
@@ -76,7 +77,7 @@ def test_ocr_provider_applies_relative_crop_to_image(tmp_path) -> None:
 
 def test_screen_provider_can_fallback_to_screen_when_uia_window_missing(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
-        "visual_agent.uia.find_uia_element_bounds",
+        "visual_agent.uia.find_uia_window_match",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("missing")),
     )
     registry = default_provider_registry()
@@ -93,6 +94,35 @@ def test_screen_provider_can_fallback_to_screen_when_uia_window_missing(tmp_path
     assert observation.width == observation.metadata["crop_region"]["width"]
     assert observation.metadata["crop_region"]["width"] > 0
     assert observation.metadata["uia_window_fallback"]["used"] is True
+
+
+def test_screen_provider_foregrounds_before_capture_and_minimizes_after(tmp_path, monkeypatch) -> None:
+    calls = {"find": 0, "minimize": []}
+
+    def fake_match(*_args, **_kwargs):
+        calls["find"] += 1
+        return UIAWindowMatch(
+            bounds=Bounds(left=0, top=0, width=500, height=400),
+            native_window_handle=123,
+            name="Target App",
+        )
+
+    monkeypatch.setattr("visual_agent.uia.find_uia_window_match", fake_match)
+    monkeypatch.setattr("visual_agent.uia.minimize_window", lambda handle: calls["minimize"].append(handle) or True)
+
+    registry = default_provider_registry()
+    observation = registry.observe(
+        "observe_screen",
+        {
+            "window": {"title_contains": "Target App", "bring_to_front": True, "post_capture": "minimize"},
+        },
+        ProviderContext(run_dir=tmp_path, synthetic_on_capture_fail=True),
+    )
+
+    assert calls["find"] >= 2
+    assert calls["minimize"] == [123]
+    assert observation.metadata["uia_window_pre_capture"]["foregrounded"] is True
+    assert observation.metadata["uia_window_post_capture"] == {"action": "minimize", "status": "success"}
 
 
 def test_vision_provider_supports_deterministic_mock_description(tmp_path) -> None:

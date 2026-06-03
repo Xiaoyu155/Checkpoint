@@ -100,14 +100,15 @@ def apply_capture_region(
 
     uia_window = params.get("uia_window") or params.get("window")
     if isinstance(uia_window, dict):
-        from .uia import find_uia_element_bounds
+        from .uia import find_uia_window_match
 
         try:
-            bounds = find_uia_element_bounds(
+            match = find_uia_window_match(
                 uia_window,
                 max_depth=int(uia_window.get("max_depth", params.get("uia_max_depth", 3))),
                 max_elements=int(uia_window.get("max_elements", params.get("uia_max_elements", 800))),
             )
+            bounds = match.bounds
             window_crop = {
                 "left": bounds.left,
                 "top": bounds.top,
@@ -124,6 +125,10 @@ def apply_capture_region(
                 )
             current, region = crop_image(current, window_crop)
             metadata["uia_window_region"] = region
+            metadata["uia_window"] = {
+                "name": match.name,
+                "native_window_handle": match.native_window_handle,
+            }
             current_path = Path(output_dir) / f"{source_path.stem}-{label}-window.png"
             current.save(current_path)
         except Exception as exc:
@@ -142,3 +147,72 @@ def apply_capture_region(
         current.save(current_path)
 
     return current, current_path, metadata
+
+
+def prepare_capture_window(params: dict[str, Any]) -> dict[str, Any]:
+    uia_window = params.get("uia_window") or params.get("window")
+    if not isinstance(uia_window, dict):
+        return {}
+    if not bool(uia_window.get("bring_to_front") or uia_window.get("foreground")):
+        return {}
+    from .uia import find_uia_window_match
+
+    try:
+        match = find_uia_window_match(
+            uia_window,
+            max_depth=int(uia_window.get("max_depth", params.get("uia_max_depth", 3))),
+            max_elements=int(uia_window.get("max_elements", params.get("uia_max_elements", 800))),
+        )
+        return {
+            "uia_window_pre_capture": {
+                "foregrounded": True,
+                "name": match.name,
+                "native_window_handle": match.native_window_handle,
+            }
+        }
+    except Exception as exc:
+        if not bool(params.get("fallback_to_screen", False)):
+            raise
+        return {
+            "uia_window_fallback": {
+                "used": True,
+                "phase": "pre_capture",
+                "reason": f"{exc.__class__.__name__}: {exc}",
+            }
+        }
+
+
+def finalize_capture_window(params: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    uia_window = params.get("uia_window") or params.get("window")
+    if not isinstance(uia_window, dict):
+        return {}
+    post_capture = str(
+        uia_window.get("post_capture")
+        or uia_window.get("after_capture")
+        or params.get("post_capture")
+        or params.get("after_capture")
+        or ""
+    ).strip().lower()
+    minimize_after = bool(
+        uia_window.get("minimize_after")
+        or uia_window.get("minimize_after_capture")
+        or params.get("minimize_after")
+        or params.get("minimize_after_capture")
+    )
+    if post_capture not in {"minimize", "minimise"} and not minimize_after:
+        return {}
+    handle = None
+    window_meta = metadata.get("uia_window")
+    if isinstance(window_meta, dict):
+        handle = window_meta.get("native_window_handle")
+    pre_capture = metadata.get("uia_window_pre_capture")
+    if handle is None and isinstance(pre_capture, dict):
+        handle = pre_capture.get("native_window_handle")
+    try:
+        parsed_handle = int(handle)
+    except (TypeError, ValueError):
+        return {"uia_window_post_capture": {"action": "minimize", "status": "skipped", "reason": "missing_window_handle"}}
+    from .uia import minimize_window
+
+    ok = minimize_window(parsed_handle)
+    return {"uia_window_post_capture": {"action": "minimize", "status": "success" if ok else "failed"}}

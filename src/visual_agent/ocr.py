@@ -7,7 +7,7 @@ from typing import Any
 
 from PIL import Image
 
-from .capture import ScreenCapture, apply_capture_region
+from .capture import ScreenCapture, apply_capture_region, finalize_capture_window, prepare_capture_window
 from .models import Bounds, Observation, ProviderKind
 
 
@@ -162,6 +162,7 @@ def load_or_capture_image(
         return image, path, metadata
 
     capture = ScreenCapture(output_dir=run_dir)
+    pre_capture_metadata = prepare_capture_window(params)
     try:
         screenshot = capture.capture_primary()
     except Exception:
@@ -175,6 +176,8 @@ def load_or_capture_image(
         output_dir=run_dir,
         label="ocr-region",
     )
+    metadata = {**pre_capture_metadata, **metadata}
+    metadata.update(finalize_capture_window(params, metadata))
     return image, path, metadata
 
 

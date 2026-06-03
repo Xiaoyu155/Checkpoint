@@ -51,6 +51,13 @@ class UIAutomationProvider:
             self._walk_control(child, elements, depth=depth + 1)
 
 
+@dataclass(frozen=True)
+class UIAWindowMatch:
+    bounds: Bounds
+    native_window_handle: int | None = None
+    name: str | None = None
+
+
 def normalize_control_type(value: Any) -> str:
     text = str(value or "").strip().lower()
     if text.endswith("control"):
@@ -130,6 +137,13 @@ def element_bounds(element: dict[str, Any], *, bring_to_front: bool = False) -> 
 
 
 def hwnd_bounds(element: dict[str, Any], *, bring_to_front: bool = False) -> Bounds | None:
+    handle = element_native_window_handle(element)
+    if handle is None:
+        return None
+    return hwnd_bounds_from_handle(handle, bring_to_front=bring_to_front)
+
+
+def element_native_window_handle(element: dict[str, Any]) -> int | None:
     raw_handle = str(element.get("native_window_handle") or "").strip()
     if not raw_handle:
         return None
@@ -139,6 +153,10 @@ def hwnd_bounds(element: dict[str, Any], *, bring_to_front: bool = False) -> Bou
         return None
     if handle <= 0:
         return None
+    return handle
+
+
+def hwnd_bounds_from_handle(handle: int, *, bring_to_front: bool = False) -> Bounds | None:
     try:
         import ctypes
         from ctypes import wintypes
@@ -167,12 +185,31 @@ def hwnd_bounds(element: dict[str, Any], *, bring_to_front: bool = False) -> Bou
         return None
 
 
+def minimize_window(handle: int) -> bool:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        return bool(ctypes.windll.user32.ShowWindow(wintypes.HWND(handle), 6))
+    except Exception:
+        return False
+
+
 def find_uia_element_bounds(
     params: dict[str, Any],
     *,
     max_depth: int = 3,
     max_elements: int = 800,
 ) -> Bounds:
+    return find_uia_window_match(params, max_depth=max_depth, max_elements=max_elements).bounds
+
+
+def find_uia_window_match(
+    params: dict[str, Any],
+    *,
+    max_depth: int = 3,
+    max_elements: int = 800,
+) -> UIAWindowMatch:
     provider = UIAutomationProvider(max_depth=max_depth, max_elements=max_elements)
     observation = provider.observe_desktop()
     title_contains = normalized_match_text(params.get("window_title_contains") or params.get("title_contains"))
@@ -200,7 +237,7 @@ def find_uia_element_bounds(
             bring_to_front=bring_to_front,
         )
         if matches:
-            return max(matches, key=lambda item: item.width * item.height)
+            return max(matches, key=lambda item: item.bounds.width * item.bounds.height)
 
     label = title_contains or ", ".join(title_contains_any) or name_contains or class_contains or control_type or "matching UIA element"
     raise RuntimeError(f"Could not find UIA bounds for {label}.")
@@ -214,8 +251,8 @@ def matching_uia_bounds(
     class_contains: str,
     control_type: str,
     bring_to_front: bool = False,
-) -> list[Bounds]:
-    matches: list[Bounds] = []
+) -> list[UIAWindowMatch]:
+    matches: list[UIAWindowMatch] = []
     for element in elements:
         if control_type and control_type not in normalize_control_type(element.get("control_type")):
             continue
@@ -230,7 +267,13 @@ def matching_uia_bounds(
             continue
         bounds = element_bounds(element, bring_to_front=bring_to_front)
         if bounds is not None:
-            matches.append(bounds)
+            matches.append(
+                UIAWindowMatch(
+                    bounds=bounds,
+                    native_window_handle=element_native_window_handle(element),
+                    name=str(element.get("name") or "") or None,
+                )
+            )
     return matches
 
 
