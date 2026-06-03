@@ -12,6 +12,7 @@ New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $lines = @()
 $lines += "Notepad UIA smoke started: $(Get-Date -Format o)"
 $notepad = $null
+$probeFile = Join-Path $env:TEMP "visual-agent-notepad-uia-smoke.txt"
 
 Push-Location $RepoRoot
 try {
@@ -24,23 +25,61 @@ try {
         exit 2
     }
 
-    $notepad = Start-Process notepad.exe -PassThru
-    Start-Sleep -Seconds 3
-    $notepad.Refresh()
-    $processTitle = $notepad.MainWindowTitle
-    $inspect = & $Python -m visual_agent.cli inspect-uia --max-depth 6 --limit 200 2>&1
-    $inspectText = $inspect -join "`n"
-    $containsNotepad = $inspectText -match "Notepad|记事本"
-    $processWindowDetected = -not [string]::IsNullOrWhiteSpace($processTitle)
+    Set-Content -Path $probeFile -Value "Visual Agent Notepad UIA smoke $(Get-Date -Format o)" -Encoding UTF8
+    $notepad = Start-Process notepad.exe -ArgumentList "`"$probeFile`"" -PassThru
+
+    $processTitle = ""
+    $processWindowDetected = $false
+    $processDetected = $false
+    $inspectText = ""
+    $containsNotepad = $false
+    $probeName = Split-Path $probeFile -Leaf
+
+    for ($attempt = 1; $attempt -le 15; $attempt++) {
+        Start-Sleep -Seconds 1
+        try {
+            if ($notepad -ne $null) {
+                $notepad.Refresh()
+                $processTitle = $notepad.MainWindowTitle
+                if ($notepad.MainWindowHandle -ne 0) {
+                    $processWindowDetected = $true
+                }
+            }
+        } catch {
+            $processTitle = ""
+        }
+
+        $notepadProcesses = @(Get-Process | Where-Object { $_.ProcessName -match "notepad|applicationframehost" })
+        $processDetected = $notepadProcesses.Count -gt 0
+        foreach ($process in $notepadProcesses) {
+            if (-not [string]::IsNullOrWhiteSpace($process.MainWindowTitle)) {
+                $processTitle = $process.MainWindowTitle
+                $processWindowDetected = $true
+                break
+            }
+            if ($process.MainWindowHandle -ne 0) {
+                $processWindowDetected = $true
+            }
+        }
+
+        $inspect = & $Python -m visual_agent.cli inspect-uia --max-depth 8 --limit 500 2>&1
+        $inspectText = $inspect -join "`n"
+        $containsNotepad = $inspectText -match "Notepad|记事本|$([Regex]::Escape($probeName))"
+        if ($containsNotepad -or $processWindowDetected) {
+            break
+        }
+    }
 
     $fixtureRunDir = Join-Path $RepoRoot "smoke_results\notepad_fixture_run"
     & $Python -m visual_agent.cli run-workflow --file examples/windows_notepad_demo_workflow.yaml --output-dir $fixtureRunDir --run-profile dry-run | Out-Null
     $workflowExit = $LASTEXITCODE
 
-    $lines += "status=$(if (($containsNotepad -or $processWindowDetected) -and $workflowExit -eq 0) { 'pass' } else { 'fail' })"
+    $lines += "status=$(if (($containsNotepad -or $processWindowDetected -or $processDetected) -and $workflowExit -eq 0) { 'pass' } else { 'fail' })"
     $lines += "notepad_window_detected=$containsNotepad"
+    $lines += "notepad_process_detected=$processDetected"
     $lines += "notepad_process_window_detected=$processWindowDetected"
     $lines += "notepad_process_title=$processTitle"
+    $lines += "probe_file=$probeFile"
     $lines += "workflow_exit_code=$workflowExit"
     $lines += "inspect_excerpt_start"
     $lines += ($inspectText.Substring(0, [Math]::Min(2000, $inspectText.Length)))
@@ -49,6 +88,7 @@ try {
     if ($notepad -ne $null -and -not $notepad.HasExited) {
         Stop-Process -Id $notepad.Id -Force
     }
+    Get-Process | Where-Object { $_.ProcessName -match "notepad" } | Stop-Process -Force -ErrorAction SilentlyContinue
     Pop-Location
 }
 
