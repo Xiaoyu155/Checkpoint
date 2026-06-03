@@ -73,6 +73,8 @@ Expected result:
 - Validation returns `valid: true`.
 - The run returns a `run_id`.
 - A report is written under `.agent-workspace\reports`.
+- Compact context tools such as `get_session_context`, `summarize_latest_failure`, and `run_verification` are available for coding-agent loops.
+- Oversized reports and artifact lists return `truncated: true` with a local path hint instead of flooding the chat.
 
 ## Troubleshooting
 

@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from threading import Thread
 from time import sleep as sleep_seconds
 
@@ -9,6 +10,7 @@ from visual_agent.locks import RunLock
 from visual_agent.gui import build_gui_action_plan, execute_gui_action, safe_execute_gui_action
 from visual_agent.models import ActionStatus
 from visual_agent.scheduler import submit_queue_task
+from visual_agent.session import load_agent_session
 from visual_agent.workspace import (
     build_workspace_risk_policy_template,
     build_workspace_risk_policy_apply_plan,
@@ -42,7 +44,10 @@ def test_init_workspace_creates_dirs_and_demo(tmp_path) -> None:
     assert workspace.inputs_dir.exists()
     assert workspace.fixtures_dir.exists()
     assert (workspace.root / "workspace.json").exists()
-    assert discover_workflows(workspace)[0].name == "local_html_form_workflow"
+    assert {workflow.name for workflow in discover_workflows(workspace)} == {
+        "checkout_verification",
+        "local_html_form_workflow",
+    }
 
 
 def test_find_workflow_accepts_name_and_relative_path(tmp_path) -> None:
@@ -59,8 +64,8 @@ def test_validate_workspace_accepts_demo(tmp_path) -> None:
 
     results = validate_workspace(workspace)
 
-    assert len(results) == 1
-    assert results[0].valid
+    assert len(results) == 2
+    assert all(result.valid for result in results)
 
 
 def test_load_workspace_inputs_reads_inputs_dir(tmp_path) -> None:
@@ -370,10 +375,10 @@ def test_workspace_status_reports_counts(tmp_path) -> None:
 
     status = workspace_status(workspace)
 
-    assert status["workflow_count"] == 1
+    assert status["workflow_count"] == 2
     assert status["report_count"] == 0
     assert status["regression_test_count"] == 0
-    assert status["valid_workflows"] == 1
+    assert status["valid_workflows"] == 2
     assert status["invalid_workflows"] == 0
 
 
@@ -386,8 +391,8 @@ def test_planner_context_exposes_safe_workspace_summary(tmp_path) -> None:
     capability_names = {capability["name"] for capability in context["capabilities"]}
 
     assert context["workspace"]["name"] == "agent-workspace"
-    assert context["workflows"][0]["name"] == "local_html_form_workflow"
-    assert context["workflows"][0]["valid"] is True
+    local_workflow = next(workflow for workflow in context["workflows"] if workflow["name"] == "local_html_form_workflow")
+    assert local_workflow["valid"] is True
     assert context["inputs"][0]["name"] == "demo_login.json"
     assert "username" not in str(context["inputs"])
     assert "password" not in str(context["inputs"])
@@ -548,3 +553,55 @@ def test_workspace_risk_policy_apply_plan_can_apply_overwrite(tmp_path) -> None:
     assert plan["applied"] is True
     assert updated["quality"]["gui_action_history"]["error_rate_threshold"] == 0.25
     assert updated["quality"]["gui_action_history"]["profiles"]["planner"]["history_limit"] == 50
+
+
+def test_run_workspace_workflow_updates_session_file_on_pass(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "agent-workspace")
+
+    result = run_workspace_workflow(workspace, "local_html_form_workflow", inputs=load_workspace_inputs(workspace, None, "demo_login.json"))
+    session = load_agent_session(workspace.root)
+
+    assert result.workflow_name == "local_html_form_workflow"
+    assert session is not None
+    assert "local_html_form_workflow" in session.passing_workflows
+    assert session.latest_failure is None
+
+
+def test_run_workspace_workflow_updates_session_file_on_fail(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "agent-workspace", with_demo=False)
+    (workspace.workflows_dir / "failure.yaml").write_text(
+        "schema_version: 1\n"
+        "min_runtime_version: '0.1.0'\n"
+        "name: failure\n"
+        "version: 1\n"
+        "steps:\n"
+        "  - id: observe\n"
+        "    action: observe_fixture\n"
+        f"    path: {str((Path(__file__).resolve().parent.parent / 'examples' / 'fixtures' / 'login_page_observation.json')).replace(chr(92), '/')}\n"
+        "  - id: assert_missing\n"
+        "    action: assert_text\n"
+        "    text: missing text\n",
+        encoding="utf-8",
+    )
+
+    result = run_workspace_workflow(workspace, "failure")
+    session = load_agent_session(workspace.root)
+
+    assert result.steps[-1].status == ActionStatus.FAILED
+    assert session is not None
+    assert "failure" in session.failing_workflows
+    assert session.latest_failure is not None
+    assert session.latest_failure.step_id == "assert_missing"
+
+
+def test_run_workspace_workflow_does_not_raise_when_session_update_fails(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "agent-workspace")
+
+    def fail_update(*args, **kwargs):
+        raise RuntimeError("session write failed")
+
+    monkeypatch.setattr("visual_agent.session.update_agent_session", fail_update)
+
+    result = run_workspace_workflow(workspace, "local_html_form_workflow", inputs=load_workspace_inputs(workspace, None, "demo_login.json"))
+
+    assert result.workflow_name == "local_html_form_workflow"

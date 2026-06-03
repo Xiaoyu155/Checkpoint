@@ -78,12 +78,16 @@ def test_layered_workflow_index_points_to_valid_workflows() -> None:
 
     assert index["schema_version"] == 1
     group_ids = {group["id"] for group in index["groups"]}
-    assert group_ids == {"readonly", "form-fill", "download", "auth"}
+    assert group_ids == {"readonly", "form-fill", "download", "auth", "checkout"}
 
     workflow_paths = []
     for group in index["groups"]:
         for workflow_ref in group["workflows"]:
-            workflow_path = index_path.parent / workflow_ref
+            workflow_path = (
+                index_path.parent.parent / workflow_ref["path"]
+                if isinstance(workflow_ref, dict)
+                else index_path.parent / workflow_ref
+            )
             workflow_paths.append(workflow_path)
             assert workflow_path.exists(), workflow_ref
             assert validate_workflow_file(workflow_path).valid, workflow_ref

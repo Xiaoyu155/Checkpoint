@@ -47,12 +47,14 @@ Run this checklist before publishing a release, demo, or public branch.
 ```powershell
 .\.venv\Scripts\python.exe -m visual_agent.cli mcp-client-config --workspace-root .agent-workspace --client cursor --format markdown
 .\.venv\Scripts\python.exe -m visual_agent.cli mcp-smoke --workspace-root .agent-workspace --format markdown
-.\.venv\Scripts\python.exe -m pytest tests\test_mcp_server.py
+.\.venv\Scripts\python.exe -m pytest tests\test_mcp_server.py tests\e2e\test_e2e_mcp.py -q
 ```
 
 ## Security
 
 - [ ] No plaintext passwords, cookies, tokens, or API keys in reports.
+- [ ] MCP compact context tools do not expose passwords, cookies, tokens, or API keys.
+- [ ] Oversized MCP reports/lists return truncation metadata instead of full unbounded content.
 - [ ] No real auth-state files committed.
 - [ ] `.agent-secrets/`, `.agent-auth/`, `.agent-workspace/`, and local credential files remain ignored.
 - [ ] External samples use sandbox/staging/test account environments only.
@@ -70,3 +72,12 @@ Run this checklist before publishing a release, demo, or public branch.
 - [ ] Summarize safety and audit changes.
 - [ ] List known requirements such as Playwright browser installation.
 - [ ] Mention any skipped live-account validation and its prerequisites.
+
+## Latest Verification
+
+Last checked on 2026-06-03:
+
+- Editable install with `[web,mcp]`: passed.
+- `doctor`: passed for required capabilities; OCR/VLM are optional and not configured.
+- Workspace demo, dashboard, MCP smoke, and CI quality gate: passed on a temporary release workspace.
+- Full test suite: `564 passed`.

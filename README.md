@@ -23,7 +23,7 @@ After running `bootstrap.ps1`, the following are ready with no extra configurati
 | --- | --- | --- |
 | DOM browser automation | **Ready** | Playwright Chromium installed by bootstrap |
 | YAML workflow execution | **Ready** | dry-run, supervised, approved profiles |
-| MCP server (7 tools) | **Ready** | Codex, Claude Code, Cursor, VS Code, Claude Desktop |
+| MCP server (10 tools) | **Ready** | Codex, Claude Code, Cursor, VS Code, Claude Desktop |
 | Run reports and audit logs | **Ready** | Screenshots, failure diagnosis, queue |
 | Windows UIA desktop automation | **Ready** | Windows only, no extra install needed |
 
@@ -62,6 +62,20 @@ Run the local dry-run demo:
 ```powershell
 .\.venv\Scripts\python.exe -m visual_agent.cli demo-workspace-check --root .agent-workspace --format markdown
 ```
+
+### Verification Loop
+
+Visual Agent's core value is detecting regressions automatically after code
+changes. After the dry-run demo passes, try the verification loop:
+
+1. Run `workspace-run --workflow checkout_verification` - all green.
+2. Change one button label in `examples/web/checkout_verification_demo.html`.
+3. Run again - Visual Agent reports the exact text mismatch in the failing step.
+4. Read `context-snapshot` - a <= 500-token summary tells you what changed and
+   where to look.
+5. Fix the label, run again - green.
+
+See [docs/quickstart.md](docs/quickstart.md) for the full walkthrough.
 
 Inspect the workspace:
 
@@ -108,6 +122,9 @@ Available MCP tools:
 - `list_run_artifacts`
 - `get_workspace_dashboard`
 - `get_latest_failure`
+- `summarize_latest_failure`
+- `get_session_context`
+- `run_verification`
 
 Generate a coding-agent brief:
 
@@ -124,6 +141,7 @@ Safety defaults:
 - MCP calls are written to `gui/actions.jsonl`.
 - Artifact paths are constrained to the workspace.
 - Reports are scrubbed before MCP JSON or Markdown output.
+- MCP responses are budgeted for coding agents; oversized reports and lists return compact summaries with truncation metadata.
 
 ## Comparison
 

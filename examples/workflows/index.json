@@ -31,6 +31,18 @@
         "auth/browser_auth_save_workflow.yaml",
         "auth/browser_auth_restore_workflow.yaml"
       ]
+    },
+    {
+      "id": "checkout",
+      "title": "Checkout verification workflows",
+      "workflows": [
+        {
+          "name": "checkout_verification",
+          "path": "workflows/checkout/checkout_verification.yaml",
+          "tags": ["verification"],
+          "description": "Verify checkout page copy and structure."
+        }
+      ]
     }
   ]
 }

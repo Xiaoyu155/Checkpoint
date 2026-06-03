@@ -17,3 +17,21 @@ The important server fields are:
 
 Keep the workspace local. Real execution remains gated by the workspace MCP
 policy: `approved` runs require `workspace.json` approval and human intent.
+
+Current MCP tools include:
+
+- `list_workflows`
+- `validate_workflow`
+- `run_workflow`
+- `get_run_report`
+- `list_run_artifacts`
+- `get_workspace_dashboard`
+- `get_latest_failure`
+- `summarize_latest_failure`
+- `get_session_context`
+- `run_verification`
+
+Use `get_session_context` to resume work, `summarize_latest_failure` for a
+compact failure diagnosis, and `run_verification` after code changes. Oversized
+MCP responses are truncated and include metadata such as `truncated`,
+`omitted_count`, or `report_hint`.

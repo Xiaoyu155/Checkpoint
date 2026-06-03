@@ -27,6 +27,14 @@ def text_metadata(text: str, *, sensitive: bool = False, salt: str = "visual-age
 
 
 SECRET_KEY_HINTS = ("password", "passwd", "pwd", "token", "secret", "cookie", "api_key", "apikey", "authorization", "bearer")
+SAFE_SECRETISH_KEYS = {
+    "token_estimate",
+    "token_count",
+    "tokens_used",
+    "total_tokens",
+    "max_tokens",
+    "max_completion_tokens",
+}
 SECRET_TEXT_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9_-]{8,}"),
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}"),
@@ -40,7 +48,9 @@ def scrub_secrets(value: Any, *, extra_secrets: tuple[str, ...] | list[str] | se
         cleaned: dict[str, Any] = {}
         for key, item in value.items():
             text_key = str(key).lower()
-            if any(hint in text_key for hint in SECRET_KEY_HINTS):
+            if text_key in SAFE_SECRETISH_KEYS:
+                cleaned[str(key)] = scrub_secrets(item, extra_secrets=extra_secrets)
+            elif any(hint in text_key for hint in SECRET_KEY_HINTS):
                 cleaned[str(key)] = {"redacted": True}
             else:
                 cleaned[str(key)] = scrub_secrets(item, extra_secrets=extra_secrets)

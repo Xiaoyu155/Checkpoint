@@ -156,6 +156,10 @@ def copy_demo_assets(workspace: Workspace, *, overwrite: bool = False) -> None:
     repo_root = Path(__file__).resolve().parent.parent.parent
     copies = [
         (repo_root / "examples" / "local_html_form_workflow.yaml", workspace.workflows_dir / "local_html_form_workflow.yaml"),
+        (
+            repo_root / "examples" / "workflows" / "checkout" / "checkout_verification.yaml",
+            workspace.workflows_dir / "checkout_verification.yaml",
+        ),
         (repo_root / "examples" / "inputs" / "demo_login.json", workspace.inputs_dir / "demo_login.json"),
         (repo_root / "examples" / "web" / "login_demo.html", workspace.fixtures_dir / "login_demo.html"),
     ]
@@ -170,6 +174,15 @@ def copy_demo_assets(workspace: Workspace, *, overwrite: bool = False) -> None:
         text = workflow_path.read_text(encoding="utf-8")
         text = text.replace("examples/web/login_demo.html", "fixtures/login_demo.html")
         workflow_path.write_text(text, encoding="utf-8")
+
+    checkout_workflow_path = workspace.workflows_dir / "checkout_verification.yaml"
+    if checkout_workflow_path.exists():
+        text = checkout_workflow_path.read_text(encoding="utf-8")
+        text = text.replace(
+            "examples/web/checkout_verification_demo.html",
+            "../examples/web/checkout_verification_demo.html",
+        )
+        checkout_workflow_path.write_text(text, encoding="utf-8")
 
 
 def discover_workflows(workspace: Workspace) -> tuple[WorkflowRef, ...]:
@@ -390,6 +403,12 @@ def run_workspace_workflow(
         )
         if export_report:
             export_workspace_run_report(workspace, result.run_dir)
+        try:
+            from .session import update_agent_session
+
+            update_agent_session(workspace.root, result)
+        except Exception:
+            pass
         return result
     finally:
         chdir(previous_cwd)

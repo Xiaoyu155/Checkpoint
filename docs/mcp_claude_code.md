@@ -60,7 +60,7 @@ Inside Claude Code, open:
 Expected result:
 
 - `visual-agent` appears as connected or pending approval.
-- The server exposes the workflow tools.
+- The server exposes workflow tools plus `get_session_context`, `summarize_latest_failure`, and `run_verification`.
 
 ## 4. Test A Workflow
 
@@ -81,6 +81,7 @@ Expected result:
 - The call returns a `run_id`.
 - The report is available through `get_run_report`.
 - The MCP call is audited in `.agent-workspace\gui\actions.jsonl`.
+- If a report is too large, MCP returns a compact truncated response with a local report or artifact hint.
 
 ## Troubleshooting
 

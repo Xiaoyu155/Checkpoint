@@ -29,7 +29,7 @@ Before connecting a client, run the release check plan and MCP smoke tests:
 .\.venv\Scripts\python.exe -m visual_agent.cli release-check --format markdown
 .\.venv\Scripts\python.exe -m visual_agent.cli mcp-client-config --workspace-root .agent-workspace --client cursor --format json
 .\.venv\Scripts\python.exe -m visual_agent.cli mcp-smoke --workspace-root .agent-workspace --format markdown
-.\.venv\Scripts\python.exe -m pytest tests\test_mcp_server.py
+.\.venv\Scripts\python.exe -m pytest tests\test_mcp_server.py tests\e2e\test_e2e_mcp.py -q
 ```
 
 ## Claude Desktop
@@ -51,13 +51,38 @@ For source checkouts, use `examples/mcp_config/claude_desktop_config.json` and s
 
 ## Tools
 
-- `list_workflows`: list available workflows and latest run status.
+Workflow tools:
+
+- `list_workflows`: list available workflows and latest run status. Large lists are truncated with `omitted_count`.
 - `validate_workflow`: run workflow validation and preflight checks without execution.
 - `run_workflow`: run a workflow. Defaults to `dry-run`.
-- `get_run_report`: return markdown or redacted JSON for a completed run.
-- `list_run_artifacts`: list reports, screenshots, downloads, and run artifacts under the workspace.
+- `get_run_report`: return markdown or redacted JSON for a completed run. Large reports are truncated and include `report_hint`.
+- `list_run_artifacts`: list reports, screenshots, downloads, and run artifacts under the workspace. Large lists are truncated with `omitted_count`.
+
+AI context tools:
+
+- `summarize_latest_failure`: return a compact latest-failure summary for coding agents.
+- `get_session_context`: return a compact session snapshot for resuming work in a new chat.
+- `run_verification`: run workflows tagged `verification` and return an AI-ready pass/fail report.
+
+Compatibility and dashboard tools:
+
 - `get_workspace_dashboard`: return workspace health, queue, reports, and quality status.
-- `get_latest_failure`: return the latest failed workflow report and diagnosis.
+- `get_latest_failure`: return the latest failed workflow report and diagnosis. Prefer `summarize_latest_failure` when token budget matters.
+
+## Response Budgets
+
+MCP responses are designed for coding agents and are budgeted by default:
+
+| Tool/output | Budget | Behavior when large |
+| --- | --- | --- |
+| `summarize_latest_failure` | about 400 tokens | Returns one compact failure summary |
+| `get_session_context` | about 500 tokens | Returns a snapshot, not full reports |
+| `run_verification` | about 800 tokens | Passed workflows are summarized by name |
+| `get_run_report` | about 2000 tokens | Returns a truncated summary plus `report_hint` |
+| Any MCP response | about 2000 tokens | Final fallback returns a compact summary |
+
+Use `list_run_artifacts` to locate full local report files when a response is truncated.
 
 ## Safety Defaults
 
@@ -66,7 +91,9 @@ For source checkouts, use `examples/mcp_config/claude_desktop_config.json` and s
 - `mcp.max_run_profile` limits the highest profile MCP can use.
 - MCP calls are audited in `gui/actions.jsonl` when `mcp.audit_all_calls` is true.
 - Reports are scrubbed before JSON responses.
+- Secret-like values are scrubbed before MCP output.
 - Artifact paths must stay inside the workspace.
+- `workspace_root` rejects `..` path traversal and must be under an allowed local root.
 - MCP does not need cloud browser infrastructure; workflow reports, screenshots, queue data, auth-state metadata, and GUI action history stay under the local workspace.
 - Secret-like strings in reports can be checked with `quality-gate --fail-on-secret-leak`.
 
@@ -90,6 +117,9 @@ Example `workspace.json` section:
 - "Show the report for run 20260602-123456-abcd1234."
 - "Show the workspace dashboard and summarize any attention items."
 - "Fetch the latest failed workflow report and explain the recovery suggestion."
+- "Call get_session_context and tell me the current Visual Agent state."
+- "Summarize the latest failure without reading the full report."
+- "Run verification workflows after my code change."
 
 ## Client Config Files
 

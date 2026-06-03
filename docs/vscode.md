@@ -40,3 +40,11 @@ recovery suggestion before editing code.
 - `get_run_report`
 - `get_latest_failure`
 - `list_run_artifacts`
+- `summarize_latest_failure`
+- `get_session_context`
+- `run_verification`
+
+Prefer `get_session_context` when resuming work and `summarize_latest_failure`
+when a failure summary is enough. Full reports and large lists are budgeted for
+MCP output and may return `truncated: true` with a local report or artifact
+hint.

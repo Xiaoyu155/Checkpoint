@@ -12,6 +12,7 @@ from visual_agent.state import StateStore
 from visual_agent.workflow import (
     WorkflowRuntime,
     WorkflowStep,
+    close_context_resources,
     file_metadata,
     find_network_response,
     network_assertion_label,
@@ -22,6 +23,9 @@ from visual_agent.workflow import (
     resolve_output_path,
     sanitize_filename,
     target_from_config,
+    url_matches_condition,
+    wait_condition_from_dict,
+    wait_for_conditions,
     workflow_from_dict,
 )
 from visual_agent.dispatcher import read_path, resolve_step_value
@@ -42,6 +46,48 @@ def test_workflow_from_dict_parses_steps() -> None:
 
     assert workflow.name == "demo"
     assert workflow.steps[1].params["target"] == "登录"
+
+
+def test_url_matches_condition_returns_false_for_invalid_regex() -> None:
+    assert url_matches_condition("https://example.test/orders", {"url_regex": "["}) is False
+
+
+def test_url_matches_condition_returns_false_when_no_url_keys() -> None:
+    assert url_matches_condition("https://example.test/orders", {"condition": "url"}) is False
+
+
+def test_url_matches_condition_matches_url_contains() -> None:
+    assert url_matches_condition("https://example.test/orders/123", {"url_contains": "/orders/"}) is True
+
+
+def test_wait_for_conditions_list_form_parsed_correctly() -> None:
+    conditions = wait_for_conditions(
+        {
+            "conditions": [
+                {"condition": "text", "text": "Ready"},
+                {"type": "url", "url_contains": "/checkout"},
+            ],
+            "timeout_seconds": 3,
+            "match": "any",
+            "observation": "observe",
+        }
+    )
+
+    assert conditions == [
+        {"condition": "text", "text": "Ready", "observation": "observe"},
+        {"type": "url", "url_contains": "/checkout", "condition": "url", "observation": "observe"},
+    ]
+
+
+def test_wait_condition_from_dict_raises_on_missing_condition_field() -> None:
+    with pytest.raises(ValueError, match="missing condition"):
+        wait_condition_from_dict({"text": "Ready"}, {})
+
+
+def test_close_context_resources_is_silent_on_no_close_method(tmp_path) -> None:
+    context = WorkflowContext(run_id="run", run_dir=tmp_path, resources={"playwright_page": object()})
+
+    close_context_resources(context)
 
 
 def test_workflow_from_dict_parses_schema_metadata() -> None:

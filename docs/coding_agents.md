@@ -23,9 +23,11 @@ client-specific wording and MCP config shape.
 3. Run `mcp-smoke` before using the tools for real work.
 4. Prefer existing workflows over ad hoc browser actions.
 5. Run workflows as `dry-run` unless a human explicitly approves escalation.
-6. Read `get_run_report` before claiming success.
-7. Use `get_workspace_dashboard` before and after risky changes.
-8. Use `get_latest_failure` when a run fails and no run id is obvious.
+6. Use `get_session_context` when resuming work in a new chat.
+7. Read `get_run_report` before claiming success when a specific run id matters.
+8. Use `summarize_latest_failure` before reading a full failed report.
+9. Use `run_verification` after code changes when verification-tagged workflows exist.
+10. Use `get_workspace_dashboard` before and after risky changes.
 
 ## Useful Prompts
 
@@ -44,6 +46,16 @@ code.
 ```
 
 ```text
+If a workflow fails, use summarize_latest_failure first. Only read the full
+report if the summary does not contain enough detail.
+```
+
+```text
+After changing code, run verification workflows and summarize the pass/fail
+report.
+```
+
+```text
 Use visual-agent to get the workspace dashboard, find the latest failed run,
 and explain the failure diagnosis.
 ```
@@ -55,4 +67,6 @@ and explain the failure diagnosis.
 - Do not print secrets from inputs, cookies, tokens, or model credentials.
 - Do not request `approved` run_profile unless the workspace policy and the
   human both allow it.
+- Treat `truncated: true` as a signal to use `list_run_artifacts` or a more
+  specific tool rather than asking for a larger MCP response.
 - Use the run report as the source of truth.

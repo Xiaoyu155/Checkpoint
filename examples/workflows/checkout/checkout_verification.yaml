@@ -1,0 +1,28 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: checkout_verification
+version: 1
+tags:
+  - verification
+steps:
+  - id: observe_page
+    action: observe_html
+    path: examples/web/checkout_verification_demo.html
+  - id: assert_title
+    action: assert_text
+    text: "Checkout Demo"
+  - id: assert_product
+    action: assert_text
+    text: "Premium Widget"
+  - id: assert_price
+    action: assert_text
+    text: "$29.99"
+  - id: assert_add_to_cart
+    action: assert_text
+    text: "Add to Cart"
+  - id: assert_checkout_button
+    action: assert_text
+    text: "Proceed to Checkout"
+  - id: assert_shipping
+    action: assert_text
+    text: "Standard Delivery"

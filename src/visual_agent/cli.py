@@ -298,6 +298,21 @@ def build_parser() -> argparse.ArgumentParser:
     demo_workspace_check.add_argument("--overwrite", action="store_true", help="Overwrite demo assets before checking.")
     demo_workspace_check.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
+    context_snapshot = subparsers.add_parser("context-snapshot", help="Print compact AI context for the workspace.")
+    context_snapshot.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing agent_session.json.")
+    context_snapshot.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    summarize_failure = subparsers.add_parser("summarize-latest-failure", help="Print a compact latest-failure summary.")
+    summarize_failure.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing agent_session.json.")
+    summarize_failure.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    verify = subparsers.add_parser("verify", help="Run verification-tagged workspace workflows.")
+    verify.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
+    verify.add_argument("--tags", default="verification", help="Comma-separated workflow tags to run. Default: verification.")
+    verify.add_argument("--run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    verify.add_argument("--for", dest="target_agent", default="codex", help="Target coding agent label.")
+    verify.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
     ci_templates = subparsers.add_parser("install-ci-templates", help="Install CI/local quality gate templates.")
     ci_templates.add_argument("--root", default=".", help="Repository root to receive generated templates. Default: current directory.")
     ci_templates.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root used by generated quality gates.")
@@ -1291,6 +1306,42 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
         return 0 if result.get("status") == "success" else 1
+    if args.command == "context-snapshot":
+        from .session import load_agent_session, session_to_snapshot_text
+
+        session = load_agent_session(Path(args.workspace_root).resolve())
+        if session is None:
+            text = "No session data yet. Run a workflow first."
+        else:
+            text = session_to_snapshot_text(session)
+        if args.format == "markdown":
+            print(text)
+        else:
+            print(json.dumps({"snapshot": text, "token_estimate": len(text) // 4, "within_budget": len(text) <= 2000}, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "summarize-latest-failure":
+        from .failure_summary import build_failure_summary
+
+        payload = build_failure_summary(Path(args.workspace_root).resolve())
+        if args.format == "markdown":
+            if payload.get("status") == "no_failure":
+                print(payload["message"])
+            else:
+                print(payload.get("suggested_next_prompt", ""))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "verify":
+        from .verify import run_verify, verify_to_markdown
+
+        workspace = open_workspace(args.workspace_root)
+        tags = tuple(item.strip() for item in str(args.tags).split(",") if item.strip())
+        report = run_verify(workspace, tags=tags or ("verification",), run_profile=args.run_profile)
+        if args.format == "markdown":
+            print(verify_to_markdown(report))
+        else:
+            print(json.dumps(to_jsonable(report), ensure_ascii=False, indent=2))
+        return 0 if report.failed == 0 else 1
     if args.command == "workspace-list":
         refs = discover_workflows(open_workspace(args.root))
         print(json.dumps(to_jsonable(refs), ensure_ascii=False, indent=2))
