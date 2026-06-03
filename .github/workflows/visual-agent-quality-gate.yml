@@ -33,6 +33,12 @@ jobs:
           python -m visual_agent.cli workspace-risk-policy-check --root .agent-workspace
           python -m visual_agent.cli quality-gate --profile ci --workspace-root .agent-workspace --run --fail-on-secret-leak
 
+      - name: Run non-browser E2E tests
+        run: python -m pytest tests/e2e -m "not browser" -q --tb=short
+
+      - name: Run browser E2E tests
+        run: python -m pytest tests/e2e -m browser -q --tb=short
+
       - name: Upload quality reports
         if: always()
         uses: actions/upload-artifact@v4

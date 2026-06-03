@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,30 @@ def playwright_available() -> bool:
         cwd=str(ROOT),
         capture_output=True,
         text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+@lru_cache(maxsize=1)
+def playwright_chromium_available() -> bool:
+    browsers = ROOT / ".pw-browsers"
+    merged_env = os.environ.copy()
+    if browsers.exists():
+        merged_env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers)
+    script = (
+        "from playwright.sync_api import sync_playwright\n"
+        "with sync_playwright() as p:\n"
+        "    browser = p.chromium.launch(headless=True)\n"
+        "    browser.close()\n"
+    )
+    result = subprocess.run(
+        [str(PYTHON), "-c", script],
+        cwd=str(ROOT),
+        env=merged_env,
+        text=True,
+        capture_output=True,
+        timeout=30.0,
         check=False,
     )
     return result.returncode == 0

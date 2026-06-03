@@ -1,6 +1,8 @@
 .venv/
 .pw-browsers/
 .runs/
+.runs-e2e-*/
+.e2e-*/
 .run-locks/
 .agent-auth/
 .agent-secrets/
