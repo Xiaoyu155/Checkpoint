@@ -26,11 +26,13 @@ def test_optional_provider_capabilities_have_install_hints() -> None:
     assert by_name["observe_dom"].install_hint
     assert by_name["observe_uia"].install_hint
     assert by_name["pytesseract"].install_hint
+    assert by_name["screen_ocr"].install_hint or by_name["screen_ocr"].available
     assert by_name["tesseract"].install_hint or by_name["tesseract"].available
     assert by_name["torch"].required is False
     assert by_name["transformers"].required is False
     assert by_name["observe_dom"].required is False
     assert by_name["observe_uia"].required is False
+    assert by_name["screen_ocr"].required is False
     assert by_name["tesseract"].required is False
 
 
@@ -44,7 +46,8 @@ def test_capabilities_include_planner_visible_atomic_specs() -> None:
     assert by_name["observe_browser"].input_schema is not None
     assert by_name["click"].dry_run_supported is True
     assert by_name["press_key"].dry_run_supported is True
-    assert by_name["press_key"].input_schema["required"] == ["target", "keys"]
+    assert by_name["press_key"].input_schema["required"] == ["keys"]
+    assert by_name["press_key"].input_schema["fields"]["target"] == "Target?"
     assert by_name["save_storage_state"].risk_level == "high"
     assert by_name["assert_response"].kind == "assertion"
     assert by_name["resolve"].kind == "extractor"

@@ -52,6 +52,21 @@ def test_validate_workflow_accepts_press_key_with_target_and_keys() -> None:
     assert result.valid
 
 
+def test_validate_workflow_accepts_press_key_without_target() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "press-key-global",
+            "steps": [
+                {"id": "submit", "action": "press_key", "keys": "enter"},
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert result.valid
+
+
 def test_validate_workflow_accepts_press_key_key_alias() -> None:
     workflow = workflow_from_dict(
         {

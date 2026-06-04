@@ -113,7 +113,7 @@ def validate_workflow(
         if step.action == "wait_for" and wait_for_has_target_condition(step.params):
             has_resolved_target = True
 
-        if step.action in {"click", "type", "paste", "press_key", "expect_download"} and "target" not in step.params and not has_resolved_target:
+        if step.action in {"click", "type", "paste", "expect_download"} and "target" not in step.params and not has_resolved_target:
             issues.append(
                 ValidationIssue(
                     "error",
@@ -127,7 +127,6 @@ def validate_workflow(
             "click",
             "type",
             "paste",
-            "press_key",
             "expect_download",
             "assert_text",
             "assert_text_contract",

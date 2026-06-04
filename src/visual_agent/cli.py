@@ -732,7 +732,7 @@ def _build_perception_status(manifest: Any, vlm_summary: dict[str, Any]) -> dict
     }
     dom_ok = "observe_browser" in available_names or "observe_dom" in available_names
     uia_ok = "observe_uia" in available_names
-    ocr_ok = "observe_ocr" in available_names and "pytesseract" in available_names
+    ocr_ok = "observe_ocr" in available_names and ("screen_ocr" in available_names or "pytesseract" in available_names)
     vlm_ok = bool(vlm_summary.get("ok")) or (
         vlm_summary.get("cloud", {}).get("available") is True
         or any(
@@ -756,7 +756,7 @@ def _build_perception_status(manifest: Any, vlm_summary: dict[str, Any]) -> dict
     if not ocr_ok:
         warnings.append(
             "OCR provider unavailable (optional). "
-            "Install pytesseract and the Tesseract binary for text-extraction fallback."
+            "Install screen-ocr[winrt] on Windows, or install pytesseract and the Tesseract binary."
         )
 
     return {

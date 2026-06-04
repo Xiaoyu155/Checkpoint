@@ -357,7 +357,7 @@ def provider_input_schema(action: str) -> dict[str, Any]:
             "type": "object",
             "fields": {
                 "path": "string?",
-                "engine": "auto|tesseract|mock?",
+                "engine": "auto|screen-ocr|winrt|tesseract|mock?",
                 "mock_text": "string?",
                 "mock_bounds": "Bounds?",
                 "min_confidence": "number?",
@@ -445,10 +445,11 @@ def action_input_schema(action: str) -> dict[str, Any]:
     if action == "press_key":
         return {
             "type": "object",
-            "required": ["target", "keys"],
+            "required": ["keys"],
             "fields": {
-                "target": "Target",
+                "target": "Target?",
                 "keys": "string|string[]",
+                "key": "string?",
                 "dry_run": "boolean?",
                 "allow_mock_target": "boolean?",
             },
@@ -457,9 +458,10 @@ def action_input_schema(action: str) -> dict[str, Any]:
 
 
 def dependency_capabilities() -> tuple[Capability, ...]:
-    from .ocr import detect_tesseract
+    from .ocr import detect_screen_ocr, detect_tesseract
 
     tesseract_status = detect_tesseract()
+    screen_ocr_status = detect_screen_ocr()
     dependencies = {
         "mss": ("Screen capture dependency.", True, None),
         "PIL": ("Image processing dependency.", True, "pip install Pillow"),
@@ -469,13 +471,19 @@ def dependency_capabilities() -> tuple[Capability, ...]:
         "playwright": ("Live browser DOM automation dependency.", False, "pip install -e .[web]"),
         "uiautomation": ("Windows UI Automation dependency.", False, "pip install -e .[desktop]"),
         "pytesseract": ("Optional OCR Python wrapper; also requires the Tesseract binary.", False, "pip install pytesseract"),
+        "screen_ocr": ("Optional Windows native OCR with text coordinates.", False, screen_ocr_status["install_hint"]),
         "tesseract": ("Optional Tesseract OCR binary for real OCR.", False, tesseract_status["install_hint"]),
         "torch": ("Optional local VLM runtime dependency.", False, "pip install torch"),
         "transformers": ("Optional local VLM model loading dependency.", False, "pip install transformers"),
     }
     capabilities = []
     for name, (description, required, install_hint) in sorted(dependencies.items()):
-        available = bool(tesseract_status["available"]) if name == "tesseract" else module_available(name)
+        if name == "tesseract":
+            available = bool(tesseract_status["available"])
+        elif name == "screen_ocr":
+            available = bool(screen_ocr_status["available"])
+        else:
+            available = module_available(name)
         capabilities.append(
             Capability(
                 name=name,

@@ -1,13 +1,22 @@
 from PIL import Image
 
 from visual_agent.models import ProviderKind
-from visual_agent.ocr import detect_tesseract, observe_ocr, tesseract_language
+from visual_agent.ocr import detect_screen_ocr, detect_tesseract, observe_ocr, screen_ocr_word_bounds, tesseract_language
 
 
 def test_detect_tesseract_returns_diagnostic_shape() -> None:
     status = detect_tesseract()
 
     assert status["engine"] == "tesseract"
+    assert isinstance(status["available"], bool)
+    assert isinstance(status["module_available"], bool)
+    assert "install_hint" in status
+
+
+def test_detect_screen_ocr_returns_diagnostic_shape() -> None:
+    status = detect_screen_ocr()
+
+    assert status["engine"] == "screen-ocr"
     assert isinstance(status["available"], bool)
     assert isinstance(status["module_available"], bool)
     assert "install_hint" in status
@@ -20,6 +29,56 @@ def test_ocr_mock_keeps_engine_status_available(tmp_path) -> None:
     assert observation.metadata["engine"] == "mock"
     assert observation.metadata["engine_available"] is True
     assert observation.metadata["engine_status"]["available"] is True
+
+
+def test_ocr_winrt_backend_returns_text_bounds(tmp_path, monkeypatch) -> None:
+    image_path = tmp_path / "sample.png"
+    Image.new("RGB", (100, 40), "white").save(image_path)
+    monkeypatch.setattr(
+        "visual_agent.ocr.detect_screen_ocr",
+        lambda: {
+            "engine": "screen-ocr",
+            "available": True,
+            "module_available": True,
+            "binary_path": None,
+            "version": "test",
+            "error": None,
+            "install_hint": None,
+        },
+    )
+    monkeypatch.setattr(
+        "visual_agent.ocr.screen_ocr_elements",
+        lambda *_args, **_kwargs: (
+            {
+                "text": "购买服务",
+                "role": "text",
+                "confidence": 1.0,
+                "bounds": {"left": 10, "top": 5, "width": 50, "height": 20},
+                "engine": "screen-ocr",
+            },
+        ),
+    )
+
+    observation = observe_ocr({"path": str(image_path), "engine": "winrt", "language": "chi_sim+eng"}, tmp_path)
+
+    assert observation.metadata["engine"] == "screen-ocr"
+    assert observation.metadata["engine_available"] is True
+    assert observation.metadata["engine_status"]["language"] == "zh-Hans"
+    assert observation.elements[0]["text"] == "购买服务"
+    assert observation.elements[0]["bounds"] == {"left": 10, "top": 5, "width": 50, "height": 20}
+
+
+def test_screen_ocr_word_bounds_accepts_right_bottom_box() -> None:
+    class Box:
+        left = 10
+        top = 20
+        right = 70
+        bottom = 45
+
+    class Word:
+        bounding_box = Box()
+
+    assert screen_ocr_word_bounds(Word()) == {"left": 10, "top": 20, "width": 60, "height": 25}
 
 
 def test_ocr_unavailable_tesseract_returns_clear_diagnostic(tmp_path, monkeypatch) -> None:

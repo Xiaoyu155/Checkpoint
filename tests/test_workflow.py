@@ -181,6 +181,56 @@ def test_workflow_runtime_runs_screen_resolve_click_dry_run(tmp_path) -> None:
     assert not (tmp_path / "workflow.lock").exists()
 
 
+def test_workflow_runtime_wraps_visual_steps_with_visual_lock(tmp_path, monkeypatch) -> None:
+    calls = []
+    providers = ProviderRegistry()
+
+    class FakeVisualLock:
+        def __enter__(self):
+            calls.append("enter")
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            calls.append("exit")
+
+    def observe_uia(_params, _provider_context):
+        calls.append("observe")
+        return Observation(provider=ProviderKind.UIA, source="desktop")
+
+    monkeypatch.setattr("visual_agent.workflow.VisualLock", FakeVisualLock)
+    providers.register("observe_uia", observe_uia)
+    workflow = workflow_from_dict({"name": "visual-lock", "steps": [{"id": "observe", "action": "observe_uia"}]})
+
+    result = WorkflowRuntime(output_dir=tmp_path, providers=providers).run(workflow)
+
+    assert result.steps[0].status == ActionStatus.SUCCESS
+    assert calls == ["enter", "observe", "exit"]
+
+
+def test_workflow_runtime_allows_press_key_without_target(tmp_path) -> None:
+    dispatcher = ActionDispatcher()
+    seen = {}
+
+    def fake_press_key(resolved, params, context):
+        seen["target"] = resolved.target.display_name
+        seen["reason"] = resolved.evidence.reason
+        return ActionResult(
+            action="press_key",
+            status=ActionStatus.DRY_RUN if context.dry_run else ActionStatus.SUCCESS,
+            target=resolved.target.display_name,
+            provider=resolved.evidence.provider,
+            message="fake press",
+        )
+
+    dispatcher.register("press_key", fake_press_key)
+    workflow = workflow_from_dict({"name": "press-key", "steps": [{"id": "press", "action": "press_key", "keys": "enter"}]})
+
+    result = WorkflowRuntime(output_dir=tmp_path, dispatcher=dispatcher).run(workflow, run_profile="dry-run")
+
+    assert result.steps[0].status == ActionStatus.DRY_RUN
+    assert seen == {"target": "press_key", "reason": "global action does not require a target"}
+
+
 def test_workflow_runtime_respects_active_run_lock(tmp_path) -> None:
     workflow = parse_workflow_file("examples/minimal_testable_workflow.yaml")
     lock = RunLock(tmp_path)

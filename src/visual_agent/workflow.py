@@ -11,10 +11,11 @@ from .audit import RunAudit
 from .diagnostics import diagnose_failure
 from .dispatcher import ActionDispatchContext, ActionDispatcher, read_path, resolve_step_value, selector_from_resolved
 from .dom import normalize_text
-from .locks import RunLock, lock_to_dict, queue_to_dict
+from .locks import RunLock, VisualLock, lock_to_dict, queue_to_dict
 from .models import (
     ActionResult,
     ActionStatus,
+    LocationEvidence,
     Observation,
     ProviderKind,
     ResolvedTarget,
@@ -219,12 +220,21 @@ class WorkflowRuntime:
 
         for attempt in range(1, attempts + 1):
             try:
-                result = self._run_step_or_raise(
-                    step,
-                    context,
-                    run_profile=run_profile,
-                    synthetic_on_capture_fail=synthetic_on_capture_fail,
-                )
+                if step_needs_visual_lock(step):
+                    with VisualLock():
+                        result = self._run_step_or_raise(
+                            step,
+                            context,
+                            run_profile=run_profile,
+                            synthetic_on_capture_fail=synthetic_on_capture_fail,
+                        )
+                else:
+                    result = self._run_step_or_raise(
+                        step,
+                        context,
+                        run_profile=run_profile,
+                        synthetic_on_capture_fail=synthetic_on_capture_fail,
+                    )
                 elapsed = monotonic() - started
                 timeout_seconds = optional_float(step.params.get("timeout_seconds"))
                 if timeout_seconds is not None and elapsed > timeout_seconds:
@@ -326,7 +336,7 @@ class WorkflowRuntime:
             )
 
         if action in self.dispatcher.actions_available:
-            resolved = self._resolve_for_action(params, context, step.id, action=action)
+            resolved = placeholder_resolved_target(action) if action == "press_key" and "target" not in params else self._resolve_for_action(params, context, step.id, action=action)
             action_result = self.dispatcher.execute(
                 action,
                 resolved,
@@ -890,6 +900,26 @@ def is_retry_safe_action(action: str) -> bool:
         "assert_response",
         "assert_file_exists",
     }
+
+
+VISUAL_LOCK_ACTIONS = {"observe_screen", "observe_ocr", "observe_vision", "observe_uia"}
+
+
+def step_needs_visual_lock(step: WorkflowStep) -> bool:
+    if step.action in VISUAL_LOCK_ACTIONS:
+        return True
+    return bool(step.params.get("uia_window") or step.params.get("window"))
+
+
+def placeholder_resolved_target(action: str) -> ResolvedTarget:
+    return ResolvedTarget(
+        target=Target(label=action),
+        evidence=LocationEvidence(
+            provider=ProviderKind.MOCK,
+            confidence=1.0,
+            reason="global action does not require a target",
+        ),
+    )
 
 
 def optional_float(value: Any) -> float | None:
