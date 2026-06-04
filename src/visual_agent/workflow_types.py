@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .models import ActionResult, Observation, ResolvedTarget
+from .models import ActionResult, Observation, ResolvedTarget, to_jsonable
 
 
 @dataclass
@@ -15,8 +17,23 @@ class WorkflowContext:
     sensitive_fields: set[str] = field(default_factory=set)
     resources: dict[str, Any] = field(default_factory=dict)
     observations: dict[str, Observation] = field(default_factory=dict)
+    _observation_cache: dict[str, Observation] = field(default_factory=dict, repr=False)
     resolved_targets: dict[str, ResolvedTarget] = field(default_factory=dict)
     actions: dict[str, ActionResult] = field(default_factory=dict)
+
+    def observation_cache_key(self, action: str, params: dict[str, Any]) -> str:
+        payload = {"action": action, "params": to_jsonable(params)}
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    def get_cached_observation(self, key: str) -> Observation | None:
+        return self._observation_cache.get(key)
+
+    def set_cached_observation(self, key: str, observation: Observation) -> None:
+        self._observation_cache[key] = observation
+
+    def invalidate_observation_cache(self) -> None:
+        self._observation_cache.clear()
 
     @property
     def latest_observation(self) -> Observation:

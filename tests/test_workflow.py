@@ -207,6 +207,137 @@ def test_workflow_runtime_wraps_visual_steps_with_visual_lock(tmp_path, monkeypa
     assert calls == ["enter", "observe", "exit"]
 
 
+def test_workflow_runtime_reuses_cached_observation_for_identical_observe_steps(tmp_path, monkeypatch) -> None:
+    providers = ProviderRegistry()
+    calls = {"count": 0}
+
+    class FakeVisualLock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr("visual_agent.workflow.VisualLock", FakeVisualLock)
+
+    def observe_uia(params, _provider_context):
+        calls["count"] += 1
+        return Observation(
+            provider=ProviderKind.UIA,
+            source="fake-uia",
+            elements=({"text": f"scan-{calls['count']}"},),
+            metadata={"params": params},
+        )
+
+    providers.register("observe_uia", observe_uia)
+    workflow = workflow_from_dict(
+        {
+            "name": "observe-cache",
+            "steps": [
+                {"id": "first", "action": "observe_uia", "window": {"title_contains": "Demo"}},
+                {"id": "second", "action": "observe_uia", "window": {"title_contains": "Demo"}},
+            ],
+        }
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, providers=providers).run(workflow)
+
+    assert calls["count"] == 1
+    assert result.steps[0].metadata["observation_cache"] == "miss"
+    assert result.steps[1].metadata["observation_cache"] == "hit"
+    assert result.steps[1].observation is result.steps[0].observation
+
+
+def test_workflow_runtime_invalidates_observation_cache_after_action(tmp_path, monkeypatch) -> None:
+    providers = ProviderRegistry()
+    dispatcher = ActionDispatcher()
+    calls = {"count": 0}
+
+    class FakeVisualLock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr("visual_agent.workflow.VisualLock", FakeVisualLock)
+
+    def observe_uia(params, _provider_context):
+        calls["count"] += 1
+        return Observation(
+            provider=ProviderKind.UIA,
+            source="fake-uia",
+            elements=({"text": f"scan-{calls['count']}"},),
+        )
+
+    def fake_press_key(resolved, params, context):
+        return ActionResult(
+            action="press_key",
+            status=ActionStatus.DRY_RUN if context.dry_run else ActionStatus.SUCCESS,
+            target=resolved.target.display_name,
+            provider=resolved.evidence.provider,
+            message="fake press",
+        )
+
+    providers.register("observe_uia", observe_uia)
+    dispatcher.register("press_key", fake_press_key)
+    workflow = workflow_from_dict(
+        {
+            "name": "observe-cache-invalidated",
+            "steps": [
+                {"id": "before", "action": "observe_uia", "window": {"title_contains": "Demo"}},
+                {"id": "press", "action": "press_key", "keys": "enter"},
+                {"id": "after", "action": "observe_uia", "window": {"title_contains": "Demo"}},
+            ],
+        }
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, providers=providers, dispatcher=dispatcher).run(
+        workflow,
+        run_profile="dry-run",
+    )
+
+    assert calls["count"] == 2
+    assert result.steps[0].metadata["observation_cache"] == "miss"
+    assert result.steps[2].metadata["observation_cache"] == "miss"
+    assert result.steps[2].observation.elements[0]["text"] == "scan-2"
+
+
+def test_workflow_runtime_observe_cache_can_be_disabled(tmp_path, monkeypatch) -> None:
+    providers = ProviderRegistry()
+    calls = {"count": 0}
+
+    class FakeVisualLock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr("visual_agent.workflow.VisualLock", FakeVisualLock)
+
+    def observe_uia(params, _provider_context):
+        calls["count"] += 1
+        return Observation(provider=ProviderKind.UIA, source="fake-uia")
+
+    providers.register("observe_uia", observe_uia)
+    workflow = workflow_from_dict(
+        {
+            "name": "observe-cache-disabled",
+            "steps": [
+                {"id": "first", "action": "observe_uia", "cache": False},
+                {"id": "second", "action": "observe_uia", "cache": False},
+            ],
+        }
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, providers=providers).run(workflow)
+
+    assert calls["count"] == 2
+    assert result.steps[0].metadata["observation_cache"] == "disabled"
+    assert result.steps[1].metadata["observation_cache"] == "disabled"
+
+
 def test_workflow_runtime_allows_press_key_without_target(tmp_path) -> None:
     dispatcher = ActionDispatcher()
     seen = {}

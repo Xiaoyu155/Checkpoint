@@ -304,6 +304,20 @@ class WorkflowRuntime:
         step_dry_run = step_should_dry_run(run_profile, action, params)
 
         if action.startswith("observe_"):
+            cache_enabled = params.get("cache") is not False
+            cache_key = context.observation_cache_key(action, params) if cache_enabled else ""
+            if cache_enabled:
+                cached = context.get_cached_observation(cache_key)
+                if cached is not None:
+                    context.observations[step.id] = cached
+                    return WorkflowStepResult(
+                        id=step.id,
+                        action=action,
+                        status=ActionStatus.SUCCESS,
+                        message=f"{action} completed (cache hit)",
+                        observation=cached,
+                        metadata={"observation_cache": "hit", "cache_key": cache_key},
+                    )
             observation = self.providers.observe(
                 action,
                 params,
@@ -313,6 +327,8 @@ class WorkflowRuntime:
                     resources=context.resources,
                 ),
             )
+            if cache_enabled:
+                context.set_cached_observation(cache_key, observation)
             context.observations[step.id] = observation
             return WorkflowStepResult(
                 id=step.id,
@@ -320,6 +336,10 @@ class WorkflowRuntime:
                 status=ActionStatus.SUCCESS,
                 message=f"{action} completed",
                 observation=observation,
+                metadata={
+                    "observation_cache": "miss" if cache_enabled else "disabled",
+                    **({"cache_key": cache_key} if cache_enabled else {}),
+                },
             )
 
         if action == "resolve":
@@ -344,6 +364,7 @@ class WorkflowRuntime:
                 ActionDispatchContext(workflow_context=context, dry_run=step_dry_run),
             )
             context.actions[step.id] = action_result
+            context.invalidate_observation_cache()
             return WorkflowStepResult(
                 id=step.id,
                 action=action,
