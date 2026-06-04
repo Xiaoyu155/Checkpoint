@@ -176,6 +176,8 @@ Safety defaults:
 ## Docs
 
 - [English Quickstart](docs/quickstart.md)
+- [Agent handoff guide](docs/agent_handoff.md)
+- [Codex usage guide](docs/codex.md)
 - [MCP Server README](README_MCP.md)
 - [Claude Desktop MCP setup](docs/mcp_claude_desktop.md)
 - [Cursor MCP setup](docs/mcp_cursor.md)
