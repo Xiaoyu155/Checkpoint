@@ -62,6 +62,18 @@ python -m visual_agent.cli workspace-status --root .agent-workspace
 `workspace-status` shows the workspace root and project root so an agent can
 confirm it is using the right project before running visual checks.
 
+## Resume In A New Chat
+
+Visual Agent stores the working context in the project workspace, not in the
+chat window. After reopening Codex or starting a new chat, run:
+
+```powershell
+python -m visual_agent.cli context-snapshot --workspace-root .agent-workspace --format markdown
+```
+
+MCP clients should call `get_session_context` first. The snapshot shows recent
+passes, latest failure, and the next suggested action.
+
 ## Fast Verification
 
 Run only the workflow that protects the code you changed:
@@ -79,6 +91,11 @@ python -m visual_agent.cli verify --workspace-root .agent-workspace --tags verif
 Keep OCR/VLM workflows in their own tags, such as `visual` or `miniprogram`,
 and run them explicitly. They are much slower than DOM/UIA/file checks because
 they capture windows and extract visual text.
+
+When a visual workflow brings a target window to the foreground, Visual Agent
+minimizes that target window after capture and restores the previous foreground
+window by default. Use `post_capture: keep` only when a workflow intentionally
+needs to leave the target window open.
 
 ## Verification Loop Demo
 

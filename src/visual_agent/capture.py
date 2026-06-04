@@ -239,22 +239,26 @@ def finalize_capture_window(params: dict[str, Any], metadata: dict[str, Any]) ->
     uia_window = params.get("uia_window") or params.get("window")
     result: dict[str, Any] = {}
 
-    # --- Minimize target window if requested ---
+    # Minimize target window by default after an explicit bring-to-front capture.
+    # This keeps visual checks from occupying the user's desktop after evidence is collected.
     if isinstance(uia_window, dict):
         post_capture = str(
             uia_window.get("post_capture")
             or uia_window.get("after_capture")
             or params.get("post_capture")
             or params.get("after_capture")
-            or ""
+            or ("minimize" if bool(uia_window.get("bring_to_front") or uia_window.get("foreground")) else "")
         ).strip().lower()
+        keep_open = post_capture in {"keep", "keep_open", "none", "noop"} or bool(
+            uia_window.get("keep_open") or params.get("keep_open")
+        )
         minimize_after = bool(
             uia_window.get("minimize_after")
             or uia_window.get("minimize_after_capture")
             or params.get("minimize_after")
             or params.get("minimize_after_capture")
         )
-        if post_capture in {"minimize", "minimise"} or minimize_after:
+        if (post_capture in {"minimize", "minimise"} or minimize_after) and not keep_open:
             handle = None
             window_meta = metadata.get("uia_window")
             if isinstance(window_meta, dict):

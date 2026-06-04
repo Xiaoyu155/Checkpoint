@@ -54,11 +54,12 @@ If your DevTools window uses another project name, edit
 `window_title_candidates`. Prefer the exact DevTools simulator/project title;
 avoid broad words that also appear in your code editor.
 
-The default mini program workflows also request `bring_to_front: true`, so
-Visual Agent tries to restore and foreground the matched DevTools window before
-capturing the simulator. The visual capture examples also set
-`post_capture: minimize`, so the DevTools window is minimized after the
-screenshot/OCR evidence is collected.
+The default mini program workflows request `bring_to_front: true`, so Visual
+Agent restores and foregrounds the matched DevTools window before capturing the
+simulator. Visual Agent minimizes foregrounded capture windows by default after
+the screenshot/OCR evidence is collected, then restores the previous foreground
+window. Use `post_capture: keep` only when you deliberately want the target
+window left open.
 
 ## Tune The Simulator Crop
 

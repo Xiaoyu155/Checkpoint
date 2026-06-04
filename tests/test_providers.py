@@ -123,7 +123,7 @@ def test_screen_provider_foregrounds_before_capture_and_minimizes_after(tmp_path
     observation = registry.observe(
         "observe_screen",
         {
-            "window": {"title_contains": "Target App", "bring_to_front": True, "post_capture": "minimize"},
+            "window": {"title_contains": "Target App", "bring_to_front": True},
         },
         ProviderContext(run_dir=tmp_path, synthetic_on_capture_fail=True),
     )
@@ -133,6 +133,32 @@ def test_screen_provider_foregrounds_before_capture_and_minimizes_after(tmp_path
     assert calls["minimize"] == [123]
     assert observation.metadata["uia_window_pre_capture"]["foregrounded"] is True
     assert observation.metadata["uia_window_post_capture"] == {"action": "minimize", "status": "success"}
+
+
+def test_screen_provider_can_keep_foregrounded_window_open(tmp_path, monkeypatch) -> None:
+    calls = {"minimize": []}
+
+    def fake_match(*_args, **_kwargs):
+        return UIAWindowMatch(
+            bounds=Bounds(left=0, top=0, width=500, height=400),
+            native_window_handle=123,
+            name="Target App",
+        )
+
+    monkeypatch.setattr("visual_agent.uia.find_uia_window_match", fake_match)
+    monkeypatch.setattr("visual_agent.uia.minimize_window", lambda handle: calls["minimize"].append(handle) or True)
+
+    registry = default_provider_registry()
+    observation = registry.observe(
+        "observe_screen",
+        {
+            "window": {"title_contains": "Target App", "bring_to_front": True, "post_capture": "keep"},
+        },
+        ProviderContext(run_dir=tmp_path, synthetic_on_capture_fail=True),
+    )
+
+    assert calls["minimize"] == []
+    assert "uia_window_post_capture" not in observation.metadata
 
 
 def test_vision_provider_supports_deterministic_mock_description(tmp_path) -> None:
