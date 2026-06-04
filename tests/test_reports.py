@@ -1,4 +1,9 @@
+import json
+from pathlib import Path
+
+from visual_agent.models import ActionStatus, Observation, ProviderKind, to_jsonable
 from visual_agent.reports import (
+    compact_run_report,
     list_run_summaries,
     load_run_report,
     load_run_summary,
@@ -6,7 +11,7 @@ from visual_agent.reports import (
     run_report_to_markdown,
     run_summary_to_dict,
 )
-from visual_agent.workflow import WorkflowRuntime, parse_workflow_file
+from visual_agent.workflow import WorkflowRunResult, WorkflowRuntime, WorkflowStepResult, parse_workflow_file
 
 
 def test_run_summary_reports_successful_dry_run(tmp_path) -> None:
@@ -88,3 +93,52 @@ def test_run_report_surfaces_selector_resolution_metadata(tmp_path) -> None:
     assert click_step["selector_resolution"]["confidence_level"] == "high"
     assert "Selector: level `high`" in markdown
     assert "fallback path `dom`" in markdown
+
+
+def test_compact_run_report_strips_verbose_observation_elements_and_keeps_failure_diagnosis(tmp_path) -> None:
+    screenshot = tmp_path / "failure.png"
+    screenshot.write_text("png", encoding="utf-8")
+    observation = Observation(
+        provider=ProviderKind.OCR,
+        source="screen",
+        screenshot_path=screenshot,
+        elements=tuple({"text": f"item {index}", "bounds": {"left": index, "top": index, "width": 10, "height": 10}} for index in range(300)),
+    )
+    result = WorkflowRunResult(
+        run_id="run",
+        run_dir=Path(tmp_path),
+        workflow_name="checkout",
+        steps=(
+            WorkflowStepResult(
+                id="observe",
+                action="observe_ocr",
+                status=ActionStatus.SUCCESS,
+                observation=observation,
+            ),
+            WorkflowStepResult(
+                id="assert_total",
+                action="assert_text",
+                status=ActionStatus.FAILED,
+                message="Text not found",
+                metadata={
+                    "failure_diagnosis": {
+                        "expected": "expected text: 128",
+                        "actual": "visible text: 0",
+                        "recovery_suggestions": ["Fix total calculation."],
+                        "artifacts": {"screenshot": str(screenshot)},
+                    }
+                },
+            ),
+        ),
+    )
+
+    raw = json.dumps(to_jsonable(result), ensure_ascii=False)
+    compact = compact_run_report(result)
+    compact_text = json.dumps(compact, ensure_ascii=False)
+
+    assert compact["status"] == "failed"
+    assert compact["failed_step"] == "assert_total"
+    assert compact["steps"][0]["screenshot"] == str(screenshot)
+    assert "elements" not in compact_text
+    assert compact["steps"][1]["diagnosis"]["expected"] == "expected text: 128"
+    assert len(compact_text) < len(raw) / 10
