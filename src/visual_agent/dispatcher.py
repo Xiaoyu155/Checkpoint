@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+from time import monotonic, sleep
 from typing import Any, Callable
 
 from .actions import DesktopActions
 from .models import ActionResult, ActionStatus, ResolvedTarget
+from .ocr import observe_ocr as observe_ocr_image
 from .security import text_metadata
+from .selector import OCRSelectorStrategy
+from .models import Target
 from .workflow_types import WorkflowContext
 
 
@@ -26,6 +31,8 @@ class ActionDispatcher:
         self.register("type", self._type)
         self.register("paste", self._paste)
         self.register("press_key", self._press_key)
+        self.register("click_text", self._click_text)
+        self.register("wait_for_text", self._wait_for_text)
 
     def register(self, action: str, handler: ActionHandler) -> None:
         self._handlers[action] = handler
@@ -159,6 +166,76 @@ class ActionDispatcher:
             dry_run=bool(params.get("dry_run", context.dry_run)),
         )
 
+    def _click_text(
+        self,
+        resolved: ResolvedTarget,
+        params: dict[str, Any],
+        context: ActionDispatchContext,
+    ) -> ActionResult:
+        text = str(params.get("text") or params.get("label") or "").strip()
+        contains_text = str(params.get("contains_text") or "").strip()
+        if not text and not contains_text:
+            raise ValueError("click_text requires text, label, or contains_text.")
+        target = Target(text=text or None, contains_text=contains_text or None, preferred=(resolved.evidence.provider,))
+        observation = observe_ocr_image(
+            ocr_params(params, exclude={"text", "label", "contains_text", "dry_run", "timeout_seconds"}),
+            Path(context.workflow_context.run_dir),
+            synthetic_on_capture_fail=bool(params.get("synthetic_on_capture_fail", False)),
+        )
+        evidence = OCRSelectorStrategy().locate(target, observation)
+        if evidence is None or evidence.click_point is None:
+            raise LookupError(f"click_text could not find OCR text: {target.display_name}")
+        return self.actions.click(
+            evidence.click_point,
+            target,
+            provider=evidence.provider,
+            dry_run=bool(params.get("dry_run", context.dry_run)),
+        )
+
+    def _wait_for_text(
+        self,
+        resolved: ResolvedTarget,
+        params: dict[str, Any],
+        context: ActionDispatchContext,
+    ) -> ActionResult:
+        text = str(params.get("text") or "").strip()
+        contains_text = str(params.get("contains_text") or "").strip()
+        if not text and not contains_text:
+            raise ValueError("wait_for_text requires text or contains_text.")
+        target = Target(text=text or None, contains_text=contains_text or None, preferred=(resolved.evidence.provider,))
+        timeout_seconds = float(params.get("timeout_seconds", 10.0))
+        poll_seconds = max(0.05, float(params.get("poll_seconds", 1.0)))
+        deadline = monotonic() + timeout_seconds
+        ocr_options = ocr_params(
+            params,
+            exclude={"text", "contains_text", "timeout_seconds", "poll_seconds", "dry_run"},
+        )
+        last_source = None
+        while True:
+            observation = observe_ocr_image(
+                ocr_options,
+                Path(context.workflow_context.run_dir),
+                synthetic_on_capture_fail=bool(params.get("synthetic_on_capture_fail", False)),
+            )
+            last_source = observation.source
+            evidence = OCRSelectorStrategy().locate(target, observation)
+            if evidence is not None:
+                return ActionResult(
+                    action="wait_for_text",
+                    status=ActionStatus.SUCCESS,
+                    target=target.display_name,
+                    point=evidence.click_point,
+                    provider=evidence.provider,
+                    message=f"text appeared: {target.display_name}",
+                    metadata={
+                        "confidence": evidence.confidence,
+                        "source": observation.source,
+                    },
+                )
+            if monotonic() >= deadline:
+                raise TimeoutError(f"wait_for_text timed out after {timeout_seconds:.3f}s: {target.display_name}")
+            sleep(min(poll_seconds, max(0.0, deadline - monotonic())))
+
 
 def resolve_step_value(params: dict[str, Any], context: WorkflowContext) -> Any:
     if "value" in params:
@@ -189,6 +266,10 @@ def selector_from_resolved(resolved: ResolvedTarget) -> str | None:
     if isinstance(element, dict) and element.get("selector"):
         return str(element["selector"])
     return None
+
+
+def ocr_params(params: dict[str, Any], *, exclude: set[str]) -> dict[str, Any]:
+    return {key: value for key, value in params.items() if key not in exclude}
 
 
 def read_path(payload: dict[str, Any], path: str) -> Any:

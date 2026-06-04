@@ -6,7 +6,7 @@ from visual_agent.workflow_types import WorkflowContext
 def test_action_dispatcher_exposes_default_actions() -> None:
     dispatcher = ActionDispatcher()
 
-    assert dispatcher.actions_available == ("click", "paste", "press_key", "type")
+    assert dispatcher.actions_available == ("click", "click_text", "paste", "press_key", "type", "wait_for_text")
 
 
 def test_action_dispatcher_supports_custom_action(tmp_path) -> None:

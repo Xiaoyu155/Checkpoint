@@ -22,6 +22,8 @@ SUPPORTED_ACTIONS = {
     "type",
     "paste",
     "press_key",
+    "click_text",
+    "wait_for_text",
     "assert_text",
     "assert_text_contract",
     "assert_response",
@@ -46,7 +48,7 @@ REQUIRED_PARAMS = {
 
 ASSERTION_ACTIONS = {"assert_text", "assert_text_contract", "assert_response", "assert_file_exists"}
 HIGH_RISK_ACTIONS = {"save_storage_state"}
-MUTATING_ACTIONS = {"click", "type", "paste", "press_key", "expect_download", "save_storage_state"}
+MUTATING_ACTIONS = {"click", "type", "paste", "press_key", "click_text", "expect_download", "save_storage_state"}
 SENSITIVE_NAME_HINTS = ("password", "passwd", "pwd", "token", "secret", "key", "cookie", "id_card", "ssn")
 
 
@@ -145,6 +147,7 @@ def validate_workflow(
         validate_target_like_params(step.id, step.params, issues)
         validate_value_params(step.id, step.action, step.params, issues)
         validate_press_key(step.id, step.action, step.params, issues)
+        validate_text_action(step.id, step.action, step.params, issues)
         validate_text_contract(step.id, step.action, step.params, issues)
         validate_wait_for(step.id, step.action, step.params, issues)
         validate_retry_safety(step.id, step.action, step.params, issues)
@@ -216,6 +219,13 @@ def validate_press_key(step_id: str, action: str, params: dict[str, Any], issues
         return
     if missing_param(params, "keys") and missing_param(params, "key"):
         issues.append(ValidationIssue("error", step_id, "Missing required parameter: keys or key"))
+
+
+def validate_text_action(step_id: str, action: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:
+    if action == "click_text" and not any(key in params for key in ("text", "label", "contains_text")):
+        issues.append(ValidationIssue("error", step_id, "click_text requires text, label, or contains_text."))
+    if action == "wait_for_text" and not any(key in params for key in ("text", "contains_text")):
+        issues.append(ValidationIssue("error", step_id, "wait_for_text requires text or contains_text."))
 
 
 def validate_text_contract(step_id: str, action: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:

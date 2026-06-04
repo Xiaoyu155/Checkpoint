@@ -48,6 +48,8 @@ def test_capabilities_include_planner_visible_atomic_specs() -> None:
     assert by_name["press_key"].dry_run_supported is True
     assert by_name["press_key"].input_schema["required"] == ["keys"]
     assert by_name["press_key"].input_schema["fields"]["target"] == "Target?"
+    assert by_name["click_text"].input_schema["required"] == ["text|label|contains_text"]
+    assert by_name["wait_for_text"].input_schema["required"] == ["text|contains_text"]
     assert by_name["save_storage_state"].risk_level == "high"
     assert by_name["assert_response"].kind == "assertion"
     assert by_name["resolve"].kind == "extractor"
@@ -63,6 +65,8 @@ def test_atomic_capability_manifest_excludes_dependencies_and_hidden_commands() 
 
     assert "click" in names
     assert "press_key" in names
+    assert "click_text" in names
+    assert "wait_for_text" in names
     assert "assert_response" in names
     assert "expect_download" in names
     assert "resolve" in names

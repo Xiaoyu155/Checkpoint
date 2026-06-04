@@ -336,7 +336,7 @@ class WorkflowRuntime:
             )
 
         if action in self.dispatcher.actions_available:
-            resolved = placeholder_resolved_target(action) if action == "press_key" and "target" not in params else self._resolve_for_action(params, context, step.id, action=action)
+            resolved = placeholder_resolved_target(action) if action in SELF_CONTAINED_ACTIONS and "target" not in params else self._resolve_for_action(params, context, step.id, action=action)
             action_result = self.dispatcher.execute(
                 action,
                 resolved,
@@ -902,7 +902,8 @@ def is_retry_safe_action(action: str) -> bool:
     }
 
 
-VISUAL_LOCK_ACTIONS = {"observe_screen", "observe_ocr", "observe_vision", "observe_uia"}
+SELF_CONTAINED_ACTIONS = {"press_key", "click_text", "wait_for_text"}
+VISUAL_LOCK_ACTIONS = {"observe_screen", "observe_ocr", "observe_vision", "observe_uia", "click_text", "wait_for_text"}
 
 
 def step_needs_visual_lock(step: WorkflowStep) -> bool:

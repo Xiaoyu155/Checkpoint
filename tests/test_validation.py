@@ -100,6 +100,40 @@ def test_validate_workflow_rejects_press_key_without_keys() -> None:
     assert any("Missing required parameter: keys or key" in issue.message for issue in result.issues)
 
 
+def test_validate_workflow_accepts_click_text_and_wait_for_text() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "ocr-actions",
+            "steps": [
+                {"id": "buy", "action": "click_text", "text": "购买服务", "mock_text": "购买服务"},
+                {"id": "wait", "action": "wait_for_text", "contains_text": "支付", "mock_text": "支付成功"},
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert result.valid
+
+
+def test_validate_workflow_rejects_text_actions_without_text() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "ocr-actions-bad",
+            "steps": [
+                {"id": "buy", "action": "click_text", "mock_text": "购买服务"},
+                {"id": "wait", "action": "wait_for_text", "mock_text": "支付成功"},
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert not result.valid
+    assert any("click_text requires" in issue.message for issue in result.issues)
+    assert any("wait_for_text requires" in issue.message for issue in result.issues)
+
+
 def test_validate_workflow_flags_invalid_wait_condition() -> None:
     workflow = workflow_from_dict(
         {

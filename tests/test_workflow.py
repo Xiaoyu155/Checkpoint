@@ -231,6 +231,60 @@ def test_workflow_runtime_allows_press_key_without_target(tmp_path) -> None:
     assert seen == {"target": "press_key", "reason": "global action does not require a target"}
 
 
+def test_workflow_runtime_click_text_uses_ocr_bounds(tmp_path) -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "click-text",
+            "steps": [
+                {
+                    "id": "buy",
+                    "action": "click_text",
+                    "text": "购买服务",
+                    "mock_text": "购买服务",
+                    "mock_bounds": {"left": 20, "top": 30, "width": 100, "height": 40},
+                },
+            ],
+        }
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path).run(workflow, run_profile="dry-run")
+
+    step = result.steps[0]
+    assert step.status == ActionStatus.DRY_RUN
+    assert step.action_result is not None
+    assert step.action_result.action == "click"
+    assert step.action_result.point.x == 70
+    assert step.action_result.point.y == 50
+
+
+def test_workflow_runtime_wait_for_text_uses_ocr_bounds(tmp_path) -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "wait-for-text",
+            "steps": [
+                {
+                    "id": "wait",
+                    "action": "wait_for_text",
+                    "text": "支付成功",
+                    "mock_text": "支付成功",
+                    "mock_bounds": {"left": 10, "top": 10, "width": 80, "height": 30},
+                    "timeout_seconds": 0.2,
+                    "poll_seconds": 0.05,
+                },
+            ],
+        }
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path).run(workflow, run_profile="dry-run")
+
+    step = result.steps[0]
+    assert step.status == ActionStatus.SUCCESS
+    assert step.action_result is not None
+    assert step.action_result.action == "wait_for_text"
+    assert step.action_result.point.x == 50
+    assert step.action_result.point.y == 25
+
+
 def test_workflow_runtime_respects_active_run_lock(tmp_path) -> None:
     workflow = parse_workflow_file("examples/minimal_testable_workflow.yaml")
     lock = RunLock(tmp_path)

@@ -113,6 +113,8 @@ def action_capabilities() -> tuple[Capability, ...]:
         "type": "Type text into a resolved target.",
         "paste": "Paste text into a resolved target.",
         "press_key": "Press a key or hotkey against a resolved target.",
+        "click_text": "OCR text, locate it on screen, and click its center.",
+        "wait_for_text": "Poll OCR until text appears on screen.",
     }
     return tuple(
         Capability(
@@ -124,7 +126,7 @@ def action_capabilities() -> tuple[Capability, ...]:
                 input_schema=action_input_schema(action),
                 output_schema={"type": "object", "fields": {"action_result": "ActionResult"}},
                 dry_run_supported=True,
-                risk_level="medium" if action in {"click", "press_key"} else "low",
+                risk_level="medium" if action in {"click", "press_key", "click_text"} else "low",
                 planner_visible=True,
             )
         for action in dispatcher.actions_available
@@ -455,6 +457,36 @@ def action_input_schema(action: str) -> dict[str, Any]:
                 "key": "string?",
                 "dry_run": "boolean?",
                 "allow_mock_target": "boolean?",
+            },
+        }
+    if action == "click_text":
+        return {
+            "type": "object",
+            "required": ["text|label|contains_text"],
+            "fields": {
+                "text": "string?",
+                "label": "string?",
+                "contains_text": "string?",
+                "engine": "auto|screen-ocr|winrt|tesseract|mock?",
+                "mock_text": "string?",
+                "window": "UIAWindowMatch?",
+                "crop": "CropRegion?",
+                "dry_run": "boolean?",
+            },
+        }
+    if action == "wait_for_text":
+        return {
+            "type": "object",
+            "required": ["text|contains_text"],
+            "fields": {
+                "text": "string?",
+                "contains_text": "string?",
+                "timeout_seconds": "number?",
+                "poll_seconds": "number?",
+                "engine": "auto|screen-ocr|winrt|tesseract|mock?",
+                "mock_text": "string?",
+                "window": "UIAWindowMatch?",
+                "crop": "CropRegion?",
             },
         }
     return {"type": "object", "fields": {}}
