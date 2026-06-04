@@ -42,6 +42,7 @@ class WorkflowRef:
     name: str
     path: Path
     relative_path: str
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -196,7 +197,7 @@ def copy_demo_assets(workspace: Workspace, *, overwrite: bool = False) -> None:
         checkout_workflow_path.write_text(text, encoding="utf-8")
 
 
-def discover_workflows(workspace: Workspace) -> tuple[WorkflowRef, ...]:
+def discover_workflows(workspace: Workspace, *, include_slow: bool = False) -> tuple[WorkflowRef, ...]:
     paths = sorted(
         [
             *workspace.workflows_dir.rglob("*.yaml"),
@@ -206,14 +207,25 @@ def discover_workflows(workspace: Workspace) -> tuple[WorkflowRef, ...]:
     )
     refs: list[WorkflowRef] = []
     for path in paths:
+        tags = workflow_tags(path)
+        if not include_slow and "slow" in tags:
+            continue
         refs.append(
             WorkflowRef(
                 name=path.stem,
                 path=path,
                 relative_path=path.relative_to(workspace.root).as_posix(),
+                tags=tags,
             )
         )
     return tuple(refs)
+
+
+def workflow_tags(path: Path) -> tuple[str, ...]:
+    try:
+        return tuple(str(tag) for tag in parse_workflow_file(path).tags)
+    except Exception:
+        return ()
 
 
 def find_workflow(workspace: Workspace, name_or_path: str) -> WorkflowRef:
@@ -240,9 +252,10 @@ def find_workflow(workspace: Workspace, name_or_path: str) -> WorkflowRef:
                 relative_path=candidate.relative_to(workspace.root).as_posix()
                 if candidate.is_relative_to(workspace.root)
                 else str(candidate),
+                tags=workflow_tags(candidate),
             )
 
-    for ref in discover_workflows(workspace):
+    for ref in discover_workflows(workspace, include_slow=True):
         if ref.name == name_or_path or ref.relative_path == name_or_path:
             return ref
     raise FileNotFoundError(f"Workflow not found in workspace: {name_or_path}")

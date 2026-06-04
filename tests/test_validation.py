@@ -100,6 +100,48 @@ def test_validate_workflow_rejects_press_key_without_keys() -> None:
     assert any("Missing required parameter: keys or key" in issue.message for issue in result.issues)
 
 
+def test_validate_workflow_accepts_post_action_observe() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "post-action-observe",
+            "steps": [
+                {
+                    "id": "submit",
+                    "action": "press_key",
+                    "keys": "enter",
+                    "post_action_observe": {"wait_seconds": 0, "assert_text": "提交成功", "mock_text": "提交成功"},
+                },
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert result.valid
+
+
+def test_validate_workflow_rejects_invalid_post_action_observe() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "post-action-observe-bad",
+            "steps": [
+                {
+                    "id": "submit",
+                    "action": "press_key",
+                    "keys": "enter",
+                    "post_action_observe": {"wait_seconds": "later", "assert_text": 123},
+                },
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert not result.valid
+    assert any("post_action_observe.wait_seconds" in issue.message for issue in result.issues)
+    assert any("post_action_observe.assert_text" in issue.message for issue in result.issues)
+
+
 def test_validate_workflow_accepts_click_text_and_wait_for_text() -> None:
     workflow = workflow_from_dict(
         {

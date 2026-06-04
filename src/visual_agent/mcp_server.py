@@ -55,7 +55,14 @@ def mcp_tools() -> list[Tool]:
             description="List available workspace workflows and latest run status.",
             inputSchema={
                 "type": "object",
-                "properties": {"workspace_root": {"type": "string"}},
+                "properties": {
+                    "workspace_root": {"type": "string"},
+                    "include_slow": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Include workflows tagged 'slow'. Default: skipped.",
+                    },
+                },
                 "required": ["workspace_root"],
             },
         ),
@@ -178,6 +185,11 @@ def mcp_tools() -> list[Tool]:
                     },
                     "max_workflows": {"type": "integer", "default": 10},
                     "run_profile": {"type": "string", "enum": ["dry-run", "supervised"], "default": "dry-run"},
+                    "include_slow": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Include workflows tagged 'slow'. Default: skipped.",
+                    },
                 },
                 "required": ["workspace_root"],
             },
@@ -226,16 +238,18 @@ async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> list[
 
 def list_workflows_payload(args: dict[str, Any]) -> dict[str, Any]:
     workspace = require_workspace(args)
+    include_slow = bool(args.get("include_slow", False))
     latest_by_workflow = {}
     for summary in list_run_summaries(workspace.runs_dir, limit=50):
         latest_by_workflow.setdefault(summary.workflow_name, summary)
     workflows = []
-    for ref in discover_workflows(workspace):
+    for ref in discover_workflows(workspace, include_slow=include_slow):
         latest = latest_by_workflow.get(ref.name)
         workflows.append(
             {
                 "name": ref.name,
                 "path": ref.relative_path,
+                "tags": list(ref.tags),
                 "last_run_status": latest.status if latest else None,
                 "last_run_id": latest.run_id if latest else None,
             }
@@ -477,12 +491,14 @@ def run_verification_payload(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw_workflows, list):
         raise ValueError("workflow must be a string or an array of strings")
     max_workflows = int(args.get("max_workflows") or 10)
+    include_slow = bool(args.get("include_slow", False))
     report = run_verify(
         workspace,
         tags=tuple(str(item) for item in raw_tags),
         workflow_names=tuple(str(item) for item in raw_workflows),
         max_workflows=max_workflows,
         run_profile=run_profile,
+        include_slow=include_slow,
     )
     content = verify_to_markdown(report)
     return {

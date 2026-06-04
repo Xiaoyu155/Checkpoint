@@ -362,6 +362,83 @@ def test_workflow_runtime_allows_press_key_without_target(tmp_path) -> None:
     assert seen == {"target": "press_key", "reason": "global action does not require a target"}
 
 
+def test_workflow_runtime_post_action_observe_asserts_text_after_action(tmp_path) -> None:
+    dispatcher = ActionDispatcher()
+
+    def fake_press_key(resolved, params, context):
+        return ActionResult(
+            action="press_key",
+            status=ActionStatus.SUCCESS,
+            target=resolved.target.display_name,
+            provider=resolved.evidence.provider,
+            message="fake press",
+        )
+
+    dispatcher.register("press_key", fake_press_key)
+    workflow = workflow_from_dict(
+        {
+            "name": "post-action-observe",
+            "steps": [
+                {
+                    "id": "submit",
+                    "action": "press_key",
+                    "keys": "enter",
+                    "post_action_observe": {
+                        "wait_seconds": 0,
+                        "mock_text": "提交成功",
+                        "assert_text": "提交成功",
+                    },
+                }
+            ],
+        }
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, dispatcher=dispatcher).run(workflow, run_profile="supervised")
+
+    step = result.steps[0]
+    assert step.status == ActionStatus.SUCCESS
+    assert step.metadata["post_action_observe"]["status"] == "observed"
+    assert step.metadata["post_action_observe"]["assertion"] == "matched"
+    assert step.metadata["post_action_observe"]["screenshot_path"].endswith("ocr-mock.png")
+
+
+def test_workflow_runtime_post_action_observe_fails_when_assert_text_missing(tmp_path) -> None:
+    dispatcher = ActionDispatcher()
+
+    def fake_press_key(resolved, params, context):
+        return ActionResult(
+            action="press_key",
+            status=ActionStatus.SUCCESS,
+            target=resolved.target.display_name,
+            provider=resolved.evidence.provider,
+            message="fake press",
+        )
+
+    dispatcher.register("press_key", fake_press_key)
+    workflow = workflow_from_dict(
+        {
+            "name": "post-action-observe-fail",
+            "steps": [
+                {
+                    "id": "submit",
+                    "action": "press_key",
+                    "keys": "enter",
+                    "post_action_observe": {
+                        "wait_seconds": 0,
+                        "mock_text": "仍在提交",
+                        "assert_text": "提交成功",
+                    },
+                }
+            ],
+        }
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, dispatcher=dispatcher).run(workflow, run_profile="supervised")
+
+    assert result.steps[0].status == ActionStatus.FAILED
+    assert "post_action_observe" in result.steps[0].message
+
+
 def test_workflow_runtime_click_text_uses_ocr_bounds(tmp_path) -> None:
     workflow = workflow_from_dict(
         {

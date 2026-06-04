@@ -365,6 +365,15 @@ class WorkflowRuntime:
             )
             context.actions[step.id] = action_result
             context.invalidate_observation_cache()
+            metadata: dict[str, Any] = {}
+            post_action_observe = run_post_action_observe(
+                params.get("post_action_observe"),
+                context,
+                step_id=step.id,
+                enabled=action_result.status == ActionStatus.SUCCESS,
+            )
+            if post_action_observe is not None:
+                metadata["post_action_observe"] = post_action_observe
             return WorkflowStepResult(
                 id=step.id,
                 action=action,
@@ -372,6 +381,7 @@ class WorkflowRuntime:
                 message=action_result.message,
                 resolved_target=resolved,
                 action_result=action_result,
+                metadata=metadata,
             )
 
         if action == "assert_text":
@@ -921,6 +931,57 @@ def is_retry_safe_action(action: str) -> bool:
         "assert_response",
         "assert_file_exists",
     }
+
+
+def run_post_action_observe(
+    raw_params: Any,
+    context: WorkflowContext,
+    *,
+    step_id: str,
+    enabled: bool,
+) -> dict[str, Any] | None:
+    if raw_params in (None, False):
+        return None
+    if raw_params is True:
+        params: dict[str, Any] = {}
+    elif isinstance(raw_params, dict):
+        params = dict(raw_params)
+    else:
+        raise ValueError("post_action_observe must be an object or boolean.")
+
+    if not enabled:
+        return {"status": "skipped", "reason": "action did not complete successfully"}
+
+    wait_seconds = max(0.0, float(params.get("wait_seconds", 0.3)))
+    if wait_seconds > 0:
+        sleep(wait_seconds)
+
+    from .ocr import observe_ocr as observe_ocr_image
+
+    observation = observe_ocr_image(
+        {key: value for key, value in params.items() if key not in {"assert_text", "wait_seconds"}},
+        context.run_dir,
+        synthetic_on_capture_fail=bool(params.get("synthetic_on_capture_fail", True)),
+    )
+    observation_id = f"{step_id}.post_action_observe"
+    context.observations[observation_id] = observation
+    metadata = {
+        "status": "observed",
+        "observation": observation_id,
+        "source": observation.source,
+        "screenshot_path": str(observation.screenshot_path) if observation.screenshot_path is not None else None,
+        "engine": observation.metadata.get("engine"),
+        "engine_available": observation.metadata.get("engine_available"),
+        "text_count": len(observation.elements),
+    }
+
+    assert_text = str(params.get("assert_text") or "").strip()
+    if assert_text:
+        if not observation_contains_text(observation, normalize_text(assert_text)):
+            raise AssertionError(f"post_action_observe: text not found after step '{step_id}': {assert_text}")
+        metadata["assert_text"] = assert_text
+        metadata["assertion"] = "matched"
+    return metadata
 
 
 SELF_CONTAINED_ACTIONS = {"press_key", "click_text", "wait_for_text"}

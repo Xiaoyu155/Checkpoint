@@ -432,7 +432,12 @@ def action_input_schema(action: str) -> dict[str, Any]:
         return {
             "type": "object",
             "required": ["target"],
-            "fields": {"target": "Target", "dry_run": "boolean?", "allow_mock_target": "boolean?"},
+            "fields": {
+                "target": "Target",
+                "dry_run": "boolean?",
+                "allow_mock_target": "boolean?",
+                "post_action_observe": "PostActionObserve?",
+            },
         }
     if action in {"type", "paste"}:
         return {
@@ -445,6 +450,7 @@ def action_input_schema(action: str) -> dict[str, Any]:
                 "sensitive": "boolean?",
                 "dry_run": "boolean?",
                 "allow_mock_target": "boolean?",
+                "post_action_observe": "PostActionObserve?",
             },
         }
     if action == "press_key":
@@ -457,6 +463,7 @@ def action_input_schema(action: str) -> dict[str, Any]:
                 "key": "string?",
                 "dry_run": "boolean?",
                 "allow_mock_target": "boolean?",
+                "post_action_observe": "PostActionObserve?",
             },
         }
     if action == "click_text":
@@ -472,6 +479,7 @@ def action_input_schema(action: str) -> dict[str, Any]:
                 "window": "UIAWindowMatch?",
                 "crop": "CropRegion?",
                 "dry_run": "boolean?",
+                "post_action_observe": "PostActionObserve?",
             },
         }
     if action == "wait_for_text":

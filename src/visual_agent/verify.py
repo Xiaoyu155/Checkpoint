@@ -37,8 +37,9 @@ def run_verify(
     run_profile: str = "dry-run",
     wait_lock: bool = False,
     lock_wait_seconds: float = 30.0,
+    include_slow: bool = False,
 ) -> VerificationReport:
-    workflows = [ref for ref in discover_workflows(workspace) if _has_tag(ref, tags)]
+    workflows = [ref for ref in discover_workflows(workspace, include_slow=include_slow) if _has_tag(ref, tags)]
     if workflow_names:
         requested = set(workflow_names)
         workflows = [ref for ref in workflows if ref.name in requested or ref.relative_path in requested]

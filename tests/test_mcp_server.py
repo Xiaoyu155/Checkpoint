@@ -452,6 +452,55 @@ def test_mcp_run_verification_can_target_one_workflow(tmp_path) -> None:
     assert "slow_visual_contract" not in payload["content"]
 
 
+def test_mcp_run_verification_skips_slow_by_default_and_includes_when_requested(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    for name, extra_tags in (("slow_visual_contract", "  - slow\n"), ("fast_smoke_contract", "")):
+        (workspace.workflows_dir / f"{name}.yaml").write_text(
+            "schema_version: 1\n"
+            "min_runtime_version: '0.1.0'\n"
+            f"name: {name}\n"
+            "version: 1\n"
+            "tags:\n"
+            "  - verification\n"
+            f"{extra_tags}"
+            "steps:\n"
+            "  - id: observe\n"
+            "    action: observe_fixture\n"
+            f"    path: {str(ROOT / 'examples' / 'fixtures' / 'login_page_observation.json').replace(chr(92), '/')}\n",
+            encoding="utf-8",
+        )
+
+    default_payload = content_payload(asyncio.run(call_tool("run_verification", {"workspace_root": str(workspace.root)})))
+    included_payload = content_payload(
+        asyncio.run(call_tool("run_verification", {"workspace_root": str(workspace.root), "include_slow": True}))
+    )
+
+    assert default_payload["total"] == 1
+    assert "fast_smoke_contract" in default_payload["content"]
+    assert "slow_visual_contract" not in default_payload["content"]
+    assert included_payload["total"] == 2
+    assert "slow_visual_contract" in included_payload["content"]
+
+
+def test_mcp_list_workflows_skips_slow_by_default_and_includes_when_requested(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    (workspace.workflows_dir / "fast.yaml").write_text(
+        "schema_version: 1\nname: fast\nversion: 1\ntags:\n  - verification\nsteps:\n  - id: observe\n    action: observe_ocr\n    mock_text: ready\n",
+        encoding="utf-8",
+    )
+    (workspace.workflows_dir / "slow.yaml").write_text(
+        "schema_version: 1\nname: slow\nversion: 1\ntags:\n  - verification\n  - slow\nsteps:\n  - id: observe\n    action: observe_ocr\n    mock_text: ready\n",
+        encoding="utf-8",
+    )
+
+    default_payload = list_workflows_payload({"workspace_root": str(workspace.root)})
+    included_payload = list_workflows_payload({"workspace_root": str(workspace.root), "include_slow": True})
+
+    assert [item["name"] for item in default_payload["workflows"]] == ["fast"]
+    assert {item["name"] for item in included_payload["workflows"]} == {"fast", "slow"}
+    assert next(item for item in included_payload["workflows"] if item["name"] == "slow")["tags"] == ["verification", "slow"]
+
+
 def test_mcp_workspace_root_rejects_path_traversal(tmp_path) -> None:
     with pytest.raises(ValueError):
         require_workspace({"workspace_root": str(tmp_path / ".." / "workspace")})

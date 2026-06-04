@@ -12,9 +12,10 @@ ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = str(ROOT / "examples" / "fixtures" / "login_page_observation.json").replace(chr(92), "/")
 
 
-def write_workflow(workspace, name: str, *, tagged: bool = True, failing: bool = False) -> Path:
+def write_workflow(workspace, name: str, *, tagged: bool = True, failing: bool = False, extra_tags: tuple[str, ...] = ()) -> Path:
     path = workspace.workflows_dir / f"{name}.yaml"
-    tags = "tags:\n  - verification\n" if tagged else ""
+    tag_lines = ["verification", *extra_tags] if tagged else list(extra_tags)
+    tags = "tags:\n" + "".join(f"  - {tag}\n" for tag in tag_lines) if tag_lines else ""
     assert_step = "  - id: assert_title\n    action: assert_text\n    text: missing text\n" if failing else (
         "  - id: assert_title\n    action: assert_text\n    text: 客户管理系统\n"
     )
@@ -151,6 +152,28 @@ def test_run_verify_can_target_specific_workflow(tmp_path) -> None:
 
     assert report.total == 1
     assert report.results[0].name == "fast_smoke_contract"
+
+
+def test_run_verify_skips_slow_workflows_by_default(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_workflow(workspace, "slow_visual_contract", extra_tags=("slow",))
+    write_workflow(workspace, "fast_smoke_contract")
+
+    report = run_verify(workspace)
+
+    assert report.total == 1
+    assert report.results[0].name == "fast_smoke_contract"
+
+
+def test_run_verify_includes_slow_workflows_when_requested(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_workflow(workspace, "slow_visual_contract", extra_tags=("slow",))
+    write_workflow(workspace, "fast_smoke_contract")
+
+    report = run_verify(workspace, include_slow=True)
+
+    assert report.total == 2
+    assert {item.name for item in report.results} == {"slow_visual_contract", "fast_smoke_contract"}
 
 
 def test_run_verify_respects_custom_max_workflows(tmp_path) -> None:

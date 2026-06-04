@@ -315,6 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--run-profile", choices=["dry-run", "supervised"], default="dry-run")
     verify.add_argument("--wait-lock", action="store_true", help="Wait for workflow locks instead of failing immediately.")
     verify.add_argument("--lock-wait-seconds", type=float, default=30.0, help="Maximum seconds to wait when queued. Default: 30.")
+    verify.add_argument("--include-slow", action="store_true", help="Include workflows tagged 'slow'. Default: skipped.")
     verify.add_argument("--for", dest="target_agent", default="codex", help="Target coding agent label.")
     verify.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
@@ -539,6 +540,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ws_list = subparsers.add_parser("workspace-list", help="List workflows in a workspace.")
     ws_list.add_argument("--root", required=True, help="Workspace root directory.")
+    ws_list.add_argument("--include-slow", action="store_true", help="Include workflows tagged 'slow'. Default: skipped.")
 
     ws_validate = subparsers.add_parser("workspace-validate", help="Validate all workflows in a workspace.")
     ws_validate.add_argument("--root", required=True, help="Workspace root directory.")
@@ -1350,6 +1352,7 @@ def main(argv: list[str] | None = None) -> int:
             run_profile=args.run_profile,
             wait_lock=args.wait_lock,
             lock_wait_seconds=args.lock_wait_seconds,
+            include_slow=args.include_slow,
         )
         if args.format == "markdown":
             print(verify_to_markdown(report))
@@ -1357,7 +1360,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(to_jsonable(report), ensure_ascii=False, indent=2))
         return 0 if report.failed == 0 else 1
     if args.command == "workspace-list":
-        refs = discover_workflows(open_workspace(args.root))
+        refs = discover_workflows(open_workspace(args.root), include_slow=args.include_slow)
         print(json.dumps(to_jsonable(refs), ensure_ascii=False, indent=2))
         return 0
     if args.command == "workspace-validate":

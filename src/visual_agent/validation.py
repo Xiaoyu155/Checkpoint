@@ -148,6 +148,7 @@ def validate_workflow(
         validate_value_params(step.id, step.action, step.params, issues)
         validate_press_key(step.id, step.action, step.params, issues)
         validate_text_action(step.id, step.action, step.params, issues)
+        validate_post_action_observe(step.id, step.action, step.params, issues)
         validate_text_contract(step.id, step.action, step.params, issues)
         validate_wait_for(step.id, step.action, step.params, issues)
         validate_retry_safety(step.id, step.action, step.params, issues)
@@ -226,6 +227,24 @@ def validate_text_action(step_id: str, action: str, params: dict[str, Any], issu
         issues.append(ValidationIssue("error", step_id, "click_text requires text, label, or contains_text."))
     if action == "wait_for_text" and not any(key in params for key in ("text", "contains_text")):
         issues.append(ValidationIssue("error", step_id, "wait_for_text requires text or contains_text."))
+
+
+def validate_post_action_observe(step_id: str, action: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:
+    if action not in MUTATING_ACTIONS or "post_action_observe" not in params:
+        return
+    value = params.get("post_action_observe")
+    if isinstance(value, bool) or value is None:
+        return
+    if not isinstance(value, dict):
+        issues.append(ValidationIssue("error", step_id, "post_action_observe must be an object or boolean."))
+        return
+    if "assert_text" in value and not isinstance(value.get("assert_text"), str):
+        issues.append(ValidationIssue("error", step_id, "post_action_observe.assert_text must be a string."))
+    if "wait_seconds" in value:
+        try:
+            float(value["wait_seconds"])
+        except (TypeError, ValueError):
+            issues.append(ValidationIssue("error", step_id, "post_action_observe.wait_seconds must be a number."))
 
 
 def validate_text_contract(step_id: str, action: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:
