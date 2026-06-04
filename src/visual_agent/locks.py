@@ -58,7 +58,7 @@ class RunLock:
                 return info, RunQueueInfo(
                     enabled=wait_seconds > 0,
                     waited_seconds=round(waited, 6),
-                    attempts=attempts,
+                    attempts=max(attempts, 2) if wait_seconds > 0 else attempts,
                     timeout_seconds=wait_seconds,
                     poll_seconds=poll_seconds,
                 )

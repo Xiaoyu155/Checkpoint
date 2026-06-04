@@ -32,7 +32,11 @@ mcp = [
 ]
 
 [project.scripts]
+visual-agent = "visual_agent.cli:main"
 visual-agent-mcp = "visual_agent.mcp_server:main"
+
+[project.entry-points."pytest11"]
+visual_agent = "visual_agent.pytest_plugin"
 
 [project.urls]
 Homepage = "https://github.com/Xiaoyu155/visual-agent"
@@ -45,4 +49,5 @@ pythonpath = ["src"]
 markers = [
     "e2e: end-to-end tests that run real CLI/workflows",
     "browser: tests that require Playwright Chromium",
+    "slow: tests using OCR/VLM or other slow visual integrations",
 ]

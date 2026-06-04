@@ -5,13 +5,14 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from os import chdir
 from pathlib import Path
 from time import strftime, time
 from typing import Any
 
 from .capabilities import build_atomic_capability_manifest
+from .locks import RunLock, lock_to_dict, queue_to_dict
 from .models import to_jsonable
 from .preflight import run_preflight
 from .reports import (
@@ -407,17 +408,28 @@ def run_workspace_workflow(
     input_check = validate_workflow_inputs(workflow, inputs or {}, sensitive_fields=sensitive_fields)
     if not input_check["ok"]:
         raise ValueError(str(input_check["message"]))
-    if preflight:
-        preflight_result = run_preflight(
-            workflow,
-            strict=strict_preflight,
-            allow_high_risk=allow_high_risk,
+    outer_lock = None
+    outer_lock_info = None
+    outer_queue_info = None
+    if use_lock and queue_when_locked:
+        outer_lock = RunLock(workspace.runs_dir, ttl_seconds=lock_ttl_seconds)
+        outer_lock_info, outer_queue_info = outer_lock.acquire_with_wait(
+            owner=f"{workflow.name}:workspace-run",
+            wait_seconds=lock_wait_seconds,
+            poll_seconds=lock_poll_seconds,
         )
-        if not preflight_result.ok:
-            raise RuntimeError(f"Preflight failed for workflow '{workflow.name}'.")
-    runtime = WorkflowRuntime(output_dir=workspace.runs_dir)
+
     previous_cwd = Path.cwd()
     try:
+        if preflight:
+            preflight_result = run_preflight(
+                workflow,
+                strict=strict_preflight,
+                allow_high_risk=allow_high_risk,
+            )
+            if not preflight_result.ok:
+                raise RuntimeError(f"Preflight failed for workflow '{workflow.name}'.")
+        runtime = WorkflowRuntime(output_dir=workspace.runs_dir)
         chdir(workspace.root)
         result = runtime.run(
             workflow,
@@ -427,12 +439,18 @@ def run_workspace_workflow(
             inputs=inputs or {},
             sensitive_fields=sensitive_fields,
             resume_from=resume_from,
-            use_lock=use_lock,
+            use_lock=use_lock and outer_lock is None,
             lock_ttl_seconds=lock_ttl_seconds,
-            queue_when_locked=queue_when_locked,
+            queue_when_locked=queue_when_locked and outer_lock is None,
             lock_wait_seconds=lock_wait_seconds,
             lock_poll_seconds=lock_poll_seconds,
         )
+        if outer_lock_info is not None and outer_queue_info is not None:
+            result = replace(
+                result,
+                run_lock=lock_to_dict(outer_lock_info),
+                run_queue=queue_to_dict(outer_queue_info),
+            )
         if export_report:
             export_workspace_run_report(workspace, result.run_dir)
         try:
@@ -444,6 +462,8 @@ def run_workspace_workflow(
         return result
     finally:
         chdir(previous_cwd)
+        if outer_lock is not None:
+            outer_lock.release()
 
 
 def workspace_run_summaries(workspace: Workspace, *, limit: int = 20) -> tuple[RunSummary, ...]:

@@ -51,6 +51,9 @@ def default_provider_registry() -> ProviderRegistry:
     registry.register("observe_vision", observe_vision)
     registry.register("observe_fixture", observe_fixture)
     registry.register("observe_html", observe_html)
+    from .plugins import load_provider_plugins
+
+    load_provider_plugins(registry)
     return registry
 
 

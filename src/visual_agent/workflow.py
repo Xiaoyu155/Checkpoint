@@ -117,6 +117,17 @@ class WorkflowRuntime:
     ) -> WorkflowRunResult:
         profile = normalize_run_profile(str(run_profile) if run_profile is not None else None, dry_run=dry_run)
         lock = RunLock(self.audit.root_dir, ttl_seconds=lock_ttl_seconds) if use_lock else None
+        lock_info = None
+        queue_info = None
+        if lock is not None and resume_from is None:
+            if queue_when_locked:
+                lock_info, queue_info = lock.acquire_with_wait(
+                    owner=f"{workflow.name}:pending",
+                    wait_seconds=lock_wait_seconds,
+                    poll_seconds=lock_poll_seconds,
+                )
+            else:
+                lock_info = lock.acquire(owner=f"{workflow.name}:pending")
         if resume_from is not None:
             run_dir = Path(resume_from)
             run_id = run_dir.name
@@ -128,9 +139,7 @@ class WorkflowRuntime:
             state_store = StateStore(run_dir)
             completed_steps = []
             state_store.save(WorkflowState(run_id=run_id, workflow_name=workflow.name, completed_steps=()))
-        lock_info = None
-        queue_info = None
-        if lock is not None:
+        if lock is not None and lock_info is None:
             if queue_when_locked:
                 lock_info, queue_info = lock.acquire_with_wait(
                     owner=f"{workflow.name}:{run_id}",

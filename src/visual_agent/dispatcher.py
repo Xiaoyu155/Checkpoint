@@ -33,6 +33,9 @@ class ActionDispatcher:
         self.register("press_key", self._press_key)
         self.register("click_text", self._click_text)
         self.register("wait_for_text", self._wait_for_text)
+        from .plugins import load_action_plugins
+
+        load_action_plugins(self)
 
     def register(self, action: str, handler: ActionHandler) -> None:
         self._handlers[action] = handler
