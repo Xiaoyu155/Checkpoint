@@ -5,7 +5,7 @@ from visual_agent.models import Bounds, Observation, ProviderKind
 from visual_agent.uia import UIAWindowMatch
 import pytest
 
-from visual_agent.capture import crop_image
+from visual_agent.capture import capture_window_params, crop_image
 from visual_agent.providers import ProviderContext, ProviderRegistry, default_provider_registry, normalize_url, route_handler
 
 
@@ -133,6 +133,45 @@ def test_screen_provider_foregrounds_before_capture_and_minimizes_after(tmp_path
     assert calls["minimize"] == [123]
     assert observation.metadata["uia_window_pre_capture"]["foregrounded"] is True
     assert observation.metadata["uia_window_post_capture"] == {"action": "minimize", "status": "success"}
+
+
+def test_screen_provider_normalizes_top_level_window_title_candidates(tmp_path, monkeypatch) -> None:
+    calls = {"titles": [], "minimize": []}
+
+    def fake_match(params, *_args, **_kwargs):
+        calls["titles"].append(tuple(params["title_contains_any"]))
+        return UIAWindowMatch(
+            bounds=Bounds(left=0, top=0, width=500, height=400),
+            native_window_handle=456,
+            name="微信开发者工具",
+        )
+
+    monkeypatch.setattr("visual_agent.uia.find_uia_window_match", fake_match)
+    monkeypatch.setattr("visual_agent.uia.minimize_window", lambda handle: calls["minimize"].append(handle) or True)
+
+    registry = default_provider_registry()
+    observation = registry.observe(
+        "observe_screen",
+        {
+            "window_title_candidates": ["微信开发者工具", "Chrome"],
+            "fallback_to_screen": False,
+        },
+        ProviderContext(run_dir=tmp_path, synthetic_on_capture_fail=True),
+    )
+
+    assert calls["titles"]
+    assert calls["titles"][0] == ("微信开发者工具", "Chrome")
+    assert calls["minimize"] == [456]
+    assert observation.metadata["uia_window_pre_capture"]["foregrounded"] is True
+    assert observation.metadata["uia_window_post_capture"] == {"action": "minimize", "status": "success"}
+
+
+def test_capture_window_params_defaults_to_foreground_and_minimize_for_title_aliases() -> None:
+    params = capture_window_params({"window_title_contains": "Chrome"})
+
+    assert params["title_contains"] == "Chrome"
+    assert params["bring_to_front"] is True
+    assert params["post_capture"] == "minimize"
 
 
 def test_screen_provider_can_keep_foregrounded_window_open(tmp_path, monkeypatch) -> None:

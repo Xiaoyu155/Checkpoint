@@ -132,7 +132,7 @@ def apply_capture_region(
     current = image
     current_path = source_path
 
-    uia_window = params.get("uia_window") or params.get("window")
+    uia_window = capture_window_params(params)
     if isinstance(uia_window, dict):
         from .uia import find_uia_window_match
 
@@ -187,8 +187,65 @@ def public_capture_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in metadata.items() if not str(key).startswith("_")}
 
 
+def capture_window_params(params: dict[str, Any]) -> dict[str, Any] | None:
+    raw = params.get("uia_window") or params.get("window")
+    if isinstance(raw, dict):
+        window = dict(raw)
+    else:
+        window = {}
+    aliases = {
+        "window_title_contains": "title_contains",
+        "title_contains": "title_contains",
+        "window_title_contains_any": "title_contains_any",
+        "title_contains_any": "title_contains_any",
+        "window_title_candidates": "title_contains_any",
+        "window_name_contains": "name_contains",
+        "name_contains": "name_contains",
+        "window_class_contains": "class_contains",
+        "class_contains": "class_contains",
+        "uia_control_type": "control_type",
+        "control_type": "control_type",
+    }
+    for source, target in aliases.items():
+        if source in params and target not in window:
+            window[target] = params[source]
+    for key in (
+        "max_depth",
+        "max_elements",
+        "min_width",
+        "min_height",
+        "min_area",
+        "bring_to_front",
+        "foreground",
+        "post_capture",
+        "after_capture",
+        "minimize_after",
+        "minimize_after_capture",
+        "keep_open",
+    ):
+        if key in params and key not in window:
+            window[key] = params[key]
+    has_matcher = any(
+        key in window
+        for key in (
+            "title_contains",
+            "title_contains_any",
+            "name_contains",
+            "class_contains",
+            "control_type",
+        )
+    )
+    if not has_matcher:
+        return None
+    if "bring_to_front" not in window and "foreground" not in window:
+        window["bring_to_front"] = True
+    if "post_capture" not in window and "after_capture" not in window and "keep_open" not in window:
+        window["post_capture"] = "minimize"
+    return window
+
+
 def prepare_capture_window(params: dict[str, Any]) -> dict[str, Any]:
-    uia_window = params.get("uia_window") or params.get("window")
+    uia_window = capture_window_params(params)
     if not isinstance(uia_window, dict):
         return {}
     if not bool(uia_window.get("bring_to_front") or uia_window.get("foreground")):
@@ -236,7 +293,7 @@ def prepare_capture_window(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def finalize_capture_window(params: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
-    uia_window = params.get("uia_window") or params.get("window")
+    uia_window = capture_window_params(params)
     result: dict[str, Any] = {}
 
     # Minimize target window by default after an explicit bring-to-front capture.

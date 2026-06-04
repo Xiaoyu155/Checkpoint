@@ -114,6 +114,70 @@ affects:
   - templates/checkout.html
 ```
 
+## Real Interaction Checks
+
+Codex must not treat unit tests as a substitute for product interaction. When a
+task changes UI, forms, navigation, checkout, auth, or visible copy, run at
+least one Visual Agent workflow that actually observes and operates the UI.
+
+Use `dry-run` first to validate selectors and safety, then use `supervised` for
+real low/medium-risk clicks and typing:
+
+```powershell
+python -m visual_agent.cli run-workflow --file examples/workflows/form-fill/browser_form_workflow.yaml --inputs-file examples/inputs/demo_login.json --run-profile dry-run
+python -m visual_agent.cli run-workflow --file examples/workflows/form-fill/browser_form_workflow.yaml --inputs-file examples/inputs/demo_login.json --run-profile supervised
+```
+
+For browser pages, prefer `observe_browser` plus semantic targets. Visual Agent
+captures the DOM, finds controls by label/text/role/selector, and executes
+native Playwright `click`/`fill` actions. This is faster and more reliable than
+OCR for web UI:
+
+```yaml
+- id: observe
+  action: observe_browser
+  url: http://localhost:3000
+- id: fill_name
+  action: paste
+  target:
+    label: 用户名
+    role: input
+  value: demo
+- id: submit
+  action: click
+  target:
+    text: 登录
+    role: button
+- id: reread
+  action: observe_browser
+  reuse_page: true
+- id: assert_result
+  action: assert_product_contract
+  required_sections: ["首页"]
+  no_error_state: true
+```
+
+For desktop, mini program simulators, or canvas-like UI where DOM is not
+available, use OCR-based actions:
+
+```yaml
+- id: buy
+  action: click_text
+  text: 购买服务
+  window_title_candidates: ["微信开发者工具", "Chrome"]
+- id: fill
+  action: paste
+  target:
+    text: 输入框
+    preferred: [ocr]
+  value: demo
+```
+
+Window title aliases such as `window_title_contains` and
+`window_title_candidates` are treated as target-window capture parameters.
+Visual Agent foregrounds the target, captures it, minimizes it after capture,
+and restores the previously active window unless `post_capture: keep` is set.
+
 ## Visual Desktop Behavior
 
 Visual Agent uses a global visual lock for screen/OCR/VLM/UIA foreground
