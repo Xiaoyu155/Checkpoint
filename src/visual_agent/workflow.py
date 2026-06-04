@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic, sleep
@@ -23,6 +25,14 @@ from .models import (
     to_jsonable,
 )
 from .providers import ProviderContext, ProviderRegistry, default_provider_registry
+from .product_state import (
+    ai_quality_failure_message,
+    evaluate_ai_response_quality,
+    evaluate_no_error_state,
+    evaluate_product_contract,
+    observation_to_state,
+    product_contract_failure_message,
+)
 from .run_profile import RunProfileName, ensure_step_allowed, normalize_run_profile, step_should_dry_run
 from .selector import SelectorResolver
 from .state import StateStore, WorkflowState, hydrate_context_from_completed_steps
@@ -304,6 +314,28 @@ class WorkflowRuntime:
         ensure_step_allowed(run_profile, action, params)
         step_dry_run = step_should_dry_run(run_profile, action, params)
 
+        if action == "observe_state":
+            source_observation = context.observations.get(str(params.get("observation", ""))) or context.latest_observation
+            state = observation_to_state(source_observation, max_text_items=int(params.get("max_text_items", 80) or 80))
+            observation = Observation(
+                provider=source_observation.provider,
+                source=source_observation.source,
+                screenshot_path=source_observation.screenshot_path,
+                width=source_observation.width,
+                height=source_observation.height,
+                elements=tuple({"kind": key, "value": value} for key, value in state.items() if isinstance(value, (tuple, list)) and value),
+                metadata={"provider": "state", "state": state, "source_provider": source_observation.provider.value},
+            )
+            context.observations[step.id] = observation
+            return WorkflowStepResult(
+                id=step.id,
+                action=action,
+                status=ActionStatus.SUCCESS,
+                message="state observed",
+                observation=observation,
+                metadata={"state": state},
+            )
+
         if action.startswith("observe_"):
             cache_enabled = params.get("cache") is not False
             cache_key = context.observation_cache_key(action, params) if cache_enabled else ""
@@ -412,6 +444,48 @@ class WorkflowRuntime:
                 message="text contract matched",
                 metadata={"text_contract": contract},
             )
+
+        if action == "assert_no_error":
+            observation = context.observations.get(str(params.get("observation", ""))) or context.latest_observation
+            result = evaluate_no_error_state(observation, network_events=context.resources.get("network_events", []))
+            if not result["passed"]:
+                raise AssertionError("error state detected")
+            return WorkflowStepResult(
+                id=step.id,
+                action=action,
+                status=ActionStatus.SUCCESS,
+                message="no error state detected",
+                metadata={"no_error": result},
+            )
+
+        if action == "assert_product_contract":
+            observation = context.observations.get(str(params.get("observation", ""))) or context.latest_observation
+            contract = evaluate_product_contract(observation, params, network_events=context.resources.get("network_events", []))
+            if not contract.passed:
+                raise AssertionError(product_contract_failure_message(contract))
+            return WorkflowStepResult(
+                id=step.id,
+                action=action,
+                status=ActionStatus.SUCCESS,
+                message="product contract matched",
+                metadata={"product_contract": contract},
+            )
+
+        if action == "assert_ai_response_quality":
+            observation = context.observations.get(str(params.get("observation", ""))) or context.latest_observation_or_none
+            result = evaluate_ai_response_quality(params, observation=observation)
+            if not result.passed:
+                raise AssertionError(ai_quality_failure_message(result))
+            return WorkflowStepResult(
+                id=step.id,
+                action=action,
+                status=ActionStatus.SUCCESS,
+                message="AI response quality matched",
+                metadata={"ai_response_quality": result},
+            )
+
+        if action == "request_api":
+            return self._request_api(step, context, dry_run=step_dry_run)
 
         if action == "assert_response":
             event = wait_for_network_response(
@@ -673,6 +747,68 @@ class WorkflowRuntime:
             metadata=actual,
         )
 
+    def _request_api(self, step: WorkflowStep, context: WorkflowContext, *, dry_run: bool) -> WorkflowStepResult:
+        params = step.params
+        url = str(require_param(params, "url"))
+        method = str(params.get("method") or "GET").upper()
+        headers = {str(key): str(value) for key, value in dict(params.get("headers") or {}).items()}
+        body = api_request_body(params)
+        timeout = float(params.get("timeout_seconds", 10.0))
+        event: dict[str, Any] = {
+            "type": "response",
+            "url": url,
+            "method": method,
+            "status": 0,
+            "ok": False,
+            "dry_run": dry_run,
+        }
+        if dry_run:
+            status = int(params.get("mock_status", 200) or 200)
+            event.update({"status": status, "ok": status < 400})
+            append_network_event(context, event)
+            return WorkflowStepResult(
+                id=step.id,
+                action=step.action,
+                status=ActionStatus.DRY_RUN,
+                message=f"would request {method} {url}",
+                metadata={"event": event},
+            )
+        try:
+            request = urllib.request.Request(url, data=body, headers=headers, method=method)
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                raw = response.read(max(0, int(params.get("max_body_bytes", 4096) or 4096)))
+                status = int(getattr(response, "status", response.getcode()))
+                event.update(
+                    {
+                        "status": status,
+                        "ok": status < 400,
+                        "response_body_preview": raw.decode("utf-8", errors="replace"),
+                        "content_type": response.headers.get("content-type"),
+                    }
+                )
+        except urllib.error.HTTPError as exc:
+            raw = exc.read(max(0, int(params.get("max_body_bytes", 4096) or 4096)))
+            event.update(
+                {
+                    "status": int(exc.code),
+                    "ok": False,
+                    "response_body_preview": raw.decode("utf-8", errors="replace"),
+                    "failure": str(exc),
+                }
+            )
+        except Exception as exc:
+            event.update({"type": "request_failed", "failure": str(exc)})
+        append_network_event(context, event)
+        if event["type"] == "request_failed":
+            raise AssertionError(f"API request failed: {event['failure']}")
+        return WorkflowStepResult(
+            id=step.id,
+            action=step.action,
+            status=ActionStatus.SUCCESS,
+            message=f"API response {event['status']}: {method} {url}",
+            metadata={"event": event},
+        )
+
     def _save_storage_state(self, step: WorkflowStep, context: WorkflowContext, *, dry_run: bool) -> WorkflowStepResult:
         browser_context = context.resources.get("playwright_context")
         if browser_context is None:
@@ -930,9 +1066,31 @@ def retry_config(params: dict[str, Any]) -> dict[str, float | int]:
 def is_retry_safe_action(action: str) -> bool:
     return action.startswith("observe_") or action == "wait_for" or action in {
         "assert_text",
+        "assert_text_contract",
+        "assert_no_error",
+        "assert_product_contract",
+        "assert_ai_response_quality",
         "assert_response",
         "assert_file_exists",
     }
+
+
+def api_request_body(params: dict[str, Any]) -> bytes | None:
+    if "body" in params:
+        value = params["body"]
+    elif "json" in params:
+        value = json.dumps(params["json"], ensure_ascii=False)
+    else:
+        return None
+    if isinstance(value, bytes):
+        return value
+    return str(value).encode("utf-8")
+
+
+def append_network_event(context: WorkflowContext, event: dict[str, Any]) -> None:
+    events = context.resources.setdefault("network_events", [])
+    if isinstance(events, list):
+        events.append(event)
 
 
 def run_post_action_observe(

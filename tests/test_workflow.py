@@ -104,6 +104,130 @@ def test_close_context_resources_is_silent_on_no_close_method(tmp_path) -> None:
     close_context_resources(context)
 
 
+def product_page_observation(params, context) -> Observation:
+    return Observation(
+        provider=ProviderKind.DOM,
+        source="product",
+        elements=(
+            {"role": "button", "text": "购买服务"},
+            {"role": "button", "text": "联系客服"},
+            {"text": "首页 会员权益 退款说明"},
+        ),
+        metadata={"title": "会员页"},
+    )
+
+
+def error_page_observation(params, context) -> Observation:
+    return Observation(provider=ProviderKind.DOM, source="product", elements=({"text": "请求失败，请稍后重试"},))
+
+
+def test_workflow_observe_state_returns_structured_page_state(tmp_path) -> None:
+    registry = ProviderRegistry()
+    registry.register("observe_fixture", product_page_observation)
+    runtime = WorkflowRuntime(tmp_path, providers=registry)
+    workflow = Workflow(
+        name="state",
+        version=1,
+        steps=(
+            WorkflowStep("observe", "observe_fixture", {}),
+            WorkflowStep("state", "observe_state", {"max_text_items": 5}),
+        ),
+    )
+
+    result = runtime.run(workflow, dry_run=True)
+
+    assert result.steps[-1].status == ActionStatus.SUCCESS
+    state = result.steps[-1].metadata["state"]
+    assert state["title"] == "会员页"
+    assert state["buttons"] == ("购买服务", "联系客服")
+    assert state["primary_actions"] == ("购买服务", "联系客服")
+
+
+def test_workflow_assert_product_contract_passes_required_sections_and_actions(tmp_path) -> None:
+    registry = ProviderRegistry()
+    registry.register("observe_fixture", product_page_observation)
+    runtime = WorkflowRuntime(tmp_path, providers=registry)
+    workflow = Workflow(
+        name="contract",
+        version=1,
+        steps=(
+            WorkflowStep("observe", "observe_fixture", {}),
+            WorkflowStep(
+                "contract",
+                "assert_product_contract",
+                {
+                    "required_sections": ["会员权益", "退款说明"],
+                    "must_have_actions": ["购买服务"],
+                    "forbidden_entries": ["旧功能入口"],
+                    "no_error_state": True,
+                    "min_primary_actions": 1,
+                },
+            ),
+        ),
+    )
+
+    result = runtime.run(workflow, dry_run=True)
+
+    assert result.steps[-1].status == ActionStatus.SUCCESS
+    assert result.steps[-1].metadata["product_contract"].passed is True
+
+
+def test_workflow_assert_no_error_fails_on_visible_error_state(tmp_path) -> None:
+    registry = ProviderRegistry()
+    registry.register("observe_fixture", error_page_observation)
+    runtime = WorkflowRuntime(tmp_path, providers=registry)
+    workflow = Workflow(
+        name="error",
+        version=1,
+        steps=(
+            WorkflowStep("observe", "observe_fixture", {}),
+            WorkflowStep("assert", "assert_no_error", {}),
+        ),
+    )
+
+    result = runtime.run(workflow, dry_run=True)
+
+    assert result.steps[-1].status == ActionStatus.FAILED
+    assert "error state detected" in result.steps[-1].message
+
+
+def test_workflow_assert_ai_response_quality_fails_template_answer(tmp_path) -> None:
+    runtime = WorkflowRuntime(tmp_path)
+    workflow = Workflow(
+        name="ai-quality",
+        version=1,
+        steps=(
+            WorkflowStep(
+                "quality",
+                "assert_ai_response_quality",
+                {"response": "很抱歉 很抱歉 很抱歉 很抱歉 很抱歉 很抱歉", "question": "怎么购买服务"},
+            ),
+        ),
+    )
+
+    result = runtime.run(workflow, dry_run=True)
+
+    assert result.steps[-1].status == ActionStatus.FAILED
+    assert "AI response quality failed" in result.steps[-1].message
+
+
+def test_workflow_request_api_dry_run_feeds_assert_response(tmp_path) -> None:
+    runtime = WorkflowRuntime(tmp_path)
+    workflow = Workflow(
+        name="api-contract",
+        version=1,
+        steps=(
+            WorkflowStep("api", "request_api", {"url": "https://example.test/api/orders", "method": "POST", "mock_status": 201}),
+            WorkflowStep("assert", "assert_response", {"url_contains": "/api/orders", "method": "POST", "status": 201}),
+        ),
+    )
+
+    result = runtime.run(workflow, dry_run=True)
+
+    assert result.steps[0].status == ActionStatus.DRY_RUN
+    assert result.steps[-1].status == ActionStatus.SUCCESS
+
+
 def test_workflow_from_dict_parses_schema_metadata() -> None:
     workflow = workflow_from_dict(
         {

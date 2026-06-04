@@ -15,6 +15,7 @@ SUPPORTED_ACTIONS = {
     "observe_uia",
     "observe_ocr",
     "observe_vision",
+    "observe_state",
     "observe_fixture",
     "observe_html",
     "resolve",
@@ -24,8 +25,12 @@ SUPPORTED_ACTIONS = {
     "press_key",
     "click_text",
     "wait_for_text",
+    "request_api",
     "assert_text",
     "assert_text_contract",
+    "assert_no_error",
+    "assert_product_contract",
+    "assert_ai_response_quality",
     "assert_response",
     "expect_download",
     "assert_file_exists",
@@ -43,12 +48,21 @@ REQUIRED_PARAMS = {
     "paste": ("target",),
     "expect_download": ("target",),
     "assert_text": ("text",),
+    "request_api": ("url",),
     "wait_for": ("condition",),
 }
 
-ASSERTION_ACTIONS = {"assert_text", "assert_text_contract", "assert_response", "assert_file_exists"}
+ASSERTION_ACTIONS = {
+    "assert_text",
+    "assert_text_contract",
+    "assert_no_error",
+    "assert_product_contract",
+    "assert_ai_response_quality",
+    "assert_response",
+    "assert_file_exists",
+}
 HIGH_RISK_ACTIONS = {"save_storage_state"}
-MUTATING_ACTIONS = {"click", "type", "paste", "press_key", "click_text", "expect_download", "save_storage_state"}
+MUTATING_ACTIONS = {"click", "type", "paste", "press_key", "click_text", "request_api", "expect_download", "save_storage_state"}
 SENSITIVE_NAME_HINTS = ("password", "passwd", "pwd", "token", "secret", "key", "cookie", "id_card", "ssn")
 
 
@@ -132,10 +146,13 @@ def validate_workflow(
             "expect_download",
             "assert_text",
             "assert_text_contract",
+            "assert_no_error",
+            "assert_product_contract",
+            "assert_ai_response_quality",
             "assert_response",
             "save_storage_state",
             "wait_for",
-        } and not has_observation:
+        } and not has_observation and not (step.action == "assert_ai_response_quality" and any(key in step.params for key in ("text", "response"))):
             issues.append(
                 ValidationIssue(
                     "warning",
@@ -150,6 +167,9 @@ def validate_workflow(
         validate_text_action(step.id, step.action, step.params, issues)
         validate_post_action_observe(step.id, step.action, step.params, issues)
         validate_text_contract(step.id, step.action, step.params, issues)
+        validate_product_contract(step.id, step.action, step.params, issues)
+        validate_ai_quality(step.id, step.action, step.params, issues)
+        validate_request_api(step.id, step.action, step.params, issues)
         validate_wait_for(step.id, step.action, step.params, issues)
         validate_retry_safety(step.id, step.action, step.params, issues)
         if strict:
@@ -274,6 +294,46 @@ def validate_text_contract(step_id: str, action: str, params: dict[str, Any], is
         )
 
 
+def validate_product_contract(step_id: str, action: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:
+    if action != "assert_product_contract":
+        return
+    if not any(key in params for key in ("required_sections", "must_have_actions", "forbidden_entries", "forbidden_any", "no_error_state", "min_primary_actions")):
+        issues.append(
+            ValidationIssue(
+                "error",
+                step_id,
+                "assert_product_contract requires required_sections, must_have_actions, forbidden_entries, no_error_state, or min_primary_actions.",
+            )
+        )
+
+
+def validate_ai_quality(step_id: str, action: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:
+    if action != "assert_ai_response_quality":
+        return
+    if not any(key in params for key in ("text", "response", "observation")):
+        issues.append(ValidationIssue("warning", step_id, "assert_ai_response_quality should provide text/response or reference an observation."))
+    if "min_length" in params:
+        try:
+            int(params["min_length"])
+        except (TypeError, ValueError):
+            issues.append(ValidationIssue("error", step_id, "assert_ai_response_quality.min_length must be an integer."))
+
+
+def validate_request_api(step_id: str, action: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:
+    if action != "request_api":
+        return
+    method = str(params.get("method") or "GET").upper()
+    if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+        issues.append(ValidationIssue("error", step_id, f"Unsupported request_api method: {method}"))
+    if "headers" in params and not isinstance(params.get("headers"), dict):
+        issues.append(ValidationIssue("error", step_id, "request_api.headers must be an object."))
+    if "timeout_seconds" in params:
+        try:
+            float(params["timeout_seconds"])
+        except (TypeError, ValueError):
+            issues.append(ValidationIssue("error", step_id, "request_api.timeout_seconds must be a number."))
+
+
 def missing_param(params: dict[str, Any], param: str) -> bool:
     if param in params and params[param] not in (None, ""):
         return False
@@ -332,7 +392,7 @@ def validate_retry_safety(step_id: str, action: str, params: dict[str, Any], iss
         return
     if retry_count(params) <= 0:
         return
-    if action.startswith("observe_") or action == "wait_for" or action in {"assert_text", "assert_text_contract", "assert_response", "assert_file_exists"}:
+    if action.startswith("observe_") or action == "wait_for" or action in ASSERTION_ACTIONS:
         return
     issues.append(
         ValidationIssue(

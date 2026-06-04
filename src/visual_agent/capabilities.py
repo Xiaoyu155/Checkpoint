@@ -69,6 +69,7 @@ def provider_capabilities() -> tuple[Capability, ...]:
         "observe_uia": "Read Windows UI Automation controls.",
         "observe_ocr": "Extract text boxes from a screenshot or image.",
         "observe_vision": "Describe screenshot state with a VLM provider.",
+        "observe_state": "Convert the latest observation into structured page state: text, buttons, inputs, dialogs, errors, and loading/empty signals.",
         "observe_fixture": "Replay a saved Observation fixture.",
         "observe_html": "Read deterministic local HTML into DOM-like Observation.",
     }
@@ -100,7 +101,7 @@ def provider_capabilities() -> tuple[Capability, ...]:
                 dry_run_supported=False,
                 risk_level="low",
                 planner_visible=action
-                in {"observe_browser", "observe_dom", "observe_html", "observe_uia", "observe_ocr", "observe_vision"},
+                in {"observe_browser", "observe_dom", "observe_html", "observe_uia", "observe_ocr", "observe_vision", "observe_state"},
             )
         )
     return tuple(result)
@@ -135,6 +136,17 @@ def action_capabilities() -> tuple[Capability, ...]:
 
 def workflow_atomic_capabilities() -> tuple[Capability, ...]:
     specs = [
+        Capability(
+            name="observe_state",
+            kind="extractor",
+            available=True,
+            description="Convert the latest or named observation into structured product state: text, buttons, inputs, dialogs, errors, loading, and empty signals.",
+            input_schema={"type": "object", "fields": {"observation": "string?", "max_text_items": "integer?"}},
+            output_schema={"type": "object", "fields": {"state": "ProductState", "observation": "Observation"}},
+            dry_run_supported=False,
+            risk_level="low",
+            planner_visible=True,
+        ),
         Capability(
             name="resolve",
             kind="extractor",
@@ -180,6 +192,29 @@ def workflow_atomic_capabilities() -> tuple[Capability, ...]:
             planner_visible=True,
         ),
         Capability(
+            name="request_api",
+            kind="action",
+            available=True,
+            description="Call an HTTP API from a workflow and record the response as a network event for assert_response.",
+            input_schema={
+                "type": "object",
+                "required": ["url"],
+                "fields": {
+                    "url": "string",
+                    "method": "GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS?",
+                    "headers": "object?",
+                    "body": "string?",
+                    "json": "object|string|array?",
+                    "timeout_seconds": "number?",
+                    "mock_status": "integer?",
+                },
+            },
+            output_schema={"type": "object", "fields": {"event": "NetworkEvent"}},
+            dry_run_supported=True,
+            risk_level="medium",
+            planner_visible=True,
+        ),
+        Capability(
             name="assert_response",
             kind="assertion",
             available=True,
@@ -197,6 +232,64 @@ def workflow_atomic_capabilities() -> tuple[Capability, ...]:
                 },
             },
             output_schema={"type": "object", "fields": {"event": "NetworkEvent"}},
+            dry_run_supported=False,
+            risk_level="low",
+            planner_visible=True,
+        ),
+        Capability(
+            name="assert_no_error",
+            kind="assertion",
+            available=True,
+            description="Assert that page state and captured network events contain no visible error or failed request.",
+            input_schema={"type": "object", "fields": {"observation": "string?"}},
+            output_schema={"type": "object", "fields": {"no_error": "NoErrorStateResult"}},
+            dry_run_supported=False,
+            risk_level="low",
+            planner_visible=True,
+        ),
+        Capability(
+            name="assert_product_contract",
+            kind="assertion",
+            available=True,
+            description="Assert a product quality contract: required sections/actions, forbidden entries, no-error state, and minimum primary actions.",
+            input_schema={
+                "type": "object",
+                "fields": {
+                    "required_sections": "string[]|string?",
+                    "must_have_actions": "string[]|string?",
+                    "forbidden_entries": "string[]|string?",
+                    "forbidden_any": "string[]|string?",
+                    "no_error_state": "boolean?",
+                    "min_primary_actions": "integer?",
+                    "observation": "string?",
+                },
+            },
+            output_schema={"type": "object", "fields": {"product_contract": "ProductContractResult"}},
+            dry_run_supported=False,
+            risk_level="low",
+            planner_visible=True,
+        ),
+        Capability(
+            name="assert_ai_response_quality",
+            kind="assertion",
+            available=True,
+            description="Assert basic AI answer quality: non-empty, relevant to the question/context, not repetitive, and not template-like.",
+            input_schema={
+                "type": "object",
+                "fields": {
+                    "text": "string?",
+                    "response": "string?",
+                    "question": "string?",
+                    "previous_context": "string?",
+                    "min_length": "integer?",
+                    "require_answer_relevance": "boolean?",
+                    "require_context_reference": "boolean?",
+                    "require_specific_advice": "boolean?",
+                    "forbidden_phrases": "string[]|string?",
+                    "observation": "string?",
+                },
+            },
+            output_schema={"type": "object", "fields": {"ai_response_quality": "AIResponseQualityResult"}},
             dry_run_supported=False,
             risk_level="low",
             planner_visible=True,
@@ -354,6 +447,7 @@ def provider_input_schema(action: str) -> dict[str, Any]:
         },
         "observe_dom": {"type": "object", "required": ["url"], "fields": {"url": "string", "headed": "boolean?"}},
         "observe_html": {"type": "object", "required": ["path"], "fields": {"path": "string"}},
+        "observe_state": {"type": "object", "fields": {"observation": "string?", "max_text_items": "integer?"}},
         "observe_uia": {"type": "object", "fields": {"max_depth": "integer?"}},
         "observe_ocr": {
             "type": "object",

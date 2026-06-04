@@ -57,6 +57,7 @@ from .planner_generate import (
     save_planner_draft_result,
 )
 from .preflight import run_preflight
+from .product_issues import build_product_issues, product_issues_to_markdown, write_product_issues
 from .quality import (
     build_coding_agent_brief,
     build_install_check_plan,
@@ -627,6 +628,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     ws_report_tags = subparsers.add_parser("workspace-report-tags", help="Show workspace report annotations.")
     ws_report_tags.add_argument("--root", required=True, help="Workspace root directory.")
+
+    ws_product_issues = subparsers.add_parser("workspace-product-issues", help="Summarize failed reports as product issue groups.")
+    ws_product_issues.add_argument("--root", required=True, help="Workspace root directory.")
+    ws_product_issues.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+    ws_product_issues.add_argument("--write", action="store_true", help="Write reports/product_issues.json before printing.")
 
     ws_export_regression = subparsers.add_parser("workspace-export-regression-fixture", help="Export a failed run report into a regression fixture draft.")
     ws_export_regression.add_argument("--root", required=True, help="Workspace root directory.")
@@ -1509,6 +1515,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "workspace-report-tags":
         print(json.dumps(to_jsonable(load_workspace_report_tags(open_workspace(args.root))), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "workspace-product-issues":
+        workspace = open_workspace(args.root)
+        if args.write:
+            write_product_issues(workspace)
+        payload = build_product_issues(workspace)
+        if args.format == "markdown":
+            print(product_issues_to_markdown(to_jsonable(payload)))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
         return 0
     if args.command == "workspace-export-regression-fixture":
         result = export_regression_fixture(

@@ -158,6 +158,94 @@ def test_validate_workflow_accepts_click_text_and_wait_for_text() -> None:
     assert result.valid
 
 
+def test_validate_workflow_accepts_product_state_and_contract_actions() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "product-contract",
+            "steps": [
+                {"id": "observe", "action": "observe_html", "path": "examples/web/checkout_verification_demo.html"},
+                {"id": "state", "action": "observe_state"},
+                {
+                    "id": "contract",
+                    "action": "assert_product_contract",
+                    "required_sections": ["Premium Widget"],
+                    "must_have_actions": ["Proceed to Checkout"],
+                    "no_error_state": True,
+                },
+                {"id": "no_error", "action": "assert_no_error"},
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert result.valid
+
+
+def test_validate_workflow_rejects_empty_product_contract() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "bad-contract",
+            "steps": [
+                {"id": "observe", "action": "observe_html", "path": "examples/web/checkout_verification_demo.html"},
+                {"id": "contract", "action": "assert_product_contract"},
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert not result.valid
+    assert any("assert_product_contract requires" in issue.message for issue in result.issues)
+
+
+def test_validate_workflow_accepts_ai_quality_with_direct_text_without_observation_warning() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "ai-quality",
+            "steps": [
+                {
+                    "id": "quality",
+                    "action": "assert_ai_response_quality",
+                    "response": "建议先确认登录状态，再重试购买服务。",
+                    "question": "购买服务失败怎么办",
+                }
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert result.valid
+    assert not any(issue.level == "warning" and "previous observation" in issue.message for issue in result.issues)
+
+
+def test_validate_workflow_accepts_request_api_and_rejects_bad_method() -> None:
+    valid = validate_workflow(
+        workflow_from_dict(
+            {
+                "name": "api",
+                "steps": [
+                    {"id": "api", "action": "request_api", "url": "https://example.test/health", "method": "GET"},
+                    {"id": "assert", "action": "assert_response", "url_contains": "/health", "status": 200},
+                ],
+            }
+        )
+    )
+    invalid = validate_workflow(
+        workflow_from_dict(
+            {
+                "name": "api-bad",
+                "steps": [{"id": "api", "action": "request_api", "url": "https://example.test/health", "method": "TRACE"}],
+            }
+        )
+    )
+
+    assert valid.valid
+    assert not invalid.valid
+    assert any("Unsupported request_api method" in issue.message for issue in invalid.issues)
+
+
 def test_validate_workflow_rejects_text_actions_without_text() -> None:
     workflow = workflow_from_dict(
         {
