@@ -48,6 +48,7 @@ class Workflow:
     schema_version: int | None = None
     min_runtime_version: str | None = None
     tags: tuple[str, ...] = ()
+    affects: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -867,6 +868,7 @@ def workflow_from_dict(payload: dict[str, Any]) -> Workflow:
         schema_version=int(payload["schema_version"]) if payload.get("schema_version") not in (None, "") else None,
         min_runtime_version=str(payload["min_runtime_version"]) if payload.get("min_runtime_version") not in (None, "") else None,
         tags=tuple(str(item) for item in payload.get("tags", []) or []),
+        affects=tuple(str(item) for item in payload.get("affects", []) or []),
     )
 
 

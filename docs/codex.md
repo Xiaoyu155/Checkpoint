@@ -13,6 +13,21 @@ redacted reports.
 
 Give the generated brief to Codex when you want it to use local workflows.
 
+## Connect Codex
+
+From the project root, initialize the workspace and write Codex instructions:
+
+```powershell
+python -m visual_agent.cli connect codex --workspace-root .agent-workspace
+```
+
+For MCP clients, connect the platform directly:
+
+```powershell
+python -m visual_agent.cli connect claude-code --workspace-root .agent-workspace
+python -m visual_agent.cli connect cursor --workspace-root .agent-workspace
+```
+
 ## Recommended Loop
 
 1. Ask Codex to call `get_session_context` when resuming an existing workspace.
@@ -65,6 +80,20 @@ Prefer targeted verification while coding:
 python -m visual_agent.cli verify --workspace-root .agent-workspace --workflow <workflow_name> --wait-lock --format markdown
 ```
 
+For Codex, prefer the git-diff-aware check. It reads changed files, selects
+workflows whose `affects` paths overlap, skips `slow` workflows by default, and
+returns compact output:
+
+```powershell
+python -m visual_agent.cli codex-check --workspace-root .agent-workspace
+```
+
+To include visual/OCR-heavy contracts:
+
+```powershell
+python -m visual_agent.cli codex-check --workspace-root .agent-workspace --include-slow
+```
+
 Use broad tag verification only when you intentionally want the full local
 contract suite:
 
@@ -74,6 +103,16 @@ python -m visual_agent.cli verify --workspace-root .agent-workspace --tags verif
 
 Keep slow visual/OCR workflows under explicit tags such as `visual`,
 `desktop`, or `miniprogram` and run them when the changed code needs them.
+
+To make diff-aware selection precise, add `affects` to workflows:
+
+```yaml
+name: checkout_verification
+tags: [verification]
+affects:
+  - src/payment/
+  - templates/checkout.html
+```
 
 ## Visual Desktop Behavior
 

@@ -64,7 +64,7 @@ def test_find_workflow_accepts_name_and_relative_path(tmp_path) -> None:
 def test_discover_workflows_skips_slow_by_default(tmp_path) -> None:
     workspace = init_workspace(tmp_path / "agent-workspace", with_demo=False)
     (workspace.workflows_dir / "fast.yaml").write_text(
-        "schema_version: 1\nname: fast\nversion: 1\ntags:\n  - verification\nsteps:\n  - id: noop\n    action: observe_html\n    path: page.html\n",
+        "schema_version: 1\nname: fast\nversion: 1\naffects:\n  - src/fast/\ntags:\n  - verification\nsteps:\n  - id: noop\n    action: observe_html\n    path: page.html\n",
         encoding="utf-8",
     )
     (workspace.workflows_dir / "slow.yaml").write_text(
@@ -74,6 +74,7 @@ def test_discover_workflows_skips_slow_by_default(tmp_path) -> None:
 
     assert {workflow.name for workflow in discover_workflows(workspace)} == {"fast"}
     assert {workflow.name for workflow in discover_workflows(workspace, include_slow=True)} == {"fast", "slow"}
+    assert discover_workflows(workspace)[0].affects == ("src/fast/",)
     assert find_workflow(workspace, "slow").name == "slow"
 
 

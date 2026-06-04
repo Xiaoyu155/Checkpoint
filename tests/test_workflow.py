@@ -49,6 +49,19 @@ def test_workflow_from_dict_parses_steps() -> None:
     assert workflow.steps[1].params["target"] == "登录"
 
 
+def test_workflow_from_dict_parses_affects() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "checkout",
+            "version": 1,
+            "affects": ["src/payment/", "templates/checkout.html"],
+            "steps": [{"id": "observe", "action": "observe_screen"}],
+        }
+    )
+
+    assert workflow.affects == ("src/payment/", "templates/checkout.html")
+
+
 def test_url_matches_condition_returns_false_for_invalid_regex() -> None:
     assert url_matches_condition("https://example.test/orders", {"url_regex": "["}) is False
 

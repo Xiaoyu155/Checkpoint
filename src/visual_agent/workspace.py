@@ -43,6 +43,7 @@ class WorkflowRef:
     path: Path
     relative_path: str
     tags: tuple[str, ...] = ()
+    affects: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -207,7 +208,7 @@ def discover_workflows(workspace: Workspace, *, include_slow: bool = False) -> t
     )
     refs: list[WorkflowRef] = []
     for path in paths:
-        tags = workflow_tags(path)
+        tags, affects = workflow_metadata(path)
         if not include_slow and "slow" in tags:
             continue
         refs.append(
@@ -216,16 +217,22 @@ def discover_workflows(workspace: Workspace, *, include_slow: bool = False) -> t
                 path=path,
                 relative_path=path.relative_to(workspace.root).as_posix(),
                 tags=tags,
+                affects=affects,
             )
         )
     return tuple(refs)
 
 
 def workflow_tags(path: Path) -> tuple[str, ...]:
+    return workflow_metadata(path)[0]
+
+
+def workflow_metadata(path: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
     try:
-        return tuple(str(tag) for tag in parse_workflow_file(path).tags)
+        workflow = parse_workflow_file(path)
+        return tuple(str(tag) for tag in workflow.tags), tuple(str(item) for item in workflow.affects)
     except Exception:
-        return ()
+        return (), ()
 
 
 def find_workflow(workspace: Workspace, name_or_path: str) -> WorkflowRef:
@@ -253,6 +260,7 @@ def find_workflow(workspace: Workspace, name_or_path: str) -> WorkflowRef:
                 if candidate.is_relative_to(workspace.root)
                 else str(candidate),
                 tags=workflow_tags(candidate),
+                affects=workflow_metadata(candidate)[1],
             )
 
     for ref in discover_workflows(workspace, include_slow=True):

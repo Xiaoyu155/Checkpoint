@@ -119,6 +119,21 @@ def test_mcp_run_workflow_defaults_to_dry_run_and_audits(tmp_path) -> None:
     assert "mcp:run_workflow" in audit.read_text(encoding="utf-8")
 
 
+def test_mcp_run_workflow_defaults_to_compact_report_and_supports_verbose(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace")
+    args = {"workspace_root": str(workspace.root), "workflow_name": "local_html_form_workflow", "inputs_file": "demo_login.json"}
+
+    compact = run_workflow_payload(args)
+    verbose = run_workflow_payload({**args, "verbose": True})
+
+    assert compact["status"] == "success"
+    assert compact["workflow"] == "local_html_form_workflow"
+    assert "steps" in compact
+    assert "failed_steps" not in compact
+    assert verbose["status"] == "success"
+    assert "failed_steps" in verbose
+
+
 def test_mcp_run_workflow_rejects_approved_outside_whitelist(tmp_path) -> None:
     workspace = init_workspace(tmp_path / "workspace")
 

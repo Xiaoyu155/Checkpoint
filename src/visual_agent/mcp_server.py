@@ -10,7 +10,7 @@ from .console import build_report_detail, build_workspace_dashboard, dashboard_t
 from .gui import write_gui_action_event
 from .models import to_jsonable
 from .preflight import run_preflight
-from .reports import list_run_summaries
+from .reports import compact_run_report, list_run_summaries
 from .security import scrub_secrets
 from .validation import validate_workflow_file
 from .workflow import parse_workflow_file
@@ -88,6 +88,7 @@ def mcp_tools() -> list[Tool]:
                     "workflow_name": {"type": "string"},
                     "inputs_file": {"type": "string"},
                     "run_profile": {"type": "string", "enum": ["dry-run", "supervised", "approved"], "default": "dry-run"},
+                    "verbose": {"type": "boolean", "default": False, "description": "Return verbose run summary instead of compact report."},
                 },
                 "required": ["workspace_root", "workflow_name"],
             },
@@ -302,6 +303,12 @@ def run_workflow_payload(args: dict[str, Any]) -> dict[str, Any]:
         for step in result.steps
         if getattr(step.status, "value", str(step.status)) == "failed"
     ]
+    if not bool(args.get("verbose", False)):
+        return {
+            **compact_run_report(result),
+            "requested_run_profile": run_profile,
+            "report_hint": f"Use get_run_report with run_id='{result.run_id}' for full details.",
+        }
     return {
         "schema_version": 1,
         "run_id": result.run_id,

@@ -279,6 +279,51 @@ def run_report_to_dict(report: RunReport) -> dict[str, Any]:
     }
 
 
+def compact_run_report(result: Any) -> dict[str, Any]:
+    steps = []
+    failed = None
+    for step in getattr(result, "steps", ()) or ():
+        status = getattr(getattr(step, "status", None), "value", getattr(step, "status", ""))
+        entry: dict[str, Any] = {
+            "id": str(getattr(step, "id", "") or ""),
+            "action": str(getattr(step, "action", "") or ""),
+            "status": str(status),
+        }
+        message = str(getattr(step, "message", "") or "")
+        if message and str(status) == "failed":
+            entry["message"] = message
+        metadata = getattr(step, "metadata", {}) if isinstance(getattr(step, "metadata", {}), dict) else {}
+        diagnosis = metadata.get("failure_diagnosis") if isinstance(metadata.get("failure_diagnosis"), dict) else {}
+        if str(status) == "failed":
+            failed = entry
+            if diagnosis:
+                entry["diagnosis"] = {
+                    "expected": diagnosis.get("expected"),
+                    "actual": diagnosis.get("actual"),
+                    "recovery_suggestions": diagnosis.get("recovery_suggestions"),
+                }
+                artifacts = diagnosis.get("artifacts") if isinstance(diagnosis.get("artifacts"), dict) else {}
+                if artifacts.get("screenshot"):
+                    entry["screenshot"] = str(artifacts["screenshot"])
+        observation = getattr(step, "observation", None)
+        screenshot_path = getattr(observation, "screenshot_path", None)
+        if screenshot_path is not None:
+            entry["screenshot"] = str(screenshot_path)
+        steps.append(entry)
+    status = "failed" if failed else "success"
+    return {
+        "schema_version": 1,
+        "run_id": str(getattr(result, "run_id", "") or ""),
+        "workflow": str(getattr(result, "workflow_name", "") or ""),
+        "run_profile": str(getattr(result, "run_profile", "") or ""),
+        "status": status,
+        "step_count": len(steps),
+        "failed_step": failed.get("id") if failed else None,
+        "run_dir": str(getattr(result, "run_dir", "") or ""),
+        "steps": steps,
+    }
+
+
 def run_report_to_markdown(report: RunReport) -> str:
     lines = [
         f"# Run Report: {report.workflow_name}",

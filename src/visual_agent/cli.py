@@ -8,6 +8,8 @@ from .auth_state import auth_state_probe_to_markdown, build_auth_state_import_pl
 from .capabilities import build_atomic_capability_manifest, build_capability_manifest
 from .ci_templates import ci_template_install_to_dict, install_ci_templates
 from .console import build_report_detail, build_workspace_dashboard, dashboard_to_markdown, report_detail_to_markdown
+from .codex_check import codex_check_to_markdown, run_codex_check
+from .connect import connect_platform, connect_result_to_dict
 from .dom import DomProvider
 from .external_samples import (
     build_external_sample_batch_plan,
@@ -318,6 +320,24 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--include-slow", action="store_true", help="Include workflows tagged 'slow'. Default: skipped.")
     verify.add_argument("--for", dest="target_agent", default="codex", help="Target coding agent label.")
     verify.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    codex_check = subparsers.add_parser("codex-check", help="Smart check for Codex/Claude Code: git-diff-aware, fast by default.")
+    codex_check.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
+    codex_check.add_argument("--repo-root", default=".", help="Git repository root. Default: current directory.")
+    codex_check.add_argument("--base", default="HEAD", help="Git base ref for diff. Default: HEAD.")
+    codex_check.add_argument("--tags", default="verification", help="Comma-separated workflow tags to run. Default: verification.")
+    codex_check.add_argument("--max-workflows", type=int, default=10, help="Maximum workflows to run. Default: 10.")
+    codex_check.add_argument("--run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    codex_check.add_argument("--include-slow", action="store_true", help="Include workflows tagged 'slow'. Default: skipped.")
+    codex_check.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    connect = subparsers.add_parser("connect", help="Connect Visual Agent to an AI coding platform.")
+    connect.add_argument("platform", choices=["claude-code", "cursor", "codex"])
+    connect.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root to initialize/connect.")
+    connect.add_argument("--repo-root", default=".", help="Repository root. Default: current directory.")
+    connect.add_argument("--python", default="python", help="Python executable used by MCP clients. Default: python.")
+    connect.add_argument("--global", dest="global_config", action="store_true", help="Write user-level config where supported.")
+    connect.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     ci_templates = subparsers.add_parser("install-ci-templates", help="Install CI/local quality gate templates.")
     ci_templates.add_argument("--root", default=".", help="Repository root to receive generated templates. Default: current directory.")
@@ -1359,6 +1379,39 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(to_jsonable(report), ensure_ascii=False, indent=2))
         return 0 if report.failed == 0 else 1
+    if args.command == "codex-check":
+        workspace = open_workspace(args.workspace_root)
+        tags = tuple(item.strip() for item in str(args.tags).split(",") if item.strip())
+        result = run_codex_check(
+            workspace,
+            base=args.base,
+            repo_root=args.repo_root,
+            include_slow=args.include_slow,
+            tags=tags or ("verification",),
+            max_workflows=args.max_workflows,
+            run_profile=args.run_profile,
+        )
+        if args.format == "markdown":
+            print(codex_check_to_markdown(result))
+        else:
+            print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
+        return 0 if result.failed == 0 else 1
+    if args.command == "connect":
+        result = connect_platform(
+            args.platform,
+            workspace_root=args.workspace_root,
+            repo_root=args.repo_root,
+            python=args.python,
+            global_config=args.global_config,
+        )
+        payload = connect_result_to_dict(result)
+        if args.format == "markdown":
+            print(f"Connected {payload['platform']} to Visual Agent.")
+            print(f"Workspace: {payload['workspace_root']}")
+            print(f"Config: {payload['config_path']}")
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "workspace-list":
         refs = discover_workflows(open_workspace(args.root), include_slow=args.include_slow)
         print(json.dumps(to_jsonable(refs), ensure_ascii=False, indent=2))
