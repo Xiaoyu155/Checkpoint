@@ -24,7 +24,7 @@ python -m pytest tests/ -q --tb=short
 上次全量测试结果：
 
 ```text
-890 passed, 6 skipped
+892 passed, 6 skipped
 ```
 
 如果只是确认 SDK 和 CLI：
@@ -71,7 +71,7 @@ ca2996b Add post-action observation and slow workflow filtering
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-890 passed, 6 skipped
+892 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -85,14 +85,18 @@ success
 - `generate-from-diff --audit-log <path>`：每次生成后追加一行 JSONL 审计记录，用于后续定位 parser 误判。
 - 新增 `src/visual_agent/context_audit.py`，审计字段包含 `task`、`framework`、`confidence`、`method`、`fields`、`submit_actions`、`success_states`、`unmatched_data_displays`、`warnings`、`quality_score`、`workflow_name`、`workflow_path`、`changed_files`。
 - 审计日志父目录自动创建；连续多次运行会追加多行有效 JSON，不影响原 CLI JSON/YAML/markdown 输出结构。
+- `workflow-lint <workflow.yaml>` / `workflow-lint --file <workflow.yaml>`：复用 workflow validation 和 quality score，输出质量缺口与修复建议；低于默认阈值 `0.6` 或 validation 失败时返回 1。
+- `workflow-lint --format json` 可输出结构化 `quality`、`validation.issues` 和 `suggestions`，便于 Codex 自动读取。
 
 本轮定向验证：
 
 ```text
 python -m pytest tests/test_cli.py tests/test_context_workflow_synthesis.py -q
 51 passed
+python -m pytest tests/test_cli.py tests/test_workflow_quality.py tests/test_validation.py -q
+59 passed
 python -m pytest -q
-890 passed, 6 skipped
+892 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 ```

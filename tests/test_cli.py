@@ -242,6 +242,65 @@ def test_generate_from_diff_markdown_prints_warnings() -> None:
     assert "DatePicker" in output
 
 
+def test_workflow_lint_flags_low_quality_workflow(tmp_path: Path, capsys) -> None:
+    workflow = tmp_path / "weak.yaml"
+    workflow.write_text(
+        """
+schema_version: 1
+name: weak
+version: 1
+steps:
+  - id: observe
+    action: observe_html
+    path: page.html
+""".strip(),
+        encoding="utf-8",
+    )
+
+    code = main(["workflow-lint", str(workflow)])
+    output = capsys.readouterr().out
+
+    assert code == 1
+    assert "Workflow: weak" in output
+    assert "Quality score:" in output
+    assert "no success state assertion" in output
+    assert "wait_for_text" in output
+
+
+def test_workflow_lint_json_passes_strong_workflow(tmp_path: Path, capsys) -> None:
+    workflow = tmp_path / "strong.yaml"
+    workflow.write_text(
+        """
+schema_version: 1
+name: strong
+version: 1
+steps:
+  - id: observe
+    action: observe_html
+    path: page.html
+  - id: assert_success
+    action: assert_text
+    text: Saved successfully
+  - id: assert_no_error
+    action: assert_text_contract
+    forbidden_any:
+      - Error
+      - Failed
+""".strip(),
+        encoding="utf-8",
+    )
+
+    code = main(["workflow-lint", "--file", str(workflow), "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["ok"] is True
+    assert payload["workflow_name"] == "strong"
+    assert payload["quality"]["score"] >= 0.6
+    assert payload["quality"]["covers_success_path"] is True
+    assert payload["quality"]["covers_error_path"] is True
+
+
 def test_verify_impl_cli_dry_run_writes_status(tmp_path: Path, capsys) -> None:
     init_git_repo(tmp_path)
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)

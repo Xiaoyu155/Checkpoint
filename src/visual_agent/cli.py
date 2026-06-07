@@ -471,6 +471,12 @@ def build_parser() -> argparse.ArgumentParser:
     gen_workflow.add_argument("--dry-run", action="store_true", help="Print generated YAML without saving.")
     gen_workflow.add_argument("--format", choices=["json", "yaml"], default="json", help="Output format. Default: json.")
 
+    workflow_lint = subparsers.add_parser("workflow-lint", help="Lint workflow structure and verification quality.")
+    workflow_lint.add_argument("workflow", nargs="?", help="Workflow YAML/JSON path.")
+    workflow_lint.add_argument("--file", dest="workflow_file", default=None, help="Workflow YAML/JSON path.")
+    workflow_lint.add_argument("--min-quality-score", type=float, default=0.6, help="Minimum acceptable quality score. Default: 0.6.")
+    workflow_lint.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
     gen_from_diff = subparsers.add_parser("generate-from-diff", help="Generate a verification workflow from git diff context.")
     gen_from_diff.add_argument("--task-description", required=True, help="Task or feature that the code changes implement.")
     gen_from_diff.add_argument("--base-url", required=True, help="URL or local fixture path used as workflow entry point.")
@@ -1887,6 +1893,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
         return 0 if result.get("status") == "success" else 1
+    if args.command == "workflow-lint":
+        workflow_path = args.workflow_file or args.workflow
+        if not workflow_path:
+            raise ValueError("workflow-lint requires a workflow path or --file.")
+        result = workflow_lint_payload(Path(workflow_path), min_quality_score=args.min_quality_score)
+        if args.format == "markdown":
+            print(workflow_lint_to_markdown(result))
+        else:
+            print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
+        return 0 if result["ok"] else 1
     if args.command == "generate-from-diff":
         from .context_ingestion import GenerationContext
         from .git_diff import collect_code_changes
@@ -2366,6 +2382,129 @@ def workflow_generation_cli_payload(result: Any, changes: tuple[Any, ...]) -> di
         "message": result.message,
         "yaml": result.workflow_yaml if result.workflow_path is None else None,
     }
+
+
+def workflow_lint_payload(path: Path, *, min_quality_score: float = 0.6) -> dict[str, Any]:
+    from .workflow_quality import score_workflow_quality
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {
+            "status": "error",
+            "ok": False,
+            "workflow_path": str(path),
+            "message": str(exc),
+            "validation": {"valid": False, "issues": [{"level": "error", "step_id": "", "message": str(exc)}]},
+            "quality": None,
+            "suggestions": ["Check that the workflow path exists and is readable."],
+        }
+    try:
+        workflow = parse_workflow_file(path)
+        validation = validate_workflow_file(path)
+        workflow_name = workflow.name
+        step_count = len(workflow.steps)
+    except Exception as exc:
+        quality = score_workflow_quality(text)
+        return {
+            "status": "error",
+            "ok": False,
+            "workflow_path": str(path),
+            "workflow_name": path.stem,
+            "step_count": 0,
+            "message": str(exc),
+            "validation": {"valid": False, "issues": [{"level": "error", "step_id": "", "message": str(exc)}]},
+            "quality": workflow_quality_payload(quality),
+            "suggestions": ["Fix workflow syntax/schema errors before evaluating runtime behavior."],
+        }
+    quality = score_workflow_quality(text)
+    validation_issues = [
+        {"level": issue.level, "step_id": issue.step_id, "message": issue.message}
+        for issue in validation.issues
+    ]
+    suggestions = workflow_lint_suggestions(quality.gaps, validation_issues)
+    ok = validation.valid and quality.total_score >= min_quality_score
+    return {
+        "status": "ok" if ok else "needs_work",
+        "ok": ok,
+        "workflow_path": str(path),
+        "workflow_name": workflow_name,
+        "step_count": step_count,
+        "min_quality_score": min_quality_score,
+        "validation": {"valid": validation.valid, "issues": validation_issues},
+        "quality": workflow_quality_payload(quality),
+        "suggestions": suggestions,
+    }
+
+
+def workflow_quality_payload(quality: Any) -> dict[str, Any]:
+    return {
+        "score": quality.total_score,
+        "assertion_density": quality.assertion_density,
+        "business_assertions": quality.business_assertion_count,
+        "structural_assertions": quality.structural_assertion_count,
+        "data_display_assertions": quality.data_display_assertion_count,
+        "forbidden_error_assertions": quality.forbidden_error_assertion_count,
+        "text_from_input_references": quality.text_from_input_reference_count,
+        "invalid_text_from_references": list(quality.invalid_text_from_references),
+        "covers_success_path": quality.covers_success_path,
+        "covers_error_path": quality.covers_error_path,
+        "covers_data_display": quality.covers_data_display,
+        "gaps": list(quality.gaps),
+        "recommendation": quality.recommendation,
+    }
+
+
+def workflow_lint_suggestions(gaps: tuple[str, ...], validation_issues: list[dict[str, Any]]) -> list[str]:
+    suggestions: list[str] = []
+    for issue in validation_issues:
+        suggestions.append(f"Fix validation issue at step '{issue['step_id'] or '<workflow>'}': {issue['message']}")
+    for gap in gaps:
+        lower = gap.lower()
+        if "success state" in lower:
+            suggestions.append("Add wait_for_text, wait_for url_contains, or assert_text after the submit/action step.")
+        elif "assertion density" in lower:
+            suggestions.append("Add at least one assertion after the main action so the workflow verifies behavior, not just execution.")
+        elif "business assertions" in lower:
+            suggestions.append("Add a business-facing assert_text or wait_for_text for the user-visible outcome.")
+        elif "error path" in lower:
+            suggestions.append("Add assert_text_contract forbidden_any or assert_no_error to catch visible failure states.")
+        elif "text_from references" in lower:
+            suggestions.append("Fix text_from input references or add the missing fields to the inputs template.")
+        else:
+            suggestions.append(f"Address quality gap: {gap}")
+    if not suggestions:
+        suggestions.append("Workflow quality is good.")
+    return list(dict.fromkeys(suggestions))
+
+
+def workflow_lint_to_markdown(result: dict[str, Any]) -> str:
+    quality = result.get("quality") if isinstance(result.get("quality"), dict) else {}
+    validation = result.get("validation") if isinstance(result.get("validation"), dict) else {}
+    issues = validation.get("issues") if isinstance(validation.get("issues"), list) else []
+    gaps = quality.get("gaps") if isinstance(quality.get("gaps"), list) else []
+    lines = [
+        f"Workflow: {result.get('workflow_name') or Path(str(result.get('workflow_path') or '')).stem} ({result.get('step_count', 0)} steps)",
+        f"Status: {result.get('status')}",
+    ]
+    if quality:
+        lines.append(f"Quality score: {quality.get('score')} (threshold: {result.get('min_quality_score')})")
+        lines.append(f"Assertion density: {quality.get('assertion_density')}")
+    if issues:
+        lines.extend(["", "Issues:"])
+        for issue in issues:
+            location = f" step {issue.get('step_id')}" if issue.get("step_id") else ""
+            lines.append(f"  - [{issue.get('level')}] {location} {issue.get('message')}".rstrip())
+    if gaps:
+        if not issues:
+            lines.extend(["", "Issues:"])
+        for gap in gaps:
+            lines.append(f"  - [quality] {gap}")
+    suggestions = result.get("suggestions") if isinstance(result.get("suggestions"), list) else []
+    if suggestions:
+        lines.extend(["", "Suggestions:"])
+        lines.extend(f"  - {suggestion}" for suggestion in suggestions)
+    return "\n".join(lines)
 
 
 def detect_framework_from_dir(root: Path) -> str | None:

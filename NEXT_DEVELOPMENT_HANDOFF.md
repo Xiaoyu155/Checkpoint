@@ -12,7 +12,7 @@ V2 主线已经完成了大部分“代码上下文生成 → workflow 合成 �
 
 ```text
 python -m pytest
-890 passed, 6 skipped
+892 passed, 6 skipped
 
 npm test  # vscode-extension
 passed
@@ -117,7 +117,7 @@ V2 代码上下文验证主线已经收口。本轮继续推进 Phase 1 dogfoodi
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-890 passed, 6 skipped
+892 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -136,9 +136,23 @@ success
 python -m pytest tests/test_cli.py tests/test_context_workflow_synthesis.py -q
 51 passed
 python -m pytest -q
-890 passed, 6 skipped
+892 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
+```
+
+随后已完成 Phase 2 Task 2.3：
+
+- 新增 `workflow-lint <workflow.yaml>` / `workflow-lint --file <workflow.yaml>`。
+- 默认 markdown 输出 workflow 状态、quality score、validation issues、quality gaps、suggestions。
+- `--format json` 输出结构化 `quality`、`validation.issues`、`suggestions`。
+- validation 失败或 quality score 低于默认阈值 `0.6` 时退出码为 1。
+
+已通过：
+
+```text
+python -m pytest tests/test_cli.py tests/test_workflow_quality.py tests/test_validation.py -q
+59 passed
 ```
 
 V2 既有验证结果：
@@ -150,7 +164,7 @@ python -m pytest tests/e2e/test_e2e_context_verification.py tests/test_cli.py te
 136 passed
 
 python -m pytest tests/ -q --tb=short
-890 passed, 6 skipped
+892 passed, 6 skipped
 
 npm test --prefix vscode-extension
 passed
@@ -182,7 +196,7 @@ passed
 
 ```powershell
 cd "D:\longxia agent"
-python -m pytest tests/test_cli.py tests/test_context_workflow_synthesis.py tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
+python -m pytest tests/test_cli.py tests/test_context_workflow_synthesis.py tests/test_workflow_quality.py tests/test_validation.py tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 npm test --prefix vscode-extension
 python -m pytest
 ```
@@ -210,9 +224,9 @@ V2 code-context verification 主线可以阶段性暂停。当前已覆盖：
 
 ## 推荐下一步执行顺序
 
-1. 跑全量 `python -m pytest` 和 `npm test --prefix vscode-extension`，确认 Phase 2 audit-log 改动没有长尾回归。
-2. 进入 Phase 2 Task 2.3：新增 `workflow-lint` 辅助命令，复用 workflow quality/validation 给出可操作修复建议。
-3. Phase 2 收集真实 `--audit-log` 误判后，再做 AntD/MUI 组件扩展；不要提前扩散到 Phase 3 cloud-server。
+1. 跑全量 `python -m pytest` 和 `npm test --prefix vscode-extension`，确认 Phase 2 workflow-lint 改动没有长尾回归。
+2. 用 dogfooding 收集真实 `--audit-log` 误判样本。
+3. 根据真实样本做 Phase 2 Task 2.2 AntD/MUI 组件扩展；不要提前扩散到 Phase 3 cloud-server。
 4. 每轮结束更新 `DEVELOPMENT_LOG.md` / `README_MCP.md` / `NEXT_DEVELOPMENT_HANDOFF.md`。
 
 ## 常用验证命令
