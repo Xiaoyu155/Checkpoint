@@ -12,7 +12,7 @@ V2 主线已经完成了大部分“代码上下文生成 → workflow 合成 �
 
 ```text
 python -m pytest
-907 passed, 6 skipped
+911 passed, 6 skipped
 
 npm test  # vscode-extension
 passed
@@ -117,7 +117,7 @@ V2 代码上下文验证主线已经收口。本轮继续推进 Phase 1 dogfoodi
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-907 passed, 6 skipped
+911 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -136,7 +136,7 @@ success
 python -m pytest tests/test_cli.py tests/test_context_workflow_synthesis.py -q
 51 passed
 python -m pytest -q
-907 passed, 6 skipped
+911 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 ```
@@ -184,7 +184,7 @@ python -m pytest tests/e2e/test_e2e_context_verification.py tests/test_cli.py te
 136 passed
 
 python -m pytest tests/ -q --tb=short
-907 passed, 6 skipped
+911 passed, 6 skipped
 
 npm test --prefix vscode-extension
 passed
@@ -212,11 +212,32 @@ passed
 - `require_feature()` 仍保持非阻断占位，避免云端/收费能力未正式启用前影响本地功能。
 - 已补 `tests/test_licensing.py`、`tests/test_session.py`、`tests/test_cli.py` 覆盖 license/usage。
 
+随后已完成 Phase 3 Task 3.1 最小 cloud-server：
+
+- 新增 `src/visual_agent/cloud_server.py`，使用标准库 `ThreadingHTTPServer`。
+- 新增 CLI：`python -m visual_agent.cli cloud-server --workspace-root .agent-workspace --host 127.0.0.1 --port 7890 --run-profile dry-run`。
+- 端点：`GET /v1/health`、`POST /v1/run`、`GET /v1/run/{run_id}`。
+- `POST /v1/run` 支持现有 `cloud-run --execute --transport http` 发出的 `workflow_name` / `workspace` / `run_profile` 请求，也预留 `workflow_yaml` 请求。
+- 本地服务端执行 workspace workflow 后返回 `status`、`run_id`、`report_url`、`steps_passed`、`steps_total`。
+- `cloud-run --execute --transport http` 已能打通本地 cloud-server。
+- `require_feature()` 仍不阻断；Task 3.2 要等 cloud-server dogfooding 稳定后再做。
+
+已通过：
+
+```text
+python -m pytest tests/test_cloud_server.py tests/test_cli.py::test_cloud_run_cli_execute_http_calls_local_cloud_server tests/test_cli.py::test_cloud_run_cli_execute_http_without_config_blocks_without_network -q
+5 passed
+python -m pytest tests/test_licensing.py -q
+35 passed
+python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensing.py tests/test_session.py -q
+88 passed
+```
+
 下一位接手者建议先做：
 
 ```powershell
 cd "D:\longxia agent"
-python -m pytest tests/test_cli.py tests/test_context_workflow_synthesis.py tests/test_workflow_quality.py tests/test_validation.py tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
+python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensing.py tests/test_session.py tests/test_context_workflow_synthesis.py tests/test_workflow_quality.py tests/test_validation.py tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 npm test --prefix vscode-extension
 python -m pytest
 ```
@@ -244,9 +265,9 @@ V2 code-context verification 主线可以阶段性暂停。当前已覆盖：
 
 ## 推荐下一步执行顺序
 
-1. 跑全量 `python -m pytest` 和 `npm test --prefix vscode-extension`，确认 Phase 2 组件扩展没有长尾回归。
-2. 用 dogfooding 收集真实 `--audit-log` 误判样本。
-3. 根据真实样本继续补更多组件库解析；不要提前扩散到 Phase 3 cloud-server。
+1. 跑全量 `python -m pytest` 和 `npm test --prefix vscode-extension`，确认 cloud-server 改动没有长尾回归。
+2. dogfooding `cloud-server` + `cloud-run --execute --transport http`，确认 CI/另一进程触发本地浏览器执行的链路稳定。
+3. cloud-server 稳定后再做 Phase 3 Task 3.2 `require_feature()` 真实阻断；不要提前启用付费阻断影响本地功能。
 4. 每轮结束更新 `DEVELOPMENT_LOG.md` / `README_MCP.md` / `NEXT_DEVELOPMENT_HANDOFF.md`。
 
 ## 常用验证命令

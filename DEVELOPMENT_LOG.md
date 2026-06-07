@@ -24,7 +24,7 @@ python -m pytest tests/ -q --tb=short
 上次全量测试结果：
 
 ```text
-907 passed, 6 skipped
+911 passed, 6 skipped
 ```
 
 如果只是确认 SDK 和 CLI：
@@ -71,7 +71,7 @@ ca2996b Add post-action observation and slow workflow filtering
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-907 passed, 6 skipped
+911 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -105,9 +105,31 @@ python -m pytest tests/test_cli.py tests/test_validation.py tests/test_workflow_
 python -m pytest tests/test_context_workflow_synthesis.py tests/e2e/test_e2e_context_verification.py tests/test_cli.py tests/test_workflow_quality.py -q
 74 passed
 python -m pytest -q
-907 passed, 6 skipped
+911 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
+```
+
+## 2026-06-07 Phase 3 云端执行最小服务进展
+
+已完成：
+
+- 新增 `src/visual_agent/cloud_server.py`，基于 Python 标准库 `ThreadingHTTPServer`，不引入 FastAPI 依赖。
+- 新增 `cloud-server` CLI：`python -m visual_agent.cli cloud-server --workspace-root .agent-workspace --host 127.0.0.1 --port 7890 --run-profile dry-run`。
+- 服务端支持 `GET /v1/health`、`POST /v1/run`、`GET /v1/run/{run_id}`。
+- `POST /v1/run` 兼容现有 `cloud-run --execute --transport http` 的 `workflow_name` / `workspace` / `run_profile` payload，也支持未来 `workflow_yaml` payload 落盘后执行。
+- 本地服务端执行 workspace workflow 后返回 `status`、`run_id`、`report_url`、`steps_passed`、`steps_total`；`cloud-run --execute --transport http` 已可打通本地 server。
+- `require_feature()` 仍保持非阻断占位，本轮只打通服务链路，不启用商业化阻断。
+
+本轮定向验证：
+
+```text
+python -m pytest tests/test_cloud_server.py tests/test_cli.py::test_cloud_run_cli_execute_http_calls_local_cloud_server tests/test_cli.py::test_cloud_run_cli_execute_http_without_config_blocks_without_network -q
+5 passed
+python -m pytest tests/test_licensing.py -q
+35 passed
+python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensing.py tests/test_session.py -q
+88 passed
 ```
 
 ## 已完成能力

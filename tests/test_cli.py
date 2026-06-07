@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from threading import Thread
 
 import pytest
 
+from visual_agent.cloud_server import create_cloud_server
 from visual_agent.cli import generate_from_diff_cli_markdown, load_inputs, main, verify_impl_cli_markdown
 from visual_agent.codex_check import CodexCheckResult, CodexWorkflowCheck
 from visual_agent.session import load_agent_session, record_cloud_run_usage, update_agent_session
@@ -804,6 +806,57 @@ def test_cloud_run_cli_execute_http_without_config_blocks_without_network(tmp_pa
     assert payload["result"]["status"] == "blocked"
     assert payload["result"]["usage_recorded"] is False
     assert load_agent_session(tmp_path) is None
+
+
+def test_cloud_run_cli_execute_http_calls_local_cloud_server(tmp_path: Path, capsys, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    (workspace.fixtures_dir / "ready.html").write_text("<p>Ready</p>", encoding="utf-8")
+    (workspace.workflows_dir / "ready.yaml").write_text(
+        """
+schema_version: 1
+name: ready
+version: 1
+steps:
+  - id: observe
+    action: observe_html
+    path: fixtures/ready.html
+  - id: assert_ready
+    action: assert_text
+    text: Ready
+""".strip(),
+        encoding="utf-8",
+    )
+    server = create_cloud_server(workspace_root=workspace.root, port=0)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("VISUAL_AGENT_CLOUD_ENDPOINT", f"http://127.0.0.1:{server.server_port}/v1/run")
+    monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY", "local-test-key")
+    try:
+        code = main(
+            [
+                "cloud-run",
+                "--workspace-root",
+                str(workspace.root),
+                "--workflow",
+                "ready",
+                "--execute",
+                "--transport",
+                "http",
+                "--format",
+                "json",
+            ]
+        )
+        payload = json.loads(capsys.readouterr().out)
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert code == 0
+    assert payload["network_sent"] is True
+    assert payload["result"]["status"] == "success"
+    assert payload["result"]["run_id"]
+    assert payload["result"]["usage_recorded"] is True
 
 
 def init_git_repo(path: Path) -> None:

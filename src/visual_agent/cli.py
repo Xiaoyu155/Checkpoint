@@ -366,6 +366,12 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_run.add_argument("--retry-backoff-seconds", type=float, default=0.0, help="Initial retry backoff for HTTP transport. Default: 0.")
     cloud_run.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
+    cloud_server = subparsers.add_parser("cloud-server", help="Run a minimal local Visual Agent cloud execution server.")
+    cloud_server.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root served by the cloud server.")
+    cloud_server.add_argument("--host", default="127.0.0.1", help="Host to bind. Default: 127.0.0.1.")
+    cloud_server.add_argument("--port", type=int, default=7890, help="Port to bind. Default: 7890.")
+    cloud_server.add_argument("--run-profile", choices=RUN_PROFILE_CHOICES, default="dry-run", help="Default run profile for requests.")
+
     save_task = subparsers.add_parser("save-task-context", help="Save AI task state before switching windows.")
     save_task.add_argument("--task", required=True, help="Current task description.")
     save_task.add_argument("--files", nargs="*", default=[], help="Files already analyzed.")
@@ -1691,6 +1697,16 @@ def main(argv: list[str] | None = None) -> int:
             print(cloud_run_to_markdown(payload))
         else:
             print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "cloud-server":
+        from .cloud_server import serve_cloud_server
+
+        serve_cloud_server(
+            workspace_root=args.workspace_root,
+            host=args.host,
+            port=args.port,
+            run_profile=args.run_profile,
+        )
         return 0
     if args.command == "save-task-context":
         from .session import save_task_context, session_to_snapshot_text
