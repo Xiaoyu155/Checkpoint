@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -476,6 +477,18 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_lint.add_argument("--file", dest="workflow_file", default=None, help="Workflow YAML/JSON path.")
     workflow_lint.add_argument("--min-quality-score", type=float, default=0.6, help="Minimum acceptable quality score. Default: 0.6.")
     workflow_lint.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    workflow_add_step = subparsers.add_parser("workflow-add-step", help="Insert a workflow step after an existing step id.")
+    workflow_add_step.add_argument("--workflow", required=True, help="Workflow YAML path to modify.")
+    workflow_add_step.add_argument("--after", required=True, help="Existing step id after which the new step is inserted.")
+    workflow_add_step.add_argument("--action", required=True, help="Action for the new step, for example wait_for_text or assert_text.")
+    workflow_add_step.add_argument("--id", dest="step_id", default=None, help="Optional id for the new step. Default is generated from action.")
+    workflow_add_step.add_argument("--text", default=None, help="Text parameter for wait/assert actions.")
+    workflow_add_step.add_argument("--url-contains", default=None, help="URL fragment for wait_for.")
+    workflow_add_step.add_argument("--timeout-ms", type=int, default=None, help="timeout_ms parameter for wait actions.")
+    workflow_add_step.add_argument("--observation", default=None, help="Observation id to attach to the new step.")
+    workflow_add_step.add_argument("--dry-run", action="store_true", help="Preview the insertion without writing the workflow.")
+    workflow_add_step.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     gen_from_diff = subparsers.add_parser("generate-from-diff", help="Generate a verification workflow from git diff context.")
     gen_from_diff.add_argument("--task-description", required=True, help="Task or feature that the code changes implement.")
@@ -1903,6 +1916,23 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
         return 0 if result["ok"] else 1
+    if args.command == "workflow-add-step":
+        result = workflow_add_step_payload(
+            Path(args.workflow),
+            after_step_id=args.after,
+            action=args.action,
+            step_id=args.step_id,
+            text=args.text,
+            url_contains=args.url_contains,
+            timeout_ms=args.timeout_ms,
+            observation=args.observation,
+            dry_run=args.dry_run,
+        )
+        if args.format == "markdown":
+            print(workflow_add_step_to_markdown(result))
+        else:
+            print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
+        return 0 if result["status"] in {"updated", "preview"} else 1
     if args.command == "generate-from-diff":
         from .context_ingestion import GenerationContext
         from .git_diff import collect_code_changes
@@ -2504,6 +2534,126 @@ def workflow_lint_to_markdown(result: dict[str, Any]) -> str:
     if suggestions:
         lines.extend(["", "Suggestions:"])
         lines.extend(f"  - {suggestion}" for suggestion in suggestions)
+    return "\n".join(lines)
+
+
+def workflow_add_step_payload(
+    path: Path,
+    *,
+    after_step_id: str,
+    action: str,
+    step_id: str | None = None,
+    text: str | None = None,
+    url_contains: str | None = None,
+    timeout_ms: int | None = None,
+    observation: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    try:
+        import yaml
+
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {"status": "error", "workflow_path": str(path), "message": str(exc)}
+    if not isinstance(doc, dict):
+        return {"status": "error", "workflow_path": str(path), "message": "Workflow YAML root must be an object."}
+    steps = doc.get("steps")
+    if not isinstance(steps, list):
+        return {"status": "error", "workflow_path": str(path), "message": "Workflow YAML must contain a steps list."}
+    insert_index = next((index for index, step in enumerate(steps) if isinstance(step, dict) and step.get("id") == after_step_id), None)
+    if insert_index is None:
+        return {"status": "error", "workflow_path": str(path), "message": f"Step id not found: {after_step_id}"}
+    existing_ids = {str(step.get("id")) for step in steps if isinstance(step, dict) and step.get("id")}
+    new_step = build_workflow_step_for_cli(
+        action=action,
+        step_id=step_id or unique_step_id(action, existing_ids),
+        text=text,
+        url_contains=url_contains,
+        timeout_ms=timeout_ms,
+        observation=observation,
+    )
+    if new_step["id"] in existing_ids:
+        return {"status": "error", "workflow_path": str(path), "message": f"Step id already exists: {new_step['id']}"}
+    updated_steps = [*steps[: insert_index + 1], new_step, *steps[insert_index + 1 :]]
+    updated_doc = {**doc, "steps": updated_steps}
+    yaml_text = yaml.safe_dump(updated_doc, allow_unicode=True, sort_keys=False).rstrip() + "\n"
+    if not dry_run:
+        path.write_text(yaml_text, encoding="utf-8")
+    validation = None
+    if not dry_run:
+        try:
+            validation_result = validate_workflow_file(path)
+            validation = {
+                "valid": validation_result.valid,
+                "issues": [
+                    {"level": issue.level, "step_id": issue.step_id, "message": issue.message}
+                    for issue in validation_result.issues
+                ],
+            }
+        except Exception as exc:
+            validation = {"valid": False, "issues": [{"level": "error", "step_id": "", "message": str(exc)}]}
+    return {
+        "status": "preview" if dry_run else "updated",
+        "workflow_path": str(path),
+        "after": after_step_id,
+        "inserted_index": insert_index + 1,
+        "step": new_step,
+        "validation": validation,
+        "yaml": yaml_text if dry_run else None,
+    }
+
+
+def build_workflow_step_for_cli(
+    *,
+    action: str,
+    step_id: str,
+    text: str | None,
+    url_contains: str | None,
+    timeout_ms: int | None,
+    observation: str | None,
+) -> dict[str, Any]:
+    step: dict[str, Any] = {"id": step_id, "action": action}
+    if text is not None:
+        if action == "wait_for":
+            step["condition"] = "text"
+        step["text"] = text
+    if url_contains is not None:
+        step["condition"] = "url"
+        step["url_contains"] = url_contains
+    if timeout_ms is not None:
+        step["timeout_ms"] = timeout_ms
+    if observation is not None:
+        step["observation"] = observation
+    return step
+
+
+def unique_step_id(action: str, existing_ids: set[str]) -> str:
+    base = re.sub(r"[^0-9a-zA-Z_]+", "_", action).strip("_").lower() or "step"
+    candidate = base
+    counter = 2
+    while candidate in existing_ids:
+        candidate = f"{base}_{counter}"
+        counter += 1
+    return candidate
+
+
+def workflow_add_step_to_markdown(result: dict[str, Any]) -> str:
+    lines = [
+        f"Status: {result.get('status')}",
+        f"Workflow: {result.get('workflow_path')}",
+    ]
+    if result.get("message"):
+        lines.append(f"Message: {result['message']}")
+    step = result.get("step") if isinstance(result.get("step"), dict) else None
+    if step:
+        lines.extend(["", "Inserted step:", f"- id: {step.get('id')}", f"- action: {step.get('action')}"])
+        if step.get("text"):
+            lines.append(f"- text: {step['text']}")
+        if step.get("url_contains"):
+            lines.append(f"- url_contains: {step['url_contains']}")
+    validation = result.get("validation") if isinstance(result.get("validation"), dict) else None
+    if validation is not None:
+        lines.append(f"Validation: {'valid' if validation.get('valid') else 'invalid'}")
     return "\n".join(lines)
 
 

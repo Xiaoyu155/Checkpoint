@@ -12,7 +12,7 @@ V2 主线已经完成了大部分“代码上下文生成 → workflow 合成 �
 
 ```text
 python -m pytest
-904 passed, 6 skipped
+907 passed, 6 skipped
 
 npm test  # vscode-extension
 passed
@@ -117,7 +117,7 @@ V2 代码上下文验证主线已经收口。本轮继续推进 Phase 1 dogfoodi
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-904 passed, 6 skipped
+907 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -136,7 +136,7 @@ success
 python -m pytest tests/test_cli.py tests/test_context_workflow_synthesis.py -q
 51 passed
 python -m pytest -q
-904 passed, 6 skipped
+907 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 ```
@@ -147,12 +147,17 @@ passed
 - 默认 markdown 输出 workflow 状态、quality score、validation issues、quality gaps、suggestions。
 - `--format json` 输出结构化 `quality`、`validation.issues`、`suggestions`。
 - validation 失败或 quality score 低于默认阈值 `0.6` 时退出码为 1。
+- 新增 `workflow-add-step --workflow <path> --after <step_id> --action <action>`。
+- 支持 `--text`、`--url-contains`、`--timeout-ms`、`--observation`、`--dry-run`、`--format json/markdown`。
+- 会自动生成不冲突 step id，写回后运行 workflow validation；dry-run 模式只返回预览 YAML。
 
 已通过：
 
 ```text
 python -m pytest tests/test_cli.py tests/test_workflow_quality.py tests/test_validation.py -q
 59 passed
+python -m pytest tests/test_cli.py tests/test_validation.py tests/test_workflow_quality.py -q
+62 passed
 ```
 
 随后已完成 Phase 2 Task 2.2：
@@ -179,7 +184,7 @@ python -m pytest tests/e2e/test_e2e_context_verification.py tests/test_cli.py te
 136 passed
 
 python -m pytest tests/ -q --tb=short
-904 passed, 6 skipped
+907 passed, 6 skipped
 
 npm test --prefix vscode-extension
 passed

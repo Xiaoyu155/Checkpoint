@@ -301,6 +301,120 @@ steps:
     assert payload["quality"]["covers_error_path"] is True
 
 
+def test_workflow_add_step_inserts_wait_for_text_after_step(tmp_path: Path, capsys) -> None:
+    workflow = tmp_path / "profile.yaml"
+    workflow.write_text(
+        """
+schema_version: 1
+name: profile
+version: 1
+steps:
+  - id: observe
+    action: observe_html
+    path: page.html
+  - id: click_submit
+    action: click
+    target:
+      text: Save
+""".strip(),
+        encoding="utf-8",
+    )
+
+    code = main(
+        [
+            "workflow-add-step",
+            "--workflow",
+            str(workflow),
+            "--after",
+            "click_submit",
+            "--action",
+            "wait_for_text",
+            "--text",
+            "Saved successfully",
+            "--timeout-ms",
+            "10000",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    text = workflow.read_text(encoding="utf-8")
+
+    assert code == 0
+    assert payload["status"] == "updated"
+    assert payload["step"]["id"] == "wait_for_text"
+    assert payload["step"]["text"] == "Saved successfully"
+    assert payload["step"]["timeout_ms"] == 10000
+    assert "id: wait_for_text" in text
+    assert text.index("id: click_submit") < text.index("id: wait_for_text")
+
+
+def test_workflow_add_step_dry_run_does_not_write(tmp_path: Path, capsys) -> None:
+    workflow = tmp_path / "profile.yaml"
+    original = """
+schema_version: 1
+name: profile
+version: 1
+steps:
+  - id: observe
+    action: observe_html
+    path: page.html
+""".strip()
+    workflow.write_text(original, encoding="utf-8")
+
+    code = main(
+        [
+            "workflow-add-step",
+            "--workflow",
+            str(workflow),
+            "--after",
+            "observe",
+            "--action",
+            "assert_text",
+            "--text",
+            "Ready",
+            "--dry-run",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["status"] == "preview"
+    assert "id: assert_text" in payload["yaml"]
+    assert workflow.read_text(encoding="utf-8") == original
+
+
+def test_workflow_add_step_missing_after_returns_error(tmp_path: Path, capsys) -> None:
+    workflow = tmp_path / "profile.yaml"
+    workflow.write_text(
+        "schema_version: 1\nname: profile\nversion: 1\nsteps:\n  - id: observe\n    action: observe_html\n    path: page.html\n",
+        encoding="utf-8",
+    )
+
+    code = main(
+        [
+            "workflow-add-step",
+            "--workflow",
+            str(workflow),
+            "--after",
+            "missing",
+            "--action",
+            "assert_text",
+            "--text",
+            "Ready",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 1
+    assert payload["status"] == "error"
+    assert "missing" in payload["message"]
+
+
 def test_verify_impl_cli_dry_run_writes_status(tmp_path: Path, capsys) -> None:
     init_git_repo(tmp_path)
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
