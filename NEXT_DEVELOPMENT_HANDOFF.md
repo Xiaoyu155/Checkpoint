@@ -124,6 +124,19 @@ visual-agent mcp-smoke
 success
 ```
 
+随后已完成 Phase 2 Task 2.1：
+
+- `generate-from-diff --audit-log <path>` 会追加 JSONL parser 审计记录。
+- 审计字段覆盖 framework/confidence/method、字段列表、submit actions、success states、unmatched data displays、warnings、quality score、workflow/changed files。
+- 审计文件父目录自动创建，连续运行追加多行有效 JSON。
+
+已通过：
+
+```text
+python -m pytest tests/test_cli.py tests/test_context_workflow_synthesis.py -q
+51 passed
+```
+
 V2 既有验证结果：
 
 已通过：
@@ -165,7 +178,7 @@ passed
 
 ```powershell
 cd "D:\longxia agent"
-python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
+python -m pytest tests/test_cli.py tests/test_context_workflow_synthesis.py tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 npm test --prefix vscode-extension
 python -m pytest
 ```
@@ -193,9 +206,9 @@ V2 code-context verification 主线可以阶段性暂停。当前已覆盖：
 
 ## 推荐下一步执行顺序
 
-1. 跑全量 `python -m pytest` 和 `npm test --prefix vscode-extension`，确认 Phase 1 本轮改动没有长尾回归。
-2. 进入 Phase 2 Task 2.1：为 `generate-from-diff` 增加 `--audit-log .agent-workspace/audit/context_parse.jsonl`，记录 framework/confidence/submit actions/unmatched displays/warnings。
-3. Phase 2 收集真实误判后，再做 AntD/MUI 组件扩展；不要提前扩散到 Phase 3 cloud-server。
+1. 跑全量 `python -m pytest` 和 `npm test --prefix vscode-extension`，确认 Phase 2 audit-log 改动没有长尾回归。
+2. 进入 Phase 2 Task 2.3：新增 `workflow-lint` 辅助命令，复用 workflow quality/validation 给出可操作修复建议。
+3. Phase 2 收集真实 `--audit-log` 误判后，再做 AntD/MUI 组件扩展；不要提前扩散到 Phase 3 cloud-server。
 4. 每轮结束更新 `DEVELOPMENT_LOG.md` / `README_MCP.md` / `NEXT_DEVELOPMENT_HANDOFF.md`。
 
 ## 常用验证命令

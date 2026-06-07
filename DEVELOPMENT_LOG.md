@@ -76,6 +76,21 @@ visual-agent mcp-smoke
 success
 ```
 
+## 2026-06-07 Phase 2 真实样本审计进展
+
+已完成：
+
+- `generate-from-diff --audit-log <path>`：每次生成后追加一行 JSONL 审计记录，用于后续定位 parser 误判。
+- 新增 `src/visual_agent/context_audit.py`，审计字段包含 `task`、`framework`、`confidence`、`method`、`fields`、`submit_actions`、`success_states`、`unmatched_data_displays`、`warnings`、`quality_score`、`workflow_name`、`workflow_path`、`changed_files`。
+- 审计日志父目录自动创建；连续多次运行会追加多行有效 JSON，不影响原 CLI JSON/YAML/markdown 输出结构。
+
+本轮定向验证：
+
+```text
+python -m pytest tests/test_cli.py tests/test_context_workflow_synthesis.py -q
+51 passed
+```
+
 ## 已完成能力
 
 ### 1. 真实点击与输入
