@@ -25,12 +25,13 @@ FREE_FEATURES = frozenset(
 
 PRO_FEATURES = frozenset(
     {
-        "cloud_run",
         "ci_github_check",
         "workflow_history_30d",
         "priority_support",
     }
 )
+
+CLOUD_RUN_FREE_MONTHLY_LIMIT = 5
 
 TEAM_FEATURES = frozenset(
     {
@@ -66,8 +67,9 @@ class FeatureGatedError(Exception):
 def get_license() -> License:
     """Return local license metadata from env or a local JSON file.
 
-    License reads are intentionally local-only. The product still keeps paid
-    gates non-blocking until remote license validation is activated.
+    License reads are intentionally local-only. Feature gates are enforced with
+    local tier metadata and workspace usage counters until remote validation is
+    activated.
     """
     env_license = _license_from_env()
     if env_license:
@@ -82,6 +84,8 @@ def check_feature(feature: str, license_: License | None = None) -> bool:
     lic = license_ or get_license()
     if _is_expired(lic):
         lic = License(tier="free", source=lic.source, key_present=lic.key_present)
+    if feature == "cloud_run":
+        return True
     if feature in FREE_FEATURES:
         return True
     if lic.tier in ("pro", "team", "enterprise") and feature in PRO_FEATURES:
@@ -106,6 +110,8 @@ def require_feature(feature: str, license_: License | None = None) -> None:
 
 
 def _feature_min_tier(feature: str) -> TierName | str:
+    if feature == "cloud_run":
+        return "free"
     if feature in FREE_FEATURES:
         return "free"
     if feature in PRO_FEATURES:
@@ -113,6 +119,15 @@ def _feature_min_tier(feature: str) -> TierName | str:
     if feature in TEAM_FEATURES:
         return "team"
     return "enterprise"
+
+
+def monthly_feature_limit(feature: str, license_: License | None = None) -> int | None:
+    lic = license_ or get_license()
+    if _is_expired(lic):
+        lic = License(tier="free", source=lic.source, key_present=lic.key_present)
+    if feature == "cloud_run" and lic.tier == "free":
+        return CLOUD_RUN_FREE_MONTHLY_LIMIT
+    return None
 
 
 def default_license_path() -> Path:

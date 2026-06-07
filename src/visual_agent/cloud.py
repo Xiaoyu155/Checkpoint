@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .licensing import FeatureGatedError, require_feature
+from .licensing import FeatureGatedError, get_license, monthly_feature_limit, require_feature
 from .security import scrub_secrets
 
 CloudWorkflowClient = Callable[[str, Path], dict[str, Any]]
@@ -269,7 +270,11 @@ def execute_remote_workflow_plan(
     )
     result = run_remote_workflow(workflow_name, workspace_root, client=client)
     payload["result"] = result
-    payload["network_sent"] = bool(transport is not None and request.get("status") == "ready" and result.get("status") != "upgrade_required")
+    payload["network_sent"] = bool(
+        transport is not None
+        and request.get("status") == "ready"
+        and result.get("status") not in {"upgrade_required", "quota_exceeded"}
+    )
     return payload
 
 
@@ -300,6 +305,24 @@ def run_remote_workflow(
             "workspace": str(workspace_root),
             "usage_recorded": False,
         }
+    quota_status = cloud_run_quota_status(workspace_root)
+    if not quota_status["allowed"]:
+        return {
+            "schema_version": 1,
+            "status": "upgrade_required",
+            "feature": "cloud_run",
+            "reason": "quota_exceeded",
+            "required_tier": "pro",
+            "current_tier": quota_status["tier"],
+            "message": (
+                f"Cloud run monthly quota exceeded ({quota_status['used']}/{quota_status['limit']}). "
+                "Upgrade to pro for unlimited cloud runs."
+            ),
+            "quota": quota_status,
+            "workflow_name": workflow_name,
+            "workspace": str(workspace_root),
+            "usage_recorded": False,
+        }
     if client is not None:
         result = dict(client(workflow_name, workspace_root))
         result.setdefault("schema_version", 1)
@@ -317,3 +340,23 @@ def run_remote_workflow(
         "Cloud runs are not yet available. "
         f"Workflow '{workflow_name}' can still be run locally from {workspace_root}."
     )
+
+
+def cloud_run_quota_status(workspace_root: Path) -> dict[str, Any]:
+    license_ = get_license()
+    limit = monthly_feature_limit("cloud_run", license_)
+    from .session import load_agent_session
+
+    session = load_agent_session(Path(workspace_root))
+    current_month = datetime.now().strftime("%Y-%m")
+    used = int(session.cloud_runs_used if session and session.usage_reset_date == current_month else 0)
+    remaining = None if limit is None else max(0, int(limit) - used)
+    return {
+        "feature": "cloud_run",
+        "tier": license_.tier,
+        "limit": limit,
+        "used": used,
+        "remaining": remaining,
+        "allowed": limit is None or used < int(limit),
+        "reset_month": current_month,
+    }

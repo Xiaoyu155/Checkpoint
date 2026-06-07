@@ -1610,7 +1610,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"snapshot": text, "token_estimate": len(text) // 4, "within_budget": len(text) <= 2000}, ensure_ascii=False, indent=2))
         return 0
     if args.command == "usage-status":
-        from .cloud import build_remote_workflow_request, cloud_config_status
+        from .cloud import build_remote_workflow_request, cloud_config_status, cloud_run_quota_status
         from .licensing import check_feature, get_license
         from .session import load_agent_session
 
@@ -1631,6 +1631,7 @@ def main(argv: list[str] | None = None) -> int:
                 "runs_this_month": session.runs_this_month if session else 0,
                 "cloud_runs_used": session.cloud_runs_used if session else 0,
                 "usage_reset_date": session.usage_reset_date if session else "",
+                "cloud_run_quota": cloud_run_quota_status(workspace_root),
             },
             "feature_access": {
                 "cloud_run": check_feature("cloud_run"),
@@ -2840,6 +2841,16 @@ def usage_status_to_markdown(payload: dict[str, Any]) -> str:
         f"- Org: `{cloud_config.get('org') or ''}`",
         f"- Network probe: `{cloud_config.get('network_probe') or 'not_run'}`",
     ]
+    quota = usage.get("cloud_run_quota") if isinstance(usage.get("cloud_run_quota"), dict) else {}
+    if quota:
+        limit = "unlimited" if quota.get("limit") is None else quota.get("limit")
+        remaining = "unlimited" if quota.get("remaining") is None else quota.get("remaining")
+        lines.extend(
+            [
+                f"- Cloud run limit: `{limit}`",
+                f"- Cloud run remaining: `{remaining}`",
+            ]
+        )
     blockers = cloud_config.get("blockers") if isinstance(cloud_config.get("blockers"), list) else []
     if blockers:
         lines.append(f"- Blockers: {', '.join(str(item) for item in blockers)}")

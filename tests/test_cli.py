@@ -626,6 +626,8 @@ def test_usage_status_cli_reports_usage_and_license_without_secret(tmp_path: Pat
     assert payload["license"]["key_present"] is True
     assert payload["usage"]["runs_this_month"] == 1
     assert payload["usage"]["cloud_runs_used"] == 2
+    assert payload["usage"]["cloud_run_quota"]["limit"] is None
+    assert payload["usage"]["cloud_run_quota"]["remaining"] is None
     assert payload["feature_access"]["cloud_run"] is True
     assert payload["cloud_config"]["available"] is True
     assert payload["cloud_config"]["api_key_present"] is True
@@ -648,6 +650,8 @@ def test_usage_status_cli_outputs_markdown(tmp_path: Path, capsys) -> None:
     assert code == 0
     assert "# Visual Agent Usage" in output
     assert "Local runs this month: `1`" in output
+    assert "Cloud run limit: `5`" in output
+    assert "Cloud run remaining: `5`" in output
     assert "## Cloud Config" in output
     assert "Blockers: missing_endpoint, missing_api_key" in output
     assert "cloud_run" in output
@@ -771,10 +775,39 @@ def test_cloud_run_cli_execute_without_transport_blocks_without_usage(tmp_path: 
     assert "# Cloud Run" in output
     assert "Execution requested: `True`" in output
     assert "Network sent: `False`" in output
-    assert "Status: `upgrade_required`" in output
-    assert "requires the pro plan" in output
+    assert "Status: `blocked`" in output
+    assert "transport is not enabled" in output
     assert "va_cloud_secret_key" not in output
     assert load_agent_session(tmp_path) is None
+
+
+def test_cloud_run_cli_execute_blocks_when_free_quota_exceeded(tmp_path: Path, capsys, monkeypatch) -> None:
+    record_cloud_run_usage(tmp_path, count=5)
+    monkeypatch.setenv("VISUAL_AGENT_CLOUD_ENDPOINT", "https://cloud.visualagent.test")
+    monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY", "va_cloud_secret_key")
+
+    code = main(
+        [
+            "cloud-run",
+            "--workspace-root",
+            str(tmp_path),
+            "--workflow",
+            "checkout",
+            "--execute",
+            "--transport",
+            "http",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["network_sent"] is False
+    assert payload["result"]["status"] == "upgrade_required"
+    assert payload["result"]["reason"] == "quota_exceeded"
+    assert payload["result"]["quota"]["remaining"] == 0
+    assert load_agent_session(tmp_path).cloud_runs_used == 5
 
 
 def test_cloud_run_cli_execute_http_without_config_blocks_without_network(tmp_path: Path, capsys, monkeypatch) -> None:

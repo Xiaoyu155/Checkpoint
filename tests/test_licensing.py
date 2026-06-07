@@ -9,14 +9,15 @@ import pytest
 from visual_agent.cloud import (
     build_http_cloud_transport,
     build_remote_workflow_request,
+    cloud_run_quota_status,
     cloud_config_status,
     execute_remote_workflow_plan,
     filter_remote_workflow_response,
     remote_client_from_env,
     run_remote_workflow,
 )
-from visual_agent.licensing import FeatureGatedError, check_feature, get_license, require_feature
-from visual_agent.session import load_agent_session
+from visual_agent.licensing import FeatureGatedError, check_feature, get_license, monthly_feature_limit, require_feature
+from visual_agent.session import load_agent_session, record_cloud_run_usage
 
 
 def test_get_license_returns_free_tier(monkeypatch) -> None:
@@ -35,15 +36,15 @@ def test_check_feature_reports_free_and_paid_boundaries(monkeypatch) -> None:
     assert check_feature("local_run") is True
     assert check_feature("mcp_server") is True
     assert check_feature("generate_workflow") is True
-    assert check_feature("cloud_run") is False
+    assert check_feature("cloud_run") is True
     assert check_feature("team_workspace") is False
 
 
-def test_require_feature_blocks_cloud_run_on_free_tier(monkeypatch) -> None:
+def test_require_feature_allows_limited_cloud_run_on_free_tier(monkeypatch) -> None:
     clear_license_env(monkeypatch)
 
-    with pytest.raises(FeatureGatedError, match="pro"):
-        require_feature("cloud_run")
+    require_feature("cloud_run")
+    assert monthly_feature_limit("cloud_run") == 5
 
 
 def test_require_feature_allows_cloud_run_on_pro_tier(monkeypatch) -> None:
@@ -96,7 +97,8 @@ def test_expired_license_downgrades_feature_checks(tmp_path: Path, monkeypatch) 
 
     assert get_license().tier == "pro"
     assert check_feature("local_run") is True
-    assert check_feature("cloud_run") is False
+    assert check_feature("cloud_run") is True
+    assert monthly_feature_limit("cloud_run") == 5
 
 
 def test_feature_gated_error_message_is_available_for_future_gates() -> None:
@@ -108,8 +110,29 @@ def test_feature_gated_error_message_is_available_for_future_gates() -> None:
     assert "pro plan" in str(error)
 
 
-def test_cloud_run_returns_upgrade_required_on_free_tier(tmp_path: Path, monkeypatch) -> None:
+def test_cloud_run_free_tier_records_usage_until_quota(tmp_path: Path, monkeypatch) -> None:
     clear_license_env(monkeypatch)
+    calls = 0
+
+    def fake_client(_workflow_name: str, _workspace_root: Path) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"status": "success", "run_id": "cloud-run-1"}
+
+    result = run_remote_workflow("checkout", tmp_path, client=fake_client)
+    session = load_agent_session(tmp_path)
+
+    assert result["status"] == "success"
+    assert result["usage_recorded"] is True
+    assert calls == 1
+    assert session is not None
+    assert session.cloud_runs_used == 1
+    assert cloud_run_quota_status(tmp_path)["remaining"] == 4
+
+
+def test_cloud_run_returns_upgrade_required_when_free_quota_exceeded(tmp_path: Path, monkeypatch) -> None:
+    clear_license_env(monkeypatch)
+    record_cloud_run_usage(tmp_path, count=5)
     calls = 0
 
     def fake_client(_workflow_name: str, _workspace_root: Path) -> dict:
@@ -120,12 +143,15 @@ def test_cloud_run_returns_upgrade_required_on_free_tier(tmp_path: Path, monkeyp
     result = run_remote_workflow("checkout", tmp_path, client=fake_client)
 
     assert result["status"] == "upgrade_required"
+    assert result["reason"] == "quota_exceeded"
     assert result["feature"] == "cloud_run"
     assert result["required_tier"] == "pro"
     assert result["current_tier"] == "free"
+    assert result["quota"]["used"] == 5
+    assert result["quota"]["remaining"] == 0
     assert result["usage_recorded"] is False
     assert calls == 0
-    assert load_agent_session(tmp_path) is None
+    assert load_agent_session(tmp_path).cloud_runs_used == 5
 
 
 def test_cloud_run_placeholder_still_raises_without_client_on_paid_tier(tmp_path: Path, monkeypatch) -> None:
