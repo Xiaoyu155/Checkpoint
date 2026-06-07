@@ -90,7 +90,17 @@ def observe_browser(params: dict[str, Any], context: ProviderContext) -> Observa
         page = context.resources.get("playwright_page") if context.resources is not None else None
         if page is None:
             raise RuntimeError("observe_browser reuse_page requires an existing browser page.")
-        return browser_page_observation(page, storage_state_loaded=bool(context.resources.get("storage_state") if context.resources else False))
+        if bool(params.get("refresh", False)):
+            page.reload(wait_until=str(params.get("wait_until") or "domcontentloaded"), timeout=int(params.get("timeout_ms", 10_000)))
+        return browser_page_observation(
+            page,
+            storage_state_loaded=bool(context.resources.get("storage_state") if context.resources else False),
+            run_dir=context.run_dir,
+            label=str(params.get("screenshot_label") or "browser-reuse"),
+            network_events=context.resources.get("network_events", []) if context.resources else [],
+            console_events=context.resources.get("console_events", []) if context.resources else [],
+            page_errors=context.resources.get("page_errors", []) if context.resources else [],
+        )
 
     url = normalize_url(require_param(params, "url"), run_dir=context.run_dir)
     playwright = sync_playwright().start()
@@ -108,20 +118,34 @@ def observe_browser(params: dict[str, Any], context: ProviderContext) -> Observa
         browser_context = browser.new_context(**context_options)
         page = browser_context.new_page()
         network_events: list[dict[str, Any]] = []
+        console_events: list[dict[str, Any]] = []
+        page_errors: list[dict[str, Any]] = []
         page.on("response", lambda response: network_events.append(response_event(response)))
         page.on("requestfailed", lambda request: network_events.append(request_failed_event(request)))
+        page.on("console", lambda message: console_events.append(console_event(message)))
+        page.on("pageerror", lambda exc: page_errors.append(page_error_event(exc)))
         for route in params.get("routes", []) or []:
             if not isinstance(route, dict):
                 continue
             page.route(str(route.get("url") or "**/*"), route_handler(route, context.run_dir))
-        page.goto(url, wait_until="domcontentloaded", timeout=int(params.get("timeout_ms", 10_000)))
-        observation = browser_page_observation(page, storage_state_loaded=bool(storage_state))
+        page.goto(url, wait_until=str(params.get("wait_until") or "domcontentloaded"), timeout=int(params.get("timeout_ms", 10_000)))
+        observation = browser_page_observation(
+            page,
+            storage_state_loaded=bool(storage_state),
+            run_dir=context.run_dir,
+            label=str(params.get("screenshot_label") or "browser"),
+            network_events=network_events,
+            console_events=console_events,
+            page_errors=page_errors,
+        )
         if context.resources is not None:
             context.resources["playwright"] = playwright
             context.resources["playwright_browser"] = browser
             context.resources["playwright_context"] = browser_context
             context.resources["playwright_page"] = page
             context.resources["network_events"] = network_events
+            context.resources["console_events"] = console_events
+            context.resources["page_errors"] = page_errors
         return observation
     except Exception:
         if browser_context is not None:
@@ -132,11 +156,40 @@ def observe_browser(params: dict[str, Any], context: ProviderContext) -> Observa
         raise
 
 
-def browser_page_observation(page: Any, *, storage_state_loaded: bool = False) -> Observation:
+def browser_page_observation(
+    page: Any,
+    *,
+    storage_state_loaded: bool = False,
+    run_dir: Path | None = None,
+    label: str = "browser",
+    network_events: list[dict[str, Any]] | None = None,
+    console_events: list[dict[str, Any]] | None = None,
+    page_errors: list[dict[str, Any]] | None = None,
+) -> Observation:
     elements = tuple(page.evaluate(_COLLECT_ELEMENTS_SCRIPT, INTERACTIVE_SELECTOR))
+    visible_text = str(page.evaluate("() => document.body ? (document.body.innerText || document.body.textContent || '') : ''") or "")
+    screenshot_path = None
+    html_path = None
+    visible_text_path = None
+    if run_dir is not None:
+        screenshots_dir = run_dir / "screenshots"
+        screenshots_dir.mkdir(parents=True, exist_ok=True)
+        screenshot_path = screenshots_dir / f"{safe_artifact_label(label)}.png"
+        page.screenshot(path=str(screenshot_path), full_page=True)
+        artifacts_dir = run_dir / "browser"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        html_path = artifacts_dir / f"{safe_artifact_label(label)}.html"
+        visible_text_path = artifacts_dir / f"{safe_artifact_label(label)}.txt"
+        content = page.content() if hasattr(page, "content") else ""
+        html_path.write_text(str(content), encoding="utf-8")
+        visible_text_path.write_text(visible_text, encoding="utf-8")
+    network_events = network_events or []
+    console_events = console_events or []
+    page_errors = page_errors or []
     return Observation(
         provider=ProviderKind.DOM,
         source=page.url,
+        screenshot_path=screenshot_path,
         width=page.viewport_size["width"] if page.viewport_size else None,
         height=page.viewport_size["height"] if page.viewport_size else None,
         elements=elements,
@@ -145,8 +198,46 @@ def browser_page_observation(page: Any, *, storage_state_loaded: bool = False) -
             "url": page.url,
             "provider": "playwright_browser",
             "storage_state_loaded": storage_state_loaded,
+            "visible_text": visible_text[:10_000],
+            "visible_text_length": len(visible_text.strip()),
+            "interactive_count": len(elements),
+            "network_event_count": len(network_events),
+            "failed_request_count": sum(1 for event in network_events if is_failed_network_event(event)),
+            "console_errors": tuple(event for event in console_events[-20:] if event.get("type") in {"error", "assert"}),
+            "page_errors": tuple(page_errors[-20:]),
+            "screenshot_path": str(screenshot_path) if screenshot_path is not None else None,
+            "html_path": str(html_path) if html_path is not None else None,
+            "visible_text_path": str(visible_text_path) if visible_text_path is not None else None,
         },
     )
+
+
+def console_event(message: Any) -> dict[str, Any]:
+    return {
+        "type": str(getattr(message, "type", "") or ""),
+        "text": str(getattr(message, "text", "") or "")[:1000],
+    }
+
+
+def page_error_event(exc: Any) -> dict[str, Any]:
+    return {"type": "pageerror", "message": str(exc)[:1000]}
+
+
+def is_failed_network_event(event: dict[str, Any]) -> bool:
+    if event.get("type") == "request_failed":
+        return True
+    if event.get("ok") is False:
+        return True
+    try:
+        return int(event.get("status") or 200) >= 400
+    except (TypeError, ValueError):
+        return False
+
+
+def safe_artifact_label(value: str) -> str:
+    text = value.strip() or "browser"
+    safe = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in text)
+    return safe[:80] or "browser"
 
 
 def observe_uia(params: dict[str, Any], context: ProviderContext) -> Observation:

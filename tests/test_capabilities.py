@@ -48,12 +48,15 @@ def test_capabilities_include_planner_visible_atomic_specs() -> None:
     assert by_name["press_key"].dry_run_supported is True
     assert by_name["press_key"].input_schema["required"] == ["keys"]
     assert by_name["press_key"].input_schema["fields"]["target"] == "Target?"
+    assert by_name["refresh_browser"].planner_visible is True
+    assert by_name["refresh_browser"].input_schema["fields"]["wait_until"] == "domcontentloaded|load|networkidle?"
     assert by_name["click_text"].input_schema["required"] == ["text|label|contains_text"]
     assert by_name["wait_for_text"].input_schema["required"] == ["text|contains_text"]
     assert by_name["request_api"].dry_run_supported is True
     assert by_name["request_api"].input_schema["required"] == ["url"]
     assert by_name["observe_state"].planner_visible is True
     assert by_name["assert_no_error"].kind == "assertion"
+    assert by_name["assert_browser_ready"].kind == "assertion"
     assert by_name["assert_product_contract"].kind == "assertion"
     assert by_name["assert_ai_response_quality"].kind == "assertion"
     assert by_name["save_storage_state"].risk_level == "high"
@@ -71,11 +74,13 @@ def test_atomic_capability_manifest_excludes_dependencies_and_hidden_commands() 
 
     assert "click" in names
     assert "press_key" in names
+    assert "refresh_browser" in names
     assert "click_text" in names
     assert "wait_for_text" in names
     assert "request_api" in names
     assert "observe_state" in names
     assert "assert_no_error" in names
+    assert "assert_browser_ready" in names
     assert "assert_product_contract" in names
     assert "assert_ai_response_quality" in names
     assert "assert_response" in names

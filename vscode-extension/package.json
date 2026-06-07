@@ -1,0 +1,178 @@
+{
+  "name": "visual-agent",
+  "displayName": "Visual Agent",
+  "description": "UI verification co-pilot for AI coding assistants. Run workflows, see results, and keep context across coding sessions.",
+  "version": "0.1.0",
+  "publisher": "visual-agent",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Xiaoyu155/visual-agent.git",
+    "directory": "vscode-extension"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Testing",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "visual-agent",
+          "title": "Visual Agent",
+          "icon": "icons/visual-agent.svg"
+        }
+      ]
+    },
+    "views": {
+      "visual-agent": [
+        {
+          "id": "visualAgentWorkflows",
+          "name": "Workflows"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "visualAgent.runAll",
+        "title": "Visual Agent: Run All Workflows"
+      },
+      {
+        "command": "visualAgent.runLiveSupervised",
+        "title": "Visual Agent: Run Live Supervised Workflows"
+      },
+      {
+        "command": "visualAgent.runAffected",
+        "title": "Visual Agent: Run Affected Workflows"
+      },
+      {
+        "command": "visualAgent.verifyCurrentChange",
+        "title": "Visual Agent: Verify Current Change"
+      },
+      {
+        "command": "visualAgent.showLastVerification",
+        "title": "Visual Agent: Show Last AI Verification"
+      },
+      {
+        "command": "visualAgent.showLatestFailure",
+        "title": "Visual Agent: Show Latest Failure"
+      },
+      {
+        "command": "visualAgent.autoRepair",
+        "title": "Visual Agent: Auto Repair Latest Failure"
+      },
+      {
+        "command": "visualAgent.generateWorkflow",
+        "title": "Visual Agent: Generate Workflow from Description"
+      },
+      {
+        "command": "visualAgent.browserSmoke",
+        "title": "Visual Agent: Browser Smoke URL"
+      },
+      {
+        "command": "visualAgent.connectCloud",
+        "title": "Visual Agent: Connect to Cloud (Pro)"
+      },
+      {
+        "command": "visualAgent.refresh",
+        "title": "Visual Agent: Refresh"
+      }
+    ],
+    "configuration": {
+      "title": "Visual Agent",
+      "properties": {
+        "visualAgent.workspaceRoot": {
+          "type": "string",
+          "default": ".agent-workspace",
+          "description": "Workspace root for Visual Agent data."
+        },
+        "visualAgent.runOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run affected workflows on file save."
+        },
+        "visualAgent.autoRunTags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "fast"
+          ],
+          "description": "Tags to include in auto-run on save."
+        },
+        "visualAgent.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to Python interpreter."
+        },
+        "visualAgent.maxNotificationChars": {
+          "type": "number",
+          "default": 500,
+          "description": "Maximum CLI output characters shown in notifications."
+        }
+      }
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "visualAgent.verifyCurrentChange",
+          "when": "view == visualAgentWorkflows",
+          "group": "navigation@1"
+        },
+        {
+          "command": "visualAgent.autoRepair",
+          "when": "view == visualAgentWorkflows",
+          "group": "navigation@2"
+        },
+        {
+          "command": "visualAgent.runLiveSupervised",
+          "when": "view == visualAgentWorkflows",
+          "group": "navigation@3"
+        },
+        {
+          "command": "visualAgent.browserSmoke",
+          "when": "view == visualAgentWorkflows",
+          "group": "navigation@4"
+        },
+        {
+          "command": "visualAgent.refresh",
+          "when": "view == visualAgentWorkflows",
+          "group": "navigation@5"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "visualAgent.autoRepair",
+          "when": "view == visualAgentWorkflows && viewItem == failedWorkflow",
+          "group": "inline@1"
+        },
+        {
+          "command": "visualAgent.showLatestFailure",
+          "when": "view == visualAgentWorkflows && viewItem == failedWorkflow",
+          "group": "inline@2"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "test": "npm run compile && node test/agentStatus.test.js",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.1",
+    "typescript": "^5.0.0"
+  }
+}

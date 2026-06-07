@@ -114,6 +114,7 @@ def action_capabilities() -> tuple[Capability, ...]:
         "type": "Type text into a resolved target.",
         "paste": "Paste text into a resolved target.",
         "press_key": "Press a key or hotkey against a resolved target.",
+        "refresh_browser": "Refresh the current Playwright browser page.",
         "click_text": "OCR text, locate it on screen, and click its center.",
         "wait_for_text": "Poll OCR until text appears on screen.",
     }
@@ -127,7 +128,7 @@ def action_capabilities() -> tuple[Capability, ...]:
                 input_schema=action_input_schema(action),
                 output_schema={"type": "object", "fields": {"action_result": "ActionResult"}},
                 dry_run_supported=True,
-                risk_level="medium" if action in {"click", "press_key", "click_text"} else "low",
+                risk_level="medium" if action in {"click", "press_key", "refresh_browser", "click_text"} else "low",
                 planner_visible=True,
             )
         for action in dispatcher.actions_available
@@ -248,6 +249,28 @@ def workflow_atomic_capabilities() -> tuple[Capability, ...]:
             planner_visible=True,
         ),
         Capability(
+            name="assert_browser_ready",
+            kind="assertion",
+            available=True,
+            description="Assert that a live browser page is not blank and has no visible, network, console, or page-error failures.",
+            input_schema={
+                "type": "object",
+                "fields": {
+                    "observation": "string?",
+                    "min_text_length": "integer?",
+                    "min_interactive": "integer?",
+                    "require_title": "boolean?",
+                    "allow_blank": "boolean?",
+                    "check_network": "boolean?",
+                    "check_console": "boolean?",
+                },
+            },
+            output_schema={"type": "object", "fields": {"browser_ready": "BrowserReadinessResult"}},
+            dry_run_supported=False,
+            risk_level="low",
+            planner_visible=True,
+        ),
+        Capability(
             name="assert_product_contract",
             kind="assertion",
             available=True,
@@ -347,11 +370,15 @@ def workflow_atomic_capabilities() -> tuple[Capability, ...]:
                     "conditions": "WaitCondition[]?",
                     "match": "all|any?",
                     "text": "string?",
+                    "text_from": "input.path?",
                     "target": "Target?",
                     "selector": "string?",
                     "url": "string?",
                     "url_contains": "string?",
                     "url_regex": "string?",
+                    "url_from": "input.path?",
+                    "url_contains_from": "input.path?",
+                    "url_regex_from": "input.path?",
                     "method": "GET|POST|PUT|PATCH|DELETE?",
                     "status": "integer?",
                     "status_min": "integer?",
@@ -558,6 +585,17 @@ def action_input_schema(action: str) -> dict[str, Any]:
                 "dry_run": "boolean?",
                 "allow_mock_target": "boolean?",
                 "post_action_observe": "PostActionObserve?",
+            },
+        }
+    if action == "refresh_browser":
+        return {
+            "type": "object",
+            "fields": {
+                "dry_run": "boolean?",
+                "wait_until": "domcontentloaded|load|networkidle?",
+                "timeout_ms": "integer?",
+                "wait_after_seconds": "number?",
+                "wait_for_network_idle": "boolean?",
             },
         }
     if action == "click_text":

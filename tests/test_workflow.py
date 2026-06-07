@@ -6,7 +6,7 @@ from time import sleep as sleep_seconds
 
 from visual_agent.dispatcher import ActionDispatcher
 from visual_agent.locks import RunLock
-from visual_agent.models import ActionResult, ActionStatus, Observation, ProviderKind
+from visual_agent.models import ActionResult, ActionStatus, Observation, ProviderKind, to_jsonable
 from visual_agent.providers import ProviderRegistry
 from visual_agent.state import StateStore
 from visual_agent.workflow import (
@@ -499,6 +499,131 @@ def test_workflow_runtime_allows_press_key_without_target(tmp_path) -> None:
     assert seen == {"target": "press_key", "reason": "global action does not require a target"}
 
 
+class FakeBrowserLocator:
+    def __init__(self, page):
+        self.page = page
+
+    def click(self):
+        self.page.clicked = True
+        self.page.text = "Dashboard Ready"
+
+    def fill(self, value):
+        self.page.text = str(value)
+
+
+class FakeBrowserPage:
+    url = "https://example.test/app"
+    viewport_size = {"width": 1280, "height": 720}
+
+    def __init__(self, *, text: str = "Login", elements: tuple[dict, ...] | None = None):
+        self.text = text
+        self.clicked = False
+        self._elements = elements or ({"role": "button", "text": "Login", "selector": "#login", "bounds": {"left": 1, "top": 2, "width": 80, "height": 30}},)
+
+    def evaluate(self, script, arg=None):
+        if arg is not None:
+            return list(self._elements if not self.clicked else ({"role": "button", "text": self.text, "selector": "#done", "bounds": {"left": 1, "top": 2, "width": 80, "height": 30}},))
+        return self.text
+
+    def title(self):
+        return "Demo"
+
+    def screenshot(self, *, path, full_page=True):
+        Path(path).write_bytes(b"fake-png")
+
+    def locator(self, selector):
+        return FakeBrowserLocator(self)
+
+    def wait_for_timeout(self, value):
+        return None
+
+
+def test_workflow_browser_action_auto_observes_after_click(tmp_path) -> None:
+    providers = ProviderRegistry()
+
+    def observe_browser(params, provider_context):
+        page = FakeBrowserPage()
+        provider_context.resources["playwright_page"] = page
+        provider_context.resources["network_events"] = []
+        provider_context.resources["console_events"] = []
+        provider_context.resources["page_errors"] = []
+        return Observation(
+            provider=ProviderKind.DOM,
+            source=page.url,
+            elements=tuple(page.evaluate("collect", "selector")),
+            metadata={"title": "Demo", "url": page.url, "visible_text": page.text, "visible_text_length": len(page.text), "interactive_count": 1},
+        )
+
+    providers.register("observe_browser", observe_browser)
+    workflow = workflow_from_dict(
+        {
+            "name": "browser-click",
+            "steps": [
+                {"id": "observe", "action": "observe_browser", "url": "https://example.test/app"},
+                {"id": "ready", "action": "assert_browser_ready", "min_text_length": 1, "min_interactive": 1},
+                {"id": "click", "action": "click", "target": {"text": "Login", "role": "button"}},
+                {"id": "assert", "action": "assert_text", "text": "Dashboard Ready"},
+            ],
+        }
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, providers=providers).run(workflow, run_profile="supervised")
+
+    assert [step.status for step in result.steps] == [ActionStatus.SUCCESS] * 4
+    assert result.steps[2].metadata["browser_post_action_observe"]["status"] == "observed"
+    assert result.steps[2].metadata["browser_post_action_observe"]["visible_text_length"] == len("Dashboard Ready")
+
+
+def test_workflow_assert_browser_ready_fails_blank_page(tmp_path) -> None:
+    providers = ProviderRegistry()
+    providers.register(
+        "observe_fixture",
+        lambda _params, _context: Observation(
+            provider=ProviderKind.DOM,
+            source="about:blank",
+            elements=(),
+            metadata={"title": "", "url": "about:blank", "visible_text": "", "visible_text_length": 0, "interactive_count": 0},
+        ),
+    )
+    workflow = workflow_from_dict(
+        {
+            "name": "blank-browser",
+            "steps": [
+                {"id": "observe", "action": "observe_fixture", "path": "unused"},
+                {"id": "ready", "action": "assert_browser_ready", "min_text_length": 1},
+            ],
+        }
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, providers=providers).run(workflow, run_profile="dry-run")
+
+    assert result.steps[-1].status == ActionStatus.FAILED
+    assert "browser readiness failed" in result.steps[-1].message
+
+
+def test_workflow_runtime_allows_refresh_browser_without_target(tmp_path) -> None:
+    dispatcher = ActionDispatcher()
+    seen = {}
+
+    def fake_refresh(resolved, params, context):
+        seen["target"] = resolved.target.display_name
+        return ActionResult(
+            action="refresh_browser",
+            status=ActionStatus.DRY_RUN if context.dry_run else ActionStatus.SUCCESS,
+            target=resolved.target.display_name,
+            provider=resolved.evidence.provider,
+            message="fake refresh",
+        )
+
+    dispatcher.register("refresh_browser", fake_refresh)
+    workflow = workflow_from_dict({"name": "refresh", "steps": [{"id": "refresh", "action": "refresh_browser"}]})
+
+    result = WorkflowRuntime(output_dir=tmp_path, dispatcher=dispatcher).run(workflow, run_profile="dry-run")
+
+    assert result.steps[0].status == ActionStatus.DRY_RUN
+    assert seen == {"target": "refresh_browser"}
+
+
 def test_workflow_runtime_post_action_observe_asserts_text_after_action(tmp_path) -> None:
     dispatcher = ActionDispatcher()
 
@@ -823,6 +948,68 @@ def test_workflow_runtime_resolves_readonly_probe_input_params(tmp_path) -> None
 
     assert seen["url"] == "https://readonly.sandbox.example.com/status"
     assert result.steps[-1].status == ActionStatus.SUCCESS
+
+
+def test_workflow_runtime_wait_for_url_uses_input_reference(tmp_path) -> None:
+    providers = ProviderRegistry()
+
+    def observe_browser(params, provider_context):
+        provider_context.resources["playwright_page"] = type("Page", (), {"url": params["url"]})()
+        return Observation(provider=ProviderKind.DOM, source=params["url"], metadata={"url": params["url"]})
+
+    providers.register("observe_browser", observe_browser)
+    workflow = workflow_from_dict(
+        {
+            "name": "url-fragment-from-input",
+            "schema_version": 1,
+            "steps": [
+                {"id": "observe", "action": "observe_browser", "url_from": "input.url"},
+                {"id": "wait_url", "action": "wait_for", "condition": "url", "url_contains_from": "input.fragment", "timeout_seconds": 0.1},
+            ],
+        }
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, providers=providers).run(
+        workflow,
+        inputs={"url": "https://example.test/dashboard?username=demo_user", "fragment": "demo_user"},
+        dry_run=True,
+    )
+
+    assert result.steps[-1].status == ActionStatus.SUCCESS
+
+
+def test_workflow_runtime_redacts_sensitive_input_values_from_results(tmp_path) -> None:
+    providers = ProviderRegistry()
+
+    def observe_browser(params, provider_context):
+        provider_context.resources["playwright_page"] = type("Page", (), {"url": params["url"]})()
+        return Observation(provider=ProviderKind.DOM, source=params["url"], metadata={"url": params["url"]})
+
+    providers.register("observe_browser", observe_browser)
+    workflow = workflow_from_dict(
+        {
+            "name": "redacted-url",
+            "schema_version": 1,
+            "steps": [
+                {"id": "observe", "action": "observe_browser", "url": "https://example.test/callback?password=demo_password"},
+                {"id": "wait_url", "action": "wait_for", "condition": "url", "url_contains_from": "input.password", "timeout_seconds": 0.1},
+            ],
+        }
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, providers=providers).run(
+        workflow,
+        inputs={"password": "demo_password"},
+        sensitive_fields={"password"},
+        dry_run=True,
+    )
+    raw = json.dumps(to_jsonable(result), ensure_ascii=False)
+    step_text = (Path(result.run_dir) / "wait_url.json").read_text(encoding="utf-8")
+
+    assert result.steps[-1].status == ActionStatus.SUCCESS
+    assert "demo_password" not in raw
+    assert "demo_password" not in step_text
+    assert "[REDACTED]" in raw
 
 
 def test_workflow_runtime_runs_minimal_form_workflow(tmp_path) -> None:

@@ -46,6 +46,7 @@ Issues = "https://github.com/Xiaoyu155/visual-agent/issues"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+cache_dir = ".pytest_cache_local"
 markers = [
     "e2e: end-to-end tests that run real CLI/workflows",
     "browser: tests that require Playwright Chromium",

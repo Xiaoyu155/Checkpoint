@@ -19,7 +19,7 @@ from .scheduler import list_queue_tasks
 from .workspace import load_workspace_report_index
 
 
-MUTATING_ACTIONS = {"click", "type", "paste", "expect_download", "save_storage_state"}
+MUTATING_ACTIONS = {"click", "type", "paste", "refresh_browser", "expect_download", "save_storage_state"}
 SENSITIVE_HINTS = ("password", "passwd", "pwd", "token", "secret", "cookie", "key")
 ALLOWED_ENVIRONMENTS = {"sandbox", "staging", "test"}
 ALLOWED_STORAGE_STATE_POLICIES = {"required", "optional", "forbidden"}

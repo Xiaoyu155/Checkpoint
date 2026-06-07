@@ -34,6 +34,7 @@ def test_paste_text_dry_run_records_metadata() -> None:
     assert result.status == ActionStatus.DRY_RUN
     assert result.action == "paste"
     assert result.metadata["text_preview"] == "sec***"
+    assert result.metadata["clipboard"] is False
 
 
 def test_paste_text_sensitive_dry_run_hashes_metadata() -> None:
@@ -49,3 +50,83 @@ def test_paste_text_sensitive_dry_run_hashes_metadata() -> None:
     assert result.metadata["sensitive"] is True
     assert "sha256" in result.metadata
     assert "text_length" not in result.metadata
+
+
+def test_click_releases_buttons_and_uses_explicit_left_button(monkeypatch) -> None:
+    calls = []
+
+    monkeypatch.setattr("visual_agent.actions.pyautogui.mouseUp", lambda **kwargs: calls.append(("mouseUp", kwargs)))
+    monkeypatch.setattr("visual_agent.actions.pyautogui.click", lambda **kwargs: calls.append(("click", kwargs)))
+
+    result = DesktopActions().click(
+        Point(10, 20),
+        Target.from_text("提交"),
+        provider=ProviderKind.OCR,
+        dry_run=False,
+    )
+
+    assert result.status == ActionStatus.SUCCESS
+    assert calls[:3] == [
+        ("mouseUp", {"button": "left"}),
+        ("mouseUp", {"button": "right"}),
+        ("mouseUp", {"button": "middle"}),
+    ]
+    assert calls[3] == ("click", {"x": 10, "y": 20, "button": "left"})
+
+
+def test_paste_text_defaults_to_keyboard_write_without_clipboard(monkeypatch) -> None:
+    calls = []
+
+    monkeypatch.setattr("visual_agent.actions.pyautogui.mouseUp", lambda **kwargs: calls.append(("mouseUp", kwargs)))
+    monkeypatch.setattr("visual_agent.actions.pyautogui.click", lambda **kwargs: calls.append(("click", kwargs)))
+    monkeypatch.setattr("visual_agent.actions.pyautogui.keyUp", lambda key: calls.append(("keyUp", key)))
+    monkeypatch.setattr("visual_agent.actions.pyautogui.write", lambda text, interval: calls.append(("write", text, interval)))
+    monkeypatch.setattr("visual_agent.actions.pyautogui.hotkey", lambda *args: calls.append(("hotkey", args)))
+    monkeypatch.setattr("visual_agent.actions.pyperclip.copy", lambda value: calls.append(("copy", value)))
+
+    result = DesktopActions().paste_text(
+        "new value",
+        Target.from_text("输入框"),
+        point=Point(1, 2),
+        provider=ProviderKind.OCR,
+        dry_run=False,
+    )
+
+    assert result.status == ActionStatus.SUCCESS
+    assert result.metadata["clipboard"] is False
+    assert ("click", {"x": 1, "y": 2, "button": "left"}) in calls
+    assert ("write", "new value", 0.01) in calls
+    assert not any(call[0] in {"hotkey", "copy"} for call in calls)
+
+
+def test_paste_text_restores_clipboard_after_hotkey_when_enabled(monkeypatch) -> None:
+    calls = []
+    clipboard = {"value": "existing"}
+
+    monkeypatch.setattr("visual_agent.actions.pyautogui.mouseUp", lambda **kwargs: calls.append(("mouseUp", kwargs)))
+    monkeypatch.setattr("visual_agent.actions.pyautogui.click", lambda **kwargs: calls.append(("click", kwargs)))
+    monkeypatch.setattr("visual_agent.actions.pyautogui.hotkey", lambda *args: calls.append(("hotkey", args)))
+    monkeypatch.setattr("visual_agent.actions.pyperclip.paste", lambda: clipboard["value"])
+
+    def copy(value):
+        calls.append(("copy", value))
+        clipboard["value"] = value
+
+    monkeypatch.setattr("visual_agent.actions.pyperclip.copy", copy)
+
+    result = DesktopActions().paste_text(
+        "new value",
+        Target.from_text("输入框"),
+        point=Point(1, 2),
+        provider=ProviderKind.OCR,
+        dry_run=False,
+        use_clipboard=True,
+    )
+
+    assert result.status == ActionStatus.SUCCESS
+    assert result.metadata["clipboard"] is True
+    assert ("click", {"x": 1, "y": 2, "button": "left"}) in calls
+    assert ("copy", "new value") in calls
+    assert ("hotkey", ("ctrl", "v")) in calls
+    assert calls[-1] == ("copy", "existing")
+    assert clipboard["value"] == "existing"

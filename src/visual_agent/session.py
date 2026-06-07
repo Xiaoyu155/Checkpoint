@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from time import time
 from typing import Any
@@ -36,6 +37,20 @@ class AgentSession:
     latest_failure: FailureSummary | None
     next_action: str
     token_estimate: int
+    runs_this_month: int = 0
+    cloud_runs_used: int = 0
+    usage_reset_date: str = ""
+    ai_task_context: AiTaskContext | None = None
+
+
+@dataclass(frozen=True)
+class AiTaskContext:
+    task: str
+    analyzed_files: list[str]
+    root_cause: str
+    plan: str
+    tried: list[str]
+    updated_at: float
 
 
 def session_path(workspace: Path) -> Path:
@@ -49,6 +64,34 @@ def update_agent_session(workspace: Path, run_result: Any) -> AgentSession:
     return session
 
 
+def record_cloud_run_usage(workspace: Path, *, count: int = 1) -> AgentSession:
+    existing = load_agent_session(workspace)
+    usage = _next_usage(existing, local_runs_delta=0, cloud_runs_delta=max(0, count))
+    if existing is None:
+        session = AgentSession(
+            updated_at=time(),
+            passing_workflows=[],
+            failing_workflows=[],
+            latest_failure=None,
+            next_action="Cloud run usage recorded. Run verification workflows after code changes.",
+            token_estimate=0,
+            runs_this_month=usage["runs_this_month"],
+            cloud_runs_used=usage["cloud_runs_used"],
+            usage_reset_date=usage["usage_reset_date"],
+        )
+    else:
+        session = replace(
+            existing,
+            updated_at=time(),
+            runs_this_month=usage["runs_this_month"],
+            cloud_runs_used=usage["cloud_runs_used"],
+            usage_reset_date=usage["usage_reset_date"],
+        )
+    session = replace(session, token_estimate=_estimate_tokens(session))
+    _write_session(workspace, session)
+    return session
+
+
 def load_agent_session(workspace: Path) -> AgentSession | None:
     path = session_path(workspace)
     if not path.exists():
@@ -56,6 +99,7 @@ def load_agent_session(workspace: Path) -> AgentSession | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         failure = data.get("latest_failure")
+        raw_task_context = data.get("ai_task_context")
         return AgentSession(
             updated_at=float(data.get("updated_at", 0.0)),
             passing_workflows=[str(item) for item in data.get("passing_workflows", [])],
@@ -63,6 +107,10 @@ def load_agent_session(workspace: Path) -> AgentSession | None:
             latest_failure=FailureSummary(**failure) if isinstance(failure, dict) else None,
             next_action=str(data.get("next_action", "")),
             token_estimate=int(data.get("token_estimate", 0)),
+            runs_this_month=int(data.get("runs_this_month", 0) or 0),
+            cloud_runs_used=int(data.get("cloud_runs_used", 0) or 0),
+            usage_reset_date=str(data.get("usage_reset_date", "") or ""),
+            ai_task_context=_task_context_from_dict(raw_task_context),
         )
     except Exception:
         return None
@@ -71,6 +119,51 @@ def load_agent_session(workspace: Path) -> AgentSession | None:
 def session_to_snapshot_text(session: AgentSession, *, max_chars: int = MAX_SNAPSHOT_CHARS) -> str:
     text = _session_to_snapshot_text(session)
     return clamp_ai_text(text, max_chars=max_chars, suffix="...[truncated, use MCP tools for details]")
+
+
+def workspace_session_snapshot_text(workspace: Path, *, max_chars: int = MAX_SNAPSHOT_CHARS) -> str:
+    session = load_agent_session(workspace)
+    if session is None:
+        text = "No session data yet. Run a workflow first."
+    else:
+        text = _session_to_snapshot_text(session)
+    text = append_latest_repair_summary(workspace, text)
+    return clamp_ai_text(text, max_chars=max_chars, suffix="...[truncated, use MCP tools for details]")
+
+
+def save_task_context(
+    workspace: Path,
+    *,
+    task: str,
+    analyzed_files: list[str] | None = None,
+    root_cause: str = "",
+    plan: str = "",
+    tried: list[str] | None = None,
+) -> AgentSession:
+    ctx = AiTaskContext(
+        task=_sanitize_text(task)[:240],
+        analyzed_files=[_sanitize_text(str(item))[:160] for item in (analyzed_files or [])[:12]],
+        root_cause=_sanitize_text(root_cause)[:240],
+        plan=_sanitize_text(plan)[:360],
+        tried=[_sanitize_text(str(item))[:180] for item in (tried or [])[:8]],
+        updated_at=time(),
+    )
+    existing = load_agent_session(workspace)
+    if existing is None:
+        session = AgentSession(
+            updated_at=time(),
+            passing_workflows=[],
+            failing_workflows=[],
+            latest_failure=None,
+            next_action="Task context saved. Run verification to check status.",
+            token_estimate=0,
+            ai_task_context=ctx,
+        )
+    else:
+        session = replace(existing, updated_at=time(), ai_task_context=ctx)
+    session = replace(session, token_estimate=_estimate_tokens(session))
+    _write_session(workspace, session)
+    return session
 
 
 def clamp_ai_text(text: str, *, max_chars: int, suffix: str) -> str:
@@ -106,6 +199,7 @@ def _build_session(workspace: Path, run_result: Any, existing: AgentSession | No
         latest_failure = _extract_failure_summary(workflow_name, run_id, failed_steps[0], workspace)
 
     next_action = _suggest_next_action(run_passed, workflow_name, latest_failure)
+    usage = _next_usage(existing, local_runs_delta=1)
     session = AgentSession(
         updated_at=time(),
         passing_workflows=passing[-10:],
@@ -113,6 +207,9 @@ def _build_session(workspace: Path, run_result: Any, existing: AgentSession | No
         latest_failure=latest_failure,
         next_action=next_action,
         token_estimate=0,
+        runs_this_month=usage["runs_this_month"],
+        cloud_runs_used=usage["cloud_runs_used"],
+        usage_reset_date=usage["usage_reset_date"],
     )
     return AgentSession(
         updated_at=session.updated_at,
@@ -121,7 +218,44 @@ def _build_session(workspace: Path, run_result: Any, existing: AgentSession | No
         latest_failure=session.latest_failure,
         next_action=session.next_action,
         token_estimate=_estimate_tokens(session),
+        runs_this_month=session.runs_this_month,
+        cloud_runs_used=session.cloud_runs_used,
+        usage_reset_date=session.usage_reset_date,
+        ai_task_context=existing.ai_task_context if existing is not None else None,
     )
+
+
+def _task_context_from_dict(value: Any) -> AiTaskContext | None:
+    if not isinstance(value, dict):
+        return None
+    return AiTaskContext(
+        task=_sanitize_text(str(value.get("task") or ""))[:240],
+        analyzed_files=[_sanitize_text(str(item))[:160] for item in value.get("analyzed_files", []) if str(item)],
+        root_cause=_sanitize_text(str(value.get("root_cause") or ""))[:240],
+        plan=_sanitize_text(str(value.get("plan") or ""))[:360],
+        tried=[_sanitize_text(str(item))[:180] for item in value.get("tried", []) if str(item)],
+        updated_at=float(value.get("updated_at", 0.0) or 0.0),
+    )
+
+
+def _next_usage(
+    existing: AgentSession | None,
+    *,
+    local_runs_delta: int = 0,
+    cloud_runs_delta: int = 0,
+) -> dict[str, int | str]:
+    current_month = datetime.now().strftime("%Y-%m")
+    if existing is not None and existing.usage_reset_date == current_month:
+        previous_runs = existing.runs_this_month
+        previous_cloud_runs = existing.cloud_runs_used
+    else:
+        previous_runs = 0
+        previous_cloud_runs = 0
+    return {
+        "runs_this_month": previous_runs + max(0, local_runs_delta),
+        "cloud_runs_used": previous_cloud_runs + max(0, cloud_runs_delta),
+        "usage_reset_date": current_month,
+    }
 
 
 def _extract_failure_summary(workflow: str, run_id: str, failed_step: Any, workspace: Path) -> FailureSummary:
@@ -202,10 +336,63 @@ def _session_to_snapshot_text(session: AgentSession) -> str:
         lines.append("")
         lines.append(f"Recent Passes: {passes}")
 
+    if session.ai_task_context is not None:
+        ctx = session.ai_task_context
+        lines.extend(["", "AI Task Context:", f"  Task: {ctx.task}"])
+        if ctx.root_cause:
+            lines.append(f"  Root cause: {ctx.root_cause}")
+        if ctx.plan:
+            lines.append(f"  Plan: {ctx.plan}")
+        if ctx.analyzed_files:
+            lines.append(f"  Files: {', '.join(ctx.analyzed_files[:5])}")
+        if ctx.tried:
+            lines.append(f"  Tried: {', '.join(ctx.tried[:3])}")
+
+    if session.usage_reset_date or session.runs_this_month or session.cloud_runs_used:
+        lines.extend(
+            [
+                "",
+                "Usage:",
+                f"  Local runs this month: {session.runs_this_month}",
+                f"  Cloud runs used: {session.cloud_runs_used}",
+                f"  Reset month: {session.usage_reset_date}",
+            ]
+        )
+
     lines.append("")
     lines.append(f"Next action: {session.next_action}")
     lines.append(f"Context fetched: {int(session.updated_at)}")
     return _sanitize_text("\n".join(lines))
+
+
+def append_latest_repair_summary(workspace: Path, text: str) -> str:
+    try:
+        from .repair_history import list_repair_history
+
+        history = list_repair_history(workspace, limit=1)
+    except Exception:
+        return text
+    entries = history.get("entries") if isinstance(history.get("entries"), list) else []
+    if not entries:
+        return text
+    latest = entries[0] if isinstance(entries[0], dict) else {}
+    if not latest:
+        return text
+    lines = [
+        text.rstrip(),
+        "",
+        "Latest Repair:",
+        f"  Status: {_sanitize_text(str(latest.get('status') or ''))[:80]}",
+        f"  Workflow: {_sanitize_text(str(latest.get('workflow') or ''))[:120]}",
+        f"  Classification: {_sanitize_text(str(latest.get('classification') or ''))[:80]}",
+    ]
+    if latest.get("verification_status"):
+        lines.append(f"  Verification: {_sanitize_text(str(latest.get('verification_status') or ''))[:80]}")
+    if latest.get("rollback_status"):
+        lines.append(f"  Rollback: {_sanitize_text(str(latest.get('rollback_status') or ''))[:80]}")
+    if latest.get("recommended_fix"):
+        lines.append(f"  Fix: {_sanitize_text(str(latest.get('recommended_fix') or ''))[:180]}")
+    return "\n".join(lines)
 
 
 def _write_session(workspace: Path, session: AgentSession) -> None:

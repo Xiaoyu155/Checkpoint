@@ -1,7 +1,10 @@
-schema_version: 1
+﻿schema_version: 1
 min_runtime_version: "0.1.0"
 name: vision_screenshot_demo
 version: 1
+visibility: private
+author: ""
+license: ""
 steps:
   - id: screen
     action: observe_screen

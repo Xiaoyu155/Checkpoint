@@ -8,6 +8,7 @@ from .quality import load_quality_gate_index, quality_gate_index_to_markdown
 from .workspace import (
     Workspace,
     load_workspace_gui_action_history_risk_config,
+    load_workspace_auto_repair_policy,
     load_workspace_report_index,
     load_workspace_report_tags,
     validate_workspace_risk_policy,
@@ -26,6 +27,7 @@ def build_workspace_dashboard(workspace: Workspace, *, limit: int = 5) -> dict[s
         strict_policy_failed=True,
     )
     risk_config = load_workspace_gui_action_history_risk_config(workspace)
+    auto_repair_policy = load_workspace_auto_repair_policy(workspace)
     risk_health_policy = dashboard_risk_health_policy(risk_config)
     risk_policy_check = validate_workspace_risk_policy(workspace)
     reports = status.get("reports") if isinstance(status.get("reports"), list) else []
@@ -43,6 +45,7 @@ def build_workspace_dashboard(workspace: Workspace, *, limit: int = 5) -> dict[s
         },
         "health": health,
         "risk_policy_check": risk_policy_check,
+        "auto_repair_policy": auto_repair_policy,
         "runs": {
             "shown": status["run_count_shown"],
             "recent": recent_runs[:limit],
@@ -139,6 +142,7 @@ def dashboard_to_markdown(dashboard: dict[str, Any]) -> str:
     health = dashboard["health"]
     quality = dashboard["quality_gates"]
     risk_policy_check = dashboard.get("risk_policy_check") if isinstance(dashboard.get("risk_policy_check"), dict) else {}
+    auto_repair_policy = dashboard.get("auto_repair_policy") if isinstance(dashboard.get("auto_repair_policy"), dict) else {}
     queue = dashboard["queue"]
     reports = dashboard["reports"]
     regression = dashboard["regression_tests"]
@@ -159,6 +163,10 @@ def dashboard_to_markdown(dashboard: dict[str, Any]) -> str:
         + ", ".join(f"`{item}`" for item in quality.get("risk_health_policy", {}).get("attention_trend_directions", [])),
         f"- Risk policy check: `{risk_policy_check.get('status') or 'unknown'}`"
         f" ({risk_policy_check.get('error_count', 0)} errors, {risk_policy_check.get('warning_count', 0)} warnings)",
+        f"- Auto repair policy: min_confidence `{auto_repair_policy.get('min_confidence')}`, "
+        f"max_risk `{auto_repair_policy.get('max_risk_level')}`, "
+        f"allow_force `{auto_repair_policy.get('allow_force')}`, "
+        f"source `{auto_repair_policy.get('source')}`",
         f"- Regression tests: {regression['total']}",
         f"- Queue: {queue['pending']} pending, {queue['running']} running, {queue['total']} total",
         "",

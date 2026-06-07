@@ -12,13 +12,21 @@ model_api_keys.txt
 .agent-workspace/reports/
 .agent-workspace/gui/
 .agent-workspace/queue/
+.agent-workspace/agent_session.json
+.agent-workspace/workflow_index.json
+.agent-workspace/repair_history.jsonl
 .agent-workspace/workflows/external_samples/
 smoke_results/
 .pytest_cache/
+.pytest_cache_local/
 *.egg-info/
 *.lock
 __pycache__/
 *.pyc
+vscode-extension/node_modules/
+vscode-extension/out/
+vscode-extension/*.vsix
+vscode-extension/.vscode-test/
 
 # Internal planning notes
 宏大蓝图开发计划.md

@@ -36,6 +36,12 @@ WORKSPACE_RISK_ATTENTION_TREND_DIRECTIONS = (
     "insufficient_history",
     "unknown",
 )
+WORKSPACE_REPAIR_RISK_LEVELS = ("unknown", "low", "medium", "high")
+DEFAULT_AUTO_REPAIR_POLICY = {
+    "min_confidence": 0.75,
+    "max_risk_level": "medium",
+    "allow_force": True,
+}
 
 
 @dataclass(frozen=True)
@@ -45,6 +51,10 @@ class WorkflowRef:
     relative_path: str
     tags: tuple[str, ...] = ()
     affects: tuple[str, ...] = ()
+    visibility: str = "private"
+    author: str = ""
+    description: str = ""
+    license: str = ""
 
 
 @dataclass(frozen=True)
@@ -209,7 +219,8 @@ def discover_workflows(workspace: Workspace, *, include_slow: bool = False) -> t
     )
     refs: list[WorkflowRef] = []
     for path in paths:
-        tags, affects = workflow_metadata(path)
+        metadata = workflow_metadata(path)
+        tags = tuple(metadata["tags"])
         if not include_slow and "slow" in tags:
             continue
         refs.append(
@@ -218,22 +229,33 @@ def discover_workflows(workspace: Workspace, *, include_slow: bool = False) -> t
                 path=path,
                 relative_path=path.relative_to(workspace.root).as_posix(),
                 tags=tags,
-                affects=affects,
+                affects=tuple(metadata["affects"]),
+                visibility=str(metadata["visibility"]),
+                author=str(metadata["author"]),
+                description=str(metadata["description"]),
+                license=str(metadata["license"]),
             )
         )
     return tuple(refs)
 
 
 def workflow_tags(path: Path) -> tuple[str, ...]:
-    return workflow_metadata(path)[0]
+    return tuple(workflow_metadata(path)["tags"])
 
 
-def workflow_metadata(path: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def workflow_metadata(path: Path) -> dict[str, Any]:
     try:
         workflow = parse_workflow_file(path)
-        return tuple(str(tag) for tag in workflow.tags), tuple(str(item) for item in workflow.affects)
+        return {
+            "tags": tuple(str(tag) for tag in workflow.tags),
+            "affects": tuple(str(item) for item in workflow.affects),
+            "visibility": workflow.visibility,
+            "author": workflow.author,
+            "description": workflow.description,
+            "license": workflow.license,
+        }
     except Exception:
-        return (), ()
+        return {"tags": (), "affects": (), "visibility": "private", "author": "", "description": "", "license": ""}
 
 
 def find_workflow(workspace: Workspace, name_or_path: str) -> WorkflowRef:
@@ -254,14 +276,19 @@ def find_workflow(workspace: Workspace, name_or_path: str) -> WorkflowRef:
 
     for candidate in candidates:
         if candidate.exists():
+            metadata = workflow_metadata(candidate)
             return WorkflowRef(
                 name=candidate.stem,
                 path=candidate,
                 relative_path=candidate.relative_to(workspace.root).as_posix()
                 if candidate.is_relative_to(workspace.root)
                 else str(candidate),
-                tags=workflow_tags(candidate),
-                affects=workflow_metadata(candidate)[1],
+                tags=tuple(metadata["tags"]),
+                affects=tuple(metadata["affects"]),
+                visibility=str(metadata["visibility"]),
+                author=str(metadata["author"]),
+                description=str(metadata["description"]),
+                license=str(metadata["license"]),
             )
 
     for ref in discover_workflows(workspace, include_slow=True):
@@ -457,6 +484,12 @@ def run_workspace_workflow(
             from .session import update_agent_session
 
             update_agent_session(workspace.root, result)
+        except Exception:
+            pass
+        try:
+            from .workflow_index import update_workflow_index
+
+            update_workflow_index(workspace.root, ref)
         except Exception:
             pass
         return result
@@ -1120,8 +1153,29 @@ def load_workspace_gui_action_history_risk_config(workspace: Workspace) -> dict[
     return config
 
 
+def load_workspace_auto_repair_policy(workspace: Workspace | str | Path) -> dict[str, Any]:
+    root = workspace.root if isinstance(workspace, Workspace) else Path(workspace).resolve()
+    manifest = load_workspace_manifest(Workspace(root)) if Path(root).exists() else {}
+    raw = manifest.get("auto_repair") if isinstance(manifest.get("auto_repair"), dict) else {}
+    policy = dict(DEFAULT_AUTO_REPAIR_POLICY)
+    if "min_confidence" in raw:
+        try:
+            policy["min_confidence"] = min(1.0, max(0.0, float(raw["min_confidence"])))
+        except (TypeError, ValueError):
+            pass
+    if str(raw.get("max_risk_level") or "").lower() in WORKSPACE_REPAIR_RISK_LEVELS:
+        policy["max_risk_level"] = str(raw.get("max_risk_level")).lower()
+    if "allow_force" in raw:
+        policy["allow_force"] = bool(raw.get("allow_force"))
+    return {
+        **policy,
+        "source": "workspace.json" if isinstance(raw, dict) and raw else "defaults",
+    }
+
+
 def build_workspace_risk_policy_template() -> dict[str, Any]:
     return {
+        "auto_repair": dict(DEFAULT_AUTO_REPAIR_POLICY),
         "quality": {
             "gui_action_history": {
                 "error_rate_threshold": 0.25,
@@ -1167,7 +1221,8 @@ def build_workspace_risk_policy_apply_plan(
             "dirs": list(WORKSPACE_DIRS),
         }
     before_quality = manifest.get("quality") if isinstance(manifest.get("quality"), dict) else {}
-    template_quality = build_workspace_risk_policy_template()["quality"]
+    template = build_workspace_risk_policy_template()
+    template_quality = template["quality"]
     proposed_quality = (
         merge_json_object(before_quality, template_quality)
         if overwrite
@@ -1175,7 +1230,16 @@ def build_workspace_risk_policy_apply_plan(
     )
     proposed_manifest = dict(manifest)
     proposed_manifest["quality"] = proposed_quality
+    before_auto_repair = manifest.get("auto_repair") if isinstance(manifest.get("auto_repair"), dict) else {}
+    template_auto_repair = template["auto_repair"]
+    proposed_auto_repair = (
+        merge_json_object(before_auto_repair, template_auto_repair)
+        if overwrite
+        else merge_json_object(template_auto_repair, before_auto_repair)
+    )
+    proposed_manifest["auto_repair"] = proposed_auto_repair
     changed_paths = diff_json_paths(before_quality, proposed_quality, path="quality")
+    changed_paths.extend(diff_json_paths(before_auto_repair, proposed_auto_repair, path="auto_repair"))
     if apply and changed_paths:
         manifest_path.write_text(json.dumps(proposed_manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     validation_before = validate_workspace_risk_policy(workspace)
@@ -1188,7 +1252,7 @@ def build_workspace_risk_policy_apply_plan(
         "applied": bool(apply and changed_paths),
         "changed": bool(changed_paths),
         "changed_paths": changed_paths,
-        "patch": {"quality": proposed_quality},
+        "patch": {"auto_repair": proposed_auto_repair, "quality": proposed_quality},
         "validation_before": {
             "status": validation_before["status"],
             "error_count": validation_before["error_count"],
@@ -1319,6 +1383,28 @@ def validate_risk_policy_manifest(
             )
         config = {}
     validate_gui_action_history_policy_config(issues, config, "quality.gui_action_history")
+    auto_repair = manifest.get("auto_repair") if isinstance(manifest.get("auto_repair"), dict) else None
+    if auto_repair is None:
+        if "auto_repair" in manifest:
+            add_risk_policy_issue(
+                issues,
+                "error",
+                "auto_repair_policy_not_object",
+                "auto_repair",
+                "auto_repair must be a JSON object.",
+                "Use workspace-risk-policy-template for the expected auto_repair structure.",
+            )
+        elif manifest:
+            add_risk_policy_issue(
+                issues,
+                "warning",
+                "auto_repair_policy_missing",
+                "auto_repair",
+                "No auto_repair policy is configured; built-in defaults will be used.",
+                "Copy auto_repair from workspace-risk-policy-template.",
+            )
+        auto_repair = {}
+    validate_auto_repair_policy_config(issues, auto_repair, "auto_repair")
     return workspace_risk_policy_result(workspace, manifest_path, issues)
 
 
@@ -1336,7 +1422,32 @@ def workspace_risk_policy_result(workspace: Workspace, manifest_path: Path, issu
         "issues": issues,
         "supported_profiles": list(WORKSPACE_RISK_POLICY_PROFILES),
         "supported_attention_trend_directions": list(WORKSPACE_RISK_ATTENTION_TREND_DIRECTIONS),
+        "supported_repair_risk_levels": list(WORKSPACE_REPAIR_RISK_LEVELS),
     }
+
+
+def validate_auto_repair_policy_config(issues: list[dict[str, Any]], config: dict[str, Any], path: str) -> None:
+    validate_risk_float(issues, config, "min_confidence", path, minimum=0.0, maximum=1.0)
+    if "allow_force" in config and not isinstance(config.get("allow_force"), bool):
+        add_risk_policy_issue(
+            issues,
+            "error",
+            "auto_repair_allow_force_invalid",
+            f"{path}.allow_force",
+            "allow_force must be a boolean.",
+            "Set allow_force to true or false.",
+        )
+    if "max_risk_level" in config:
+        value = config.get("max_risk_level")
+        if not isinstance(value, str) or value not in WORKSPACE_REPAIR_RISK_LEVELS:
+            add_risk_policy_issue(
+                issues,
+                "error",
+                "auto_repair_max_risk_level_invalid",
+                f"{path}.max_risk_level",
+                "max_risk_level must be one of the supported repair risk levels.",
+                "Use one of: " + ", ".join(WORKSPACE_REPAIR_RISK_LEVELS) + ".",
+            )
 
 
 def validate_gui_action_history_policy_config(issues: list[dict[str, Any]], config: dict[str, Any], path: str) -> None:

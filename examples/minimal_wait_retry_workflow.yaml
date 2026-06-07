@@ -1,7 +1,10 @@
-schema_version: 1
+﻿schema_version: 1
 min_runtime_version: "0.1.0"
 name: minimal_wait_retry_workflow
 version: 1
+visibility: private
+author: ""
+license: ""
 steps:
   - id: observe_fixture
     action: observe_fixture

@@ -67,6 +67,23 @@ def test_validate_workflow_accepts_press_key_without_target() -> None:
     assert result.valid
 
 
+def test_validate_workflow_accepts_refresh_browser_without_target() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "refresh-browser",
+            "steps": [
+                {"id": "observe", "action": "observe_browser", "url": "https://example.test"},
+                {"id": "refresh", "action": "refresh_browser"},
+                {"id": "ready", "action": "assert_browser_ready", "min_text_length": 1},
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert result.valid
+
+
 def test_validate_workflow_accepts_press_key_key_alias() -> None:
     workflow = workflow_from_dict(
         {
@@ -513,6 +530,7 @@ def test_validation_accepts_readonly_probe_input_references() -> None:
                 {"id": "observe", "action": "observe_browser", "url_from": "input.url"},
                 {"id": "assert", "action": "assert_text", "text_from": "input.assert_text"},
                 {"id": "wait", "action": "wait_for", "condition": "text", "text_from": "input.assert_text"},
+                {"id": "wait_url", "action": "wait_for", "condition": "url", "url_contains_from": "input.url_fragment"},
             ],
         }
     )

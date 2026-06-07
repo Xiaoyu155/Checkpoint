@@ -1,9 +1,9 @@
 # Visual Agent 开发日志与新窗口交接
 
-> 更新时间：2026-06-05  
+> 更新时间：2026-06-07  
 > 仓库地址：https://github.com/Xiaoyu155/visual-agent  
 > 当前分支：`main`  
-> 当前工作区状态：干净，无未提交改动  
+> 当前工作区状态：dirty，包含多批已开发但未提交文件  
 > 最新提交：`061e6c1 Add Python SDK and plugin entrypoints`
 
 ## 一句话定位
@@ -24,7 +24,7 @@ python -m pytest tests/ -q --tb=short
 上次全量测试结果：
 
 ```text
-651 passed, 6 skipped
+882 passed, 6 skipped
 ```
 
 如果只是确认 SDK 和 CLI：
@@ -180,6 +180,68 @@ Codex 使用建议：
 - `src/visual_agent/pytest_plugin.py`
 - `src/visual_agent/__main__.py`
 
+### 7. V2：代码上下文生成与实现验证闭环
+
+新增模块：
+
+- `src/visual_agent/context_ingestion.py`
+- `src/visual_agent/workflow_synthesis.py`
+- `src/visual_agent/workflow_quality.py`
+
+新增 MCP 工具：
+
+- `generate_workflow_from_context`
+- `verify_implementation`
+
+新增 CLI：
+
+```powershell
+python -m visual_agent.cli generate-from-diff --workspace-root .agent-workspace --task-description "Verify login redirects" --base-url http://localhost:3000/login --dry-run
+python -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify login redirects" --base-url http://localhost:3000/login --run-profile dry-run
+```
+
+已支持的上下文摄取：
+
+- HTML 表单：label/input/button/form action、required/email/min/max/pattern 等基础验证规则
+- React/JSX：input、button、navigate/router.push、成功/错误文本、模板变量展示、基础验证规则
+- Vue：template 表单、router.push、成功/错误文本
+- Django/FastAPI/Flask：route、redirect、messages/json 成功文本
+- 混合前后端 diff：前端字段 + 后端 success state 合并
+
+验证闭环行为：
+
+- `code_changes` 可由调用方传入，也可省略后从 git diff 自动采集。
+- 静态语义置信度 `>= 0.5` 时走确定性 workflow 合成。
+- 静态语义置信度 `< 0.5` 时优先走 LLM 兜底；无 SDK/无配置时静态回退并返回 warning。
+- 当模板变量和非敏感表单字段同名时，静态合成会追加 `assert_text text_from: input.<field>`，验证提交值被展示出来；敏感字段不会生成回显断言。
+- 解析到已知错误文案时，静态合成会在成功路径后追加 `assert_text_contract forbidden_any`，确保成功态没有混入错误提示。
+- 自动生成 inputs 模板时，会根据基础验证规则生成更贴近约束的示例值；敏感字段仍保持空字符串。
+- `verify_implementation` 未收到显式 inputs 时，会自动使用本次生成的 inputs 模板，并在结果中返回 `inputs_source`。
+- 解析到 validation rules 时，会生成 draft-only `negative_input_cases` 和独立 `negative_workflow_yaml` / `negative_workflow_path`；默认成功 workflow 和 `verify_implementation` 不执行该草案，敏感字段只使用空安全值。
+- `verify_implementation` / CLI `verify-impl` 已支持显式 `run_negative` / `--run-negative`，仅成功路径通过后运行 negative draft；无 parsed error oracle 时返回 `negative_verification.status=skipped`。
+- negative workflow 生成结果已包含 `negative_workflow_ready` / `negative_workflow_reason`；无 parsed error oracle 时在生成阶段标记 `no_negative_oracle`。
+- negative workflow 生成结果和执行报告已包含 `negative_workflow_reset_strategy=fresh_observe_per_case`，每个 negative case 从 fresh `observe_browser` entry URL 开始。
+- negative oracle 提取会忽略混入 success 关键词的常驻文本；无 oracle 的 skipped 报告会返回 `next_action`。
+- negative report 已补 `next_action` 和 run artifact hints：有 run_id 时返回 `report_path`、`report_markdown_path`、`report_hint`。
+- negative 生成结果和执行报告已返回 `negative_oracles` / `oracles`，包含 parsed error text 和 source，便于诊断 oracle 来源。
+- `negative_oracles` / `oracles` 的 text/source 已统一脱敏，避免错误文案携带 secret。
+- `.vscode-agent-status.json` 已保留 compact `negative_verification` 摘要，CLI markdown 也展示 negative reset/oracle/report/next action。
+- `normalize_verification_status()` 已支持类型化读取 `negative_verification`，包括 run artifact、reset strategy、steps 和脱敏 oracle text/source。
+- VS Code 扩展已读取 `negative_verification`，输出面板展示 status/reason/reset/oracles/report/next action，侧边栏展示 negative 摘要；negative fail/timeout 会提升扩展状态严重级别。
+- `.vscode-agent-status.json` 已写入主验证 `report_hint`，VS Code 和下一轮代理可直接从状态文件定位 `get_run_report` 用法。
+- 新增 `agent-status` CLI，可将 `.vscode-agent-status.json` 输出为 JSON 或 VS Code 同款 markdown。
+- 新增 `scripts/code_context_verify_demo.ps1`，一条命令演示 git diff -> `generate-from-diff --dry-run` -> `verify-impl --run-profile dry-run` -> status markdown。
+- VS Code 扩展新增 `Visual Agent: Verify Current Change` 命令，直接输入任务描述和 base URL/fixture 后调用 `verify-impl --format markdown`，并自动刷新状态/展示最新 verification。
+- React/JSX parser 已支持常见字段组件 `<TextField>`、`<Field>`、`<Form.Field>`、`<Select>`、`<Textarea>`，不再只识别原生 input 和 `*Input` 组件。
+- React/JSX parser 已将常见非 submit 动作按钮（delete/remove/archive/confirm/save/create/update）纳入 submit action 候选，并把 deleted/removed/archived 文案识别为成功态。
+- Workflow 合成已支持 destructive action + confirm action 的双点击确认序列，例如 `Delete Ada` 后继续点击 `Confirm Delete`。
+- 真实前端样例 e2e 已扩展到 Next.js、React 复杂组件/表格展示、React 列表行删除确认弹窗、Vue、Remix 五条 code-context verify dry-run 链路，覆盖 matched data display、无输入动作流、确认弹窗、生成 inputs、report artifacts 和状态文件落盘。
+- `verify_implementation` 默认要求生成 workflow 质量分 `>= 0.6`，否则返回 `needs_workflow_improvement`，不运行弱验证。
+- `verify_implementation` 支持 `timeout_seconds`，超时返回 `result: timeout`。
+- MCP/CLI 响应会返回 `semantic_summary`，暴露解析框架、置信度、生成路径、字段/required/敏感字段/验证规则/成功状态/动态展示变量和 parse warnings。
+- 每次 `verify_implementation` 都会写 `.vscode-agent-status.json`，供 VS Code 扩展刷新状态栏/侧边栏，并保留语义摘要用于诊断解析盲区。
+- 已新增真实 CLI 子进程 e2e 回归，覆盖 git diff 生成 workflow、`verify-impl --run-profile dry-run`、自动 inputs 模板、report artifacts 和 `.vscode-agent-status.json` 落盘。
+
 公开 API：
 
 ```python
@@ -208,7 +270,34 @@ SDK 支持：
 - `results`
 - `run_dir`
 
-### 7. 插件系统
+### 8. Phase 6：本地 license 元数据
+
+已支持：
+
+- `get_license()` 默认返回 free tier
+- `VISUAL_AGENT_LICENSE_TIER` / `VISUAL_AGENT_LICENSE_SEATS` / `VISUAL_AGENT_LICENSE_EXPIRES_AT` / `VISUAL_AGENT_LICENSE_KEY`
+- `%USERPROFILE%\.visual-agent\license.json`
+- `VISUAL_AGENT_HOME\license.json`
+- `VISUAL_AGENT_LICENSE_FILE`
+- 过期 license 在 `check_feature()` 中降级为 free
+- `require_feature()` 仍保持非阻断占位，避免云端/收费能力未正式启用前影响本地功能
+- `agent_session.json` 记录本月本地运行次数、云端运行占位次数和 reset month
+- `context-snapshot` / MCP `get_session_context` 会展示 usage 摘要
+- `usage-status` CLI 输出 usage、license tier 和 feature access，不输出 license key 或 inputs
+- `run_remote_workflow()` 支持注入 remote client；只有返回 `status: success` 时才记录 `cloud_runs_used`，默认未实现/失败/异常均不计数
+- `usage-status` 已展示远端配置 readiness：`VISUAL_AGENT_CLOUD_ENDPOINT`、`VISUAL_AGENT_CLOUD_API_KEY` present、`VISUAL_AGENT_CLOUD_ORG`、blockers、`network_probe: not_run`
+- `build_remote_workflow_request()` 已提供远端请求 dry-run 结构，包含 workflow metadata、run profile、cloud readiness 和脱敏 inputs 摘要，不发网络请求
+- `usage-status --format json` 已包含 `remote_request_preview`
+- `remote_client_from_env()` 已提供可测试 adapter 草案；默认无 transport 时返回 blocked 诊断，不发网络请求
+- `filter_remote_workflow_response()` 只保留 `status`、`run_id`、`report_url`、`message`，并脱敏 message
+- `cloud-run-plan` CLI 已提供远端请求/adapter 诊断预览；不读取 inputs 文件内容，不发网络请求，不输出 cloud key
+- `cloud-run` CLI 已加入显式执行开关；默认只 plan，`--execute` 在无内置 transport 时返回 blocked 且不计云端 usage，注入 fake transport 成功才记录 `cloud_runs_used`
+- `cloud-run --execute --transport http` 已加入显式 HTTP transport 壳；endpoint/key 缺失时先 blocked，不发网络；HTTP 超时/失败返回 `failed` 且不计云端 usage
+- HTTP transport 已覆盖 401/403 -> `blocked`、其他 4xx/5xx -> `failed`、非 JSON/非对象响应 -> `failed`，错误 body/message 走脱敏且不计 usage
+- HTTP transport 已支持可配置 retry/backoff；仅 429 和 5xx 会重试，4xx 不重试，最终 success 才记录 `cloud_runs_used`
+- 远端响应过滤已保留 `remote_schema_version`，并确认 queued/running/blocked/failed/unknown 不计 `cloud_runs_used`；未知 status 规范化为 `unknown`
+
+### 9. 插件系统
 
 支持 entry points：
 
@@ -227,7 +316,7 @@ observe_custom = "my_package.providers:handler"
 
 插件加载失败会 warn，不会让主程序崩溃。
 
-### 8. pytest 插件
+### 10. pytest 插件
 
 新增 fixtures：
 
@@ -249,7 +338,7 @@ def test_ui_contract(visual_session):
     assert result.status.value == "dry_run"
 ```
 
-### 9. Python DSL
+### 11. Python DSL
 
 新增：
 
@@ -335,4 +424,3 @@ python -m pytest tests/ -q --tb=short
 
 任何 UI 相关改动，不能只跑后端测试。必须至少 dry-run 一个 workflow；涉及真实交互时，再用 --run-profile supervised 跑一次。
 ```
-

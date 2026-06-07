@@ -1589,6 +1589,12 @@ def summary_cards(
             "detail": risk_policy_detail(dashboard),
         },
         {
+            "id": "auto_repair",
+            "label": "Auto Repair",
+            "value": auto_repair_policy_value(dashboard),
+            "detail": auto_repair_policy_detail(dashboard),
+        },
+        {
             "id": "queue",
             "label": "Queue",
             "value": str(queue["total"]),
@@ -1636,6 +1642,20 @@ def risk_policy_detail(dashboard: dict[str, Any]) -> str:
     errors = int(check.get("error_count") or 0)
     warnings = int(check.get("warning_count") or 0)
     return f"{errors} errors, {warnings} warnings"
+
+
+def auto_repair_policy_value(dashboard: dict[str, Any]) -> str:
+    policy = dashboard.get("auto_repair_policy") if isinstance(dashboard.get("auto_repair_policy"), dict) else {}
+    return str(policy.get("max_risk_level") or "medium")
+
+
+def auto_repair_policy_detail(dashboard: dict[str, Any]) -> str:
+    policy = dashboard.get("auto_repair_policy") if isinstance(dashboard.get("auto_repair_policy"), dict) else {}
+    return (
+        f"min {policy.get('min_confidence', 0.75)}, "
+        f"force {'on' if policy.get('allow_force', True) else 'off'}, "
+        f"{policy.get('source') or 'defaults'}"
+    )
 
 
 def workflow_options(workspace: Workspace) -> list[dict[str, Any]]:

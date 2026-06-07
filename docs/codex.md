@@ -37,6 +37,7 @@ python -m visual_agent.cli connect cursor --workspace-root .agent-workspace
 5. Read `get_run_report` before accepting the result.
 6. If a run fails, call `summarize_latest_failure`, then `list_run_artifacts` if more detail is needed.
 7. After code changes, call `run_verification` when verification workflows exist.
+8. When no workflow exists for a UI change, call `generate_workflow_from_context` or run `verify-impl` so Visual Agent generates a workflow from the current code diff.
 
 ## Project Workspace Rule
 
@@ -87,6 +88,24 @@ returns compact output:
 ```powershell
 python -m visual_agent.cli codex-check --workspace-root .agent-workspace
 ```
+
+When Codex has just implemented a new UI flow and no existing workflow covers
+it, generate from the code diff:
+
+```powershell
+python -m visual_agent.cli generate-from-diff --workspace-root .agent-workspace --task-description "Verify login redirects to dashboard" --base-url http://localhost:3000/login --dry-run
+```
+
+For the one-call implementation loop, use:
+
+```powershell
+python -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify login redirects to dashboard" --base-url http://localhost:3000/login --run-profile dry-run --timeout-seconds 30
+```
+
+`verify-impl` generates a workflow from git diff, scores its assertion quality,
+blocks weak workflows by default below `0.6`, runs the generated workflow when
+quality is acceptable, and writes `.vscode-agent-status.json` for the VS Code
+extension.
 
 To include visual/OCR-heavy contracts:
 

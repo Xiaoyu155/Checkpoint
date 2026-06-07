@@ -1,12 +1,12 @@
 from visual_agent.dispatcher import ActionDispatchContext, ActionDispatcher
-from visual_agent.models import LocationEvidence, Point, ProviderKind, ResolvedTarget, Target
+from visual_agent.models import ActionResult, ActionStatus, LocationEvidence, Point, ProviderKind, ResolvedTarget, Target
 from visual_agent.workflow_types import WorkflowContext
 
 
 def test_action_dispatcher_exposes_default_actions() -> None:
     dispatcher = ActionDispatcher()
 
-    assert dispatcher.actions_available == ("click", "click_text", "paste", "press_key", "type", "wait_for_text")
+    assert dispatcher.actions_available == ("click", "click_text", "paste", "press_key", "refresh_browser", "type", "wait_for_text")
 
 
 def test_action_dispatcher_supports_custom_action(tmp_path) -> None:
@@ -59,10 +59,17 @@ class FakeLocator:
 class FakePage:
     def __init__(self):
         self.calls = []
+        self.url = "https://example.test/app"
 
     def locator(self, selector):
         self.calls.append(("locator", selector))
         return FakeLocator(self.calls)
+
+    def wait_for_timeout(self, value):
+        self.calls.append(("wait_for_timeout", value))
+
+    def reload(self, **kwargs):
+        self.calls.append(("reload", kwargs))
 
 
 def test_action_dispatcher_uses_playwright_page_for_click_and_fill(tmp_path) -> None:
@@ -99,6 +106,86 @@ def test_action_dispatcher_uses_playwright_page_for_click_and_fill(tmp_path) -> 
     assert page.calls == [
         ("locator", "#username"),
         ("fill", "demo"),
+        ("wait_for_timeout", 200),
         ("locator", "#username"),
         ("click", None),
+        ("wait_for_timeout", 200),
     ]
+
+
+def test_action_dispatcher_refreshes_playwright_page(tmp_path) -> None:
+    dispatcher = ActionDispatcher()
+    context = WorkflowContext(run_id="run", run_dir=tmp_path)
+    page = FakePage()
+    context.resources["playwright_page"] = page
+    resolved = ResolvedTarget(
+        target=Target(label="refresh_browser"),
+        evidence=LocationEvidence(provider=ProviderKind.MOCK, confidence=1, reason="global"),
+    )
+
+    result = dispatcher.execute(
+        "refresh_browser",
+        resolved,
+        {"dry_run": False, "wait_until": "load", "timeout_ms": 1234},
+        ActionDispatchContext(workflow_context=context, dry_run=True),
+    )
+
+    assert result.status == ActionStatus.SUCCESS
+    assert result.metadata["execution"] == "playwright"
+    assert page.calls == [
+        ("reload", {"wait_until": "load", "timeout": 1234}),
+        ("wait_for_timeout", 200),
+    ]
+
+
+def test_action_dispatcher_blocks_real_desktop_text_input_without_opt_in(tmp_path) -> None:
+    dispatcher = ActionDispatcher()
+    context = WorkflowContext(run_id="run", run_dir=tmp_path)
+    resolved = ResolvedTarget(
+        target=Target(label="chat box"),
+        evidence=LocationEvidence(
+            provider=ProviderKind.OCR,
+            confidence=1,
+            reason="ocr",
+            point=Point(1, 2),
+        ),
+    )
+
+    try:
+        dispatcher.execute(
+            "paste",
+            resolved,
+            {"value": "demo_password"},
+            ActionDispatchContext(workflow_context=context, dry_run=False),
+        )
+    except RuntimeError as exc:
+        assert "blocked by default" in str(exc)
+    else:
+        raise AssertionError("desktop paste should require allow_desktop_input")
+
+
+def test_action_dispatcher_allows_real_desktop_text_input_with_opt_in(tmp_path) -> None:
+    class FakeActions:
+        def paste_text(self, *_args, **_kwargs):
+            return ActionResult(action="paste", status=ActionStatus.SUCCESS, target="desktop input")
+
+    dispatcher = ActionDispatcher(actions=FakeActions())
+    context = WorkflowContext(run_id="run", run_dir=tmp_path)
+    resolved = ResolvedTarget(
+        target=Target(label="desktop input"),
+        evidence=LocationEvidence(
+            provider=ProviderKind.OCR,
+            confidence=1,
+            reason="ocr",
+            point=Point(1, 2),
+        ),
+    )
+
+    result = dispatcher.execute(
+        "paste",
+        resolved,
+        {"value": "demo", "allow_desktop_input": True},
+        ActionDispatchContext(workflow_context=context, dry_run=False),
+    )
+
+    assert result.status == ActionStatus.SUCCESS

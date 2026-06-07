@@ -23,12 +23,14 @@ SUPPORTED_ACTIONS = {
     "type",
     "paste",
     "press_key",
+    "refresh_browser",
     "click_text",
     "wait_for_text",
     "request_api",
     "assert_text",
     "assert_text_contract",
     "assert_no_error",
+    "assert_browser_ready",
     "assert_product_contract",
     "assert_ai_response_quality",
     "assert_response",
@@ -56,13 +58,24 @@ ASSERTION_ACTIONS = {
     "assert_text",
     "assert_text_contract",
     "assert_no_error",
+    "assert_browser_ready",
     "assert_product_contract",
     "assert_ai_response_quality",
     "assert_response",
     "assert_file_exists",
 }
 HIGH_RISK_ACTIONS = {"save_storage_state"}
-MUTATING_ACTIONS = {"click", "type", "paste", "press_key", "click_text", "request_api", "expect_download", "save_storage_state"}
+MUTATING_ACTIONS = {
+    "click",
+    "type",
+    "paste",
+    "press_key",
+    "refresh_browser",
+    "click_text",
+    "request_api",
+    "expect_download",
+    "save_storage_state",
+}
 SENSITIVE_NAME_HINTS = ("password", "passwd", "pwd", "token", "secret", "key", "cookie", "id_card", "ssn")
 
 
@@ -147,6 +160,7 @@ def validate_workflow(
             "assert_text",
             "assert_text_contract",
             "assert_no_error",
+            "assert_browser_ready",
             "assert_product_contract",
             "assert_ai_response_quality",
             "assert_response",
@@ -370,8 +384,10 @@ def validate_wait_for_condition(step_id: str, params: dict[str, Any], issues: li
         issues.append(ValidationIssue("error", step_id, f"{label} target requires target."))
     elif condition == "selector" and missing_param(params, "selector"):
         issues.append(ValidationIssue("error", step_id, f"{label} selector requires selector."))
-    elif condition == "url" and not any(key in params for key in ("url", "url_contains", "url_regex")):
-        issues.append(ValidationIssue("error", step_id, f"{label} url requires url, url_contains, or url_regex."))
+    elif condition == "url" and not any(
+        key in params for key in ("url", "url_contains", "url_regex", "url_from", "url_contains_from", "url_regex_from")
+    ):
+        issues.append(ValidationIssue("error", step_id, f"{label} url requires url, url_contains, url_regex, or *_from input references."))
     elif condition == "response" and not any(key in params for key in ("url_contains", "method", "status", "status_min", "status_max", "ok")):
         issues.append(ValidationIssue("error", step_id, f"{label} response requires response match fields."))
     elif condition not in {"text", "target", "selector", "url", "response", None}:

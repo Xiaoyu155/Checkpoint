@@ -20,7 +20,7 @@ class DesktopActions:
         dry_run: bool = False,
     ) -> ActionResult:
         if not dry_run:
-            pyautogui.click(x=point.x, y=point.y)
+            self._left_click(point)
         return ActionResult(
             action="click",
             status=ActionStatus.DRY_RUN if dry_run else ActionStatus.SUCCESS,
@@ -43,7 +43,7 @@ class DesktopActions:
     ) -> ActionResult:
         if not dry_run:
             if point is not None:
-                pyautogui.click(x=point.x, y=point.y)
+                self._left_click(point)
             pyautogui.write(text, interval=interval_seconds)
         return ActionResult(
             action="type",
@@ -100,12 +100,24 @@ class DesktopActions:
         provider: ProviderKind | None = None,
         dry_run: bool = False,
         sensitive: bool = False,
+        use_clipboard: bool = False,
     ) -> ActionResult:
         if not dry_run:
             if point is not None:
-                pyautogui.click(x=point.x, y=point.y)
-            pyperclip.copy(text)
-            pyautogui.hotkey("ctrl", "v")
+                self._left_click(point)
+            if use_clipboard:
+                clipboard_before = _safe_clipboard_paste()
+                try:
+                    pyperclip.copy(text)
+                    _release_modifier_keys()
+                    pyautogui.hotkey("ctrl", "v")
+                finally:
+                    _release_modifier_keys()
+                    if clipboard_before is not None:
+                        _safe_clipboard_copy(clipboard_before)
+            else:
+                _release_modifier_keys()
+                pyautogui.write(text, interval=0.01)
         return ActionResult(
             action="paste",
             status=ActionStatus.DRY_RUN if dry_run else ActionStatus.SUCCESS,
@@ -113,5 +125,39 @@ class DesktopActions:
             point=point,
             provider=provider,
             message="paste skipped by dry-run" if dry_run else "pasted",
-            metadata=text_metadata(text, sensitive=sensitive),
+            metadata={**text_metadata(text, sensitive=sensitive), "clipboard": use_clipboard},
         )
+
+    def _left_click(self, point: Point) -> None:
+        _release_mouse_buttons()
+        pyautogui.click(x=point.x, y=point.y, button="left")
+
+
+def _release_mouse_buttons() -> None:
+    for button in ("left", "right", "middle"):
+        try:
+            pyautogui.mouseUp(button=button)
+        except Exception:
+            continue
+
+
+def _release_modifier_keys() -> None:
+    for key in ("ctrl", "shift", "alt", "win"):
+        try:
+            pyautogui.keyUp(key)
+        except Exception:
+            continue
+
+
+def _safe_clipboard_paste() -> str | None:
+    try:
+        return pyperclip.paste()
+    except Exception:
+        return None
+
+
+def _safe_clipboard_copy(text: str) -> None:
+    try:
+        pyperclip.copy(text)
+    except Exception:
+        pass

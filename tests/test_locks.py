@@ -1,4 +1,5 @@
 import json
+import warnings
 from threading import Thread
 from time import time
 from time import sleep as sleep_seconds
@@ -38,6 +39,22 @@ def test_run_lock_replaces_stale_lock(tmp_path) -> None:
 
     assert fresh.owner == "new"
     assert read_lock(lock_path).owner == "new"
+
+
+def test_read_lock_deleted_between_exists_and_read_returns_none(tmp_path, monkeypatch) -> None:
+    lock_path = tmp_path / "workflow.lock"
+    lock_path.write_text("{}", encoding="utf-8")
+
+    def missing_read_text(*_args, **_kwargs):
+        raise FileNotFoundError(str(lock_path))
+
+    monkeypatch.setattr(type(lock_path), "read_text", missing_read_text)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert read_lock(lock_path) is None
+
+    assert caught == []
 
 
 def test_run_lock_waits_until_release(tmp_path) -> None:

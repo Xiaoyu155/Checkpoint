@@ -19,6 +19,15 @@ same command, args, cwd, and `PYTHONPATH` values.
 .\.venv\Scripts\python.exe -m visual_agent.cli coding-agent-brief --client vscode --workspace-root .agent-workspace --format markdown
 ```
 
+## Verify Current Change
+
+The bundled VS Code extension contributes `Visual Agent: Verify Current Change`.
+It prompts for a task description and a base URL or fixture path, then runs
+`verify-impl --format markdown`, refreshes the sidebar/status bar, and opens the
+latest verification markdown.
+
+Use dry-run first unless the workflow needs real browser actions.
+
 ## Useful Agent Requests
 
 ```text

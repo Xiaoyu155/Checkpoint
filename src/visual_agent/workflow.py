@@ -4,7 +4,7 @@ import json
 import re
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
@@ -27,7 +27,9 @@ from .models import (
 from .providers import ProviderContext, ProviderRegistry, default_provider_registry
 from .product_state import (
     ai_quality_failure_message,
+    browser_readiness_failure_message,
     evaluate_ai_response_quality,
+    evaluate_browser_readiness,
     evaluate_no_error_state,
     evaluate_product_contract,
     observation_to_state,
@@ -35,6 +37,7 @@ from .product_state import (
 )
 from .run_profile import RunProfileName, ensure_step_allowed, normalize_run_profile, step_should_dry_run
 from .selector import SelectorResolver
+from .security import redact_secret_text
 from .state import StateStore, WorkflowState, hydrate_context_from_completed_steps
 from .workflow_types import WorkflowContext
 
@@ -59,6 +62,10 @@ class Workflow:
     min_runtime_version: str | None = None
     tags: tuple[str, ...] = ()
     affects: tuple[str, ...] = ()
+    description: str = ""
+    visibility: str = "private"
+    author: str = ""
+    license: str = ""
 
 
 @dataclass(frozen=True)
@@ -159,6 +166,7 @@ class WorkflowRuntime:
             )
             hydrate_context_from_completed_steps(context, tuple(completed_steps))
             results: list[WorkflowStepResult] = []
+            sensitive_values = workflow_sensitive_input_values(workflow, context.inputs, context.sensitive_fields)
 
             for step in workflow.steps:
                 if step.id in completed_lookup:
@@ -178,8 +186,9 @@ class WorkflowRuntime:
                     run_profile=profile,
                     synthetic_on_capture_fail=synthetic_on_capture_fail,
                 )
-                results.append(result)
-                self._write_step_result(run_dir, result)
+                safe_result = redact_workflow_step_result(result, sensitive_values)
+                results.append(safe_result)
+                self._write_step_result(run_dir, safe_result)
                 if result.status == ActionStatus.FAILED:
                     state_store.save(
                         WorkflowState(
@@ -408,6 +417,15 @@ class WorkflowRuntime:
             context.actions[step.id] = action_result
             context.invalidate_observation_cache()
             metadata: dict[str, Any] = {}
+            browser_observation = run_browser_post_action_observe(
+                context,
+                step_id=step.id,
+                enabled=action_result.status == ActionStatus.SUCCESS
+                and action_result.metadata.get("execution") == "playwright"
+                and bool(params.get("browser_post_action_observe", True)),
+            )
+            if browser_observation is not None:
+                metadata["browser_post_action_observe"] = browser_observation
             post_action_observe = run_post_action_observe(
                 params.get("post_action_observe"),
                 context,
@@ -465,6 +483,19 @@ class WorkflowRuntime:
                 status=ActionStatus.SUCCESS,
                 message="no error state detected",
                 metadata={"no_error": result},
+            )
+
+        if action == "assert_browser_ready":
+            observation = context.observations.get(str(params.get("observation", ""))) or context.latest_observation
+            result = evaluate_browser_readiness(observation, params, network_events=context.resources.get("network_events", []))
+            if not result.passed:
+                raise AssertionError(browser_readiness_failure_message(result))
+            return WorkflowStepResult(
+                id=step.id,
+                action=action,
+                status=ActionStatus.SUCCESS,
+                message="browser ready",
+                metadata={"browser_ready": result},
             )
 
         if action == "assert_product_contract":
@@ -1014,6 +1045,10 @@ def workflow_from_dict(payload: dict[str, Any]) -> Workflow:
         min_runtime_version=str(payload["min_runtime_version"]) if payload.get("min_runtime_version") not in (None, "") else None,
         tags=tuple(str(item) for item in payload.get("tags", []) or []),
         affects=tuple(str(item) for item in payload.get("affects", []) or []),
+        description=str(payload.get("description") or ""),
+        visibility=str(payload.get("visibility") or "private"),
+        author=str(payload.get("author") or ""),
+        license=str(payload.get("license") or ""),
     )
 
 
@@ -1077,6 +1112,7 @@ def is_retry_safe_action(action: str) -> bool:
         "assert_text",
         "assert_text_contract",
         "assert_no_error",
+        "assert_browser_ready",
         "assert_product_contract",
         "assert_ai_response_quality",
         "assert_response",
@@ -1100,6 +1136,40 @@ def append_network_event(context: WorkflowContext, event: dict[str, Any]) -> Non
     events = context.resources.setdefault("network_events", [])
     if isinstance(events, list):
         events.append(event)
+
+
+def run_browser_post_action_observe(
+    context: WorkflowContext,
+    *,
+    step_id: str,
+    enabled: bool,
+) -> dict[str, Any] | None:
+    if not enabled:
+        return None
+    page = context.resources.get("playwright_page")
+    if page is None:
+        return None
+    from .providers import browser_page_observation
+
+    observation = browser_page_observation(
+        page,
+        run_dir=context.run_dir,
+        label=f"{step_id}-browser-after",
+        network_events=context.resources.get("network_events", []),
+        console_events=context.resources.get("console_events", []),
+        page_errors=context.resources.get("page_errors", []),
+    )
+    observation_id = f"{step_id}.browser_after"
+    context.observations[observation_id] = observation
+    return {
+        "status": "observed",
+        "observation": observation_id,
+        "source": observation.source,
+        "screenshot_path": str(observation.screenshot_path) if observation.screenshot_path is not None else None,
+        "visible_text_length": observation.metadata.get("visible_text_length"),
+        "interactive_count": observation.metadata.get("interactive_count"),
+        "failed_request_count": observation.metadata.get("failed_request_count"),
+    }
 
 
 def run_post_action_observe(
@@ -1153,7 +1223,7 @@ def run_post_action_observe(
     return metadata
 
 
-SELF_CONTAINED_ACTIONS = {"press_key", "click_text", "wait_for_text"}
+SELF_CONTAINED_ACTIONS = {"press_key", "refresh_browser", "click_text", "wait_for_text"}
 VISUAL_LOCK_ACTIONS = {"observe_screen", "observe_ocr", "observe_vision", "observe_uia", "click_text", "wait_for_text"}
 
 
@@ -1469,6 +1539,92 @@ def resolve_input_ref(value_from: str, key: str, context: WorkflowContext) -> An
     if value_from.startswith("input."):
         return read_path(context.inputs, value_from.removeprefix("input."))
     raise ValueError(f"Unsupported {key} path: {value_from}")
+
+
+def workflow_sensitive_input_values(workflow: Workflow, inputs: dict[str, Any], sensitive_fields: set[str]) -> tuple[str, ...]:
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def add_value(path: str) -> None:
+        try:
+            value = read_path(inputs, path)
+        except KeyError:
+            return
+        if isinstance(value, (str, int, float)):
+            text = str(value)
+            if text and text not in seen:
+                seen.add(text)
+                values.append(text)
+
+    for path in sensitive_fields:
+        add_value(path)
+    for step in workflow.steps:
+        value_from = str(step.params.get("value_from") or "")
+        if not value_from.startswith("input."):
+            continue
+        path = value_from.removeprefix("input.")
+        if step.action in {"type", "paste"} or step.params.get("sensitive") is True or path in sensitive_fields:
+            add_value(path)
+    return tuple(values)
+
+
+def redact_workflow_step_result(result: WorkflowStepResult, sensitive_values: tuple[str, ...]) -> WorkflowStepResult:
+    if not sensitive_values:
+        return result
+    return replace(
+        result,
+        message=redact_workflow_value(result.message, sensitive_values),
+        observation=redact_observation(result.observation, sensitive_values),
+        resolved_target=redact_resolved_target(result.resolved_target, sensitive_values),
+        action_result=redact_action_result(result.action_result, sensitive_values),
+        metadata=redact_workflow_value(result.metadata, sensitive_values),
+    )
+
+
+def redact_observation(observation: Observation | None, sensitive_values: tuple[str, ...]) -> Observation | None:
+    if observation is None:
+        return None
+    return replace(
+        observation,
+        source=redact_workflow_value(observation.source, sensitive_values),
+        elements=tuple(redact_workflow_value(element, sensitive_values) for element in observation.elements),
+        metadata=redact_workflow_value(observation.metadata, sensitive_values),
+    )
+
+
+def redact_resolved_target(resolved: ResolvedTarget | None, sensitive_values: tuple[str, ...]) -> ResolvedTarget | None:
+    if resolved is None:
+        return None
+    evidence = replace(
+        resolved.evidence,
+        reason=redact_workflow_value(resolved.evidence.reason, sensitive_values),
+        handle=redact_workflow_value(resolved.evidence.handle, sensitive_values),
+        metadata=redact_workflow_value(resolved.evidence.metadata, sensitive_values),
+    )
+    return replace(resolved, evidence=evidence)
+
+
+def redact_action_result(result: ActionResult | None, sensitive_values: tuple[str, ...]) -> ActionResult | None:
+    if result is None:
+        return None
+    return replace(
+        result,
+        target=redact_workflow_value(result.target, sensitive_values),
+        message=redact_workflow_value(result.message, sensitive_values),
+        metadata=redact_workflow_value(result.metadata, sensitive_values),
+    )
+
+
+def redact_workflow_value(value: Any, sensitive_values: tuple[str, ...]) -> Any:
+    if isinstance(value, str):
+        return redact_secret_text(value, extra_secrets=sensitive_values)
+    if isinstance(value, dict):
+        return {key: redact_workflow_value(item, sensitive_values) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(redact_workflow_value(item, sensitive_values) for item in value)
+    if isinstance(value, list):
+        return [redact_workflow_value(item, sensitive_values) for item in value]
+    return value
 
 
 def resolve_screenshot_source(value: Any, context: WorkflowContext) -> Path:

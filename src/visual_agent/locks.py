@@ -136,6 +136,8 @@ def read_lock(path: str | Path) -> RunLockInfo | None:
             host=str(payload["host"]) if payload.get("host") is not None else None,
             cwd=str(payload["cwd"]) if payload.get("cwd") is not None else None,
         )
+    except FileNotFoundError:
+        return None
     except PermissionError as exc:
         warnings.warn(
             f"Lock file at {lock_path} is temporarily unreadable and will be treated as active: {exc}",

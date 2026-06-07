@@ -20,7 +20,10 @@ def test_workspace_dashboard_summarizes_empty_workspace(tmp_path) -> None:
 
     assert dashboard["health"]["status"] == "ok"
     assert dashboard["risk_policy_check"]["status"] == "warning"
-    assert dashboard["risk_policy_check"]["warning_count"] == 1
+    assert dashboard["risk_policy_check"]["warning_count"] == 2
+    assert dashboard["auto_repair_policy"]["min_confidence"] == 0.75
+    assert dashboard["auto_repair_policy"]["max_risk_level"] == "medium"
+    assert dashboard["auto_repair_policy"]["source"] == "defaults"
     assert dashboard["workspace"]["workflow_count"] == 2
     assert dashboard["reports"]["total"] == 0
     assert dashboard["quality_gates"]["total"] == 0
@@ -167,7 +170,8 @@ def test_workspace_dashboard_flags_invalid_risk_policy(tmp_path) -> None:
     assert dashboard["health"]["status"] == "attention"
     assert "workspace_risk_policy_invalid" in dashboard["health"]["issues"]
     assert dashboard["risk_policy_check"]["error_count"] == 2
-    assert "Risk policy check: `error` (2 errors, 0 warnings)" in markdown
+    assert "Risk policy check: `error` (2 errors, 1 warnings)" in markdown
+    assert "Auto repair policy: min_confidence" in markdown
     assert "## Risk Policy Check" in markdown
     assert "risk_policy_float_out_of_range" in markdown
     assert "quality.gui_action_history.error_rate_threshold" in markdown
@@ -527,6 +531,7 @@ def test_workspace_risk_policy_check_cli_reports_invalid_policy(tmp_path, capsys
     assert {issue["code"] for issue in payload["issues"]} == {
         "risk_policy_float_out_of_range",
         "risk_policy_attention_trends_not_list",
+        "auto_repair_policy_missing",
     }
 
 
@@ -540,6 +545,7 @@ def test_workspace_risk_policy_plan_cli_outputs_patch_preview(tmp_path, capsys) 
     assert payload["applied"] is False
     assert payload["changed"] is True
     assert "quality.gui_action_history" in payload["changed_paths"]
+    assert "auto_repair.min_confidence" in payload["changed_paths"]
     assert payload["patch"]["quality"]["gui_action_history"]["health"]["attention_trend_directions"] == ["worsening"]
     assert payload["validation_after"]["status"] == "ok"
 

@@ -479,6 +479,9 @@ def test_workspace_risk_policy_template_is_copyable_quality_fragment() -> None:
     assert config["profiles"]["ci"]["error_rate_threshold"] == 0.15
     assert config["profiles"]["ci"]["failed_action_limit"] == 1
     assert config["health"]["attention_trend_directions"] == ["worsening"]
+    assert template["auto_repair"]["min_confidence"] == 0.75
+    assert template["auto_repair"]["max_risk_level"] == "medium"
+    assert template["auto_repair"]["allow_force"] is True
 
 
 def test_validate_workspace_risk_policy_accepts_template(tmp_path) -> None:
@@ -511,6 +514,11 @@ def test_validate_workspace_risk_policy_reports_invalid_values(tmp_path) -> None
             "health": {"attention_trend_directions": ["worsening", "bad_direction", "worsening"]},
         }
     }
+    manifest["auto_repair"] = {
+        "min_confidence": "high",
+        "max_risk_level": "danger",
+        "allow_force": "yes",
+    }
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
     result = validate_workspace_risk_policy(workspace)
@@ -526,7 +534,10 @@ def test_validate_workspace_risk_policy_reports_invalid_values(tmp_path) -> None
     assert "risk_policy_unknown_profile" in codes
     assert "risk_policy_attention_trend_unsupported" in codes
     assert "risk_policy_attention_trend_duplicate" in codes
+    assert "auto_repair_max_risk_level_invalid" in codes
+    assert "auto_repair_allow_force_invalid" in codes
     assert "quality.gui_action_history.profiles.ci.error_rate_threshold" in paths
+    assert "auto_repair.min_confidence" in paths
 
 
 def test_workspace_risk_policy_apply_plan_fills_missing_policy_without_writing(tmp_path) -> None:
@@ -541,6 +552,8 @@ def test_workspace_risk_policy_apply_plan_fills_missing_policy_without_writing(t
     assert plan["applied"] is False
     assert plan["changed"] is True
     assert "quality.gui_action_history" in plan["changed_paths"]
+    assert "auto_repair.min_confidence" in plan["changed_paths"]
+    assert plan["patch"]["auto_repair"]["max_risk_level"] == "medium"
     assert plan["patch"]["quality"]["gui_action_history"]["profiles"]["ci"]["failed_action_limit"] == 1
     assert plan["validation_after"]["status"] == "ok"
     assert after == original
@@ -551,11 +564,13 @@ def test_workspace_risk_policy_apply_plan_preserves_existing_values_by_default(t
     manifest_path = workspace.root / "workspace.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["quality"] = {"gui_action_history": {"error_rate_threshold": 0.9}}
+    manifest["auto_repair"] = {"min_confidence": 0.9}
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
     plan = build_workspace_risk_policy_apply_plan(workspace)
 
     assert plan["patch"]["quality"]["gui_action_history"]["error_rate_threshold"] == 0.9
+    assert plan["patch"]["auto_repair"]["min_confidence"] == 0.9
     assert plan["patch"]["quality"]["gui_action_history"]["history_limit"] == 50
 
 

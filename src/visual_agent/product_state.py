@@ -53,6 +53,16 @@ class ProductContractResult:
 
 
 @dataclass(frozen=True)
+class BrowserReadinessResult:
+    passed: bool
+    issues: tuple[str, ...]
+    state: dict[str, Any]
+    failed_requests: tuple[dict[str, Any], ...]
+    console_errors: tuple[dict[str, Any], ...]
+    page_errors: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
 class AIResponseQualityResult:
     passed: bool
     issues: tuple[str, ...]
@@ -146,6 +156,57 @@ def evaluate_no_error_state(observation: Observation, *, network_events: list[di
     }
 
 
+def evaluate_browser_readiness(
+    observation: Observation,
+    params: dict[str, Any] | None = None,
+    *,
+    network_events: list[dict[str, Any]] | None = None,
+) -> BrowserReadinessResult:
+    params = params or {}
+    state = observation_to_state(observation)
+    visible_text_length = int(observation.metadata.get("visible_text_length") or len(" ".join(state["visible_text"])))
+    interactive_count = int(observation.metadata.get("interactive_count") or len(observation.elements))
+    min_text_length = int(params.get("min_text_length", 1) or 0)
+    min_interactive = int(params.get("min_interactive", 0) or 0)
+    require_title = bool(params.get("require_title", False))
+    allow_blank = bool(params.get("allow_blank", False))
+    check_network = bool(params.get("check_network", True))
+    check_console = bool(params.get("check_console", True))
+    issues: list[str] = []
+    if not allow_blank and visible_text_length < min_text_length and interactive_count <= 0:
+        issues.append("blank or empty browser page")
+    if visible_text_length < min_text_length:
+        issues.append(f"visible text shorter than {min_text_length}")
+    if interactive_count < min_interactive:
+        issues.append(f"interactive elements below {min_interactive}")
+    if require_title and not state["title"]:
+        issues.append("missing page title")
+    if state["errors"]:
+        issues.append("visible error text: " + "; ".join(state["errors"][:5]))
+    failed_requests = tuple(
+        compact_network_event(event)
+        for event in (network_events or [])
+        if isinstance(event, dict)
+        and (event.get("type") == "request_failed" or event.get("ok") is False or int(event.get("status") or 200) >= 400)
+    )
+    if check_network and failed_requests:
+        issues.append("failed network requests: " + str(len(failed_requests)))
+    console_errors = tuple(observation.metadata.get("console_errors") or ())
+    page_errors = tuple(observation.metadata.get("page_errors") or ())
+    if check_console and console_errors:
+        issues.append("browser console errors: " + str(len(console_errors)))
+    if page_errors:
+        issues.append("browser page errors: " + str(len(page_errors)))
+    return BrowserReadinessResult(
+        passed=not issues,
+        issues=tuple(issues),
+        state=state,
+        failed_requests=failed_requests[:10],
+        console_errors=console_errors[:10],
+        page_errors=page_errors[:10],
+    )
+
+
 def evaluate_product_contract(
     observation: Observation,
     params: dict[str, Any],
@@ -187,6 +248,10 @@ def product_contract_failure_message(result: ProductContractResult) -> str:
     if result.errors:
         parts.append("errors: " + ", ".join(result.errors))
     return "product contract failed (" + "; ".join(parts) + ")"
+
+
+def browser_readiness_failure_message(result: BrowserReadinessResult) -> str:
+    return "browser readiness failed (" + "; ".join(result.issues) + ")"
 
 
 def evaluate_ai_response_quality(params: dict[str, Any], observation: Observation | None = None) -> AIResponseQualityResult:

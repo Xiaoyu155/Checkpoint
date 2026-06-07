@@ -60,6 +60,7 @@ def test_console_window_model_handles_empty_workspace(tmp_path) -> None:
         "reports",
         "quality",
         "risk_policy",
+        "auto_repair",
         "queue",
         "external_samples",
         "gui_action_risk",
@@ -107,7 +108,10 @@ def test_console_window_model_handles_empty_workspace(tmp_path) -> None:
     assert model["gui_action_history_risk"]["risk_level"] == "ok"
     risk_policy_card = next(card for card in model["summary_cards"] if card["id"] == "risk_policy")
     assert risk_policy_card["value"] == "warning"
-    assert risk_policy_card["detail"] == "0 errors, 1 warnings"
+    assert risk_policy_card["detail"] == "0 errors, 2 warnings"
+    auto_repair_card = next(card for card in model["summary_cards"] if card["id"] == "auto_repair")
+    assert auto_repair_card["value"] == "medium"
+    assert "min 0.75" in auto_repair_card["detail"]
     assert model["summary_cards"][-1]["id"] == "gui_action_risk"
     assert model["summary_cards"][-1]["value"] == "ok"
     assert [column["id"] for column in model["primary_columns"]] == ["workflows", "runs", "queue"]
@@ -294,7 +298,7 @@ def test_console_window_model_risk_policy_card_shows_invalid_policy(tmp_path) ->
     assert "## Risk Policy Check" in model["risk_policy_check_markdown"]
     assert "quality.gui_action_history.history_limit" in model["risk_policy_check_markdown"]
     assert risk_policy_card["value"] == "error"
-    assert risk_policy_card["detail"] == "1 errors, 0 warnings"
+    assert risk_policy_card["detail"] == "1 errors, 1 warnings"
 
 
 def test_console_model_detail_markdown_can_show_risk_policy_check(tmp_path) -> None:
@@ -1242,9 +1246,10 @@ def test_risk_policy_plan_to_markdown_shows_changed_paths_and_validation(tmp_pat
     markdown = risk_policy_plan_to_markdown(result["policy_plan"])
 
     assert markdown.startswith("# Risk Policy Patch")
-    assert "| before | `warning` | 0 | 1 |" in markdown
+    assert "| before | `warning` | 0 | 2 |" in markdown
     assert "| after | `ok` | 0 | 0 |" in markdown
     assert "- `quality.gui_action_history`" in markdown
+    assert "- `auto_repair.min_confidence`" in markdown
 
 
 def test_readiness_markdown_includes_status_summary_and_remediation(tmp_path) -> None:

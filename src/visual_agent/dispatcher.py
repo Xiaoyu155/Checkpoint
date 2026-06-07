@@ -31,6 +31,7 @@ class ActionDispatcher:
         self.register("type", self._type)
         self.register("paste", self._paste)
         self.register("press_key", self._press_key)
+        self.register("refresh_browser", self._refresh_browser)
         self.register("click_text", self._click_text)
         self.register("wait_for_text", self._wait_for_text)
         from .plugins import load_action_plugins
@@ -66,6 +67,7 @@ class ActionDispatcher:
         if page is not None and selector:
             if not bool(params.get("dry_run", context.dry_run)):
                 page.locator(selector).click()
+                wait_after_browser_action(page, params)
             return ActionResult(
                 action="click",
                 status=ActionStatus.DRY_RUN if bool(params.get("dry_run", context.dry_run)) else ActionStatus.SUCCESS,
@@ -97,6 +99,7 @@ class ActionDispatcher:
         if page is not None and selector:
             if not bool(params.get("dry_run", context.dry_run)):
                 page.locator(selector).fill(value)
+                wait_after_browser_action(page, params)
             return ActionResult(
                 action="type",
                 status=ActionStatus.DRY_RUN if bool(params.get("dry_run", context.dry_run)) else ActionStatus.SUCCESS,
@@ -108,6 +111,7 @@ class ActionDispatcher:
                 else "playwright filled",
                 metadata={"execution": "playwright", "selector": selector, **text_metadata(value, sensitive=sensitive)},
             )
+        ensure_desktop_text_input_allowed("type", params, context)
         return self.actions.type_text(
             value,
             resolved.target,
@@ -131,6 +135,7 @@ class ActionDispatcher:
         if page is not None and selector:
             if not bool(params.get("dry_run", context.dry_run)):
                 page.locator(selector).fill(value)
+                wait_after_browser_action(page, params)
             return ActionResult(
                 action="paste",
                 status=ActionStatus.DRY_RUN if bool(params.get("dry_run", context.dry_run)) else ActionStatus.SUCCESS,
@@ -142,6 +147,7 @@ class ActionDispatcher:
                 else "playwright filled",
                 metadata={"execution": "playwright", "selector": selector, **text_metadata(value, sensitive=sensitive)},
             )
+        ensure_desktop_text_input_allowed("paste", params, context)
         return self.actions.paste_text(
             value,
             resolved.target,
@@ -149,6 +155,7 @@ class ActionDispatcher:
             provider=resolved.evidence.provider,
             dry_run=bool(params.get("dry_run", context.dry_run)),
             sensitive=sensitive,
+            use_clipboard=bool(params.get("clipboard", False)),
         )
 
 
@@ -167,6 +174,29 @@ class ActionDispatcher:
             resolved.target,
             provider=resolved.evidence.provider,
             dry_run=bool(params.get("dry_run", context.dry_run)),
+        )
+
+    def _refresh_browser(
+        self,
+        resolved: ResolvedTarget,
+        params: dict[str, Any],
+        context: ActionDispatchContext,
+    ) -> ActionResult:
+        page = context.workflow_context.resources.get("playwright_page")
+        if page is None:
+            raise RuntimeError("refresh_browser requires observe_browser.")
+        is_dry_run = bool(params.get("dry_run", context.dry_run))
+        if not is_dry_run:
+            page.reload(wait_until=str(params.get("wait_until") or "domcontentloaded"), timeout=int(params.get("timeout_ms", 10_000)))
+            wait_after_browser_action(page, params)
+        return ActionResult(
+            action="refresh_browser",
+            status=ActionStatus.DRY_RUN if is_dry_run else ActionStatus.SUCCESS,
+            target=resolved.target.display_name,
+            point=None,
+            provider=resolved.evidence.provider,
+            message="refresh skipped by dry-run" if is_dry_run else "browser refreshed",
+            metadata={"execution": "playwright", "url": getattr(page, "url", None)},
         )
 
     def _click_text(
@@ -262,6 +292,17 @@ def is_sensitive(params: dict[str, Any], context: WorkflowContext) -> bool:
     return False
 
 
+def ensure_desktop_text_input_allowed(action: str, params: dict[str, Any], context: ActionDispatchContext) -> None:
+    if bool(params.get("dry_run", context.dry_run)):
+        return
+    if bool(params.get("allow_desktop_input", False)):
+        return
+    raise RuntimeError(
+        f"Desktop {action} is blocked by default to avoid typing into the wrong window. "
+        "Use observe_browser for web UI, or set allow_desktop_input: true for intentional desktop text input."
+    )
+
+
 def selector_from_resolved(resolved: ResolvedTarget) -> str | None:
     if resolved.evidence.handle:
         return resolved.evidence.handle
@@ -269,6 +310,14 @@ def selector_from_resolved(resolved: ResolvedTarget) -> str | None:
     if isinstance(element, dict) and element.get("selector"):
         return str(element["selector"])
     return None
+
+
+def wait_after_browser_action(page: Any, params: dict[str, Any]) -> None:
+    wait_seconds = float(params.get("wait_after_seconds", 0.2) or 0.0)
+    if wait_seconds > 0 and hasattr(page, "wait_for_timeout"):
+        page.wait_for_timeout(int(wait_seconds * 1000))
+    if bool(params.get("wait_for_network_idle", False)) and hasattr(page, "wait_for_load_state"):
+        page.wait_for_load_state("networkidle", timeout=int(params.get("network_idle_timeout_ms", 5_000)))
 
 
 def ocr_params(params: dict[str, Any], *, exclude: set[str]) -> dict[str, Any]:

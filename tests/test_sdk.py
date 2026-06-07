@@ -6,9 +6,6 @@ import pytest
 from visual_agent import ActionStatus, Observation, ProviderKind, VisualSession
 from visual_agent.dsl import list_dsl_workflows, run_dsl_workflow, workflow
 
-pytest_plugins = ("visual_agent.pytest_plugin",)
-
-
 def test_visual_session_requires_context_manager() -> None:
     session = VisualSession()
 

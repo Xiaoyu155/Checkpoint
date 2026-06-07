@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 from .auth_state import auth_state_probe_to_markdown, build_auth_state_import_plan, import_auth_state, inspect_storage_state, probe_storage_state
 from .capabilities import build_atomic_capability_manifest, build_capability_manifest
@@ -164,6 +165,37 @@ def build_parser() -> argparse.ArgumentParser:
     resolve_dom.add_argument("--role", help="Expected DOM role, for example button or link.")
     resolve_dom.add_argument("--headed", action="store_true", help="Show the browser instead of headless mode.")
 
+    browser_smoke = subparsers.add_parser("browser-smoke", help="Run a real browser smoke check against a URL.")
+    browser_smoke.add_argument("--url", required=True, help="Page URL to open.")
+    browser_smoke.add_argument("--output-dir", default=".runs", help="Directory for smoke screenshots and artifacts.")
+    browser_smoke.add_argument("--headed", action="store_true", help="Show the browser instead of headless mode.")
+    browser_smoke.add_argument("--timeout-ms", type=int, default=10_000)
+    browser_smoke.add_argument("--wait-until", default="domcontentloaded", choices=["domcontentloaded", "load", "networkidle"])
+    browser_smoke.add_argument("--min-text-length", type=int, default=1)
+    browser_smoke.add_argument("--min-interactive", type=int, default=0)
+    browser_smoke.add_argument("--expect-text", action="append", default=[], help="Required visible text. Can be repeated.")
+    browser_smoke.add_argument("--expect-url-contains", action="append", default=[], help="Required initial URL fragment. Can be repeated.")
+    browser_smoke.add_argument("--fill", action="append", default=[], help="Fill input by semantic label, formatted as label=value. Can be repeated.")
+    browser_smoke.add_argument("--fill-selector", action="append", default=[], help="Fill input by CSS selector, formatted as selector=value. Can be repeated.")
+    browser_smoke.add_argument("--click-text", default=None, help="Visible button/link text to click once.")
+    browser_smoke.add_argument("--click-selector", default=None, help="CSS selector to click once.")
+    browser_smoke.add_argument("--require-change-after-click", action="store_true", help="Fail if click does not change URL, visible text, or interactive element count.")
+    browser_smoke.add_argument("--wait-for-text-after", action="append", default=[], help="Text to wait for after click before final screenshot. Can be repeated.")
+    browser_smoke.add_argument("--wait-for-url-contains-after", action="append", default=[], help="URL fragment to wait for after click before final screenshot. Can be repeated.")
+    browser_smoke.add_argument("--wait-timeout-seconds", type=float, default=5.0)
+    browser_smoke.add_argument("--expect-text-after", action="append", default=[], help="Required visible text after click. Can be repeated.")
+    browser_smoke.add_argument("--expect-url-contains-after", action="append", default=[], help="Required URL fragment after click. Can be repeated.")
+    browser_smoke.add_argument("--wait-after-seconds", type=float, default=0.5)
+    browser_smoke.add_argument("--save-workflow", help="Save a reusable workflow YAML generated from this smoke configuration.")
+    browser_smoke.add_argument("--overwrite-workflow", action="store_true", help="Overwrite --save-workflow if it already exists.")
+    browser_smoke.add_argument("--format", choices=["json", "markdown"], default="markdown")
+
+    browser_smoke_suite = subparsers.add_parser("browser-smoke-suite", help="Run a browser smoke suite from a JSON/YAML file.")
+    browser_smoke_suite.add_argument("--file", required=True, help="Suite JSON/YAML path.")
+    browser_smoke_suite.add_argument("--output-dir", default=".runs", help="Directory for suite reports and case artifacts.")
+    browser_smoke_suite.add_argument("--headed", action="store_true", help="Force headed browser mode for all cases.")
+    browser_smoke_suite.add_argument("--format", choices=["json", "markdown"], default="markdown")
+
     inspect_uia = subparsers.add_parser("inspect-uia", help="Inspect structured Windows UI Automation controls.")
     inspect_uia.add_argument("--max-depth", type=int, default=4, help="Maximum UIA tree depth to inspect.")
     inspect_uia.add_argument("--limit", type=int, default=50, help="Maximum controls to print.")
@@ -306,9 +338,114 @@ def build_parser() -> argparse.ArgumentParser:
     context_snapshot.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing agent_session.json.")
     context_snapshot.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
+    usage_status = subparsers.add_parser("usage-status", help="Show local usage counters and license feature boundaries.")
+    usage_status.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing agent_session.json.")
+    usage_status.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    cloud_run_plan = subparsers.add_parser("cloud-run-plan", help="Preview a cloud workflow request without sending network traffic.")
+    cloud_run_plan.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root.")
+    cloud_run_plan.add_argument("--workflow", required=True, help="Workflow name to run remotely in the future.")
+    cloud_run_plan.add_argument("--run-profile", choices=["dry-run", "supervised", "approved"], default="dry-run")
+    cloud_run_plan.add_argument("--inputs-file", default=None, help="Optional inputs file name to reference without reading its contents.")
+    cloud_run_plan.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    cloud_run = subparsers.add_parser("cloud-run", help="Plan a cloud workflow run; use --execute to request execution.")
+    cloud_run.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root.")
+    cloud_run.add_argument("--workflow", required=True, help="Workflow name to run remotely.")
+    cloud_run.add_argument("--run-profile", choices=["dry-run", "supervised", "approved"], default="dry-run")
+    cloud_run.add_argument("--inputs-file", default=None, help="Optional inputs file name to reference without reading its contents.")
+    cloud_run.add_argument("--execute", action="store_true", help="Explicitly request remote execution.")
+    cloud_run.add_argument("--transport", choices=["none", "http"], default="none", help="Remote transport. Default: none.")
+    cloud_run.add_argument("--timeout-seconds", type=float, default=30.0, help="HTTP transport timeout when --transport http is used.")
+    cloud_run.add_argument("--max-retries", type=int, default=0, help="Retry count for retryable HTTP transport responses. Default: 0.")
+    cloud_run.add_argument("--retry-backoff-seconds", type=float, default=0.0, help="Initial retry backoff for HTTP transport. Default: 0.")
+    cloud_run.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    save_task = subparsers.add_parser("save-task-context", help="Save AI task state before switching windows.")
+    save_task.add_argument("--task", required=True, help="Current task description.")
+    save_task.add_argument("--files", nargs="*", default=[], help="Files already analyzed.")
+    save_task.add_argument("--root-cause", default="", help="Current root-cause hypothesis.")
+    save_task.add_argument("--plan", default="", help="Next-step plan.")
+    save_task.add_argument("--tried", nargs="*", default=[], help="Approaches already tried.")
+    save_task.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing agent_session.json.")
+    save_task.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
     summarize_failure = subparsers.add_parser("summarize-latest-failure", help="Print a compact latest-failure summary.")
     summarize_failure.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing agent_session.json.")
     summarize_failure.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    diagnose_failure = subparsers.add_parser("diagnose-latest-failure", help="Build an AI-readable evidence pack for the latest workflow failure.")
+    diagnose_failure.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflow reports.")
+    diagnose_failure.add_argument("--run-id", default=None, help="Specific run id to diagnose. Default: latest failed run.")
+    diagnose_failure.add_argument("--max-chars", type=int, default=12000, help="Maximum JSON evidence budget. Default: 12000.")
+    diagnose_failure.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    repair_workflow = subparsers.add_parser("repair-workflow", help="Suggest a safe workflow or app repair from failure evidence.")
+    repair_workflow.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflow reports.")
+    repair_workflow.add_argument("--run-id", default=None, help="Specific run id to repair. Default: latest failed run.")
+    repair_workflow.add_argument("--provider", choices=["none", "anthropic", "openai"], default="none", help="Model provider. Default: none.")
+    repair_workflow.add_argument("--model", default=None, help="Model name for provider-backed repair.")
+    repair_workflow.add_argument("--max-chars", type=int, default=12000, help="Maximum JSON evidence budget. Default: 12000.")
+    repair_workflow.add_argument("--apply", action="store_true", help="Apply a high-confidence deterministic workflow patch and create a backup.")
+    repair_workflow.add_argument("--min-confidence", type=float, default=0.75, help="Minimum confidence required for --apply. Default: 0.75.")
+    repair_workflow.add_argument("--verify", action="store_true", help="Rerun the repaired workflow after --apply. Default run profile: dry-run.")
+    repair_workflow.add_argument("--verify-run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    repair_workflow.add_argument("--inputs-file", default=None, help="Optional workspace inputs file for verification rerun.")
+    repair_workflow.add_argument("--rollback-on-fail", action="store_true", help="Restore the workflow backup when --verify fails.")
+    repair_workflow.add_argument("--candidate-id", default=None, help="Repair candidate id to apply. Default: deterministic workflow patch when available.")
+    repair_workflow.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    auto_repair = subparsers.add_parser("auto-repair", help="Diagnose, apply a safe deterministic repair, verify, and rollback on failure.")
+    auto_repair.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflow reports.")
+    auto_repair.add_argument("--run-id", default=None, help="Specific run id to repair. Default: latest failed run.")
+    auto_repair.add_argument("--max-chars", type=int, default=12000, help="Maximum JSON evidence budget. Default: 12000.")
+    auto_repair.add_argument("--min-confidence", type=float, default=0.75, help="Minimum confidence required for auto apply. Default: 0.75.")
+    auto_repair.add_argument("--verify-run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    auto_repair.add_argument("--inputs-file", default=None, help="Optional workspace inputs file for verification rerun.")
+    auto_repair.add_argument("--candidate-id", default=None, help="Repair candidate id to apply. Default: deterministic workflow patch when available.")
+    auto_repair.add_argument("--dry-run", action="store_true", help="Preview the selected repair candidate without applying or verifying.")
+    auto_repair.add_argument("--force", action="store_true", help="Apply even when repair health is high risk.")
+    auto_repair.add_argument("--promote-regression", action="store_true", help="After verified auto repair, export and promote the failed run as a regression test.")
+    auto_repair.add_argument("--overwrite-regression", action="store_true", help="Overwrite existing regression export/test when promoting.")
+    auto_repair.add_argument("--run-regression", action="store_true", help="Run workspace regression tests after promotion.")
+    auto_repair.add_argument("--regression-timeout-seconds", type=float, default=120.0, help="Timeout for --run-regression. Default: 120.")
+    auto_repair.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    repair_history = subparsers.add_parser("repair-history", help="List recent workflow repair attempts.")
+    repair_history.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing repair_history.jsonl.")
+    repair_history.add_argument("--limit", type=int, default=20, help="Maximum entries to return. Default: 20.")
+    repair_history.add_argument("--workflow", default=None, help="Filter by workflow name.")
+    repair_history.add_argument("--status", default=None, help="Filter by repair status.")
+    repair_history.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    repair_health = subparsers.add_parser("repair-health", help="Summarize repair reliability and rollback risk.")
+    repair_health.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing repair_history.jsonl.")
+    repair_health.add_argument("--limit", type=int, default=50, help="Maximum entries to analyze. Default: 50.")
+    repair_health.add_argument("--workflow", default=None, help="Filter by workflow name.")
+    repair_health.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    repair_rollback = subparsers.add_parser("repair-rollback", help="Rollback a workflow from a recorded repair backup.")
+    repair_rollback.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing repair_history.jsonl.")
+    repair_rollback.add_argument("--history-id", default=None, help="Specific repair history id. Default: latest repair with backup.")
+    repair_rollback.add_argument("--workflow", default=None, help="Filter rollback candidate by workflow name.")
+    repair_rollback.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    benchmarks = subparsers.add_parser("benchmarks", help="List public reference benchmarks for real-world Visual Agent testing.")
+    benchmarks.add_argument("--category", default=None, help="Optional benchmark category filter.")
+    benchmarks.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    benchmark_plan = subparsers.add_parser("benchmark-plan", help="Create an executable Visual Agent benchmark coverage plan.")
+    benchmark_plan.add_argument("--category", default=None, help="Optional benchmark category filter.")
+    benchmark_plan.add_argument("--benchmark-id", default=None, help="Optional benchmark id filter.")
+    benchmark_plan.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    benchmark_draft = subparsers.add_parser("benchmark-draft", help="Generate a local workflow YAML draft for one benchmark scenario.")
+    benchmark_draft.add_argument("--scenario-id", required=True, help="Scenario id or workflow name from benchmark-plan.")
+    benchmark_draft.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root used for saving drafts.")
+    benchmark_draft.add_argument("--output", default=None, help="Optional workspace-relative output path.")
+    benchmark_draft.add_argument("--save", action="store_true", help="Write the workflow draft to the workspace.")
+    benchmark_draft.add_argument("--overwrite", action="store_true", help="Overwrite existing workflow draft.")
+    benchmark_draft.add_argument("--format", choices=["json", "markdown", "yaml"], default="markdown", help="Output format. Default: markdown.")
 
     verify = subparsers.add_parser("verify", help="Run verification-tagged workspace workflows.")
     verify.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
@@ -321,6 +458,51 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--include-slow", action="store_true", help="Include workflows tagged 'slow'. Default: skipped.")
     verify.add_argument("--for", dest="target_agent", default="codex", help="Target coding agent label.")
     verify.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    gen_workflow = subparsers.add_parser("generate-workflow", help="Generate a workflow YAML from a natural language description.")
+    gen_workflow.add_argument("--description", required=True, help="Natural language description of the workflow.")
+    gen_workflow.add_argument("--output", default=None, help="Output YAML file path. Default: auto-named in workflows/.")
+    gen_workflow.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root used to place generated workflows.")
+    gen_workflow.add_argument("--model", default="claude-haiku-4-5-20251001", help="LLM model to use for generation.")
+    gen_workflow.add_argument("--dry-run", action="store_true", help="Print generated YAML without saving.")
+    gen_workflow.add_argument("--format", choices=["json", "yaml"], default="json", help="Output format. Default: json.")
+
+    gen_from_diff = subparsers.add_parser("generate-from-diff", help="Generate a verification workflow from git diff context.")
+    gen_from_diff.add_argument("--task-description", required=True, help="Task or feature that the code changes implement.")
+    gen_from_diff.add_argument("--base-url", required=True, help="URL or local fixture path used as workflow entry point.")
+    gen_from_diff.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root used to place generated workflows.")
+    gen_from_diff.add_argument("--repo-root", default=".", help="Git repository root. Default: current directory.")
+    gen_from_diff.add_argument("--base", default="HEAD", help="Git base ref for diff. Default: HEAD.")
+    gen_from_diff.add_argument("--framework-hint", default=None, help="Optional parser hint: html, react, vue, django, fastapi, flask.")
+    gen_from_diff.add_argument("--model", default="claude-haiku-4-5-20251001", help="LLM model used when static confidence is low.")
+    gen_from_diff.add_argument("--no-untracked", action="store_true", help="Do not include untracked git files.")
+    gen_from_diff.add_argument("--dry-run", action="store_true", help="Print generated YAML without saving.")
+    gen_from_diff.add_argument("--format", choices=["json", "yaml"], default="json", help="Output format. Default: json.")
+
+    verify_impl = subparsers.add_parser("verify-impl", help="Generate a workflow from git diff context and run it.")
+    verify_impl.add_argument("--task-description", required=True, help="Task or feature that the code changes implement.")
+    verify_impl.add_argument("--base-url", required=True, help="URL or local fixture path used as workflow entry point.")
+    verify_impl.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
+    verify_impl.add_argument("--repo-root", default=".", help="Git repository root. Default: current directory.")
+    verify_impl.add_argument("--base", default="HEAD", help="Git base ref for diff. Default: HEAD.")
+    verify_impl.add_argument("--framework-hint", default=None, help="Optional parser hint: html, react, vue, django, fastapi, flask.")
+    verify_impl.add_argument("--model", default="claude-haiku-4-5-20251001", help="LLM model used when static confidence is low.")
+    verify_impl.add_argument("--inputs-file", default=None, help="Workspace inputs JSON file for generated workflow values.")
+    verify_impl.add_argument("--run-profile", choices=["dry-run", "supervised", "approved"], default="supervised")
+    verify_impl.add_argument("--min-quality-score", type=float, default=0.6, help="Minimum generated workflow quality before running. Default: 0.6.")
+    verify_impl.add_argument("--timeout-seconds", type=float, default=30.0, help="Maximum seconds to wait for the generated workflow run. Default: 30.")
+    verify_impl.add_argument("--run-negative", action="store_true", help="Also run the generated negative workflow draft after the success-path workflow passes.")
+    verify_impl.add_argument("--no-untracked", action="store_true", help="Do not include untracked git files.")
+    verify_impl.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    agent_status = subparsers.add_parser("agent-status", help="Read .vscode-agent-status.json for AI/VS Code verification status.")
+    agent_status.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing .vscode-agent-status.json.")
+    agent_status.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    share_workflow = subparsers.add_parser("share-workflow", help="Share a workflow to the Visual Agent marketplace (coming soon).")
+    share_workflow.add_argument("--name", required=True, help="Workflow name to share.")
+    share_workflow.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
+    share_workflow.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
     codex_check = subparsers.add_parser("codex-check", help="Smart check for Codex/Claude Code: git-diff-aware, fast by default.")
     codex_check.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
@@ -852,6 +1034,51 @@ def main(argv: list[str] | None = None) -> int:
         resolved = SelectorResolver().resolve(Target(text=args.target, role=args.role), observation)
         print(json.dumps(to_jsonable(resolved), ensure_ascii=False, indent=2))
         return 0
+    if args.command == "browser-smoke":
+        from .browser_smoke import browser_smoke_to_markdown, run_browser_smoke
+
+        payload = run_browser_smoke(
+            url=args.url,
+            output_dir=args.output_dir,
+            headed=args.headed,
+            timeout_ms=args.timeout_ms,
+            wait_until=args.wait_until,
+            min_text_length=args.min_text_length,
+            min_interactive=args.min_interactive,
+            expect_text=list(args.expect_text or []),
+            expect_url_contains=list(args.expect_url_contains or []),
+            fill=list(args.fill or []),
+            fill_selector=list(args.fill_selector or []),
+            click_text=args.click_text,
+            click_selector=args.click_selector,
+            require_change_after_click=args.require_change_after_click,
+            wait_for_text_after=list(args.wait_for_text_after or []),
+            wait_for_url_contains_after=list(args.wait_for_url_contains_after or []),
+            wait_timeout_seconds=args.wait_timeout_seconds,
+            expect_text_after=list(args.expect_text_after or []),
+            expect_url_contains_after=list(args.expect_url_contains_after or []),
+            wait_after_seconds=args.wait_after_seconds,
+            save_workflow=args.save_workflow,
+            overwrite_workflow=args.overwrite_workflow,
+        )
+        if args.format == "markdown":
+            print(browser_smoke_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0 if payload.get("status") == "success" else 1
+    if args.command == "browser-smoke-suite":
+        from .browser_smoke_suite import browser_smoke_suite_to_markdown, run_browser_smoke_suite
+
+        payload = run_browser_smoke_suite(
+            args.file,
+            output_dir=args.output_dir,
+            headed=True if args.headed else None,
+        )
+        if args.format == "markdown":
+            print(browser_smoke_suite_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0 if payload.get("status") == "success" else 1
     if args.command == "inspect-uia":
         observation = UIAutomationProvider(max_depth=args.max_depth).observe_desktop()
         payload = to_jsonable(observation)
@@ -1341,17 +1568,131 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
         return 0 if result.get("status") == "success" else 1
     if args.command == "context-snapshot":
-        from .session import load_agent_session, session_to_snapshot_text
+        from .session import workspace_session_snapshot_text
 
-        session = load_agent_session(Path(args.workspace_root).resolve())
-        if session is None:
-            text = "No session data yet. Run a workflow first."
-        else:
-            text = session_to_snapshot_text(session)
+        text = workspace_session_snapshot_text(Path(args.workspace_root).resolve())
         if args.format == "markdown":
             print(text)
         else:
             print(json.dumps({"snapshot": text, "token_estimate": len(text) // 4, "within_budget": len(text) <= 2000}, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "usage-status":
+        from .cloud import build_remote_workflow_request, cloud_config_status
+        from .licensing import check_feature, get_license
+        from .session import load_agent_session
+
+        workspace_root = Path(args.workspace_root).resolve()
+        session = load_agent_session(workspace_root)
+        license_ = get_license()
+        payload = {
+            "schema_version": 1,
+            "workspace": str(workspace_root),
+            "license": {
+                "tier": license_.tier,
+                "seats": license_.seats,
+                "expires_at": license_.expires_at,
+                "source": license_.source,
+                "key_present": license_.key_present,
+            },
+            "usage": {
+                "runs_this_month": session.runs_this_month if session else 0,
+                "cloud_runs_used": session.cloud_runs_used if session else 0,
+                "usage_reset_date": session.usage_reset_date if session else "",
+            },
+            "feature_access": {
+                "cloud_run": check_feature("cloud_run"),
+                "team_workspace": check_feature("team_workspace"),
+                "workflow_history_unlimited": check_feature("workflow_history_unlimited"),
+            },
+            "cloud_config": cloud_config_status(),
+            "remote_request_preview": build_remote_workflow_request(
+                "example_workflow",
+                workspace_root,
+                run_profile="dry-run",
+            ),
+        }
+        if args.format == "markdown":
+            print(usage_status_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "cloud-run-plan":
+        from .cloud import build_remote_workflow_request, remote_client_from_env
+
+        workspace_root = Path(args.workspace_root).resolve()
+        request = build_remote_workflow_request(
+            args.workflow,
+            workspace_root,
+            run_profile=args.run_profile,
+            inputs=None,
+            inputs_file=args.inputs_file,
+        )
+        diagnostic = remote_client_from_env(run_profile=args.run_profile, inputs_file=args.inputs_file)(args.workflow, workspace_root)
+        payload = {
+            "schema_version": 1,
+            "workspace": str(workspace_root),
+            "workflow_name": args.workflow,
+            "request": request,
+            "adapter_diagnostic": diagnostic,
+        }
+        if args.format == "markdown":
+            print(cloud_run_plan_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "cloud-run":
+        from .cloud import execute_remote_workflow_plan, http_cloud_transport_from_env
+
+        transport = None
+        if args.execute and args.transport == "http":
+            transport = http_cloud_transport_from_env(
+                timeout_seconds=args.timeout_seconds,
+                max_retries=args.max_retries,
+                retry_backoff_seconds=args.retry_backoff_seconds,
+            )
+        payload = execute_remote_workflow_plan(
+            args.workflow,
+            Path(args.workspace_root).resolve(),
+            run_profile=args.run_profile,
+            inputs=None,
+            inputs_file=args.inputs_file,
+            execute=args.execute,
+            transport=transport,
+        )
+        payload["transport"] = args.transport
+        if args.format == "markdown":
+            print(cloud_run_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "save-task-context":
+        from .session import save_task_context, session_to_snapshot_text
+
+        session = save_task_context(
+            Path(args.workspace_root).resolve(),
+            task=args.task,
+            analyzed_files=[str(item) for item in args.files],
+            root_cause=args.root_cause,
+            plan=args.plan,
+            tried=[str(item) for item in args.tried],
+        )
+        snapshot = session_to_snapshot_text(session)
+        if args.format == "markdown":
+            print(snapshot)
+        else:
+            print(
+                json.dumps(
+                    {
+                        "status": "saved",
+                        "task": session.ai_task_context.task if session.ai_task_context else "",
+                        "snapshot": snapshot,
+                        "token_estimate": len(snapshot) // 4,
+                        "within_budget": len(snapshot) <= 2000,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
         return 0
     if args.command == "summarize-latest-failure":
         from .failure_summary import build_failure_summary
@@ -1365,6 +1706,144 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
         return 0
+    if args.command == "diagnose-latest-failure":
+        from .repair import build_failure_evidence_pack, repair_to_markdown
+
+        payload = build_failure_evidence_pack(
+            Path(args.workspace_root).resolve(),
+            run_id=args.run_id,
+            max_chars=args.max_chars,
+        )
+        if args.format == "markdown":
+            print(repair_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0 if payload.get("status") in {"found", "no_failure"} else 1
+    if args.command == "repair-workflow":
+        from .repair import repair_to_markdown, suggest_workflow_repair
+
+        payload = suggest_workflow_repair(
+            Path(args.workspace_root).resolve(),
+            run_id=args.run_id,
+            provider=args.provider,
+            model=args.model,
+            max_chars=args.max_chars,
+            apply=args.apply,
+            min_confidence=args.min_confidence,
+            verify=args.verify,
+            verify_run_profile=args.verify_run_profile,
+            inputs_file=args.inputs_file,
+            rollback_on_fail=args.rollback_on_fail,
+            candidate_id=args.candidate_id,
+        )
+        if args.format == "markdown":
+            print(repair_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0 if payload.get("status") in {"suggested", "needs_model", "no_failure", "applied", "verified", "rolled_back"} else 1
+    if args.command == "auto-repair":
+        from .repair import auto_repair_failure, auto_repair_to_markdown
+
+        payload = auto_repair_failure(
+            Path(args.workspace_root).resolve(),
+            run_id=args.run_id,
+            max_chars=args.max_chars,
+            min_confidence=args.min_confidence,
+            verify_run_profile=args.verify_run_profile,
+            inputs_file=args.inputs_file,
+            candidate_id=args.candidate_id,
+            dry_run=args.dry_run,
+            force=args.force,
+            promote_regression=args.promote_regression,
+            overwrite_regression=args.overwrite_regression,
+            run_regression=args.run_regression,
+            regression_timeout_seconds=args.regression_timeout_seconds,
+        )
+        if args.format == "markdown":
+            print(auto_repair_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0 if payload.get("status") in {"suggested", "verified", "rolled_back", "no_failure"} else 1
+    if args.command == "repair-history":
+        from .repair_history import list_repair_history, repair_history_to_markdown
+
+        payload = list_repair_history(
+            Path(args.workspace_root).resolve(),
+            limit=args.limit,
+            workflow=args.workflow,
+            status=args.status,
+        )
+        if args.format == "markdown":
+            print(repair_history_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "repair-health":
+        from .repair_history import build_repair_health, repair_health_to_markdown
+
+        payload = build_repair_health(
+            Path(args.workspace_root).resolve(),
+            limit=args.limit,
+            workflow=args.workflow,
+        )
+        if args.format == "markdown":
+            print(repair_health_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "repair-rollback":
+        from .repair_history import repair_rollback_to_markdown, rollback_repair_history_entry
+
+        payload = rollback_repair_history_entry(
+            Path(args.workspace_root).resolve(),
+            history_id=args.history_id,
+            workflow=args.workflow,
+        )
+        if args.format == "markdown":
+            print(repair_rollback_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0 if payload.get("status") == "manual_rolled_back" else 1
+    if args.command == "benchmarks":
+        from .benchmarks import list_public_benchmarks
+
+        payload = list_public_benchmarks(category=args.category)
+        if args.format == "markdown":
+            lines = ["# Visual Agent Public Benchmarks", ""]
+            for item in payload["benchmarks"]:
+                lines.append(f"- `{item['id']}`: {item['source']}")
+            print("\n".join(lines))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "benchmark-plan":
+        from .benchmarks import benchmark_plan_to_markdown, build_benchmark_plan
+
+        payload = build_benchmark_plan(category=args.category, benchmark_id=args.benchmark_id)
+        if args.format == "markdown":
+            print(benchmark_plan_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0 if payload.get("status") == "ready" else 1
+    if args.command == "benchmark-draft":
+        from .benchmarks import benchmark_draft_to_markdown, build_benchmark_workflow_draft
+
+        workspace_root = Path(args.workspace_root).resolve()
+        output_path = (workspace_root / args.output).resolve() if args.output else None
+        payload = build_benchmark_workflow_draft(
+            scenario_id=args.scenario_id,
+            workspace_root=workspace_root,
+            output_path=output_path,
+            dry_run=not args.save,
+            overwrite=args.overwrite,
+        )
+        if args.format == "yaml" and payload.get("yaml"):
+            print(payload["yaml"])
+        elif args.format == "markdown":
+            print(benchmark_draft_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0 if payload.get("status") == "success" else 1
     if args.command == "verify":
         from .verify import run_verify, verify_to_markdown
 
@@ -1385,6 +1864,118 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(to_jsonable(report), ensure_ascii=False, indent=2))
         return 0 if report.failed == 0 else 1
+    if args.command == "generate-workflow":
+        from .workflow_generator import generate_workflow_yaml
+
+        result = generate_workflow_yaml(
+            description=args.description,
+            workspace_root=Path(args.workspace_root).resolve(),
+            output_path=Path(args.output).resolve() if args.output else None,
+            model=args.model,
+            dry_run=args.dry_run,
+        )
+        if args.format == "yaml" and result.get("yaml"):
+            print(result["yaml"])
+        else:
+            print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
+        return 0 if result.get("status") == "success" else 1
+    if args.command == "generate-from-diff":
+        from .context_ingestion import GenerationContext
+        from .git_diff import collect_code_changes
+        from .workflow_synthesis import generate_workflow_from_context
+
+        workspace = open_workspace(args.workspace_root)
+        repo_root = Path(args.repo_root).resolve()
+        changes = collect_code_changes(
+            base=args.base,
+            cwd=repo_root,
+            include_untracked=not args.no_untracked,
+        )
+        if not changes:
+            payload = {"status": "error", "message": "No code changes found in git diff.", "changed_files": []}
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 1
+        ctx = GenerationContext(
+            task_description=args.task_description,
+            code_changes=changes,
+            base_url=args.base_url,
+            project_root=str(workspace.root),
+            framework_hint=args.framework_hint,
+        )
+        result = generate_workflow_from_context(ctx=ctx, dry_run=args.dry_run, model_id=args.model)
+        if args.format == "yaml" and result.workflow_yaml:
+            print(result.workflow_yaml)
+        else:
+            print(json.dumps(to_jsonable(workflow_generation_cli_payload(result, changes)), ensure_ascii=False, indent=2))
+        return 0 if result.status == "success" else 1
+    if args.command == "verify-impl":
+        from .mcp_server import verify_implementation_payload
+
+        workspace = open_workspace(args.workspace_root)
+        verify_args = {
+            "workspace_root": str(workspace.root),
+            "task_description": args.task_description,
+            "base_url": args.base_url,
+            "repo_root": str(Path(args.repo_root).resolve()),
+            "base": args.base,
+            "include_untracked": not args.no_untracked,
+            "framework_hint": args.framework_hint,
+            "model": args.model,
+            "run_profile": args.run_profile,
+            "min_quality_score": args.min_quality_score,
+            "timeout_seconds": args.timeout_seconds,
+            "run_negative": args.run_negative,
+        }
+        if args.inputs_file:
+            verify_args["inputs"] = load_workspace_inputs(workspace, None, args.inputs_file)
+        payload = verify_implementation_payload(verify_args)
+        if args.format == "markdown":
+            print(verify_impl_cli_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0 if payload.get("result") == "pass" else 1
+    if args.command == "agent-status":
+        from .verification_status import read_verification_status, verification_status_to_markdown
+
+        status = read_verification_status(Path(args.workspace_root).resolve())
+        if status is None:
+            payload = {
+                "status": "missing",
+                "message": "No .vscode-agent-status.json found for this workspace.",
+                "workspace_root": str(Path(args.workspace_root).resolve()),
+            }
+            if args.format == "markdown":
+                print("No AI verification status yet.")
+            else:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 1
+        if args.format == "markdown":
+            print(verification_status_to_markdown(status))
+        else:
+            print(json.dumps(to_jsonable(status), ensure_ascii=False, indent=2))
+        return 0 if status.result == "pass" else 1
+    if args.command == "share-workflow":
+        from .workflow_index import mark_workflow_public
+
+        workspace = open_workspace(args.workspace_root)
+        ref = find_workflow(workspace, args.name)
+        index_path = mark_workflow_public(workspace.root, ref)
+        payload = {
+            "status": "coming_soon",
+            "workflow": ref.name,
+            "visibility": "public",
+            "index_path": str(index_path),
+            "message": (
+                f"Sharing workflows to the marketplace is coming soon. "
+                f"Workflow '{ref.name}' has been marked as public in your local index. "
+                "Sign up at https://visualagent.dev to publish when the marketplace launches."
+            ),
+        }
+        if args.format == "markdown":
+            print(payload["message"])
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "codex-check":
         workspace = open_workspace(args.workspace_root)
         tags = tuple(item.strip() for item in str(args.tags).split(",") if item.strip())
@@ -1694,11 +2285,262 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
+def workflow_generation_cli_payload(result: Any, changes: tuple[Any, ...]) -> dict[str, Any]:
+    from .context_ingestion import summarize_data_displays
+
+    quality = result.quality_score
+    model = result.semantic_model
+    display_summary = summarize_data_displays(model)
+    return {
+        "status": result.status,
+        "workflow_name": result.workflow_name,
+        "workflow_path": result.workflow_path,
+        "inputs_path": result.inputs_path,
+        "negative_workflow_path": result.negative_workflow_path,
+        "negative_workflow_ready": result.negative_workflow_ready,
+        "negative_workflow_reason": result.negative_workflow_reason,
+        "negative_workflow_reset_strategy": result.negative_workflow_reset_strategy,
+        "negative_oracles": list(result.negative_oracles),
+        "generation_method": result.generation_method,
+        "changed_files": [change.file_path for change in changes],
+        "quality": {
+            "score": quality.total_score,
+            "covers_success_path": quality.covers_success_path,
+            "covers_error_path": quality.covers_error_path,
+            "business_assertions": quality.business_assertion_count,
+            "data_display_assertions": quality.data_display_assertion_count,
+            "forbidden_error_assertions": quality.forbidden_error_assertion_count,
+            "text_from_input_references": quality.text_from_input_reference_count,
+            "invalid_text_from_references": list(quality.invalid_text_from_references),
+            "gaps": list(quality.gaps),
+            "recommendation": quality.recommendation,
+        },
+        "framework_detected": model.framework,
+        "confidence": model.confidence,
+        "fields": [field.name for field in model.form_fields],
+        "success_states": [state.value for state in model.success_states],
+        "semantic_summary": {
+            "framework": model.framework,
+            "confidence": model.confidence,
+            "generation_method": result.generation_method,
+            "field_count": len(model.form_fields),
+            "required_field_count": sum(1 for field in model.form_fields if field.required),
+            "sensitive_field_count": sum(1 for field in model.form_fields if field.is_sensitive),
+            "validation_rule_count": sum(len(field.validation_rules) for field in model.form_fields),
+            "submit_action_count": len(model.submit_actions),
+            "success_state_count": len(model.success_states),
+            "error_state_count": len(model.error_states),
+            "data_display_count": len(model.data_displays),
+            "matched_data_displays": list(display_summary.matched),
+            "unmatched_data_displays": list(display_summary.unmatched),
+            "negative_input_case_count": len(result.negative_input_cases),
+            "fields": [field.name for field in model.form_fields],
+            "success_states": [state.value for state in model.success_states],
+            "data_displays": list(model.data_displays),
+            "warnings": list(result.warnings),
+        },
+        "negative_input_cases": list(result.negative_input_cases),
+        "negative_workflow_yaml": result.negative_workflow_yaml if result.workflow_path is None else None,
+        "generation_trace": list(result.generation_trace[:10]),
+        "warnings": list(result.warnings),
+        "message": result.message,
+        "yaml": result.workflow_yaml if result.workflow_path is None else None,
+    }
+
+
+def verify_impl_cli_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        f"[verify-impl] Result: {payload.get('result')}",
+        f"[verify-impl] Workflow: {payload.get('workflow_name')}",
+        f"[verify-impl] Quality: {payload.get('quality_score')}",
+    ]
+    if payload.get("run_id"):
+        lines.append(f"[verify-impl] Run: {payload['run_id']}")
+    if payload.get("report_path"):
+        lines.append(f"[verify-impl] Report: {payload['report_path']}")
+    if payload.get("inputs_path"):
+        lines.append(f"[verify-impl] Inputs: {payload['inputs_path']}")
+    if payload.get("inputs_source"):
+        lines.append(f"[verify-impl] Inputs source: {payload['inputs_source']}")
+    trace = payload.get("generation_trace") if isinstance(payload.get("generation_trace"), list) else []
+    if trace:
+        lines.append("[verify-impl] Generation trace: " + "; ".join(str(item) for item in trace[:5]))
+    semantic = payload.get("semantic_summary") if isinstance(payload.get("semantic_summary"), dict) else {}
+    if semantic:
+        lines.append(
+            "[verify-impl] Semantics: "
+            f"{semantic.get('framework')} confidence={semantic.get('confidence')} "
+            f"fields={semantic.get('field_count')} required={semantic.get('required_field_count')} "
+            f"success_states={semantic.get('success_state_count')} data_displays={semantic.get('data_display_count')} "
+            f"negative_cases={semantic.get('negative_input_case_count')}"
+        )
+        warnings = semantic.get("warnings") if isinstance(semantic.get("warnings"), list) else []
+        if warnings:
+            lines.append("[verify-impl] Parse warnings: " + "; ".join(str(item) for item in warnings))
+    quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+    gaps = quality.get("gaps") if isinstance(quality.get("gaps"), list) else []
+    if gaps:
+        lines.append("[verify-impl] Quality gaps: " + "; ".join(str(item) for item in gaps))
+    if quality.get("recommendation"):
+        lines.append(f"[verify-impl] Recommendation: {quality['recommendation']}")
+    negative = payload.get("negative_verification") if isinstance(payload.get("negative_verification"), dict) else {}
+    if negative:
+        lines.append(
+            "[verify-impl] Negative: "
+            f"{negative.get('status')} workflow={negative.get('workflow_name') or ''} "
+            f"run={negative.get('run_id') or ''}"
+        )
+        if negative.get("reason"):
+            lines.append(f"[verify-impl] Negative reason: {negative['reason']}")
+        if negative.get("reset_strategy"):
+            lines.append(f"[verify-impl] Negative reset: {negative['reset_strategy']}")
+        oracles = negative.get("oracles") if isinstance(negative.get("oracles"), list) else []
+        if oracles:
+            lines.append(f"[verify-impl] Negative oracles: {len(oracles)}")
+        if negative.get("report_hint"):
+            lines.append(f"[verify-impl] Negative report: {negative['report_hint']}")
+        if negative.get("next_action"):
+            lines.append(f"[verify-impl] Negative next: {negative['next_action']}")
+    failed_step = payload.get("failed_step") if isinstance(payload.get("failed_step"), dict) else None
+    if failed_step:
+        lines.append(f"[verify-impl] Failed at {failed_step.get('id')} ({failed_step.get('action')})")
+        if failed_step.get("actual"):
+            lines.append(f"  Actual: {failed_step['actual']}")
+        if failed_step.get("fix_hint"):
+            lines.append(f"  Fix: {failed_step['fix_hint']}")
+    elif payload.get("message"):
+        lines.append(str(payload["message"]))
+    if payload.get("next_action"):
+        lines.append(f"[verify-impl] Next: {payload['next_action']}")
+    return "\n".join(lines)
+
+
+def usage_status_to_markdown(payload: dict[str, Any]) -> str:
+    license_ = payload.get("license") if isinstance(payload.get("license"), dict) else {}
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    feature_access = payload.get("feature_access") if isinstance(payload.get("feature_access"), dict) else {}
+    cloud_config = payload.get("cloud_config") if isinstance(payload.get("cloud_config"), dict) else {}
+    lines = [
+        "# Visual Agent Usage",
+        "",
+        f"- Workspace: `{payload.get('workspace')}`",
+        f"- License tier: `{license_.get('tier') or 'free'}`",
+        f"- License source: `{license_.get('source') or 'default'}`",
+        f"- License key present: `{bool(license_.get('key_present', False))}`",
+        f"- Local runs this month: `{usage.get('runs_this_month', 0)}`",
+        f"- Cloud runs used: `{usage.get('cloud_runs_used', 0)}`",
+        f"- Reset month: `{usage.get('usage_reset_date') or ''}`",
+        "",
+        "## Cloud Config",
+        f"- Ready: `{bool(cloud_config.get('available', False))}`",
+        f"- Endpoint: `{cloud_config.get('endpoint') or ''}`",
+        f"- API key present: `{bool(cloud_config.get('api_key_present', False))}`",
+        f"- Org: `{cloud_config.get('org') or ''}`",
+        f"- Network probe: `{cloud_config.get('network_probe') or 'not_run'}`",
+    ]
+    blockers = cloud_config.get("blockers") if isinstance(cloud_config.get("blockers"), list) else []
+    if blockers:
+        lines.append(f"- Blockers: {', '.join(str(item) for item in blockers)}")
+    lines.extend(
+        [
+            "",
+        "## Feature Access",
+        ]
+    )
+    for name in ("cloud_run", "team_workspace", "workflow_history_unlimited"):
+        lines.append(f"- {name}: `{bool(feature_access.get(name, False))}`")
+    return "\n".join(lines)
+
+
+def cloud_run_plan_to_markdown(payload: dict[str, Any]) -> str:
+    request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
+    config = request.get("cloud_config") if isinstance(request.get("cloud_config"), dict) else {}
+    diagnostic = payload.get("adapter_diagnostic") if isinstance(payload.get("adapter_diagnostic"), dict) else {}
+    lines = [
+        "# Cloud Run Plan",
+        "",
+        f"- Workspace: `{payload.get('workspace')}`",
+        f"- Workflow: `{payload.get('workflow_name')}`",
+        f"- Request status: `{request.get('status') or 'blocked'}`",
+        f"- Run profile: `{request.get('run_profile') or ''}`",
+        f"- Inputs file: `{request.get('inputs_file') or ''}`",
+        f"- Network probe: `{request.get('network_probe') or 'not_run'}`",
+        "",
+        "## Cloud Config",
+        f"- Ready: `{bool(config.get('available', False))}`",
+        f"- Endpoint: `{config.get('endpoint') or ''}`",
+        f"- API key present: `{bool(config.get('api_key_present', False))}`",
+        f"- Org: `{config.get('org') or ''}`",
+    ]
+    blockers = config.get("blockers") if isinstance(config.get("blockers"), list) else []
+    if blockers:
+        lines.append(f"- Blockers: {', '.join(str(item) for item in blockers)}")
+    lines.extend(
+        [
+            "",
+            "## Adapter Diagnostic",
+            f"- Status: `{diagnostic.get('status') or 'blocked'}`",
+            f"- Message: {diagnostic.get('message') or ''}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def cloud_run_to_markdown(payload: dict[str, Any]) -> str:
+    request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
+    config = request.get("cloud_config") if isinstance(request.get("cloud_config"), dict) else {}
+    diagnostic = payload.get("adapter_diagnostic") if isinstance(payload.get("adapter_diagnostic"), dict) else {}
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    lines = [
+        "# Cloud Run",
+        "",
+        f"- Workspace: `{payload.get('workspace')}`",
+        f"- Workflow: `{payload.get('workflow_name')}`",
+        f"- Execution requested: `{bool(payload.get('execution_requested', False))}`",
+        f"- Transport: `{payload.get('transport') or 'none'}`",
+        f"- Network sent: `{bool(payload.get('network_sent', False))}`",
+        f"- Request status: `{request.get('status') or 'blocked'}`",
+        f"- Run profile: `{request.get('run_profile') or ''}`",
+        f"- Inputs file: `{request.get('inputs_file') or ''}`",
+        "",
+        "## Cloud Config",
+        f"- Ready: `{bool(config.get('available', False))}`",
+        f"- Endpoint: `{config.get('endpoint') or ''}`",
+        f"- API key present: `{bool(config.get('api_key_present', False))}`",
+        f"- Org: `{config.get('org') or ''}`",
+    ]
+    blockers = config.get("blockers") if isinstance(config.get("blockers"), list) else []
+    if blockers:
+        lines.append(f"- Blockers: {', '.join(str(item) for item in blockers)}")
+    if diagnostic:
+        lines.extend(
+            [
+                "",
+                "## Adapter Diagnostic",
+                f"- Status: `{diagnostic.get('status') or 'blocked'}`",
+                f"- Message: {diagnostic.get('message') or ''}",
+            ]
+        )
+    if result:
+        lines.extend(
+            [
+                "",
+                "## Execution Result",
+                f"- Status: `{result.get('status') or 'blocked'}`",
+                f"- Run id: `{result.get('run_id') or ''}`",
+                f"- Report URL: `{result.get('report_url') or ''}`",
+                f"- Usage recorded: `{bool(result.get('usage_recorded', False))}`",
+                f"- Message: {result.get('message') or ''}",
+            ]
+        )
+    return "\n".join(lines)
+
+
 def load_inputs(raw_inputs: str | None, inputs_file: str | None) -> dict:
     if raw_inputs and inputs_file:
         raise ValueError("Use either --inputs or --inputs-file, not both.")
     if inputs_file:
-        return json.loads(Path(inputs_file).read_text(encoding="utf-8"))
+        return json.loads(Path(inputs_file).read_text(encoding="utf-8-sig"))
     if raw_inputs:
         return json.loads(raw_inputs)
     return {}

@@ -7,7 +7,17 @@ from typing import Literal
 RunProfileName = Literal["dry-run", "supervised", "approved"]
 
 HIGH_RISK_ACTIONS = {"save_storage_state"}
-MUTATING_ACTIONS = {"click", "type", "paste", "press_key", "click_text", "request_api", "expect_download", "save_storage_state"}
+MUTATING_ACTIONS = {
+    "click",
+    "type",
+    "paste",
+    "press_key",
+    "refresh_browser",
+    "click_text",
+    "request_api",
+    "expect_download",
+    "save_storage_state",
+}
 
 
 @dataclass(frozen=True)

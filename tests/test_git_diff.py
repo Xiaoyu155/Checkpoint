@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
-from visual_agent.git_diff import affected_workflows, workflow_affects_changed_path
+import pytest
+
+from visual_agent.git_diff import affected_workflows, collect_code_changes, workflow_affects_changed_path
 
 
 @dataclass(frozen=True)
@@ -39,3 +43,44 @@ def test_affected_workflows_returns_all_when_changed_files_unknown() -> None:
     workflows = [Ref("always"), Ref("checkout", ("src/payment/",))]
 
     assert affected_workflows(workflows, changed=[]) == workflows
+
+
+def test_collect_code_changes_reads_before_and_after_from_git_diff(tmp_path: Path) -> None:
+    init_git_repo(tmp_path)
+    page = tmp_path / "login.html"
+    page.write_text("<form><input name='email'></form>\n", encoding="utf-8")
+    git(tmp_path, "add", "login.html")
+    git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
+    page.write_text("<form><input name='email'><button>Save</button></form>\n", encoding="utf-8")
+
+    changes = collect_code_changes(cwd=tmp_path)
+
+    assert len(changes) == 1
+    assert changes[0].file_path == "login.html"
+    assert changes[0].change_type == "modified"
+    assert "<button>Save</button>" in changes[0].after
+    assert "<button>Save</button>" not in (changes[0].before or "")
+
+
+def test_collect_code_changes_includes_untracked_files(tmp_path: Path) -> None:
+    init_git_repo(tmp_path)
+    page = tmp_path / "new.html"
+    page.write_text("<form><input name='email'></form>\n", encoding="utf-8")
+
+    changes = collect_code_changes(cwd=tmp_path)
+
+    assert len(changes) == 1
+    assert changes[0].file_path == "new.html"
+    assert changes[0].change_type == "added"
+    assert changes[0].before is None
+
+
+def init_git_repo(path: Path) -> None:
+    try:
+        git(path, "init")
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pytest.skip("git is required for this test")
+
+
+def git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True, check=True)

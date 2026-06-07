@@ -5,16 +5,21 @@ from pathlib import Path
 
 from visual_agent.models import ActionStatus
 from visual_agent.session import (
+    AiTaskContext,
     AgentSession,
     FailureSummary,
     _estimate_tokens,
     _suggest_next_action,
     clamp_ai_text,
     load_agent_session,
+    record_cloud_run_usage,
     session_path,
     session_to_snapshot_text,
+    save_task_context,
     update_agent_session,
+    workspace_session_snapshot_text,
 )
+from visual_agent.repair_history import append_repair_history
 from visual_agent.workflow import WorkflowRunResult, WorkflowStepResult
 
 
@@ -55,6 +60,32 @@ def test_update_and_load_session_round_trip(tmp_path: Path) -> None:
     assert loaded.failing_workflows == []
     assert loaded.latest_failure is None
     assert loaded.token_estimate > 0
+    assert loaded.runs_this_month == 1
+    assert loaded.cloud_runs_used == 0
+    assert loaded.usage_reset_date
+
+
+def test_update_session_increments_monthly_usage(tmp_path: Path) -> None:
+    update_agent_session(tmp_path, run_result("login_flow", run_id="run-1"))
+    update_agent_session(tmp_path, run_result("login_flow", run_id="run-2"))
+
+    loaded = load_agent_session(tmp_path)
+
+    assert loaded is not None
+    assert loaded.runs_this_month == 2
+
+
+def test_record_cloud_run_usage_increments_cloud_only(tmp_path: Path) -> None:
+    update_agent_session(tmp_path, run_result("login_flow", run_id="run-1"))
+    record_cloud_run_usage(tmp_path)
+    record_cloud_run_usage(tmp_path, count=2)
+
+    loaded = load_agent_session(tmp_path)
+
+    assert loaded is not None
+    assert loaded.runs_this_month == 1
+    assert loaded.cloud_runs_used == 3
+    assert loaded.usage_reset_date
 
 
 def test_passing_workflow_transitions_out_of_failing_list(tmp_path: Path) -> None:
@@ -189,6 +220,17 @@ def test_snapshot_within_token_budget() -> None:
     assert _estimate_tokens(session) <= 500
 
 
+def test_snapshot_includes_usage_summary(tmp_path: Path) -> None:
+    update_agent_session(tmp_path, run_result("checkout"))
+    record_cloud_run_usage(tmp_path, count=2)
+
+    text = session_to_snapshot_text(load_agent_session(tmp_path))
+
+    assert "Usage:" in text
+    assert "Local runs this month: 1" in text
+    assert "Cloud runs used: 2" in text
+
+
 def test_snapshot_no_secrets() -> None:
     session = AgentSession(
         updated_at=0.0,
@@ -233,3 +275,121 @@ def test_session_file_is_json(tmp_path: Path) -> None:
     payload = json.loads(session_path(tmp_path).read_text(encoding="utf-8"))
 
     assert payload["passing_workflows"] == ["login_flow"]
+    assert payload["runs_this_month"] == 1
+    assert payload["cloud_runs_used"] == 0
+    assert payload["usage_reset_date"]
+
+
+def test_load_legacy_session_defaults_usage_fields(tmp_path: Path) -> None:
+    session_path(tmp_path).write_text(
+        json.dumps(
+            {
+                "updated_at": 0.0,
+                "passing_workflows": [],
+                "failing_workflows": [],
+                "latest_failure": None,
+                "next_action": "legacy",
+                "token_estimate": 1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = load_agent_session(tmp_path)
+
+    assert loaded is not None
+    assert loaded.runs_this_month == 0
+    assert loaded.cloud_runs_used == 0
+    assert loaded.usage_reset_date == ""
+
+
+def test_save_task_context_round_trip_and_snapshot(tmp_path: Path) -> None:
+    session = save_task_context(
+        tmp_path,
+        task="Fix checkout export",
+        analyzed_files=["src/checkout.py", "tests/test_checkout.py"],
+        root_cause="missing click handler",
+        plan="patch handler and run verify",
+        tried=["ran pytest"],
+    )
+    loaded = load_agent_session(tmp_path)
+
+    assert loaded is not None
+    assert loaded.ai_task_context == session.ai_task_context
+    text = session_to_snapshot_text(loaded)
+    assert "AI Task Context" in text
+    assert "Fix checkout export" in text
+    assert "src/checkout.py" in text
+    assert len(text) // 4 <= 500
+
+
+def test_save_task_context_overwrites_previous_context(tmp_path: Path) -> None:
+    save_task_context(tmp_path, task="first task")
+    save_task_context(tmp_path, task="second task", plan="continue here")
+
+    loaded = load_agent_session(tmp_path)
+
+    assert loaded is not None
+    assert loaded.ai_task_context is not None
+    assert loaded.ai_task_context.task == "second task"
+    assert loaded.ai_task_context.plan == "continue here"
+    assert "first task" not in session_to_snapshot_text(loaded)
+
+
+def test_save_task_context_scrubs_secrets(tmp_path: Path) -> None:
+    save_task_context(
+        tmp_path,
+        task="Fix login password=demo123",
+        root_cause="Bearer abcdefghijklmnop leaked",
+        plan="remove token=abc12345",
+    )
+
+    text = session_to_snapshot_text(load_agent_session(tmp_path))
+
+    for keyword in ("password", "demo123", "Bearer ", "abcdefghijklmnop", "token"):
+        assert keyword not in text
+
+
+def test_update_agent_session_preserves_task_context(tmp_path: Path) -> None:
+    save_task_context(tmp_path, task="Fix checkout")
+    update_agent_session(tmp_path, run_result("checkout"))
+
+    loaded = load_agent_session(tmp_path)
+
+    assert loaded is not None
+    assert loaded.ai_task_context is not None
+    assert loaded.ai_task_context.task == "Fix checkout"
+
+
+def test_workspace_session_snapshot_includes_latest_repair(tmp_path: Path) -> None:
+    update_agent_session(tmp_path, run_result("checkout", run_id="run-pass"))
+    append_repair_history(
+        tmp_path,
+        {
+            "status": "verified",
+            "source": "deterministic",
+            "workflow": "checkout",
+            "run_id": "run-fail",
+            "repair": {
+                "classification": "selector_drift",
+                "confidence": 0.9,
+                "recommended_fix": "Update target selector.",
+                "apply_supported": True,
+            },
+            "workflow_repair_plan": {
+                "applied": True,
+                "apply_requested": True,
+                "verify_requested": True,
+                "rollback_on_fail": False,
+                "verification": {"status": "passed", "run_id": "run-verify"},
+            },
+        },
+    )
+
+    text = workspace_session_snapshot_text(tmp_path)
+
+    assert "Latest Repair" in text
+    assert "Status: verified" in text
+    assert "Workflow: checkout" in text
+    assert "Classification: selector_drift" in text
+    assert "Verification: passed" in text
