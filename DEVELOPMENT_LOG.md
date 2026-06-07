@@ -3,8 +3,8 @@
 > 更新时间：2026-06-07  
 > 仓库地址：https://github.com/Xiaoyu155/visual-agent  
 > 当前分支：`main`  
-> 当前工作区状态：Phase 1 dogfooding 改动已测试并推送
-> 最新代码提交：`37f678d Sync semi-auto profile across MCP verification`
+> 当前工作区状态：Phase 3 cloud feature gate 已实现并验证
+> 最新代码提交：本轮收尾提交见 `git log -1`
 
 ## 一句话定位
 
@@ -24,7 +24,7 @@ python -m pytest tests/ -q --tb=short
 上次全量测试结果：
 
 ```text
-911 passed, 6 skipped
+913 passed, 6 skipped
 ```
 
 如果只是确认 SDK 和 CLI：
@@ -71,7 +71,7 @@ ca2996b Add post-action observation and slow workflow filtering
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-911 passed, 6 skipped
+913 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -105,7 +105,7 @@ python -m pytest tests/test_cli.py tests/test_validation.py tests/test_workflow_
 python -m pytest tests/test_context_workflow_synthesis.py tests/e2e/test_e2e_context_verification.py tests/test_cli.py tests/test_workflow_quality.py -q
 74 passed
 python -m pytest -q
-911 passed, 6 skipped
+913 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 ```
@@ -119,7 +119,10 @@ passed
 - 服务端支持 `GET /v1/health`、`POST /v1/run`、`GET /v1/run/{run_id}`。
 - `POST /v1/run` 兼容现有 `cloud-run --execute --transport http` 的 `workflow_name` / `workspace` / `run_profile` payload，也支持未来 `workflow_yaml` payload 落盘后执行。
 - 本地服务端执行 workspace workflow 后返回 `status`、`run_id`、`report_url`、`steps_passed`、`steps_total`；`cloud-run --execute --transport http` 已可打通本地 server。
-- `require_feature()` 仍保持非阻断占位，本轮只打通服务链路，不启用商业化阻断。
+- Phase 3 Task 3.2 已完成：`require_feature()` 对 `cloud_run` 启用真实阻断。
+- free tier 执行 `cloud-run --execute` 时，在调用 HTTP transport 前返回 `status: upgrade_required`，包含 `feature`、`required_tier`、`current_tier` 和脱敏升级提示，不记录 cloud usage。
+- pro/team/enterprise tier 继续允许 `cloud-run --execute --transport http` 打通本地 cloud-server；只有远端返回 `success` 后才记录 `cloud_runs_used`。
+- `FeatureGatedError` 已携带 `required_tier/current_tier`，便于 CLI、MCP 或后续云端服务转成机器可读响应。
 
 本轮定向验证：
 
@@ -127,9 +130,9 @@ passed
 python -m pytest tests/test_cloud_server.py tests/test_cli.py::test_cloud_run_cli_execute_http_calls_local_cloud_server tests/test_cli.py::test_cloud_run_cli_execute_http_without_config_blocks_without_network -q
 5 passed
 python -m pytest tests/test_licensing.py -q
-35 passed
+37 passed
 python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensing.py tests/test_session.py -q
-88 passed
+90 passed
 ```
 
 ## 已完成能力
@@ -364,7 +367,7 @@ SDK 支持：
 - `VISUAL_AGENT_HOME\license.json`
 - `VISUAL_AGENT_LICENSE_FILE`
 - 过期 license 在 `check_feature()` 中降级为 free
-- `require_feature()` 仍保持非阻断占位，避免云端/收费能力未正式启用前影响本地功能
+- `require_feature()` 此前保持非阻断占位；Phase 3 Task 3.2 已对 `cloud_run` 启用真实阻断
 - `agent_session.json` 记录本月本地运行次数、云端运行占位次数和 reset month
 - `context-snapshot` / MCP `get_session_context` 会展示 usage 摘要
 - `usage-status` CLI 输出 usage、license tier 和 feature access，不输出 license key 或 inputs

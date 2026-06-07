@@ -771,13 +771,14 @@ def test_cloud_run_cli_execute_without_transport_blocks_without_usage(tmp_path: 
     assert "# Cloud Run" in output
     assert "Execution requested: `True`" in output
     assert "Network sent: `False`" in output
-    assert "Status: `blocked`" in output
-    assert "transport is not enabled" in output
+    assert "Status: `upgrade_required`" in output
+    assert "requires the pro plan" in output
     assert "va_cloud_secret_key" not in output
     assert load_agent_session(tmp_path) is None
 
 
 def test_cloud_run_cli_execute_http_without_config_blocks_without_network(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setenv("VISUAL_AGENT_LICENSE_TIER", "pro")
     monkeypatch.delenv("VISUAL_AGENT_CLOUD_ENDPOINT", raising=False)
     monkeypatch.delenv("VISUAL_AGENT_CLOUD_API_KEY", raising=False)
 
@@ -829,6 +830,7 @@ steps:
     server = create_cloud_server(workspace_root=workspace.root, port=0)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    monkeypatch.setenv("VISUAL_AGENT_LICENSE_TIER", "pro")
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_ENDPOINT", f"http://127.0.0.1:{server.server_port}/v1/run")
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY", "local-test-key")
     try:

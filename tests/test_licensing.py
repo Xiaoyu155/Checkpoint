@@ -39,7 +39,17 @@ def test_check_feature_reports_free_and_paid_boundaries(monkeypatch) -> None:
     assert check_feature("team_workspace") is False
 
 
-def test_require_feature_is_placeholder_and_does_not_block() -> None:
+def test_require_feature_blocks_cloud_run_on_free_tier(monkeypatch) -> None:
+    clear_license_env(monkeypatch)
+
+    with pytest.raises(FeatureGatedError, match="pro"):
+        require_feature("cloud_run")
+
+
+def test_require_feature_allows_cloud_run_on_pro_tier(monkeypatch) -> None:
+    clear_license_env(monkeypatch)
+    grant_pro_license(monkeypatch)
+
     require_feature("cloud_run")
 
 
@@ -90,20 +100,46 @@ def test_expired_license_downgrades_feature_checks(tmp_path: Path, monkeypatch) 
 
 
 def test_feature_gated_error_message_is_available_for_future_gates() -> None:
-    error = FeatureGatedError("cloud_run")
+    error = FeatureGatedError("cloud_run", required_tier="pro", current_tier="free")
 
     assert error.feature == "cloud_run"
-    assert "paid plan" in str(error)
+    assert error.required_tier == "pro"
+    assert error.current_tier == "free"
+    assert "pro plan" in str(error)
 
 
-def test_cloud_run_placeholder_does_not_raise_feature_gate(tmp_path: Path) -> None:
+def test_cloud_run_returns_upgrade_required_on_free_tier(tmp_path: Path, monkeypatch) -> None:
+    clear_license_env(monkeypatch)
+    calls = 0
+
+    def fake_client(_workflow_name: str, _workspace_root: Path) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"status": "success", "run_id": "cloud-run-1"}
+
+    result = run_remote_workflow("checkout", tmp_path, client=fake_client)
+
+    assert result["status"] == "upgrade_required"
+    assert result["feature"] == "cloud_run"
+    assert result["required_tier"] == "pro"
+    assert result["current_tier"] == "free"
+    assert result["usage_recorded"] is False
+    assert calls == 0
+    assert load_agent_session(tmp_path) is None
+
+
+def test_cloud_run_placeholder_still_raises_without_client_on_paid_tier(tmp_path: Path, monkeypatch) -> None:
+    grant_pro_license(monkeypatch)
+
     with pytest.raises(NotImplementedError, match="Cloud runs are not yet available"):
         run_remote_workflow("checkout", tmp_path)
 
     assert load_agent_session(tmp_path) is None
 
 
-def test_cloud_run_records_usage_only_after_success(tmp_path: Path) -> None:
+def test_cloud_run_records_usage_only_after_success(tmp_path: Path, monkeypatch) -> None:
+    grant_pro_license(monkeypatch)
+
     def fake_client(workflow_name: str, workspace_root: Path) -> dict:
         return {"status": "success", "run_id": "cloud-run-1", "workflow_name": workflow_name, "workspace": str(workspace_root)}
 
@@ -117,7 +153,9 @@ def test_cloud_run_records_usage_only_after_success(tmp_path: Path) -> None:
     assert session.cloud_runs_used == 1
 
 
-def test_cloud_run_failure_does_not_record_usage(tmp_path: Path) -> None:
+def test_cloud_run_failure_does_not_record_usage(tmp_path: Path, monkeypatch) -> None:
+    grant_pro_license(monkeypatch)
+
     def fake_client(_workflow_name: str, _workspace_root: Path) -> dict:
         return {"status": "failed", "message": "remote unavailable"}
 
@@ -128,7 +166,9 @@ def test_cloud_run_failure_does_not_record_usage(tmp_path: Path) -> None:
     assert load_agent_session(tmp_path) is None
 
 
-def test_cloud_run_client_exception_does_not_record_usage(tmp_path: Path) -> None:
+def test_cloud_run_client_exception_does_not_record_usage(tmp_path: Path, monkeypatch) -> None:
+    grant_pro_license(monkeypatch)
+
     def fake_client(_workflow_name: str, _workspace_root: Path) -> dict:
         raise RuntimeError("remote outage")
 
@@ -257,6 +297,7 @@ def test_remote_client_without_transport_returns_blocked(tmp_path: Path, monkeyp
 
 def test_remote_client_with_transport_filters_response_and_records_usage(tmp_path: Path, monkeypatch) -> None:
     clear_cloud_env(monkeypatch)
+    grant_pro_license(monkeypatch)
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_ENDPOINT", "https://cloud.visualagent.test")
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY", "va_cloud_secret")
     seen_requests: list[dict] = []
@@ -290,6 +331,7 @@ def test_remote_client_with_transport_filters_response_and_records_usage(tmp_pat
 @pytest.mark.parametrize("status", ["queued", "running", "blocked", "failed", "unknown"])
 def test_remote_terminal_and_pending_statuses_do_not_record_usage(tmp_path: Path, monkeypatch, status: str) -> None:
     clear_cloud_env(monkeypatch)
+    grant_pro_license(monkeypatch)
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_ENDPOINT", "https://cloud.visualagent.test")
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY", "va_cloud_secret")
 
@@ -312,6 +354,7 @@ def test_remote_terminal_and_pending_statuses_do_not_record_usage(tmp_path: Path
 
 def test_remote_unknown_status_is_normalized_and_does_not_record_usage(tmp_path: Path, monkeypatch) -> None:
     clear_cloud_env(monkeypatch)
+    grant_pro_license(monkeypatch)
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_ENDPOINT", "https://cloud.visualagent.test")
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY", "va_cloud_secret")
 
@@ -352,6 +395,7 @@ def test_execute_remote_workflow_plan_does_not_call_transport_without_execute(tm
 
 def test_execute_remote_workflow_plan_with_transport_records_success_usage(tmp_path: Path, monkeypatch) -> None:
     clear_cloud_env(monkeypatch)
+    grant_pro_license(monkeypatch)
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_ENDPOINT", "https://cloud.visualagent.test")
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY", "va_cloud_secret")
     calls: list[dict] = []
@@ -428,6 +472,7 @@ def test_http_cloud_transport_posts_json_without_exposing_key(tmp_path: Path) ->
 
 def test_execute_remote_workflow_plan_http_failure_does_not_record_usage(tmp_path: Path, monkeypatch) -> None:
     clear_cloud_env(monkeypatch)
+    grant_pro_license(monkeypatch)
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_ENDPOINT", "https://cloud.visualagent.test/run")
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY", "va_cloud_secret")
 
@@ -506,6 +551,7 @@ def test_http_cloud_transport_non_json_response_fails_without_body_leak() -> Non
 
 def test_execute_remote_workflow_plan_http_500_does_not_record_usage(tmp_path: Path, monkeypatch) -> None:
     clear_cloud_env(monkeypatch)
+    grant_pro_license(monkeypatch)
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_ENDPOINT", "https://cloud.visualagent.test/run")
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY", "va_cloud_secret")
 
@@ -545,6 +591,7 @@ def test_execute_remote_workflow_plan_http_500_does_not_record_usage(tmp_path: P
 
 def test_http_transport_retries_429_then_records_success_usage(tmp_path: Path, monkeypatch) -> None:
     clear_cloud_env(monkeypatch)
+    grant_pro_license(monkeypatch)
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_ENDPOINT", "https://cloud.visualagent.test/run")
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY", "va_cloud_secret")
     calls = 0
@@ -597,6 +644,7 @@ def test_http_transport_retries_429_then_records_success_usage(tmp_path: Path, m
 
 def test_http_transport_does_not_retry_403_or_record_usage(tmp_path: Path, monkeypatch) -> None:
     clear_cloud_env(monkeypatch)
+    grant_pro_license(monkeypatch)
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_ENDPOINT", "https://cloud.visualagent.test/run")
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY", "va_cloud_secret")
     calls = 0
@@ -622,6 +670,7 @@ def test_http_transport_does_not_retry_403_or_record_usage(tmp_path: Path, monke
 
 def test_http_transport_exhausted_5xx_retries_do_not_record_usage(tmp_path: Path, monkeypatch) -> None:
     clear_cloud_env(monkeypatch)
+    grant_pro_license(monkeypatch)
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_ENDPOINT", "https://cloud.visualagent.test/run")
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY", "va_cloud_secret")
     calls = 0
@@ -676,3 +725,7 @@ def clear_cloud_env(monkeypatch) -> None:
         "VISUAL_AGENT_CLOUD_ORG",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+def grant_pro_license(monkeypatch) -> None:
+    monkeypatch.setenv("VISUAL_AGENT_LICENSE_TIER", "pro")

@@ -7,7 +7,7 @@ from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .licensing import require_feature
+from .licensing import FeatureGatedError, require_feature
 from .security import scrub_secrets
 
 CloudWorkflowClient = Callable[[str, Path], dict[str, Any]]
@@ -72,7 +72,7 @@ def summarize_remote_inputs(inputs: dict[str, Any] | None) -> dict[str, Any]:
 
 def filter_remote_workflow_response(response: dict[str, Any]) -> dict[str, Any]:
     status = str(response.get("status") or "unknown")
-    if status not in {"success", "failed", "queued", "running", "blocked", "unknown"}:
+    if status not in {"success", "failed", "queued", "running", "blocked", "upgrade_required", "unknown"}:
         status = "unknown"
     return {
         "schema_version": 1,
@@ -269,7 +269,7 @@ def execute_remote_workflow_plan(
     )
     result = run_remote_workflow(workflow_name, workspace_root, client=client)
     payload["result"] = result
-    payload["network_sent"] = bool(transport is not None and request.get("status") == "ready")
+    payload["network_sent"] = bool(transport is not None and request.get("status") == "ready" and result.get("status") != "upgrade_required")
     return payload
 
 
@@ -280,13 +280,26 @@ def run_remote_workflow(
     client: CloudWorkflowClient | None = None,
 ) -> dict[str, Any]:
     """
-    Cloud workflow execution placeholder.
+    Execute a cloud workflow through an injected or configured client.
 
-    Phase 6 reserves the API shape but does not activate billing gates or remote
-    execution.
+    Feature gating happens before any remote transport is called, so free-tier
+    callers get a structured upgrade response without network traffic.
     """
-    require_feature("cloud_run")
     workspace_root = Path(workspace_root)
+    try:
+        require_feature("cloud_run")
+    except FeatureGatedError as exc:
+        return {
+            "schema_version": 1,
+            "status": "upgrade_required",
+            "feature": exc.feature,
+            "required_tier": exc.required_tier,
+            "current_tier": exc.current_tier,
+            "message": str(scrub_secrets(str(exc)))[:500],
+            "workflow_name": workflow_name,
+            "workspace": str(workspace_root),
+            "usage_recorded": False,
+        }
     if client is not None:
         result = dict(client(workflow_name, workspace_root))
         result.setdefault("schema_version", 1)

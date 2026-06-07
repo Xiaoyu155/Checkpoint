@@ -52,10 +52,13 @@ class License:
 
 
 class FeatureGatedError(Exception):
-    def __init__(self, feature: str):
+    def __init__(self, feature: str, *, required_tier: TierName | str = "paid", current_tier: TierName | str = "free"):
         self.feature = feature
+        self.required_tier = str(required_tier)
+        self.current_tier = str(current_tier)
         super().__init__(
-            f"Feature '{feature}' requires a paid plan. "
+            f"Feature '{feature}' requires the {self.required_tier} plan. "
+            f"Current tier: {self.current_tier}. "
             "Visit https://visualagent.dev/upgrade to unlock."
         )
 
@@ -75,8 +78,8 @@ def get_license() -> License:
     return License(tier="free")
 
 
-def check_feature(feature: str) -> bool:
-    lic = get_license()
+def check_feature(feature: str, license_: License | None = None) -> bool:
+    lic = license_ or get_license()
     if _is_expired(lic):
         lic = License(tier="free", source=lic.source, key_present=lic.key_present)
     if feature in FREE_FEATURES:
@@ -88,10 +91,28 @@ def check_feature(feature: str) -> bool:
     return lic.tier == "enterprise"
 
 
-def require_feature(feature: str) -> None:
-    """Placeholder gate. Phase 6 records feature boundaries without blocking."""
-    _ = feature
-    return None
+def require_feature(feature: str, license_: License | None = None) -> None:
+    lic = license_ or get_license()
+    effective_license = lic
+    if _is_expired(effective_license):
+        effective_license = License(tier="free", source=lic.source, key_present=lic.key_present)
+    if check_feature(feature, effective_license):
+        return None
+    raise FeatureGatedError(
+        feature,
+        required_tier=_feature_min_tier(feature),
+        current_tier=effective_license.tier,
+    )
+
+
+def _feature_min_tier(feature: str) -> TierName | str:
+    if feature in FREE_FEATURES:
+        return "free"
+    if feature in PRO_FEATURES:
+        return "pro"
+    if feature in TEAM_FEATURES:
+        return "team"
+    return "enterprise"
 
 
 def default_license_path() -> Path:
