@@ -24,7 +24,7 @@ python -m pytest tests/ -q --tb=short
 上次全量测试结果：
 
 ```text
-889 passed, 6 skipped
+890 passed, 6 skipped
 ```
 
 如果只是确认 SDK 和 CLI：
@@ -38,6 +38,8 @@ python -m visual_agent --help
 ## 最近关键提交
 
 ```text
+7770102 Document context audit progress
+93b7498 Add context parse audit log
 00c82e7 Update development handoff after release validation
 37f678d Sync semi-auto profile across MCP verification
 2d9fa5c Add semi-auto workflow profile and workspace auto-detect
@@ -69,7 +71,7 @@ ca2996b Add post-action observation and slow workflow filtering
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-889 passed, 6 skipped
+890 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -89,6 +91,10 @@ success
 ```text
 python -m pytest tests/test_cli.py tests/test_context_workflow_synthesis.py -q
 51 passed
+python -m pytest -q
+890 passed, 6 skipped
+npm test --prefix vscode-extension
+passed
 ```
 
 ## 已完成能力
