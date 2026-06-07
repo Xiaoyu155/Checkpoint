@@ -543,6 +543,7 @@ def _extract_jsx_inputs(content: str) -> list[FormField]:
             _attr(attrs, "name")
             or _attr(attrs, "id")
             or _attr(attrs, "aria-label")
+            or _jsx_register_name(attrs)
             or _jsx_bound_identifier(attrs, "value")
             or _jsx_bound_identifier(attrs, "checked")
             or ""
@@ -552,7 +553,33 @@ def _extract_jsx_inputs(content: str) -> list[FormField]:
             continue
         label = _attr(attrs, "label") or _attr(attrs, "placeholder") or _attr(attrs, "aria-label") or name
         lower_name = name.lower()
-        required = bool(re.search(r"\brequired(?:\s*=\s*{?true}?)?\b", attrs))
+        required = bool(re.search(r"\brequired(?:\s*=\s*{?true}?)?\b", attrs)) or _jsx_register_bool_option(attrs, "required")
+        results.append(
+            FormField(
+                name=name,
+                label=label,
+                field_type=field_type,
+                required=required,
+                validation_rules=_validation_rules_from_attrs(attrs, field_type=field_type, required=required),
+                is_sensitive=field_type == "password"
+                or any(keyword in lower_name for keyword in ("password", "passwd", "secret", "token", "key")),
+            )
+        )
+    results.extend(_extract_jsx_controller_fields(content))
+    return results
+
+
+def _extract_jsx_controller_fields(content: str) -> list[FormField]:
+    results: list[FormField] = []
+    for match in re.finditer(r"<(?:[A-Za-z.]*\.)?Controller\b(.*?)(?:/\s*>|>\s*</(?:[A-Za-z.]*\.)?Controller>)", content, re.DOTALL):
+        attrs = match.group(1) or ""
+        name = _attr(attrs, "name") or ""
+        if not name:
+            continue
+        field_type = _jsx_controller_field_type(attrs)
+        label = _attr(attrs, "label") or name
+        lower_name = name.lower()
+        required = _jsx_register_bool_option(attrs, "required")
         results.append(
             FormField(
                 name=name,
@@ -575,6 +602,7 @@ def _jsx_field_type(tag: str, attrs: str) -> str:
         "textarea": "textarea",
         "Textarea": "textarea",
         "select": "select",
+        "Controller": _jsx_controller_field_type(attrs),
         "Select": "select",
         "DatePicker": "date",
         "RangePicker": "date_range",
@@ -594,6 +622,37 @@ def _jsx_bound_identifier(attrs: str, name: str) -> str | None:
     if not match:
         return None
     return match.group(1).split(".")[-1]
+
+
+def _jsx_register_name(attrs: str) -> str | None:
+    match = re.search(r"\bregister\(\s*[\"']([A-Za-z_][A-Za-z0-9_.-]*)[\"']", attrs)
+    if not match:
+        return None
+    return match.group(1).split(".")[-1]
+
+
+def _jsx_register_bool_option(attrs: str, name: str) -> bool:
+    pattern = rf"\b{re.escape(name)}\s*:\s*(?:true|[\"'][^\"']+[\"'])"
+    return bool(re.search(pattern, attrs, re.IGNORECASE))
+
+
+def _jsx_register_option(attrs: str, name: str) -> str | None:
+    match = re.search(rf"\b{re.escape(name)}\s*:\s*(?:[\"']([^\"']+)[\"']|(\d+(?:\.\d+)?))", attrs)
+    if not match:
+        return None
+    return next((group for group in match.groups() if group is not None), None)
+
+
+def _jsx_controller_field_type(attrs: str) -> str:
+    if re.search(r"<(?:[A-Za-z.]*\.)?Select\b|<(?:[A-Za-z.]*\.)?Autocomplete\b", attrs):
+        return "select"
+    if re.search(r"<(?:[A-Za-z.]*\.)?DatePicker\b", attrs):
+        return "date"
+    if re.search(r"<(?:[A-Za-z.]*\.)?(?:InputNumber|Slider)\b", attrs):
+        return "number"
+    if re.search(r"<(?:[A-Za-z.]*\.)?(?:Switch|Checkbox)\b", attrs):
+        return "boolean"
+    return "text"
 
 
 def _extract_jsx_submit_buttons(content: str) -> list[SubmitAction]:
@@ -807,6 +866,10 @@ def _extract_react_template_vars(content: str) -> list[str]:
             continue
         if attr_match and _jsx_attr_binding_is_not_display(attr_match.group(1)):
             continue
+        if match.group(1) in {"register", "control"}:
+            continue
+        if match.group(1) in {"field", "fields"} and ("{..." in line_prefix or "render=" in line_prefix):
+            continue
         results.append(match.group(1))
     return list(dict.fromkeys(results))
 
@@ -825,6 +888,9 @@ def _jsx_attr_binding_is_not_display(attr_name: str) -> bool:
         "data",
         "items",
         "columns",
+        "control",
+        "render",
+        "rules",
         "visible",
         "required",
         "selected",
@@ -967,6 +1033,12 @@ def _validation_rules_from_attrs(attrs: str, *, field_type: str, required: bool)
         ("pattern", "pattern"),
     ):
         value = _attr(attrs, attr_name)
+        if not value and attr_name in {"minLength", "minlength"}:
+            value = _jsx_register_option(attrs, "minLength") or _jsx_register_option(attrs, "minlength")
+        if not value and attr_name in {"maxLength", "maxlength"}:
+            value = _jsx_register_option(attrs, "maxLength") or _jsx_register_option(attrs, "maxlength")
+        if not value and attr_name in {"min", "max", "pattern"}:
+            value = _jsx_register_option(attrs, attr_name)
         if value:
             rules.append(f"{rule_name}:{value}")
     return tuple(dict.fromkeys(rules))

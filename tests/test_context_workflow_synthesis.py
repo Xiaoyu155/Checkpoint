@@ -526,6 +526,59 @@ def test_react_component_library_fields_are_parsed(component: str, expected_name
     assert [(field.name, field.field_type) for field in model.form_fields] == [(expected_name, expected_type)]
 
 
+def test_react_hook_form_register_fields_are_parsed_with_validation_rules() -> None:
+    jsx = """
+    function AccountForm() {
+      const { register } = useForm();
+      return (
+        <form>
+          <input type="email" placeholder="Email" {...register("email", { required: true })} />
+          <input placeholder="Display name" {...register("displayName", { minLength: 3 })} />
+          <button type="submit">Save account</button>
+          <p>Account saved successfully</p>
+        </form>
+      );
+    }
+    """
+    model = ingest_context(
+        GenerationContext(
+            task_description="Verify account save",
+            code_changes=(CodeChange(file_path="AccountForm.tsx", before=None, after=jsx, change_type="added"),),
+            base_url="http://localhost:3000/account",
+            project_root=".",
+        )
+    )
+
+    assert [(field.name, field.field_type) for field in model.form_fields] == [("email", "email"), ("displayName", "text")]
+    assert model.form_fields[0].validation_rules == ("required", "email_format")
+    assert model.form_fields[1].validation_rules == ("min_length:3",)
+
+
+def test_react_hook_form_controller_field_type_is_inferred_from_render_component() -> None:
+    jsx = """
+    function BillingForm() {
+      return (
+        <form>
+          <Controller name="plan" control={control} render={({ field }) => <Select {...field} options={plans} />} />
+          <button type="submit">Save billing</button>
+          <p>Billing saved successfully</p>
+        </form>
+      );
+    }
+    """
+    model = ingest_context(
+        GenerationContext(
+            task_description="Verify billing save",
+            code_changes=(CodeChange(file_path="BillingForm.tsx", before=None, after=jsx, change_type="added"),),
+            base_url="http://localhost:3000/billing",
+            project_root=".",
+        )
+    )
+
+    assert [(field.name, field.field_type) for field in model.form_fields] == [("plan", "select")]
+    assert model.data_displays == ()
+
+
 def test_react_antd_modal_ok_text_is_parsed_as_confirm_action() -> None:
     jsx = """
     function UsersTable() {

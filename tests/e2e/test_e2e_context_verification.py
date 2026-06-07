@@ -255,6 +255,60 @@ def test_e2e_git_diff_verify_impl_dry_run_writes_status_and_artifacts(tmp_path: 
             "extra_text_from": ["input.timezone"],
         },
         {
+            "name": "react_hook_form_register",
+            "file_path": "src/AccountForm.tsx",
+            "task": "Verify React Hook Form account form saves",
+            "base_url": "fixtures/react_hook_form_register.html",
+            "fixture": "<form><label for='email'>Email</label><input id='email' name='email' type='email'><label for='displayName'>Display name</label><input id='displayName' name='displayName'><button type='submit'>Save account</button></form><p>Account saved successfully</p>",
+            "before": "export function AccountForm() { return <form />; }",
+            "after": """
+            export function AccountForm() {
+              const { register } = useForm();
+              return (
+                <form>
+                  <input type="email" placeholder="Email" {...register("email", { required: true })} />
+                  <input placeholder="Display name" {...register("displayName", { minLength: 3 })} />
+                  <button type="submit">Save account</button>
+                  <p>Account saved successfully</p>
+                </form>
+              );
+            }
+            """,
+            "framework": "react",
+            "field": "",
+            "input_field": "email",
+            "matched_display": "",
+            "expected_display_count": 0,
+            "expected_min_fields": 2,
+            "expected_yaml": ["value_from: input.email", "value_from: input.displayName"],
+        },
+        {
+            "name": "react_hook_form_controller_select",
+            "file_path": "src/BillingForm.tsx",
+            "task": "Verify React Hook Form billing plan saves",
+            "base_url": "fixtures/react_hook_form_controller_select.html",
+            "fixture": "<form><label for='plan'>Plan</label><select id='plan' name='plan'><option>pro</option></select><button type='submit'>Save billing</button></form><p>Billing saved successfully</p>",
+            "before": "export function BillingForm() { return <form />; }",
+            "after": """
+            export function BillingForm() {
+              return (
+                <form>
+                  <Controller name="plan" control={control} render={({ field }) => <Select {...field} options={plans} />} />
+                  <button type="submit">Save billing</button>
+                  <p>Billing saved successfully</p>
+                </form>
+              );
+            }
+            """,
+            "framework": "react",
+            "field": "",
+            "input_field": "plan",
+            "matched_display": "",
+            "expected_display_count": 0,
+            "expected_min_fields": 1,
+            "expected_yaml": ["value_from: input.plan"],
+        },
+        {
             "name": "react_antd_select",
             "file_path": "src/ProductStatusForm.tsx",
             "task": "Verify React AntD status form saves",
