@@ -25,7 +25,7 @@ ALLOWED_ENVIRONMENTS = {"sandbox", "staging", "test"}
 ALLOWED_STORAGE_STATE_POLICIES = {"required", "optional", "forbidden"}
 ALLOWED_DOWNLOAD_POLICIES = {"dry-run-only", "confirm-required", "forbidden"}
 ALLOWED_MUTATING_ACTION_POLICIES = {"dry-run-or-confirm", "confirm-required", "forbidden"}
-ALLOWED_EXTERNAL_RUN_PROFILES = {"dry-run", "supervised"}
+ALLOWED_EXTERNAL_RUN_PROFILES = {"dry-run", "supervised", "semi-auto"}
 
 
 @dataclass(frozen=True)

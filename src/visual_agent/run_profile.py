@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 
-RunProfileName = Literal["dry-run", "supervised", "approved"]
+RunProfileName = Literal["dry-run", "supervised", "semi-auto", "approved"]
 
 HIGH_RISK_ACTIONS = {"save_storage_state"}
 MUTATING_ACTIONS = {
@@ -37,6 +37,12 @@ RUN_PROFILES = {
     ),
     "supervised": RunProfilePolicy(
         name="supervised",
+        force_dry_run=False,
+        allow_low_and_medium_risk=True,
+        allow_high_risk=False,
+    ),
+    "semi-auto": RunProfilePolicy(
+        name="semi-auto",
         force_dry_run=False,
         allow_low_and_medium_risk=True,
         allow_high_risk=False,

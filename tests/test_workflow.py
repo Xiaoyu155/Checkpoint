@@ -8,6 +8,7 @@ from visual_agent.dispatcher import ActionDispatcher
 from visual_agent.locks import RunLock
 from visual_agent.models import ActionResult, ActionStatus, Observation, ProviderKind, to_jsonable
 from visual_agent.providers import ProviderRegistry
+from visual_agent.run_profile import normalize_run_profile, policy_for_profile
 from visual_agent.state import StateStore
 from visual_agent.workflow import (
     Workflow,
@@ -47,6 +48,47 @@ def test_workflow_from_dict_parses_steps() -> None:
 
     assert workflow.name == "demo"
     assert workflow.steps[1].params["target"] == "登录"
+
+
+def test_run_profile_semi_auto_policy_allows_medium_risk_actions() -> None:
+    policy = policy_for_profile("semi-auto")
+
+    assert normalize_run_profile("semi-auto") == "semi-auto"
+    assert policy.force_dry_run is False
+    assert policy.allow_low_and_medium_risk is True
+    assert policy.allow_high_risk is False
+
+
+def test_semi_auto_prompts_before_mutating_action(tmp_path, monkeypatch, capsys) -> None:
+    prompts: list[str] = []
+
+    def fake_input() -> str:
+        prompts.append("prompted")
+        return ""
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    dispatcher = ActionDispatcher()
+    dispatcher.register(
+        "refresh_browser",
+        lambda target, params, context: ActionResult(
+            action="refresh_browser",
+            status=ActionStatus.SUCCESS,
+            target=target.target.display_name,
+            message="refreshed",
+        ),
+    )
+    runtime = WorkflowRuntime(output_dir=tmp_path, dispatcher=dispatcher)
+    workflow = Workflow(
+        name="semi_auto",
+        version=1,
+        steps=(WorkflowStep(id="refresh", action="refresh_browser"),),
+    )
+
+    result = runtime.run(workflow, run_profile="semi-auto")
+
+    assert result.steps[0].status == ActionStatus.SUCCESS
+    assert prompts == ["prompted"]
+    assert "[semi-auto] About to execute: refresh_browser on step refresh" in capsys.readouterr().out
 
 
 def test_workflow_from_dict_parses_affects() -> None:

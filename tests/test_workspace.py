@@ -395,11 +395,22 @@ def test_workspace_status_reports_counts(tmp_path) -> None:
     status = workspace_status(workspace)
 
     assert status["project_root"] == str(workspace.project_root)
+    assert status["framework_hint"] is None
     assert status["workflow_count"] == 2
     assert status["report_count"] == 0
     assert status["regression_test_count"] == 0
     assert status["valid_workflows"] == 2
     assert status["invalid_workflows"] == 0
+
+
+def test_init_workspace_with_framework_hint_writes_demo_and_status(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False, framework_hint="react")
+
+    status = workspace_status(workspace)
+
+    assert status["framework_hint"] == "react"
+    assert (workspace.fixtures_dir / "react_demo.html").exists()
+    assert find_workflow(workspace, "react_verification").name == "react_verification"
 
 
 def test_planner_context_exposes_safe_workspace_summary(tmp_path) -> None:

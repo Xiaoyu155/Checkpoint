@@ -129,7 +129,13 @@ class RegressionTestRun:
     failed_tests: int | None = None
 
 
-def init_workspace(root: str | Path, *, with_demo: bool = True, overwrite: bool = False) -> Workspace:
+def init_workspace(
+    root: str | Path,
+    *,
+    with_demo: bool = True,
+    overwrite: bool = False,
+    framework_hint: str | None = None,
+) -> Workspace:
     workspace = Workspace(root=Path(root).resolve())
     workspace.root.mkdir(parents=True, exist_ok=True)
     for dirname in WORKSPACE_DIRS:
@@ -137,27 +143,33 @@ def init_workspace(root: str | Path, *, with_demo: bool = True, overwrite: bool 
 
     manifest_path = workspace.root / "workspace.json"
     if overwrite or not manifest_path.exists():
-        manifest_path.write_text(
-            json.dumps(
-                {
-                    "name": workspace.root.name,
-                    "version": 1,
-                    "project_root": str(workspace.project_root),
-                    "dirs": list(WORKSPACE_DIRS),
-                    "mcp": {
-                        "approved_workflows": [],
-                        "audit_all_calls": True,
-                        "max_run_profile": "supervised",
-                    },
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        manifest = {
+            "name": workspace.root.name,
+            "version": 1,
+            "project_root": str(workspace.project_root),
+            "dirs": list(WORKSPACE_DIRS),
+            "mcp": {
+                "approved_workflows": [],
+                "audit_all_calls": True,
+                "max_run_profile": "supervised",
+            },
+        }
+        if framework_hint:
+            manifest["framework_hint"] = framework_hint
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    elif framework_hint:
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            manifest = {}
+        if isinstance(manifest, dict) and manifest.get("framework_hint") != framework_hint:
+            manifest["framework_hint"] = framework_hint
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if with_demo:
         copy_demo_assets(workspace, overwrite=overwrite)
+    if framework_hint:
+        write_framework_demo_assets(workspace, framework_hint=framework_hint, overwrite=overwrite)
     return workspace
 
 
@@ -207,6 +219,67 @@ def copy_demo_assets(workspace: Workspace, *, overwrite: bool = False) -> None:
             "../examples/web/checkout_verification_demo.html",
         )
         checkout_workflow_path.write_text(text, encoding="utf-8")
+
+
+def write_framework_demo_assets(workspace: Workspace, *, framework_hint: str, overwrite: bool = False) -> None:
+    framework = framework_hint.strip().lower()
+    if not framework:
+        return
+    fixture_path = workspace.fixtures_dir / f"{framework}_demo.html"
+    workflow_path = workspace.workflows_dir / f"{framework}_verification.yaml"
+    title = {
+        "nextjs": "Next.js profile demo",
+        "react": "React profile demo",
+        "vue": "Vue profile demo",
+        "remix": "Remix profile demo",
+        "django": "Django profile demo",
+        "fastapi": "FastAPI profile demo",
+        "flask": "Flask profile demo",
+        "html": "HTML profile demo",
+    }.get(framework, f"{framework} profile demo")
+    if overwrite or not fixture_path.exists():
+        fixture_path.write_text(
+            "\n".join(
+                [
+                    "<!doctype html>",
+                    "<html>",
+                    "<head><meta charset=\"utf-8\"><title>" + title + "</title></head>",
+                    "<body>",
+                    "  <form action=\"/profile/saved\">",
+                    "    <label for=\"display_name\">Display name</label>",
+                    "    <input id=\"display_name\" name=\"display_name\" required>",
+                    "    <button type=\"submit\">Save profile</button>",
+                    "  </form>",
+                    "  <p>Profile saved successfully</p>",
+                    "</body>",
+                    "</html>",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+    if overwrite or not workflow_path.exists():
+        workflow_path.write_text(
+            "\n".join(
+                [
+                    "schema_version: 1",
+                    f"name: {framework}_verification",
+                    "version: 1",
+                    "tags:",
+                    "  - verification",
+                    f"  - {framework}",
+                    "steps:",
+                    "  - id: open_demo",
+                    "    action: observe_html",
+                    f"    path: fixtures/{framework}_demo.html",
+                    "  - id: assert_success",
+                    "    action: assert_text",
+                    "    text: Profile saved successfully",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
 
 
 def discover_workflows(workspace: Workspace, *, include_slow: bool = False) -> tuple[WorkflowRef, ...]:
@@ -1078,9 +1151,11 @@ def workspace_status(workspace: Workspace) -> dict[str, Any]:
     runs = workspace_run_summaries(workspace, limit=10)
     validations = validate_workspace(workspace)
     queue = list_queue_tasks(workspace)
+    manifest = load_workspace_manifest(workspace)
     return {
         "root": str(workspace.root),
         "project_root": str(workspace.project_root),
+        "framework_hint": manifest.get("framework_hint") if isinstance(manifest, dict) else None,
         "workflow_count": len(workflows),
         "run_count_shown": len(runs),
         "report_count": load_workspace_report_index(workspace)["total_reports"],

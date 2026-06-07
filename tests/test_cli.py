@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from visual_agent.cli import load_inputs, main, verify_impl_cli_markdown
+from visual_agent.cli import generate_from_diff_cli_markdown, load_inputs, main, verify_impl_cli_markdown
 from visual_agent.codex_check import CodexCheckResult, CodexWorkflowCheck
 from visual_agent.session import load_agent_session, record_cloud_run_usage, update_agent_session
 from visual_agent.verification_status import enrich_verification_payload, write_verification_status
@@ -143,6 +143,53 @@ def test_generate_from_diff_cli_dry_run_outputs_context_workflow(tmp_path: Path,
     assert "field email -> paste input.email" in payload["generation_trace"]
     assert payload["semantic_summary"]["success_state_count"] >= 1
     assert "url_contains: /dashboard" in payload["yaml"]
+
+
+def test_init_workspace_auto_detect_nextjs(tmp_path: Path, capsys) -> None:
+    (tmp_path / "package.json").write_text('{"dependencies":{"next":"13.0.0","react":"18.0.0"}}', encoding="utf-8")
+    workspace_root = tmp_path / ".agent-workspace"
+
+    code = main(
+        [
+            "init-workspace",
+            "--root",
+            str(workspace_root),
+            "--auto-detect",
+            "--repo-root",
+            str(tmp_path),
+            "--no-demo",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["framework_hint"] == "nextjs"
+    assert (workspace_root / "fixtures" / "nextjs_demo.html").exists()
+    assert (workspace_root / "workflows" / "nextjs_verification.yaml").exists()
+
+
+def test_generate_from_diff_markdown_prints_warnings() -> None:
+    output = generate_from_diff_cli_markdown(
+        {
+            "status": "success",
+            "workflow_path": ".agent-workspace/workflows/verify_profile.yaml",
+            "generation_method": "static",
+            "quality": {"score": 0.71},
+            "semantic_summary": {
+                "framework": "nextjs",
+                "confidence": 0.82,
+                "field_count": 2,
+                "required_field_count": 1,
+                "success_state_count": 1,
+                "data_display_count": 1,
+                "warnings": ["Unrecognized field: <DatePicker name=\"birthdate\">"],
+            },
+        }
+    )
+
+    assert "[generate-from-diff] Framework: nextjs" in output
+    assert "Parse warnings (1):" in output
+    assert "DatePicker" in output
 
 
 def test_verify_impl_cli_dry_run_writes_status(tmp_path: Path, capsys) -> None:

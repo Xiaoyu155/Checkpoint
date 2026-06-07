@@ -35,7 +35,7 @@ from .product_state import (
     observation_to_state,
     product_contract_failure_message,
 )
-from .run_profile import RunProfileName, ensure_step_allowed, normalize_run_profile, step_should_dry_run
+from .run_profile import MUTATING_ACTIONS, RunProfileName, ensure_step_allowed, normalize_run_profile, step_should_dry_run
 from .selector import SelectorResolver
 from .security import redact_secret_text
 from .state import StateStore, WorkflowState, hydrate_context_from_completed_steps
@@ -331,6 +331,9 @@ class WorkflowRuntime:
         step = WorkflowStep(step.id, step.action, params)
         ensure_step_allowed(run_profile, action, params)
         step_dry_run = step_should_dry_run(run_profile, action, params)
+        if run_profile == "semi-auto" and action in MUTATING_ACTIONS and not step_dry_run:
+            print(f"[semi-auto] About to execute: {action} on step {step.id}. Press Enter to continue or Ctrl+C to abort.")
+            input()
 
         if action == "observe_state":
             source_observation = context.observations.get(str(params.get("observation", ""))) or context.latest_observation

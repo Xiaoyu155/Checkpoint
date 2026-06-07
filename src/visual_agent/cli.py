@@ -139,6 +139,10 @@ from .workspace import (
 )
 
 
+RUN_PROFILE_CHOICES = ["dry-run", "supervised", "semi-auto", "approved"]
+SAFE_RUN_PROFILE_CHOICES = ["dry-run", "supervised", "semi-auto"]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="visual-agent")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -215,7 +219,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_workflow.add_argument("--allow-click", action="store_true", help="Allow real click actions. Default is dry-run.")
     run_workflow.add_argument(
         "--run-profile",
-        choices=["dry-run", "supervised", "approved"],
+        choices=RUN_PROFILE_CHOICES,
         default="dry-run",
         help="Execution permission profile. Default is dry-run.",
     )
@@ -345,14 +349,14 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_run_plan = subparsers.add_parser("cloud-run-plan", help="Preview a cloud workflow request without sending network traffic.")
     cloud_run_plan.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root.")
     cloud_run_plan.add_argument("--workflow", required=True, help="Workflow name to run remotely in the future.")
-    cloud_run_plan.add_argument("--run-profile", choices=["dry-run", "supervised", "approved"], default="dry-run")
+    cloud_run_plan.add_argument("--run-profile", choices=RUN_PROFILE_CHOICES, default="dry-run")
     cloud_run_plan.add_argument("--inputs-file", default=None, help="Optional inputs file name to reference without reading its contents.")
     cloud_run_plan.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
     cloud_run = subparsers.add_parser("cloud-run", help="Plan a cloud workflow run; use --execute to request execution.")
     cloud_run.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root.")
     cloud_run.add_argument("--workflow", required=True, help="Workflow name to run remotely.")
-    cloud_run.add_argument("--run-profile", choices=["dry-run", "supervised", "approved"], default="dry-run")
+    cloud_run.add_argument("--run-profile", choices=RUN_PROFILE_CHOICES, default="dry-run")
     cloud_run.add_argument("--inputs-file", default=None, help="Optional inputs file name to reference without reading its contents.")
     cloud_run.add_argument("--execute", action="store_true", help="Explicitly request remote execution.")
     cloud_run.add_argument("--transport", choices=["none", "http"], default="none", help="Remote transport. Default: none.")
@@ -389,7 +393,7 @@ def build_parser() -> argparse.ArgumentParser:
     repair_workflow.add_argument("--apply", action="store_true", help="Apply a high-confidence deterministic workflow patch and create a backup.")
     repair_workflow.add_argument("--min-confidence", type=float, default=0.75, help="Minimum confidence required for --apply. Default: 0.75.")
     repair_workflow.add_argument("--verify", action="store_true", help="Rerun the repaired workflow after --apply. Default run profile: dry-run.")
-    repair_workflow.add_argument("--verify-run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    repair_workflow.add_argument("--verify-run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
     repair_workflow.add_argument("--inputs-file", default=None, help="Optional workspace inputs file for verification rerun.")
     repair_workflow.add_argument("--rollback-on-fail", action="store_true", help="Restore the workflow backup when --verify fails.")
     repair_workflow.add_argument("--candidate-id", default=None, help="Repair candidate id to apply. Default: deterministic workflow patch when available.")
@@ -400,7 +404,7 @@ def build_parser() -> argparse.ArgumentParser:
     auto_repair.add_argument("--run-id", default=None, help="Specific run id to repair. Default: latest failed run.")
     auto_repair.add_argument("--max-chars", type=int, default=12000, help="Maximum JSON evidence budget. Default: 12000.")
     auto_repair.add_argument("--min-confidence", type=float, default=0.75, help="Minimum confidence required for auto apply. Default: 0.75.")
-    auto_repair.add_argument("--verify-run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    auto_repair.add_argument("--verify-run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
     auto_repair.add_argument("--inputs-file", default=None, help="Optional workspace inputs file for verification rerun.")
     auto_repair.add_argument("--candidate-id", default=None, help="Repair candidate id to apply. Default: deterministic workflow patch when available.")
     auto_repair.add_argument("--dry-run", action="store_true", help="Preview the selected repair candidate without applying or verifying.")
@@ -452,7 +456,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--tags", default="verification", help="Comma-separated workflow tags to run. Default: verification.")
     verify.add_argument("--workflow", action="append", default=[], help="Workflow name or workspace-relative path to verify. Can be used multiple times.")
     verify.add_argument("--max-workflows", type=int, default=10, help="Maximum matching workflows to run. Default: 10.")
-    verify.add_argument("--run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    verify.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
     verify.add_argument("--wait-lock", action="store_true", help="Wait for workflow locks instead of failing immediately.")
     verify.add_argument("--lock-wait-seconds", type=float, default=30.0, help="Maximum seconds to wait when queued. Default: 30.")
     verify.add_argument("--include-slow", action="store_true", help="Include workflows tagged 'slow'. Default: skipped.")
@@ -477,7 +481,7 @@ def build_parser() -> argparse.ArgumentParser:
     gen_from_diff.add_argument("--model", default="claude-haiku-4-5-20251001", help="LLM model used when static confidence is low.")
     gen_from_diff.add_argument("--no-untracked", action="store_true", help="Do not include untracked git files.")
     gen_from_diff.add_argument("--dry-run", action="store_true", help="Print generated YAML without saving.")
-    gen_from_diff.add_argument("--format", choices=["json", "yaml"], default="json", help="Output format. Default: json.")
+    gen_from_diff.add_argument("--format", choices=["json", "markdown", "yaml"], default="json", help="Output format. Default: json.")
 
     verify_impl = subparsers.add_parser("verify-impl", help="Generate a workflow from git diff context and run it.")
     verify_impl.add_argument("--task-description", required=True, help="Task or feature that the code changes implement.")
@@ -488,7 +492,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify_impl.add_argument("--framework-hint", default=None, help="Optional parser hint: html, react, vue, django, fastapi, flask.")
     verify_impl.add_argument("--model", default="claude-haiku-4-5-20251001", help="LLM model used when static confidence is low.")
     verify_impl.add_argument("--inputs-file", default=None, help="Workspace inputs JSON file for generated workflow values.")
-    verify_impl.add_argument("--run-profile", choices=["dry-run", "supervised", "approved"], default="supervised")
+    verify_impl.add_argument("--run-profile", choices=RUN_PROFILE_CHOICES, default="supervised")
     verify_impl.add_argument("--min-quality-score", type=float, default=0.6, help="Minimum generated workflow quality before running. Default: 0.6.")
     verify_impl.add_argument("--timeout-seconds", type=float, default=30.0, help="Maximum seconds to wait for the generated workflow run. Default: 30.")
     verify_impl.add_argument("--run-negative", action="store_true", help="Also run the generated negative workflow draft after the success-path workflow passes.")
@@ -510,7 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
     codex_check.add_argument("--base", default="HEAD", help="Git base ref for diff. Default: HEAD.")
     codex_check.add_argument("--tags", default="verification", help="Comma-separated workflow tags to run. Default: verification.")
     codex_check.add_argument("--max-workflows", type=int, default=10, help="Maximum workflows to run. Default: 10.")
-    codex_check.add_argument("--run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    codex_check.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
     codex_check.add_argument("--include-slow", action="store_true", help="Include workflows tagged 'slow'. Default: skipped.")
     codex_check.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
@@ -542,28 +546,28 @@ def build_parser() -> argparse.ArgumentParser:
     external_sample_plan.add_argument("--root", default="examples/external_samples", help="External sample catalog root.")
     external_sample_plan.add_argument("--workspace-root", default=".", help="Workspace/project root for storage_state readiness checks.")
     external_sample_plan.add_argument("--sample-id", required=True, help="External sample id from the catalog.")
-    external_sample_plan.add_argument("--run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    external_sample_plan.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
     external_sample_plan.add_argument("--require-live-auth", action="store_true", help="Require matching non-empty storage_state metadata before planning ready.")
 
     external_sample_run = subparsers.add_parser("external-sample-run", help="Run a ready external sample through workspace safety gates.")
     external_sample_run.add_argument("--root", default="examples/external_samples", help="External sample catalog root.")
     external_sample_run.add_argument("--workspace-root", required=True, help="Workspace root for the run.")
     external_sample_run.add_argument("--sample-id", required=True, help="External sample id from the catalog.")
-    external_sample_run.add_argument("--run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    external_sample_run.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
     external_sample_run.add_argument("--require-live-auth", action="store_true", help="Require matching non-empty storage_state metadata before running.")
     external_sample_run.add_argument("--skip-preflight", action="store_true", help="Skip runtime preflight checks after readiness gates.")
 
     external_batch_plan = subparsers.add_parser("external-sample-batch-plan", help="Plan protected runs for all external samples.")
     external_batch_plan.add_argument("--root", default="examples/external_samples", help="External sample catalog root.")
     external_batch_plan.add_argument("--workspace-root", default=".", help="Workspace/project root for storage_state readiness checks.")
-    external_batch_plan.add_argument("--run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    external_batch_plan.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
     external_batch_plan.add_argument("--ready-only", action="store_true", help="Only include ready samples in the plan.")
     external_batch_plan.add_argument("--require-live-auth", action="store_true", help="Require matching non-empty storage_state metadata for ready samples.")
 
     external_batch_submit = subparsers.add_parser("external-sample-batch-submit", help="Submit ready external samples to the workspace queue.")
     external_batch_submit.add_argument("--root", default="examples/external_samples", help="External sample catalog root.")
     external_batch_submit.add_argument("--workspace-root", required=True, help="Workspace root for queue submission.")
-    external_batch_submit.add_argument("--run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    external_batch_submit.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
     external_batch_submit.add_argument("--priority", type=int, default=0)
     external_batch_submit.add_argument("--max-retries", type=int, default=0)
     external_batch_submit.add_argument("--ready-only", action="store_true", help="Only include ready samples in the batch result.")
@@ -625,7 +629,7 @@ def build_parser() -> argparse.ArgumentParser:
     external_batch_rerun_plan.add_argument("--root", default="examples/external_samples", help="External sample catalog root.")
     external_batch_rerun_plan.add_argument("--workspace-root", required=True, help="Workspace root for summary reads.")
     external_batch_rerun_plan.add_argument("--report-id", required=True, help="External sample batch report id.")
-    external_batch_rerun_plan.add_argument("--run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    external_batch_rerun_plan.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
 
     external_batch_rerun_submit = subparsers.add_parser(
         "external-sample-batch-rerun-submit",
@@ -634,19 +638,19 @@ def build_parser() -> argparse.ArgumentParser:
     external_batch_rerun_submit.add_argument("--root", default="examples/external_samples", help="External sample catalog root.")
     external_batch_rerun_submit.add_argument("--workspace-root", required=True, help="Workspace root for queue submission.")
     external_batch_rerun_submit.add_argument("--report-id", required=True, help="External sample batch report id.")
-    external_batch_rerun_submit.add_argument("--run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    external_batch_rerun_submit.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
     external_batch_rerun_submit.add_argument("--priority", type=int, default=0)
     external_batch_rerun_submit.add_argument("--max-retries", type=int, default=0)
 
     external_rerun_plan = subparsers.add_parser("external-sample-rerun-plan", help="Plan reruns for failed ready external samples.")
     external_rerun_plan.add_argument("--root", default="examples/external_samples", help="External sample catalog root.")
     external_rerun_plan.add_argument("--workspace-root", required=True, help="Workspace root for summary reads.")
-    external_rerun_plan.add_argument("--run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    external_rerun_plan.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
 
     external_rerun_submit = subparsers.add_parser("external-sample-rerun-submit", help="Submit failed ready external samples to the queue.")
     external_rerun_submit.add_argument("--root", default="examples/external_samples", help="External sample catalog root.")
     external_rerun_submit.add_argument("--workspace-root", required=True, help="Workspace root for queue submission.")
-    external_rerun_submit.add_argument("--run-profile", choices=["dry-run", "supervised"], default="dry-run")
+    external_rerun_submit.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
     external_rerun_submit.add_argument("--priority", type=int, default=0)
     external_rerun_submit.add_argument("--max-retries", type=int, default=0)
 
@@ -693,6 +697,8 @@ def build_parser() -> argparse.ArgumentParser:
     init_ws.add_argument("--root", required=True, help="Workspace root directory.")
     init_ws.add_argument("--no-demo", action="store_true", help="Do not copy demo workflow/assets.")
     init_ws.add_argument("--overwrite", action="store_true", help="Overwrite demo files if they already exist.")
+    init_ws.add_argument("--auto-detect", action="store_true", help="Scan a project root and generate matching fixture/workflow examples.")
+    init_ws.add_argument("--repo-root", default=".", help="Project root to scan for --auto-detect. Default: current directory.")
 
     ws_status = subparsers.add_parser("workspace-status", help="Show workspace status.")
     ws_status.add_argument("--root", required=True, help="Workspace root directory.")
@@ -760,7 +766,7 @@ def build_parser() -> argparse.ArgumentParser:
     ws_run.add_argument("--allow-click", action="store_true", help="Allow real click/input actions. Default is dry-run.")
     ws_run.add_argument(
         "--run-profile",
-        choices=["dry-run", "supervised", "approved"],
+        choices=RUN_PROFILE_CHOICES,
         default="dry-run",
         help="Execution permission profile. Default is dry-run.",
     )
@@ -844,7 +850,7 @@ def build_parser() -> argparse.ArgumentParser:
     ws_queue_submit.add_argument("--max-retries", type=int, default=0, help="Retry count after failures. Default: 0.")
     ws_queue_submit.add_argument(
         "--run-profile",
-        choices=["dry-run", "supervised", "approved"],
+        choices=RUN_PROFILE_CHOICES,
         default="dry-run",
         help="Execution permission profile. Default is dry-run.",
     )
@@ -1449,7 +1455,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
         return 0 if result.get("ready") and (not args.run or result.get("status") == "success") else 1
     if args.command == "init-workspace":
-        workspace = init_workspace(args.root, with_demo=not args.no_demo, overwrite=args.overwrite)
+        framework_hint = detect_framework_from_dir(Path(args.repo_root).resolve()) if args.auto_detect else None
+        workspace = init_workspace(args.root, with_demo=not args.no_demo, overwrite=args.overwrite, framework_hint=framework_hint)
         print(json.dumps(workspace_status(workspace), ensure_ascii=False, indent=2))
         return 0
     if args.command == "workspace-status":
@@ -1905,6 +1912,8 @@ def main(argv: list[str] | None = None) -> int:
         result = generate_workflow_from_context(ctx=ctx, dry_run=args.dry_run, model_id=args.model)
         if args.format == "yaml" and result.workflow_yaml:
             print(result.workflow_yaml)
+        elif args.format == "markdown":
+            print(generate_from_diff_cli_markdown(workflow_generation_cli_payload(result, changes)))
         else:
             print(json.dumps(to_jsonable(workflow_generation_cli_payload(result, changes)), ensure_ascii=False, indent=2))
         return 0 if result.status == "success" else 1
@@ -2348,6 +2357,81 @@ def workflow_generation_cli_payload(result: Any, changes: tuple[Any, ...]) -> di
     }
 
 
+def detect_framework_from_dir(root: Path) -> str | None:
+    package_json = root / "package.json"
+    if package_json.exists():
+        try:
+            package = json.loads(package_json.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            package = {}
+        deps: dict[str, Any] = {}
+        if isinstance(package, dict):
+            for key in ("dependencies", "devDependencies", "peerDependencies"):
+                value = package.get(key)
+                if isinstance(value, dict):
+                    deps.update(value)
+        dep_names = set(deps)
+        if "next" in dep_names:
+            return "nextjs"
+        if any(name.startswith("@remix-run/") for name in dep_names):
+            return "remix"
+        if "vue" in dep_names:
+            return "vue"
+        if "react" in dep_names or "react-dom" in dep_names:
+            return "react"
+    if (root / "manage.py").exists():
+        return "django"
+    requirements = root / "requirements.txt"
+    if requirements.exists():
+        text = requirements.read_text(encoding="utf-8", errors="ignore").lower()
+        if "django" in text:
+            return "django"
+        if "fastapi" in text:
+            return "fastapi"
+        if "flask" in text:
+            return "flask"
+    if any(root.rglob("*.vue")):
+        return "vue"
+    if any(root.rglob("*.tsx")) or any(root.rglob("*.jsx")):
+        return "react"
+    if any(root.rglob("*.html")):
+        return "html"
+    return None
+
+
+def generate_from_diff_cli_markdown(payload: dict[str, Any]) -> str:
+    semantic = payload.get("semantic_summary") if isinstance(payload.get("semantic_summary"), dict) else {}
+    quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
+    lines = [
+        f"[generate-from-diff] Status: {payload.get('status')}",
+        (
+            "[generate-from-diff] Framework: "
+            f"{semantic.get('framework') or payload.get('framework_detected')}  "
+            f"Confidence: {semantic.get('confidence') or payload.get('confidence')}  "
+            f"Method: {payload.get('generation_method')}"
+        ),
+        (
+            "[generate-from-diff] Fields: "
+            f"{semantic.get('field_count', 0)} (required: {semantic.get('required_field_count', 0)})  "
+            f"Success states: {semantic.get('success_state_count', 0)}  "
+            f"Data displays: {semantic.get('data_display_count', 0)}"
+        ),
+    ]
+    if payload.get("workflow_path"):
+        lines.append(f"[generate-from-diff] Workflow: {payload['workflow_path']}")
+    if payload.get("inputs_path"):
+        lines.append(f"[generate-from-diff] Inputs: {payload['inputs_path']}")
+    if quality:
+        lines.append(f"[generate-from-diff] Quality: {quality.get('score')}")
+    warnings = semantic.get("warnings") if isinstance(semantic.get("warnings"), list) else payload.get("warnings")
+    if isinstance(warnings, list) and warnings:
+        lines.append("")
+        lines.append("Parse warnings (" + str(len(warnings)) + "):")
+        for warning in warnings:
+            lines.append(f"  - {warning}")
+    return "\n".join(lines)
+
+
 def verify_impl_cli_markdown(payload: dict[str, Any]) -> str:
     lines = [
         f"[verify-impl] Result: {payload.get('result')}",
@@ -2376,7 +2460,9 @@ def verify_impl_cli_markdown(payload: dict[str, Any]) -> str:
         )
         warnings = semantic.get("warnings") if isinstance(semantic.get("warnings"), list) else []
         if warnings:
-            lines.append("[verify-impl] Parse warnings: " + "; ".join(str(item) for item in warnings))
+            lines.append("[verify-impl] Parse warnings:")
+            for warning in warnings:
+                lines.append(f"  - {warning}")
     quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
     gaps = quality.get("gaps") if isinstance(quality.get("gaps"), list) else []
     if gaps:
