@@ -513,6 +513,7 @@ def _field_from_raw(raw: dict[str, object]) -> FormField | None:
 
 def _extract_jsx_inputs(content: str) -> list[FormField]:
     results: list[FormField] = []
+    formik_bound_fields = _jsx_formik_bound_fields(content)
     input_tags = (
         "input",
         "textarea",
@@ -544,6 +545,7 @@ def _extract_jsx_inputs(content: str) -> list[FormField]:
             or _attr(attrs, "id")
             or _attr(attrs, "aria-label")
             or _jsx_register_name(attrs)
+            or _jsx_formik_field_name(attrs, formik_bound_fields)
             or _jsx_bound_identifier(attrs, "value")
             or _jsx_bound_identifier(attrs, "checked")
             or ""
@@ -567,6 +569,32 @@ def _extract_jsx_inputs(content: str) -> list[FormField]:
         )
     results.extend(_extract_jsx_controller_fields(content))
     return results
+
+
+def _jsx_formik_bound_fields(content: str) -> dict[str, str]:
+    bindings: dict[str, str] = {}
+    for match in re.finditer(
+        r"(?:const|let)\s+\[\s*([A-Za-z_][A-Za-z0-9_]*)[^\]]*]\s*=\s*useField\(\s*[\"']([A-Za-z_][A-Za-z0-9_.-]*)[\"']",
+        content,
+    ):
+        bindings[match.group(1)] = match.group(2).split(".")[-1]
+    for match in re.finditer(
+        r"(?:const|let)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*useField\(\s*[\"']([A-Za-z_][A-Za-z0-9_.-]*)[\"']",
+        content,
+    ):
+        bindings[match.group(1)] = match.group(2).split(".")[-1]
+    return bindings
+
+
+def _jsx_formik_field_name(attrs: str, bindings: dict[str, str]) -> str | None:
+    direct = re.search(r"\bgetFieldProps\(\s*[\"']([A-Za-z_][A-Za-z0-9_.-]*)[\"']", attrs)
+    if direct:
+        return direct.group(1).split(".")[-1]
+    for match in re.finditer(r"{\s*\.\.\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*}", attrs):
+        field_name = bindings.get(match.group(1))
+        if field_name:
+            return field_name
+    return None
 
 
 def _extract_jsx_controller_fields(content: str) -> list[FormField]:
@@ -866,9 +894,9 @@ def _extract_react_template_vars(content: str) -> list[str]:
             continue
         if attr_match and _jsx_attr_binding_is_not_display(attr_match.group(1)):
             continue
-        if match.group(1) in {"register", "control"}:
+        if match.group(1) in {"register", "control", "getFieldProps", "setFieldValue", "useField"}:
             continue
-        if match.group(1) in {"field", "fields"} and ("{..." in line_prefix or "render=" in line_prefix):
+        if match.group(1) in {"field", "fields", "meta", "helpers"} and ("{..." in line_prefix or "render=" in line_prefix):
             continue
         results.append(match.group(1))
     return list(dict.fromkeys(results))

@@ -309,6 +309,35 @@ def test_e2e_git_diff_verify_impl_dry_run_writes_status_and_artifacts(tmp_path: 
             "expected_yaml": ["value_from: input.plan"],
         },
         {
+            "name": "react_formik_hooks",
+            "file_path": "src/ProfileForm.tsx",
+            "task": "Verify React Formik profile form saves",
+            "base_url": "fixtures/react_formik_hooks.html",
+            "fixture": "<form><label for='email'>Email</label><input id='email' name='email' type='email'><label for='displayName'>Display name</label><input id='displayName' name='displayName'><button type='submit'>Save profile</button></form><p>Profile saved successfully</p>",
+            "before": "export function ProfileForm() { return <form />; }",
+            "after": """
+            export function ProfileForm() {
+              const [emailField] = useField("email");
+              const { getFieldProps } = useFormikContext();
+              return (
+                <form>
+                  <input type="email" placeholder="Email" {...emailField} />
+                  <input placeholder="Display name" {...getFieldProps("displayName")} />
+                  <button type="submit">Save profile</button>
+                  <p>Profile saved successfully</p>
+                </form>
+              );
+            }
+            """,
+            "framework": "react",
+            "field": "",
+            "input_field": "email",
+            "matched_display": "",
+            "expected_display_count": 0,
+            "expected_min_fields": 2,
+            "expected_yaml": ["value_from: input.email", "value_from: input.displayName"],
+        },
+        {
             "name": "react_antd_select",
             "file_path": "src/ProductStatusForm.tsx",
             "task": "Verify React AntD status form saves",

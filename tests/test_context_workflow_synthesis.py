@@ -579,6 +579,35 @@ def test_react_hook_form_controller_field_type_is_inferred_from_render_component
     assert model.data_displays == ()
 
 
+def test_react_formik_hook_fields_are_parsed_from_spread_helpers() -> None:
+    jsx = """
+    function ProfileForm() {
+      const [emailField] = useField("email");
+      const { getFieldProps } = useFormikContext();
+      return (
+        <form>
+          <input type="email" placeholder="Email" {...emailField} />
+          <input placeholder="Display name" {...getFieldProps("displayName")} />
+          <button type="submit">Save profile</button>
+          <p>Profile saved successfully</p>
+        </form>
+      );
+    }
+    """
+    model = ingest_context(
+        GenerationContext(
+            task_description="Verify profile save",
+            code_changes=(CodeChange(file_path="ProfileForm.tsx", before=None, after=jsx, change_type="added"),),
+            base_url="http://localhost:3000/profile",
+            project_root=".",
+        )
+    )
+
+    assert [(field.name, field.field_type) for field in model.form_fields] == [("email", "email"), ("displayName", "text")]
+    assert model.form_fields[0].validation_rules == ("email_format",)
+    assert model.data_displays == ()
+
+
 def test_react_antd_modal_ok_text_is_parsed_as_confirm_action() -> None:
     jsx = """
     function UsersTable() {
