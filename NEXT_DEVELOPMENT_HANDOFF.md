@@ -12,7 +12,7 @@ V2 主线已经完成了大部分“代码上下文生成 → workflow 合成 �
 
 ```text
 python -m pytest
-882 passed, 6 skipped
+889 passed, 6 skipped
 
 npm test  # vscode-extension
 passed
@@ -117,7 +117,7 @@ V2 代码上下文验证主线已经收口。本轮继续推进 Phase 1 dogfoodi
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-895 passed
+889 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -133,7 +133,7 @@ python -m pytest tests/e2e/test_e2e_context_verification.py tests/test_cli.py te
 136 passed
 
 python -m pytest tests/ -q --tb=short
-882 passed, 6 skipped
+889 passed, 6 skipped
 
 npm test --prefix vscode-extension
 passed
