@@ -93,6 +93,8 @@ The minimal `cloud-server` exposes the same reports over HTTP. Use `GET /v1/runs
 
 `cloud-server` supports optional request authentication. Start it with `--api-key-env VISUAL_AGENT_CLOUD_SERVER_API_KEY` (default) or `--api-key`, and non-health endpoints require `Authorization: Bearer <token>`. Add `--required-org <org>` to require a matching `X-Visual-Agent-Org` header. The server startup output only reports whether auth/org checks are enabled; it does not print the token.
 
+Add `--audit-log .agent-workspace/audit/cloud_server.jsonl` to append a redacted JSONL event for each non-health request, including auth failures, run creation, report list/detail, and report downloads. Audit events record endpoint, status, HTTP status, run id, workflow, run profile, org, path, query keys, duration, and remote address; they do not record authorization headers, bearer tokens, raw request bodies, or workflow inputs.
+
 `install-ci-templates` includes remote cloud-run wiring hints. The generated GitHub Actions workflow keeps the remote execution step commented out until a browser host is reachable; when enabled, configure `VISUAL_AGENT_CLOUD_ENDPOINT` and `VISUAL_AGENT_CLOUD_API_KEY` as repository secrets and optionally `VISUAL_AGENT_CLOUD_ORG` as a repository variable.
 
 ## Claude Desktop

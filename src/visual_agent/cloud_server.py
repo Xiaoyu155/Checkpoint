@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 import secrets
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
@@ -25,12 +27,14 @@ class CloudRunHTTPServer(ThreadingHTTPServer):
         *,
         api_key: str = "",
         required_org: str = "",
+        audit_log: str | Path = "",
     ):
         super().__init__(server_address, CloudRunRequestHandler)
         self.workspace_root = Path(workspace_root).resolve()
         self.default_run_profile = default_run_profile
         self.api_key = str(api_key or "")
         self.required_org = str(required_org or "")
+        self.audit_log = Path(audit_log).resolve() if audit_log else None
         self.runs: dict[str, dict[str, Any]] = {}
 
 
@@ -38,11 +42,12 @@ class CloudRunRequestHandler(BaseHTTPRequestHandler):
     server: CloudRunHTTPServer
 
     def do_GET(self) -> None:
+        started_at = perf_counter()
         parsed = urlparse(self.path)
         if parsed.path == "/v1/health":
             self.write_json({"status": "ok", "workspace": str(self.server.workspace_root)})
             return
-        if not self.require_authorized():
+        if not self.require_authorized(started_at=started_at):
             return
         if parsed.path == "/v1/runs":
             query = parse_qs(parsed.query)
@@ -55,47 +60,90 @@ class CloudRunRequestHandler(BaseHTTPRequestHandler):
                 failed_only=parse_bool_query(first_query_value(query, "failed_only")),
             )
             self.write_json(payload)
+            self.audit_request(
+                "run_list",
+                payload,
+                started_at=started_at,
+                query_keys=sorted(query),
+            )
             return
         report_request = parse_report_download_path(parsed.path)
         if report_request is not None:
             run_id = report_request
             query = parse_qs(parsed.query)
             payload = cloud_run_report_file(self.server, run_id, fmt=first_query_value(query, "format") or "json")
+            http_status = int(payload.get("http_status") or 200)
             if isinstance(payload.get("content"), bytes):
                 self.write_content(
                     payload["content"],
                     content_type=str(payload.get("content_type") or "application/octet-stream"),
-                    status=int(payload.get("http_status") or 200),
+                    status=http_status,
                     filename=str(payload.get("filename") or ""),
                 )
+                self.audit_request(
+                    "report_download",
+                    payload,
+                    started_at=started_at,
+                    http_status=http_status,
+                    run_id=run_id,
+                    query_keys=sorted(query),
+                    report_format=first_query_value(query, "format") or "json",
+                )
                 return
-            self.write_json(payload, status=int(payload.get("http_status") or 200))
+            self.write_json(payload, status=http_status)
+            self.audit_request(
+                "report_download",
+                payload,
+                started_at=started_at,
+                http_status=http_status,
+                run_id=run_id,
+                query_keys=sorted(query),
+                report_format=first_query_value(query, "format") or "json",
+            )
             return
         if parsed.path.startswith("/v1/run/"):
             run_id = parsed.path.removeprefix("/v1/run/").strip("/")
             payload = cloud_run_report_detail(self.server, run_id)
             if payload.get("status") == "not_found":
                 self.write_json({"status": "not_found", "run_id": run_id, "message": "Run id was not found."}, status=404)
+                self.audit_request("run_detail", payload, started_at=started_at, http_status=404, run_id=run_id)
                 return
             if payload.get("status") == "upgrade_required":
                 self.write_json(payload, status=403)
+                self.audit_request("run_detail", payload, started_at=started_at, http_status=403, run_id=run_id)
                 return
             self.write_json(payload)
+            self.audit_request("run_detail", payload, started_at=started_at, run_id=run_id)
             return
         self.write_json({"status": "not_found", "message": "Unknown endpoint."}, status=404)
+        self.audit_request("unknown", {"status": "not_found"}, started_at=started_at, http_status=404)
 
     def do_POST(self) -> None:
+        started_at = perf_counter()
         if self.path != "/v1/run":
             self.write_json({"status": "not_found", "message": "Unknown endpoint."}, status=404)
+            self.audit_request("unknown", {"status": "not_found"}, started_at=started_at, http_status=404)
             return
-        if not self.require_authorized():
+        if not self.require_authorized(started_at=started_at):
             return
+        body: dict[str, Any] = {}
         try:
             body = self.read_json()
             payload = execute_cloud_run_request(self.server, body)
         except Exception as exc:
             payload = {"status": "failed", "message": str(scrub_secrets(str(exc)))[:500]}
-        self.write_json(payload, status=200 if payload.get("status") in {"success", "failed"} else 400)
+        http_status = 200 if payload.get("status") in {"success", "failed"} else 400
+        self.write_json(payload, status=http_status)
+        self.audit_request(
+            "run_create",
+            payload,
+            started_at=started_at,
+            http_status=http_status,
+            workflow_name=str(body.get("workflow_name") or body.get("workflow") or payload.get("workflow_name") or ""),
+            run_profile=str(body.get("run_profile") or payload.get("run_profile") or self.server.default_run_profile),
+            workspace_provided=bool(body.get("workspace")),
+            workflow_yaml_provided=bool(str(body.get("workflow_yaml") or "").strip()),
+        )
 
     def read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
@@ -126,16 +174,58 @@ class CloudRunRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
         self.close_connection = True
 
-    def require_authorized(self) -> bool:
+    def require_authorized(self, *, started_at: float | None = None) -> bool:
+        headers = {key.lower(): value for key, value in self.headers.items()}
         failure = cloud_server_auth_failure(
-            headers={key.lower(): value for key, value in self.headers.items()},
+            headers=headers,
             api_key=self.server.api_key,
             required_org=self.server.required_org,
         )
         if failure is None:
             return True
-        self.write_json(failure, status=401 if failure["reason"] == "unauthorized" else 403)
+        http_status = 401 if failure["reason"] == "unauthorized" else 403
+        self.write_json(failure, status=http_status)
+        self.audit_request(
+            "auth",
+            failure,
+            started_at=started_at,
+            http_status=http_status,
+            org=str(headers.get("x-visual-agent-org") or ""),
+        )
         return False
+
+    def audit_request(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        *,
+        started_at: float | None = None,
+        http_status: int = 200,
+        run_id: str = "",
+        org: str = "",
+        **extra: Any,
+    ) -> None:
+        parsed = urlparse(self.path)
+        headers = {key.lower(): value for key, value in self.headers.items()}
+        append_cloud_server_audit(
+            self.server,
+            {
+                "method": self.command,
+                "path": parsed.path,
+                "query_keys": extra.pop("query_keys", sorted(parse_qs(parsed.query))),
+                "endpoint": endpoint,
+                "status": payload.get("status") or "unknown",
+                "http_status": int(http_status),
+                "reason": payload.get("reason") or "",
+                "run_id": run_id or str(payload.get("run_id") or ""),
+                "workflow_name": extra.pop("workflow_name", payload.get("workflow_name", "")),
+                "run_profile": extra.pop("run_profile", payload.get("run_profile", "")),
+                "org": org or str(headers.get("x-visual-agent-org") or ""),
+                "duration_ms": round((perf_counter() - started_at) * 1000, 2) if started_at is not None else None,
+                "remote_addr": self.client_address[0] if self.client_address else "",
+                **extra,
+            },
+        )
 
     def log_message(self, _format: str, *_args: Any) -> None:
         return
@@ -168,6 +258,22 @@ def cloud_server_auth_failure(
                 "message": "Request org is not allowed.",
             }
     return None
+
+
+def append_cloud_server_audit(server: CloudRunHTTPServer, event: dict[str, Any]) -> None:
+    if server.audit_log is None:
+        return
+    audit_event = {
+        "schema_version": 1,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        **event,
+    }
+    try:
+        server.audit_log.parent.mkdir(parents=True, exist_ok=True)
+        with server.audit_log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(scrub_secrets(audit_event), ensure_ascii=False, default=str) + "\n")
+    except OSError:
+        return
 
 
 def execute_cloud_run_request(server: CloudRunHTTPServer, request: dict[str, Any]) -> dict[str, Any]:
@@ -378,6 +484,7 @@ def create_cloud_server(
     run_profile: str = "dry-run",
     api_key: str = "",
     required_org: str = "",
+    audit_log: str | Path = "",
 ) -> CloudRunHTTPServer:
     return CloudRunHTTPServer(
         (host, int(port)),
@@ -385,6 +492,7 @@ def create_cloud_server(
         default_run_profile=run_profile,
         api_key=api_key,
         required_org=required_org,
+        audit_log=audit_log,
     )
 
 
@@ -397,6 +505,7 @@ def serve_cloud_server(
     api_key: str = "",
     api_key_env: str = "VISUAL_AGENT_CLOUD_SERVER_API_KEY",
     required_org: str = "",
+    audit_log: str | Path = "",
 ) -> None:
     resolved_api_key = api_key or str(os.environ.get(api_key_env) or "")
     server = create_cloud_server(
@@ -406,6 +515,7 @@ def serve_cloud_server(
         run_profile=run_profile,
         api_key=resolved_api_key,
         required_org=required_org,
+        audit_log=audit_log,
     )
     print(
         json.dumps(
@@ -417,6 +527,8 @@ def serve_cloud_server(
                     "workspace": str(Path(workspace_root).resolve()),
                     "auth_required": bool(resolved_api_key),
                     "org_required": bool(required_org),
+                    "audit_log_enabled": bool(audit_log),
+                    "audit_log": str(Path(audit_log).resolve()) if audit_log else "",
                 }
             ),
             ensure_ascii=False,

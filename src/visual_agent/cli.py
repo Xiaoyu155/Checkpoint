@@ -374,6 +374,7 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_server.add_argument("--api-key", default="", help="Optional bearer token required for cloud-server requests. Prefer --api-key-env.")
     cloud_server.add_argument("--api-key-env", default="VISUAL_AGENT_CLOUD_SERVER_API_KEY", help="Environment variable containing bearer token. Default: VISUAL_AGENT_CLOUD_SERVER_API_KEY.")
     cloud_server.add_argument("--required-org", default="", help="Optional required X-Visual-Agent-Org header value.")
+    cloud_server.add_argument("--audit-log", default="", help="Optional redacted JSONL request audit log path.")
 
     save_task = subparsers.add_parser("save-task-context", help="Save AI task state before switching windows.")
     save_task.add_argument("--task", required=True, help="Current task description.")
@@ -1713,6 +1714,7 @@ def main(argv: list[str] | None = None) -> int:
             api_key=args.api_key,
             api_key_env=args.api_key_env,
             required_org=args.required_org,
+            audit_log=args.audit_log,
         )
         return 0
     if args.command == "save-task-context":

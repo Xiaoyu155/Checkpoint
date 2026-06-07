@@ -255,6 +255,84 @@ steps:
     assert runs_payload["returned_reports"] == 1
 
 
+def test_cloud_server_audit_log_records_redacted_request_events(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    (workspace.fixtures_dir / "ready.html").write_text("<p>Ready</p>", encoding="utf-8")
+    (workspace.workflows_dir / "ready.yaml").write_text(
+        """
+schema_version: 1
+name: ready
+version: 1
+steps:
+  - id: observe
+    action: observe_html
+    path: fixtures/ready.html
+  - id: assert_ready
+    action: assert_text
+    text: Ready
+""".strip(),
+        encoding="utf-8",
+    )
+    audit_log = tmp_path / "audit" / "cloud_server.jsonl"
+    server = create_cloud_server(
+        workspace_root=workspace.root,
+        port=0,
+        api_key="server-secret",
+        required_org="team-a",
+        audit_log=audit_log,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        endpoint = f"http://127.0.0.1:{server.server_port}/v1/run"
+        body = json.dumps({"workflow_name": "ready", "workspace": str(workspace.root), "run_profile": "dry-run"}).encode("utf-8")
+        unauthorized_request = Request(endpoint, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            urlopen(unauthorized_request, timeout=10)
+        except HTTPError as exc:
+            assert exc.code == 401
+            exc.read()
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer server-secret",
+            "X-Visual-Agent-Org": "team-a",
+        }
+        authorized_request = Request(endpoint, data=body, headers=headers, method="POST")
+        with urlopen(authorized_request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        list_request = Request(
+            f"http://127.0.0.1:{server.server_port}/v1/runs?limit=5",
+            headers={"Authorization": "Bearer server-secret", "X-Visual-Agent-Org": "team-a"},
+        )
+        with urlopen(list_request, timeout=5):
+            pass
+        report_request = Request(
+            f"http://127.0.0.1:{server.server_port}/v1/run/{payload['run_id']}/report?format=json",
+            headers={"Authorization": "Bearer server-secret", "X-Visual-Agent-Org": "team-a"},
+        )
+        with urlopen(report_request, timeout=5):
+            pass
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    raw_audit = audit_log.read_text(encoding="utf-8")
+    events = [json.loads(line) for line in raw_audit.splitlines()]
+    endpoints = {event["endpoint"] for event in events}
+    assert {"auth", "run_create", "run_list", "report_download"}.issubset(endpoints)
+    assert "server-secret" not in raw_audit
+    assert any(event["endpoint"] == "auth" and event["http_status"] == 401 for event in events)
+    create_event = next(event for event in events if event["endpoint"] == "run_create")
+    assert create_event["status"] == "success"
+    assert create_event["run_id"] == payload["run_id"]
+    assert create_event["workflow_name"] == "ready"
+    assert create_event["org"] == "team-a"
+    assert create_event["workspace_provided"] is True
+    assert isinstance(create_event["duration_ms"], float)
+
+
 def test_cloud_server_runs_endpoint_supports_pagination_and_filters(tmp_path) -> None:
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     (workspace.fixtures_dir / "ready.html").write_text("<p>Ready</p>", encoding="utf-8")

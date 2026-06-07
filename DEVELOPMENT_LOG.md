@@ -24,7 +24,7 @@ python -m pytest tests/ -q --tb=short
 上次全量测试结果：
 
 ```text
-922 passed, 6 skipped
+923 passed, 6 skipped
 ```
 
 如果只是确认 SDK 和 CLI：
@@ -71,7 +71,7 @@ ca2996b Add post-action observation and slow workflow filtering
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-922 passed, 6 skipped
+923 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -105,7 +105,7 @@ python -m pytest tests/test_cli.py tests/test_validation.py tests/test_workflow_
 python -m pytest tests/test_context_workflow_synthesis.py tests/e2e/test_e2e_context_verification.py tests/test_cli.py tests/test_workflow_quality.py -q
 74 passed
 python -m pytest -q
-922 passed, 6 skipped
+923 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 ```
@@ -123,6 +123,7 @@ passed
 - `GET /v1/run/{run_id}/report?format=json|markdown` 可下载脱敏后的持久化报告文件；只允许固定 report JSON/Markdown，不接受任意 path。
 - cloud-server 报告查询复用历史报告 tier gate：free tier 旧报告 detail 返回 HTTP 403 + `status: upgrade_required`，列表中过滤旧报告。
 - cloud-server 已支持可选鉴权：配置 `--api-key` / `--api-key-env` 后，非 health 端点要求 `Authorization: Bearer <token>`；配置 `--required-org` 后还要求匹配 `X-Visual-Agent-Org`。启动输出只展示 auth/org 是否启用，不打印 token。
+- cloud-server 已支持 `--audit-log .agent-workspace/audit/cloud_server.jsonl`，对非 health 请求追加脱敏 JSONL：记录 auth failure、run create、run list/detail、report download 的 endpoint/status/http_status/run_id/workflow/run_profile/org/path/query_keys/duration_ms/remote_addr，不记录 Authorization、bearer token、原始 body 或 inputs。
 - `install-ci-templates` 已输出 `cloud_server_command` / `cloud_run_command`，GitHub Actions 模板包含可启用的远端 `cloud-run --execute --transport http` 注释块，使用 `VISUAL_AGENT_CLOUD_ENDPOINT` / `VISUAL_AGENT_CLOUD_API_KEY` secrets 和可选 `VISUAL_AGENT_CLOUD_ORG` variable。
 - Phase 3 Task 3.2 已完成：`cloud_run` 已启用真实 feature/quota gate。
 - free tier 支持每月 5 次云端执行；未超额时可执行 `cloud-run --execute --transport http`，只有远端返回 `success` 后才记录 `cloud_runs_used`。
@@ -145,9 +146,11 @@ python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensi
 python -m pytest tests/test_workspace.py tests/test_mcp_server.py tests/test_cli.py tests/test_licensing.py -q
 172 passed
 python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensing.py tests/test_session.py tests/test_workspace.py tests/test_mcp_server.py -q
-206 passed
+207 passed
 python -m pytest tests/test_ci_templates.py -q
 3 passed
+python -m pytest tests/test_cloud_server.py -q
+8 passed
 ```
 
 ## 已完成能力
