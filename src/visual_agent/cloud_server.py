@@ -46,7 +46,14 @@ class CloudRunRequestHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/runs":
             query = parse_qs(parsed.query)
-            payload = list_cloud_run_reports(self.server, limit=bounded_int(first_query_value(query, "limit"), default=20, minimum=1, maximum=100))
+            payload = list_cloud_run_reports(
+                self.server,
+                limit=bounded_int(first_query_value(query, "limit"), default=20, minimum=1, maximum=100),
+                offset=bounded_int(first_query_value(query, "offset"), default=0, minimum=0, maximum=100000),
+                status=first_query_value(query, "status"),
+                workflow=first_query_value(query, "workflow"),
+                failed_only=parse_bool_query(first_query_value(query, "failed_only")),
+            )
             self.write_json(payload)
             return
         if parsed.path.startswith("/v1/run/"):
@@ -170,17 +177,43 @@ def execute_cloud_run_request(server: CloudRunHTTPServer, request: dict[str, Any
     return payload
 
 
-def list_cloud_run_reports(server: CloudRunHTTPServer, *, limit: int = 20) -> dict[str, Any]:
+def list_cloud_run_reports(
+    server: CloudRunHTTPServer,
+    *,
+    limit: int = 20,
+    offset: int = 0,
+    status: str | None = None,
+    workflow: str | None = None,
+    failed_only: bool = False,
+) -> dict[str, Any]:
     workspace = open_workspace(server.workspace_root)
-    index = load_workspace_report_index(workspace, rebuild=True)
+    index = load_workspace_report_index(
+        workspace,
+        rebuild=True,
+        status=normalize_filter_value(status),
+        workflow=normalize_filter_value(workflow),
+        failed_only=bool(failed_only),
+    )
     entries = index.get("entries") if isinstance(index.get("entries"), list) else []
-    selected = entries[:limit]
+    offset = max(0, int(offset))
+    limit = max(1, int(limit))
+    selected = entries[offset : offset + limit]
+    next_offset = offset + len(selected)
     return {
         "schema_version": 1,
         "status": "success",
         "workspace": str(workspace.root),
         "total_reports": index.get("total_reports", len(entries)),
         "returned_reports": len(selected),
+        "offset": offset,
+        "limit": limit,
+        "next_offset": next_offset if next_offset < len(entries) else None,
+        "has_more": next_offset < len(entries),
+        "filters": {
+            "status": normalize_filter_value(status),
+            "workflow": normalize_filter_value(workflow),
+            "failed_only": bool(failed_only),
+        },
         "history_access": index.get("history_access") if isinstance(index.get("history_access"), dict) else {},
         "reports": selected,
     }
@@ -217,6 +250,15 @@ def bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(maximum, parsed))
+
+
+def parse_bool_query(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def normalize_filter_value(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
 def materialize_request_workflow(workspace: Workspace, request: dict[str, Any]) -> str:

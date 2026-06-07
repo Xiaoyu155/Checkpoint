@@ -89,7 +89,7 @@ Use `cloud-run` for the same safe default flow. Without `--execute`, it only pri
 
 Workspace report history is also tier gated. Free tier can query reports from the last 7 days; older reports are filtered from workspace report lists/indexes and detail/artifact queries return `status: upgrade_required` with `reason: history_window_exceeded`. Pro/team/enterprise tiers can query unlimited report history.
 
-The minimal `cloud-server` exposes the same reports over HTTP. Use `GET /v1/runs` for compact report history and `GET /v1/run/{run_id}` for one persisted report detail. These endpoints reuse the same history tier gate: free tier old reports are filtered from lists and return HTTP 403 with `status: upgrade_required` when fetched directly.
+The minimal `cloud-server` exposes the same reports over HTTP. Use `GET /v1/runs` for compact report history and `GET /v1/run/{run_id}` for one persisted report detail. `GET /v1/runs` supports `limit`, `offset`, `status`, `workflow`, and `failed_only=true` query parameters and returns `next_offset` / `has_more` for pagination. These endpoints reuse the same history tier gate: free tier old reports are filtered from lists and return HTTP 403 with `status: upgrade_required` when fetched directly.
 
 `cloud-server` supports optional request authentication. Start it with `--api-key-env VISUAL_AGENT_CLOUD_SERVER_API_KEY` (default) or `--api-key`, and non-health endpoints require `Authorization: Bearer <token>`. Add `--required-org <org>` to require a matching `X-Visual-Agent-Org` header. The server startup output only reports whether auth/org checks are enabled; it does not print the token.
 
