@@ -3,8 +3,8 @@
 > 更新时间：2026-06-07  
 > 仓库地址：https://github.com/Xiaoyu155/visual-agent  
 > 当前分支：`main`  
-> 当前工作区状态：dirty，包含多批已开发但未提交文件  
-> 最新提交：`061e6c1 Add Python SDK and plugin entrypoints`
+> 当前工作区状态：Phase 1 dogfooding 改动已测试并推送
+> 最新代码提交：`37f678d Sync semi-auto profile across MCP verification`
 
 ## 一句话定位
 
@@ -37,7 +37,10 @@ python -m visual_agent --help
 
 ## 最近关键提交
 
-```text
+ ```text
+37f678d Sync semi-auto profile across MCP verification
+2d9fa5c Add semi-auto workflow profile and workspace auto-detect
+51961fe V2 code-context verification complete: workflow synthesis, quality gate, negative testing, e2e samples
 061e6c1 Add Python SDK and plugin entrypoints
 392de95 Improve real interaction guidance and window capture defaults
 159c23f Add product state contracts and issue reporting
@@ -46,6 +49,30 @@ python -m visual_agent --help
 ca2996b Add post-action observation and slow workflow filtering
 972a656 Cache repeated workflow observations
 3be0498 Add OCR text click and wait actions
+```
+
+## 2026-06-07 Phase 1 dogfooding 进展
+
+已完成：
+
+- `init-workspace --auto-detect --repo-root <path>`：扫描 `package.json` / `requirements.txt` / 典型源码文件，自动识别 `nextjs`、`react`、`vue`、`remix`、`django`、`fastapi`、`flask`、`html`，并在 workspace manifest/status 中写入 `framework_hint`。
+- 自动检测到框架时，生成对应 `fixtures/<framework>_demo.html` 和 `workflows/<framework>_verification.yaml`，让新 workspace 直接有可运行示例。
+- `generate-from-diff --format markdown`：非 JSON 模式下输出 framework/confidence/fields/quality 摘要，并在有 parse warnings 时打印醒目的 warning 列表；JSON 结构保持兼容。
+- `verify-impl --format markdown`：parse warnings 改为多行列表，便于 Codex/用户直接读取。
+- 新增 `semi-auto` run profile：observe/assert 自动执行，只在 mutating action 真实执行前暂停确认；CLI、MCP schema、repair verify、external sample profile 校验已同步。
+- `verify-impl` / `.vscode-agent-status.json` 的 `next_action` 增强：覆盖 `fail`、`timeout`、`needs_workflow_improvement`，失败时按 `assert_text` / `wait_for_text` / `assert_browser_ready` 等动作给出具体修复建议。
+
+本轮定向验证：
+
+```text
+python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
+83 passed
+python -m pytest
+895 passed
+npm test --prefix vscode-extension
+passed
+visual-agent mcp-smoke
+success
 ```
 
 ## 已完成能力

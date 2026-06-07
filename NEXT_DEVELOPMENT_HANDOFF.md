@@ -18,7 +18,13 @@ npm test  # vscode-extension
 passed
 ```
 
-注意：当前工作区本来就是大范围 dirty 状态，包含很多已开发但未提交文件。不要用 `git reset --hard` 或 `git checkout --` 清理。
+本轮开始前已按用户要求先提交所有 dirty 代码，稳定基线：
+
+```text
+51961fe V2 code-context verification complete: workflow synthesis, quality gate, negative testing, e2e samples
+```
+
+不要用 `git reset --hard` 或 `git checkout --` 清理用户未明确要求回滚的内容。
 
 ## 已完成的 V2 能力
 
@@ -98,7 +104,27 @@ passed
 
 ## 当前未完全收口项
 
-V2 代码上下文验证主线已经收口：
+V2 代码上下文验证主线已经收口。本轮继续推进 Phase 1 dogfooding，并已完成：
+
+- Task 1.1：`init-workspace --auto-detect`，自动识别项目框架并生成对应 demo fixture/workflow；`workspace_status` 返回 `framework_hint`。
+- Task 1.4：`generate-from-diff --format markdown` 和 `verify-impl --format markdown` 在非 JSON 模式下打印 parse warnings，JSON payload 不变。
+- Task 1.2：`verification_status.next_action` 覆盖 `fail` / `timeout` / `needs_workflow_improvement`，失败步骤给出可执行修复建议。
+- Task 1.3：新增 `semi-auto` run profile，并同步 CLI、MCP schema、repair verify、external sample profile 校验。
+
+本轮已通过：
+
+```text
+python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
+83 passed
+python -m pytest
+895 passed
+npm test --prefix vscode-extension
+passed
+visual-agent mcp-smoke
+success
+```
+
+V2 既有验证结果：
 
 已通过：
 
@@ -113,7 +139,7 @@ npm test --prefix vscode-extension
 passed
 ```
 
-本轮之后开始推进 Roadmap Phase 6：
+此前 Roadmap Phase 6 状态：
 
 - `src/visual_agent/licensing.py` 已从占位推进为可读取本地/env license 元数据。
 - `agent_session.json` 已记录 `runs_this_month`、`cloud_runs_used`、`usage_reset_date`。
@@ -139,7 +165,7 @@ passed
 
 ```powershell
 cd "D:\longxia agent"
-python -m pytest tests/test_licensing.py tests/test_context_workflow_synthesis.py tests/test_mcp_server.py tests/test_cli.py tests/test_verification_status.py
+python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 npm test --prefix vscode-extension
 python -m pytest
 ```
@@ -167,9 +193,10 @@ V2 code-context verification 主线可以阶段性暂停。当前已覆盖：
 
 ## 推荐下一步执行顺序
 
-1. 阶段性暂停并验收当前 V2 主线。
-2. 如果继续开发，优先选择“真实项目样本集”或“云端执行/商业化链路”其中一条，不要两条同时扩散。
-3. 每轮结束更新 `DEVELOPMENT_LOG.md` / `README_MCP.md` / `NEXT_DEVELOPMENT_HANDOFF.md`。
+1. 跑全量 `python -m pytest` 和 `npm test --prefix vscode-extension`，确认 Phase 1 本轮改动没有长尾回归。
+2. 进入 Phase 2 Task 2.1：为 `generate-from-diff` 增加 `--audit-log .agent-workspace/audit/context_parse.jsonl`，记录 framework/confidence/submit actions/unmatched displays/warnings。
+3. Phase 2 收集真实误判后，再做 AntD/MUI 组件扩展；不要提前扩散到 Phase 3 cloud-server。
+4. 每轮结束更新 `DEVELOPMENT_LOG.md` / `README_MCP.md` / `NEXT_DEVELOPMENT_HANDOFF.md`。
 
 ## 常用验证命令
 
