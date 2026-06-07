@@ -12,7 +12,7 @@ from uuid import uuid4
 from .console import build_report_detail
 from .models import to_jsonable
 from .security import scrub_secrets
-from .workspace import Workspace, load_workspace_report_index, open_workspace, run_workspace_workflow
+from .workspace import Workspace, load_workspace_report_index, open_workspace, run_workspace_workflow, workspace_report_access_payload
 from .workflow import parse_workflow_file
 
 
@@ -56,6 +56,21 @@ class CloudRunRequestHandler(BaseHTTPRequestHandler):
             )
             self.write_json(payload)
             return
+        report_request = parse_report_download_path(parsed.path)
+        if report_request is not None:
+            run_id = report_request
+            query = parse_qs(parsed.query)
+            payload = cloud_run_report_file(self.server, run_id, fmt=first_query_value(query, "format") or "json")
+            if isinstance(payload.get("content"), bytes):
+                self.write_content(
+                    payload["content"],
+                    content_type=str(payload.get("content_type") or "application/octet-stream"),
+                    status=int(payload.get("http_status") or 200),
+                    filename=str(payload.get("filename") or ""),
+                )
+                return
+            self.write_json(payload, status=int(payload.get("http_status") or 200))
+            return
         if parsed.path.startswith("/v1/run/"):
             run_id = parsed.path.removeprefix("/v1/run/").strip("/")
             payload = cloud_run_report_detail(self.server, run_id)
@@ -96,6 +111,17 @@ class CloudRunRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+        self.close_connection = True
+
+    def write_content(self, data: bytes, *, content_type: str, status: int = 200, filename: str = "") -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
         self.wfile.write(data)
         self.close_connection = True
@@ -237,6 +263,76 @@ def cloud_run_report_detail(server: CloudRunHTTPServer, run_id: str) -> dict[str
         "report": detail,
         "summary": summary or {},
     }
+
+
+def cloud_run_report_file(server: CloudRunHTTPServer, run_id: str, *, fmt: str = "json") -> dict[str, Any]:
+    workspace = open_workspace(server.workspace_root)
+    normalized_format = str(fmt or "json").strip().lower()
+    if normalized_format not in {"json", "markdown"}:
+        return {
+            "schema_version": 1,
+            "status": "failed",
+            "reason": "unsupported_format",
+            "message": "Report format must be json or markdown.",
+            "http_status": 400,
+        }
+    suffix = ".json" if normalized_format == "json" else ".md"
+    report_path = safe_report_file_path(workspace.reports_dir, run_id, suffix=suffix)
+    if report_path is None or not report_path.exists():
+        return {
+            "schema_version": 1,
+            "status": "not_found",
+            "run_id": run_id,
+            "message": "Run report file was not found.",
+            "http_status": 404,
+        }
+    access = workspace_report_access_payload(workspace, report_path)
+    if not access["allowed"]:
+        return {
+            "schema_version": 1,
+            "status": "upgrade_required",
+            "run_id": run_id,
+            "history_access": scrub_secrets(access),
+            "message": access.get("message"),
+            "http_status": 403,
+        }
+    if normalized_format == "json":
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        content = json.dumps(scrub_secrets(payload), ensure_ascii=False, default=str, indent=2).encode("utf-8")
+        content_type = "application/json; charset=utf-8"
+    else:
+        content = str(scrub_secrets(report_path.read_text(encoding="utf-8"))).encode("utf-8")
+        content_type = "text/markdown; charset=utf-8"
+    return {
+        "schema_version": 1,
+        "status": "success",
+        "run_id": run_id,
+        "format": normalized_format,
+        "filename": report_path.name,
+        "content_type": content_type,
+        "content": content,
+        "http_status": 200,
+    }
+
+
+def parse_report_download_path(path: str) -> str | None:
+    parts = path.strip("/").split("/")
+    if len(parts) == 4 and parts[0] == "v1" and parts[1] == "run" and parts[3] == "report":
+        return parts[2]
+    return None
+
+
+def safe_report_file_path(reports_dir: Path, run_id: str, *, suffix: str) -> Path | None:
+    filename = f"{run_id}{suffix}"
+    if Path(filename).name != filename:
+        return None
+    root = reports_dir.resolve()
+    path = (root / filename).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return None
+    return path
 
 
 def first_query_value(query: dict[str, list[str]], name: str) -> str | None:

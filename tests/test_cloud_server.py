@@ -59,6 +59,12 @@ steps:
             payload = json.loads(response.read().decode("utf-8"))
         with urlopen(f"http://127.0.0.1:{server.server_port}/v1/run/{payload['run_id']}", timeout=5) as response:
             run_payload = json.loads(response.read().decode("utf-8"))
+        with urlopen(f"http://127.0.0.1:{server.server_port}/v1/run/{payload['run_id']}/report?format=json", timeout=5) as response:
+            report_json = json.loads(response.read().decode("utf-8"))
+            report_json_type = response.headers.get("Content-Type")
+        with urlopen(f"http://127.0.0.1:{server.server_port}/v1/run/{payload['run_id']}/report?format=markdown", timeout=5) as response:
+            report_markdown = response.read().decode("utf-8")
+            report_markdown_type = response.headers.get("Content-Type")
         with urlopen(f"http://127.0.0.1:{server.server_port}/v1/runs?limit=5", timeout=5) as response:
             runs_payload = json.loads(response.read().decode("utf-8"))
     finally:
@@ -72,6 +78,10 @@ steps:
     assert payload["steps_total"] == 2
     assert run_payload["run_id"] == payload["run_id"]
     assert run_payload["report"]["summary"]["total_steps"] == 2
+    assert report_json["run_id"] == payload["run_id"]
+    assert "application/json" in report_json_type
+    assert "Run Report" in report_markdown
+    assert "text/markdown" in report_markdown_type
     assert runs_payload["status"] == "success"
     assert runs_payload["returned_reports"] == 1
     assert runs_payload["reports"][0]["run_id"] == payload["run_id"]
@@ -114,6 +124,11 @@ steps:
         except HTTPError as exc:
             blocked = json.loads(exc.read().decode("utf-8"))
             status_code = exc.code
+        try:
+            urlopen(f"http://127.0.0.1:{server.server_port}/v1/run/{payload['run_id']}/report?format=json", timeout=5)
+        except HTTPError as exc:
+            blocked_report = json.loads(exc.read().decode("utf-8"))
+            report_status_code = exc.code
         with urlopen(f"http://127.0.0.1:{server.server_port}/v1/runs", timeout=5) as response:
             runs_payload = json.loads(response.read().decode("utf-8"))
     finally:
@@ -124,7 +139,37 @@ steps:
     assert status_code == 403
     assert blocked["status"] == "upgrade_required"
     assert blocked["history_access"]["reason"] == "history_window_exceeded"
+    assert report_status_code == 403
+    assert blocked_report["status"] == "upgrade_required"
+    assert blocked_report["history_access"]["reason"] == "history_window_exceeded"
     assert runs_payload["returned_reports"] == 0
+
+
+def test_cloud_server_report_download_rejects_bad_format_and_path(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    server = create_cloud_server(workspace_root=workspace.root, port=0)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        try:
+            urlopen(f"http://127.0.0.1:{server.server_port}/v1/run/missing/report?format=xml", timeout=5)
+        except HTTPError as exc:
+            bad_format = json.loads(exc.read().decode("utf-8"))
+            bad_format_code = exc.code
+        try:
+            urlopen(f"http://127.0.0.1:{server.server_port}/v1/run/../report?format=json", timeout=5)
+        except HTTPError as exc:
+            bad_path = json.loads(exc.read().decode("utf-8"))
+            bad_path_code = exc.code
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert bad_format_code == 400
+    assert bad_format["reason"] == "unsupported_format"
+    assert bad_path_code in {400, 404}
+    assert bad_path["status"] in {"not_found", "failed"}
 
 
 def test_cloud_server_auth_requires_bearer_token_and_org(tmp_path) -> None:

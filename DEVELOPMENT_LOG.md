@@ -24,7 +24,7 @@ python -m pytest tests/ -q --tb=short
 上次全量测试结果：
 
 ```text
-921 passed, 6 skipped
+922 passed, 6 skipped
 ```
 
 如果只是确认 SDK 和 CLI：
@@ -71,7 +71,7 @@ ca2996b Add post-action observation and slow workflow filtering
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-921 passed, 6 skipped
+922 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -105,7 +105,7 @@ python -m pytest tests/test_cli.py tests/test_validation.py tests/test_workflow_
 python -m pytest tests/test_context_workflow_synthesis.py tests/e2e/test_e2e_context_verification.py tests/test_cli.py tests/test_workflow_quality.py -q
 74 passed
 python -m pytest -q
-921 passed, 6 skipped
+922 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 ```
@@ -120,6 +120,7 @@ passed
 - `POST /v1/run` 兼容现有 `cloud-run --execute --transport http` 的 `workflow_name` / `workspace` / `run_profile` payload，也支持未来 `workflow_yaml` payload 落盘后执行。
 - 本地服务端执行 workspace workflow 后返回 `status`、`run_id`、`report_url`、`steps_passed`、`steps_total`；`cloud-run --execute --transport http` 已可打通本地 server。
 - `GET /v1/runs` 会返回 workspace report index 的 compact 列表，支持 `limit`、`offset`、`status`、`workflow`、`failed_only=true`，并返回 `next_offset` / `has_more`；`GET /v1/run/{run_id}` 会读取持久化 workspace report detail，server 重启后仍能查询已有报告。
+- `GET /v1/run/{run_id}/report?format=json|markdown` 可下载脱敏后的持久化报告文件；只允许固定 report JSON/Markdown，不接受任意 path。
 - cloud-server 报告查询复用历史报告 tier gate：free tier 旧报告 detail 返回 HTTP 403 + `status: upgrade_required`，列表中过滤旧报告。
 - cloud-server 已支持可选鉴权：配置 `--api-key` / `--api-key-env` 后，非 health 端点要求 `Authorization: Bearer <token>`；配置 `--required-org` 后还要求匹配 `X-Visual-Agent-Org`。启动输出只展示 auth/org 是否启用，不打印 token。
 - Phase 3 Task 3.2 已完成：`cloud_run` 已启用真实 feature/quota gate。
@@ -143,7 +144,7 @@ python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensi
 python -m pytest tests/test_workspace.py tests/test_mcp_server.py tests/test_cli.py tests/test_licensing.py -q
 172 passed
 python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensing.py tests/test_session.py tests/test_workspace.py tests/test_mcp_server.py -q
-202 passed
+203 passed
 ```
 
 ## 已完成能力

@@ -12,7 +12,7 @@ V2 主线已经完成了大部分“代码上下文生成 → workflow 合成 �
 
 ```text
 python -m pytest
-921 passed, 6 skipped
+922 passed, 6 skipped
 
 npm test  # vscode-extension
 passed
@@ -117,7 +117,7 @@ V2 代码上下文验证主线已经收口。本轮继续推进 Phase 1 dogfoodi
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-921 passed, 6 skipped
+922 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -136,7 +136,7 @@ success
 python -m pytest tests/test_cli.py tests/test_context_workflow_synthesis.py -q
 51 passed
 python -m pytest -q
-921 passed, 6 skipped
+922 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 ```
@@ -184,7 +184,7 @@ python -m pytest tests/e2e/test_e2e_context_verification.py tests/test_cli.py te
 136 passed
 
 python -m pytest tests/ -q --tb=short
-921 passed, 6 skipped
+922 passed, 6 skipped
 
 npm test --prefix vscode-extension
 passed
@@ -220,6 +220,7 @@ passed
 - `POST /v1/run` 支持现有 `cloud-run --execute --transport http` 发出的 `workflow_name` / `workspace` / `run_profile` 请求，也预留 `workflow_yaml` 请求。
 - 本地服务端执行 workspace workflow 后返回 `status`、`run_id`、`report_url`、`steps_passed`、`steps_total`。
 - `GET /v1/runs` 会返回 workspace report index 的 compact 列表，支持 `limit`、`offset`、`status`、`workflow`、`failed_only=true`，并返回 `next_offset` / `has_more`；`GET /v1/run/{run_id}` 会读取持久化 workspace report detail，server 重启后仍能查询已有报告。
+- `GET /v1/run/{run_id}/report?format=json|markdown` 可下载脱敏后的持久化报告文件；只允许固定 report JSON/Markdown，不接受任意 path。
 - cloud-server 报告查询复用历史报告 tier gate：free tier 旧报告 detail 返回 HTTP 403 + `status: upgrade_required`，列表中过滤旧报告。
 - cloud-server 已支持可选鉴权：配置 `--api-key` / `--api-key-env` 后，非 health 端点要求 `Authorization: Bearer <token>`；配置 `--required-org` 后还要求匹配 `X-Visual-Agent-Org`。启动输出只展示 auth/org 是否启用，不打印 token。
 - `cloud-run --execute --transport http` 已能打通本地 cloud-server。
@@ -241,7 +242,7 @@ python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensi
 python -m pytest tests/test_workspace.py tests/test_mcp_server.py tests/test_cli.py tests/test_licensing.py -q
 172 passed
 python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensing.py tests/test_session.py tests/test_workspace.py tests/test_mcp_server.py -q
-202 passed
+203 passed
 ```
 
 下一位接手者建议先做：
@@ -278,7 +279,7 @@ V2 code-context verification 主线可以阶段性暂停。当前已覆盖：
 
 1. 跑全量 `python -m pytest` 和 `npm test --prefix vscode-extension`，确认 cloud-server 改动没有长尾回归。
 2. dogfooding `cloud-server` + `cloud-run --execute --transport http`，确认 CI/另一进程触发本地浏览器执行的链路稳定；测试环境如需执行云端链路，设置 `VISUAL_AGENT_LICENSE_TIER=pro`。
-3. 下一步可补 cloud-server 报告下载 endpoint，或把鉴权配置写入示例 CI 文档。
+3. 下一步可把 cloud-server 鉴权配置写入示例 CI 文档，或补更完整的远端报告下载索引。
 4. 每轮结束更新 `DEVELOPMENT_LOG.md` / `README_MCP.md` / `NEXT_DEVELOPMENT_HANDOFF.md`。
 
 ## 常用验证命令
