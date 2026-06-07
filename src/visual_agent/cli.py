@@ -481,6 +481,7 @@ def build_parser() -> argparse.ArgumentParser:
     gen_from_diff.add_argument("--model", default="claude-haiku-4-5-20251001", help="LLM model used when static confidence is low.")
     gen_from_diff.add_argument("--no-untracked", action="store_true", help="Do not include untracked git files.")
     gen_from_diff.add_argument("--dry-run", action="store_true", help="Print generated YAML without saving.")
+    gen_from_diff.add_argument("--audit-log", default=None, help="Append a JSONL parser audit entry for this generation run.")
     gen_from_diff.add_argument("--format", choices=["json", "markdown", "yaml"], default="json", help="Output format. Default: json.")
 
     verify_impl = subparsers.add_parser("verify-impl", help="Generate a workflow from git diff context and run it.")
@@ -1910,12 +1911,22 @@ def main(argv: list[str] | None = None) -> int:
             framework_hint=args.framework_hint,
         )
         result = generate_workflow_from_context(ctx=ctx, dry_run=args.dry_run, model_id=args.model)
+        payload = workflow_generation_cli_payload(result, changes)
+        if args.audit_log:
+            from .context_audit import append_context_parse_audit
+
+            append_context_parse_audit(
+                args.audit_log,
+                task_description=args.task_description,
+                generation=result,
+                changed_files=payload["changed_files"],
+            )
         if args.format == "yaml" and result.workflow_yaml:
             print(result.workflow_yaml)
         elif args.format == "markdown":
-            print(generate_from_diff_cli_markdown(workflow_generation_cli_payload(result, changes)))
+            print(generate_from_diff_cli_markdown(payload))
         else:
-            print(json.dumps(to_jsonable(workflow_generation_cli_payload(result, changes)), ensure_ascii=False, indent=2))
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
         return 0 if result.status == "success" else 1
     if args.command == "verify-impl":
         from .mcp_server import verify_implementation_payload

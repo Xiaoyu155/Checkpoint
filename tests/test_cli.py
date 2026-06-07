@@ -145,6 +145,56 @@ def test_generate_from_diff_cli_dry_run_outputs_context_workflow(tmp_path: Path,
     assert "url_contains: /dashboard" in payload["yaml"]
 
 
+def test_generate_from_diff_cli_appends_audit_log(tmp_path: Path, capsys) -> None:
+    init_git_repo(tmp_path)
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    page = workspace.fixtures_dir / "login.html"
+    page.write_text("<form><input name='email'></form>\n", encoding="utf-8")
+    git(tmp_path, "add", ".agent-workspace/fixtures/login.html")
+    git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
+    page.write_text(
+        "<form action='/dashboard'><label for='email'>Email</label><input id='email' name='email' type='email' required>"
+        "<button type='submit'>Sign in</button></form><p>Welcome Dashboard</p>\n",
+        encoding="utf-8",
+    )
+    audit_log = workspace.root / "audit" / "context_parse.jsonl"
+
+    for _ in range(2):
+        code = main(
+            [
+                "generate-from-diff",
+                "--workspace-root",
+                str(workspace.root),
+                "--repo-root",
+                str(tmp_path),
+                "--task-description",
+                "Verify login redirects",
+                "--base-url",
+                "fixtures/login.html",
+                "--dry-run",
+                "--no-untracked",
+                "--audit-log",
+                str(audit_log),
+            ]
+        )
+        json.loads(capsys.readouterr().out)
+        assert code == 0
+
+    entries = [json.loads(line) for line in audit_log.read_text(encoding="utf-8").splitlines()]
+
+    assert len(entries) == 2
+    assert entries[0]["task"] == "Verify login redirects"
+    assert entries[0]["framework"] == "html"
+    assert entries[0]["confidence"] >= 0.5
+    assert entries[0]["method"]
+    assert entries[0]["fields"] == ["email"]
+    assert entries[0]["submit_actions"] == ["Sign in"]
+    assert entries[0]["success_states"]
+    assert entries[0]["unmatched_data_displays"] == []
+    assert isinstance(entries[0]["warnings"], list)
+    assert entries[0]["quality_score"] >= 0.6
+
+
 def test_init_workspace_auto_detect_nextjs(tmp_path: Path, capsys) -> None:
     (tmp_path / "package.json").write_text('{"dependencies":{"next":"13.0.0","react":"18.0.0"}}', encoding="utf-8")
     workspace_root = tmp_path / ".agent-workspace"
