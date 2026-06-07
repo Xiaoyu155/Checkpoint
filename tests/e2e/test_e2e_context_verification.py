@@ -359,6 +359,110 @@ def test_e2e_git_diff_verify_impl_dry_run_writes_status_and_artifacts(tmp_path: 
             "expected_yaml": ["value_from: input.enabled"],
         },
         {
+            "name": "react_antd_checkbox",
+            "file_path": "src/SubscriptionForm.tsx",
+            "task": "Verify React AntD subscription checkbox saves",
+            "base_url": "fixtures/react_antd_checkbox.html",
+            "fixture": "<form><label for='subscribed'>Subscribed</label><input id='subscribed' name='subscribed' type='checkbox'><button type='submit'>Save settings</button></form><p>Settings saved successfully</p>",
+            "before": "export function SubscriptionForm() { return <form />; }",
+            "after": """
+            export function SubscriptionForm() {
+              return (
+                <form>
+                  <Checkbox checked={subscribed} label="Subscribed" />
+                  <button type="submit">Save settings</button>
+                  <p>Settings saved successfully</p>
+                </form>
+              );
+            }
+            """,
+            "framework": "react",
+            "field": "",
+            "input_field": "subscribed",
+            "matched_display": "",
+            "expected_display_count": 0,
+            "expected_min_fields": 1,
+            "expected_yaml": ["value_from: input.subscribed"],
+        },
+        {
+            "name": "react_antd_radio_group",
+            "file_path": "src/BillingPlanForm.tsx",
+            "task": "Verify React AntD billing plan radio saves",
+            "base_url": "fixtures/react_antd_radio_group.html",
+            "fixture": "<form><label for='plan'>Plan</label><select id='plan' name='plan'><option>pro</option></select><button type='submit'>Save billing</button></form><p>Billing saved successfully</p>",
+            "before": "export function BillingPlanForm() { return <form />; }",
+            "after": """
+            export function BillingPlanForm() {
+              return (
+                <form>
+                  <Radio.Group name="plan" label="Plan" />
+                  <button type="submit">Save billing</button>
+                  <p>Billing saved successfully</p>
+                </form>
+              );
+            }
+            """,
+            "framework": "react",
+            "field": "",
+            "input_field": "plan",
+            "matched_display": "",
+            "expected_display_count": 0,
+            "expected_min_fields": 1,
+            "expected_yaml": ["value_from: input.plan"],
+        },
+        {
+            "name": "react_antd_slider",
+            "file_path": "src/PriorityForm.tsx",
+            "task": "Verify React AntD priority slider saves",
+            "base_url": "fixtures/react_antd_slider.html",
+            "fixture": "<form><label for='priority'>Priority</label><input id='priority' name='priority' type='number'><button type='submit'>Save priority</button></form><p>Priority saved successfully</p>",
+            "before": "export function PriorityForm() { return <form />; }",
+            "after": """
+            export function PriorityForm() {
+              return (
+                <form>
+                  <Slider name="priority" label="Priority" min="1" max="5" />
+                  <button type="submit">Save priority</button>
+                  <p>Priority saved successfully</p>
+                </form>
+              );
+            }
+            """,
+            "framework": "react",
+            "field": "",
+            "input_field": "priority",
+            "matched_display": "",
+            "expected_display_count": 0,
+            "expected_min_fields": 1,
+            "expected_yaml": ["value_from: input.priority"],
+        },
+        {
+            "name": "react_mui_autocomplete",
+            "file_path": "src/AssigneeForm.tsx",
+            "task": "Verify React MUI assignee autocomplete saves",
+            "base_url": "fixtures/react_mui_autocomplete.html",
+            "fixture": "<form><label for='assignee'>Assignee</label><select id='assignee' name='assignee'><option>Ada</option></select><button type='submit'>Save assignee</button></form><p>Assignee saved successfully</p>",
+            "before": "export function AssigneeForm() { return <form />; }",
+            "after": """
+            export function AssigneeForm() {
+              return (
+                <form>
+                  <Autocomplete name="assignee" label="Assignee" options={users} />
+                  <button type="submit">Save assignee</button>
+                  <p>Assignee saved successfully</p>
+                </form>
+              );
+            }
+            """,
+            "framework": "react",
+            "field": "",
+            "input_field": "assignee",
+            "matched_display": "",
+            "expected_display_count": 0,
+            "expected_min_fields": 1,
+            "expected_yaml": ["value_from: input.assignee"],
+        },
+        {
             "name": "react_antd_upload",
             "file_path": "src/AvatarForm.tsx",
             "task": "Verify React AntD avatar upload form saves",

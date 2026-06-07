@@ -529,11 +529,15 @@ def _extract_jsx_inputs(content: str) -> list[FormField]:
         "InputNumber",
         "Switch",
         "Checkbox",
+        "Radio.Group",
+        "Slider",
+        "Autocomplete",
         "Upload",
     )
     tag_pattern = "|".join(re.escape(tag) for tag in input_tags)
     for match in re.finditer(rf"<((?:[A-Za-z.]*\.)?(?:{tag_pattern}))\b([^>]*?)(?:/>|>)", content, re.DOTALL):
-        tag = match.group(1).split(".")[-1]
+        raw_tag = match.group(1)
+        tag = "Radio.Group" if raw_tag.endswith("Radio.Group") else raw_tag.split(".")[-1]
         attrs = match.group(2) or ""
         name = (
             _attr(attrs, "name")
@@ -544,7 +548,7 @@ def _extract_jsx_inputs(content: str) -> list[FormField]:
             or ""
         )
         field_type = _jsx_field_type(tag, attrs)
-        if not name or field_type in {"hidden", "submit", "button", "reset", "checkbox", "radio"}:
+        if not name or field_type in {"hidden", "submit", "button", "reset"}:
             continue
         label = _attr(attrs, "label") or _attr(attrs, "placeholder") or _attr(attrs, "aria-label") or name
         lower_name = name.lower()
@@ -577,6 +581,9 @@ def _jsx_field_type(tag: str, attrs: str) -> str:
         "InputNumber": "number",
         "Switch": "boolean",
         "Checkbox": "boolean",
+        "Radio.Group": "radio",
+        "Slider": "number",
+        "Autocomplete": "select",
         "Upload": "file",
     }.get(tag)
     return component_type or "text"
@@ -813,6 +820,11 @@ def _jsx_attr_binding_is_not_display(attr_name: str) -> bool:
         "disabled",
         "loading",
         "open",
+        "options",
+        "datasource",
+        "data",
+        "items",
+        "columns",
         "visible",
         "required",
         "selected",

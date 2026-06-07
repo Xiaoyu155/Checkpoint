@@ -24,7 +24,7 @@ python -m pytest tests/ -q --tb=short
 上次全量测试结果：
 
 ```text
-925 passed, 6 skipped
+933 passed, 6 skipped
 ```
 
 如果只是确认 SDK 和 CLI：
@@ -71,7 +71,7 @@ ca2996b Add post-action observation and slow workflow filtering
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-925 passed, 6 skipped
+933 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -89,9 +89,9 @@ success
 - `workflow-lint --format json` 可输出结构化 `quality`、`validation.issues` 和 `suggestions`，便于 Codex 自动读取。
 - `workflow-add-step --workflow <path> --after <step_id> --action <action>`：支持在指定 step 后插入 workflow 步骤，常用参数包括 `--text`、`--url-contains`、`--timeout-ms`、`--observation` 和 `--dry-run`。
 - `workflow-add-step` 会自动生成不冲突 step id，写回后运行 workflow validation；`--dry-run --format json` 可预览 YAML 不落盘。
-- React/JSX parser 已补组件库字段识别：`Select` -> `select`、`DatePicker` -> `date`、`InputNumber` -> `number`、`Switch checked={...}` -> `boolean`、`Upload` -> `file`。
+- React/JSX parser 已补组件库字段识别：`Select` -> `select`、`DatePicker` -> `date`、`InputNumber` -> `number`、`Switch checked={...}` -> `boolean`、`Checkbox checked={...}` -> `boolean`、`Radio.Group` -> `radio`、`Slider` -> `number`、MUI `Autocomplete` -> `select`、`Upload` -> `file`。
 - React/JSX parser 已识别 AntD Modal `okText` / `confirmText` / `title` 中的确认动作，能合成 destructive action + confirm action 的双点击流程。
-- JSX data display 提取已排除 `open={...}`、`checked={...}`、事件 handler 等状态/事件 prop，避免把 Modal/Switch 状态变量误判为页面展示数据；保留 `value={profile.displayName}` 这类 unmatched display 诊断。
+- JSX data display 提取已排除 `open={...}`、`checked={...}`、事件 handler、`options/dataSource/items/data/columns` 等状态/配置 prop，避免把 Modal/Switch/Autocomplete 状态和数据源误判为页面展示数据；保留 `value={profile.displayName}` 这类 unmatched display 诊断。
 
 本轮定向验证：
 
@@ -102,10 +102,10 @@ python -m pytest tests/test_cli.py tests/test_workflow_quality.py tests/test_val
 59 passed
 python -m pytest tests/test_cli.py tests/test_validation.py tests/test_workflow_quality.py -q
 62 passed
-python -m pytest tests/test_context_workflow_synthesis.py tests/e2e/test_e2e_context_verification.py tests/test_cli.py tests/test_workflow_quality.py -q
-74 passed
+python -m pytest tests/test_context_workflow_synthesis.py tests/e2e/test_e2e_context_verification.py tests/test_cli.py tests/test_workflow_quality.py tests/test_mcp_server.py tests/test_verification_status.py -q
+169 passed
 python -m pytest -q
-925 passed, 6 skipped
+933 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 ```

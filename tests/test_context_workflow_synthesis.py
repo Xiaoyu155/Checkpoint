@@ -495,6 +495,10 @@ def test_react_common_field_components_are_parsed_as_inputs() -> None:
         ('<DatePicker name="birthdate" label="Birth date" />', "birthdate", "date"),
         ('<InputNumber name="quantity" label="Quantity" min="1" max="99" />', "quantity", "number"),
         ('<Switch checked={enabled} label="Enabled" />', "enabled", "boolean"),
+        ('<Checkbox checked={subscribed} label="Subscribed" />', "subscribed", "boolean"),
+        ('<Radio.Group name="plan" label="Plan" />', "plan", "radio"),
+        ('<Slider name="priority" label="Priority" min="1" max="5" />', "priority", "number"),
+        ('<Autocomplete name="assignee" label="Assignee" options={users} />', "assignee", "select"),
         ('<Upload name="avatar" label="Avatar" />', "avatar", "file"),
     ],
 )
