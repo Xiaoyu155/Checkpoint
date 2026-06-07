@@ -255,6 +255,160 @@ def test_e2e_git_diff_verify_impl_dry_run_writes_status_and_artifacts(tmp_path: 
             "extra_text_from": ["input.timezone"],
         },
         {
+            "name": "react_antd_select",
+            "file_path": "src/ProductStatusForm.tsx",
+            "task": "Verify React AntD status form saves",
+            "base_url": "fixtures/react_antd_select.html",
+            "fixture": "<form><label for='status'>Status</label><select id='status' name='status'><option>active</option></select><button type='submit'>Save product</button></form><p>Product saved successfully</p>",
+            "before": "export function ProductStatusForm() { return <form />; }",
+            "after": """
+            export function ProductStatusForm() {
+              return (
+                <form>
+                  <Select name="status" label="Status" />
+                  <button type="submit">Save product</button>
+                  <p>Product saved successfully</p>
+                </form>
+              );
+            }
+            """,
+            "framework": "react",
+            "field": "",
+            "input_field": "status",
+            "matched_display": "",
+            "expected_display_count": 0,
+            "expected_min_fields": 1,
+            "expected_yaml": ["value_from: input.status"],
+        },
+        {
+            "name": "react_antd_datepicker",
+            "file_path": "src/BirthdateForm.tsx",
+            "task": "Verify React AntD birthdate form saves",
+            "base_url": "fixtures/react_antd_datepicker.html",
+            "fixture": "<form><label for='birthdate'>Birth date</label><input id='birthdate' name='birthdate'><button type='submit'>Save profile</button></form><p>Profile saved successfully</p>",
+            "before": "export function BirthdateForm() { return <form />; }",
+            "after": """
+            export function BirthdateForm() {
+              return (
+                <form>
+                  <DatePicker name="birthdate" label="Birth date" />
+                  <button type="submit">Save profile</button>
+                  <p>Profile saved successfully</p>
+                </form>
+              );
+            }
+            """,
+            "framework": "react",
+            "field": "",
+            "input_field": "birthdate",
+            "matched_display": "",
+            "expected_display_count": 0,
+            "expected_min_fields": 1,
+            "expected_yaml": ["value_from: input.birthdate"],
+        },
+        {
+            "name": "react_antd_input_number",
+            "file_path": "src/QuantityForm.tsx",
+            "task": "Verify React AntD quantity form saves",
+            "base_url": "fixtures/react_antd_input_number.html",
+            "fixture": "<form><label for='quantity'>Quantity</label><input id='quantity' name='quantity' type='number'><button type='submit'>Save product</button></form><p>Product saved successfully</p>",
+            "before": "export function QuantityForm() { return <form />; }",
+            "after": """
+            export function QuantityForm() {
+              return (
+                <form>
+                  <InputNumber name="quantity" label="Quantity" min="1" max="99" />
+                  <button type="submit">Save product</button>
+                  <p>Product saved successfully</p>
+                </form>
+              );
+            }
+            """,
+            "framework": "react",
+            "field": "",
+            "input_field": "quantity",
+            "matched_display": "",
+            "expected_display_count": 0,
+            "expected_min_fields": 1,
+            "expected_yaml": ["value_from: input.quantity"],
+        },
+        {
+            "name": "react_antd_switch",
+            "file_path": "src/EnabledForm.tsx",
+            "task": "Verify React AntD enabled switch saves",
+            "base_url": "fixtures/react_antd_switch.html",
+            "fixture": "<form><label for='enabled'>Enabled</label><input id='enabled' name='enabled'><button type='submit'>Save settings</button></form><p>Settings saved successfully</p>",
+            "before": "export function EnabledForm() { return <form />; }",
+            "after": """
+            export function EnabledForm() {
+              return (
+                <form>
+                  <Switch checked={enabled} label="Enabled" />
+                  <button type="submit">Save settings</button>
+                  <p>Settings saved successfully</p>
+                </form>
+              );
+            }
+            """,
+            "framework": "react",
+            "field": "",
+            "input_field": "enabled",
+            "matched_display": "",
+            "expected_display_count": 0,
+            "expected_min_fields": 1,
+            "expected_yaml": ["value_from: input.enabled"],
+        },
+        {
+            "name": "react_antd_upload",
+            "file_path": "src/AvatarForm.tsx",
+            "task": "Verify React AntD avatar upload form saves",
+            "base_url": "fixtures/react_antd_upload.html",
+            "fixture": "<form><label for='avatar'>Avatar</label><input id='avatar' name='avatar'><button type='submit'>Save avatar</button></form><p>Avatar saved successfully</p>",
+            "before": "export function AvatarForm() { return <form />; }",
+            "after": """
+            export function AvatarForm() {
+              return (
+                <form>
+                  <Upload name="avatar" label="Avatar" />
+                  <button type="submit">Save avatar</button>
+                  <p>Avatar saved successfully</p>
+                </form>
+              );
+            }
+            """,
+            "framework": "react",
+            "field": "",
+            "input_field": "avatar",
+            "matched_display": "",
+            "expected_display_count": 0,
+            "expected_min_fields": 1,
+            "expected_yaml": ["value_from: input.avatar"],
+        },
+        {
+            "name": "react_antd_modal_confirm",
+            "file_path": "src/AntdUsersTable.tsx",
+            "task": "Verify React AntD modal confirms user deletion",
+            "base_url": "fixtures/react_antd_modal_confirm.html",
+            "fixture": "<button type='button'>Delete Ada</button><p>User deleted successfully</p>",
+            "before": "export function AntdUsersTable() { return <section />; }",
+            "after": """
+            export function AntdUsersTable() {
+              return (
+                <section>
+                  <button type="button">Delete Ada</button>
+                  <Modal open={confirmOpen} okText="Confirm Delete" title="Delete user" />
+                  <p>User deleted successfully</p>
+                </section>
+              );
+            }
+            """,
+            "framework": "react",
+            "field": "",
+            "matched_display": "",
+            "expected_display_count": 0,
+            "expected_yaml": ["text: Delete Ada", "text: Confirm Delete", "id: click_confirm_2"],
+        },
+        {
             "name": "vue_profile",
             "file_path": "src/Profile.vue",
             "task": "Verify Vue profile form saves and displays the updated name",
@@ -387,6 +541,8 @@ def test_e2e_real_frontend_samples_verify_impl_dry_run(tmp_path: Path, sample: d
     assert generation_payload["semantic_summary"]["unmatched_data_displays"] == []
     if sample["field"]:
         assert f"text_from: input.{sample['field']}" in generation_payload["yaml"]
+    if sample.get("input_field"):
+        assert f"value_from: input.{sample['input_field']}" in generation_payload["yaml"]
     for reference in sample.get("extra_text_from", []):
         assert f"text_from: {reference}" in generation_payload["yaml"]
     for expected in sample.get("expected_yaml", []):
@@ -419,7 +575,7 @@ def test_e2e_real_frontend_samples_verify_impl_dry_run(tmp_path: Path, sample: d
     assert verify_payload["semantic_summary"]["framework"] == sample["framework"]
     assert verify_payload["semantic_summary"]["matched_data_displays"] == matched_displays
     assert Path(verify_payload["workflow_path"]).exists()
-    if sample["field"]:
+    if sample["field"] or sample.get("input_field"):
         assert Path(verify_payload["inputs_path"]).exists()
     else:
         assert verify_payload.get("inputs_path") is None

@@ -12,7 +12,7 @@ V2 主线已经完成了大部分“代码上下文生成 → workflow 合成 �
 
 ```text
 python -m pytest
-892 passed, 6 skipped
+904 passed, 6 skipped
 
 npm test  # vscode-extension
 passed
@@ -117,7 +117,7 @@ V2 代码上下文验证主线已经收口。本轮继续推进 Phase 1 dogfoodi
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-892 passed, 6 skipped
+904 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -136,7 +136,7 @@ success
 python -m pytest tests/test_cli.py tests/test_context_workflow_synthesis.py -q
 51 passed
 python -m pytest -q
-892 passed, 6 skipped
+904 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 ```
@@ -155,6 +155,21 @@ python -m pytest tests/test_cli.py tests/test_workflow_quality.py tests/test_val
 59 passed
 ```
 
+随后已完成 Phase 2 Task 2.2：
+
+- React/JSX parser 支持组件库字段：`Select`、`DatePicker`、`InputNumber`、`Switch checked={...}`、`Upload`。
+- 字段类型分别归一为 `select`、`date`、`number`、`boolean`、`file`。
+- AntD Modal 的 `okText` / `confirmText` / `title` 会作为 confirm submit action 候选，用于 destructive + confirm 双点击合成。
+- JSX data display 提取已过滤状态/事件类 prop binding，避免 `open={confirmOpen}` 这类状态变量进入 unmatched displays。
+- 已新增 5 条组件字段单元参数化测试、1 条 Modal 单元测试、6 条 e2e 参数化样例。
+
+已通过：
+
+```text
+python -m pytest tests/test_context_workflow_synthesis.py tests/e2e/test_e2e_context_verification.py tests/test_cli.py tests/test_workflow_quality.py -q
+74 passed
+```
+
 V2 既有验证结果：
 
 已通过：
@@ -164,7 +179,7 @@ python -m pytest tests/e2e/test_e2e_context_verification.py tests/test_cli.py te
 136 passed
 
 python -m pytest tests/ -q --tb=short
-892 passed, 6 skipped
+904 passed, 6 skipped
 
 npm test --prefix vscode-extension
 passed
@@ -218,15 +233,15 @@ V2 code-context verification 主线可以阶段性暂停。当前已覆盖：
 后续候选：
 
 - 多步骤 wizard 表单
-- 更复杂组件库适配，例如 MUI/Ant Design 的 Select、DatePicker、Modal
+- 更复杂组件库适配，例如更多 AntD/MUI 组件和真实项目误判样本
 - 真实项目样本集和误判审计
 - 云端执行/商业化链路
 
 ## 推荐下一步执行顺序
 
-1. 跑全量 `python -m pytest` 和 `npm test --prefix vscode-extension`，确认 Phase 2 workflow-lint 改动没有长尾回归。
+1. 跑全量 `python -m pytest` 和 `npm test --prefix vscode-extension`，确认 Phase 2 组件扩展没有长尾回归。
 2. 用 dogfooding 收集真实 `--audit-log` 误判样本。
-3. 根据真实样本做 Phase 2 Task 2.2 AntD/MUI 组件扩展；不要提前扩散到 Phase 3 cloud-server。
+3. 根据真实样本继续补更多组件库解析；不要提前扩散到 Phase 3 cloud-server。
 4. 每轮结束更新 `DEVELOPMENT_LOG.md` / `README_MCP.md` / `NEXT_DEVELOPMENT_HANDOFF.md`。
 
 ## 常用验证命令

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from visual_agent.context_ingestion import CodeChange, GenerationContext, ingest_context, summarize_data_displays
 from visual_agent.workflow import parse_workflow_file
 from visual_agent.workflow_synthesis import generate_workflow_from_context
@@ -484,6 +486,68 @@ def test_react_common_field_components_are_parsed_as_inputs() -> None:
     assert summarize_data_displays(result.semantic_model).matched == ("settings.displayName", "settings.timezone")
     assert "text_from: input.displayName" in result.workflow_yaml
     assert "text_from: input.timezone" in result.workflow_yaml
+
+
+@pytest.mark.parametrize(
+    ("component", "expected_name", "expected_type"),
+    [
+        ('<Select name="status" label="Status" />', "status", "select"),
+        ('<DatePicker name="birthdate" label="Birth date" />', "birthdate", "date"),
+        ('<InputNumber name="quantity" label="Quantity" min="1" max="99" />', "quantity", "number"),
+        ('<Switch checked={enabled} label="Enabled" />', "enabled", "boolean"),
+        ('<Upload name="avatar" label="Avatar" />', "avatar", "file"),
+    ],
+)
+def test_react_component_library_fields_are_parsed(component: str, expected_name: str, expected_type: str) -> None:
+    jsx = f"""
+    function ProductForm() {{
+      return (
+        <form>
+          {component}
+          <button type="submit">Save product</button>
+          <p>Product saved successfully</p>
+        </form>
+      );
+    }}
+    """
+    model = ingest_context(
+        GenerationContext(
+            task_description="Verify product save",
+            code_changes=(CodeChange(file_path="ProductForm.tsx", before=None, after=jsx, change_type="added"),),
+            base_url="http://localhost:3000/products/new",
+            project_root=".",
+        )
+    )
+
+    assert [(field.name, field.field_type) for field in model.form_fields] == [(expected_name, expected_type)]
+
+
+def test_react_antd_modal_ok_text_is_parsed_as_confirm_action() -> None:
+    jsx = """
+    function UsersTable() {
+      return (
+        <section>
+          <button type="button">Delete Ada</button>
+          <Modal open={confirmOpen} okText="Confirm Delete" title="Delete user">
+            Delete Ada?
+          </Modal>
+          <p>User deleted successfully</p>
+        </section>
+      );
+    }
+    """
+    result = generate_workflow_from_context(
+        ctx=GenerationContext(
+            task_description="Verify user deletion",
+            code_changes=(CodeChange(file_path="UsersTable.tsx", before=None, after=jsx, change_type="added"),),
+            base_url="http://localhost:3000/users",
+            project_root=".",
+        ),
+        dry_run=True,
+    )
+
+    assert [action.text for action in result.semantic_model.submit_actions] == ["Delete Ada", "Confirm Delete"]
+    assert "click_confirm_2" in result.workflow_yaml
 
 
 def test_react_list_row_delete_action_is_parsed_as_verification_flow() -> None:

@@ -524,12 +524,26 @@ def _extract_jsx_inputs(content: str) -> list[FormField]:
         "FormField",
         "Select",
         "Textarea",
+        "DatePicker",
+        "RangePicker",
+        "InputNumber",
+        "Switch",
+        "Checkbox",
+        "Upload",
     )
     tag_pattern = "|".join(re.escape(tag) for tag in input_tags)
-    for match in re.finditer(rf"<(?:[A-Za-z.]*\.)?(?:{tag_pattern})\b([^>]*?)(?:/>|>)", content, re.DOTALL):
-        attrs = match.group(1) or ""
-        name = _attr(attrs, "name") or _attr(attrs, "id") or _attr(attrs, "aria-label") or ""
-        field_type = (_attr(attrs, "type") or "text").lower()
+    for match in re.finditer(rf"<((?:[A-Za-z.]*\.)?(?:{tag_pattern}))\b([^>]*?)(?:/>|>)", content, re.DOTALL):
+        tag = match.group(1).split(".")[-1]
+        attrs = match.group(2) or ""
+        name = (
+            _attr(attrs, "name")
+            or _attr(attrs, "id")
+            or _attr(attrs, "aria-label")
+            or _jsx_bound_identifier(attrs, "value")
+            or _jsx_bound_identifier(attrs, "checked")
+            or ""
+        )
+        field_type = _jsx_field_type(tag, attrs)
         if not name or field_type in {"hidden", "submit", "button", "reset", "checkbox", "radio"}:
             continue
         label = _attr(attrs, "label") or _attr(attrs, "placeholder") or _attr(attrs, "aria-label") or name
@@ -549,6 +563,32 @@ def _extract_jsx_inputs(content: str) -> list[FormField]:
     return results
 
 
+def _jsx_field_type(tag: str, attrs: str) -> str:
+    explicit = (_attr(attrs, "type") or "").lower()
+    if explicit:
+        return explicit
+    component_type = {
+        "textarea": "textarea",
+        "Textarea": "textarea",
+        "select": "select",
+        "Select": "select",
+        "DatePicker": "date",
+        "RangePicker": "date_range",
+        "InputNumber": "number",
+        "Switch": "boolean",
+        "Checkbox": "boolean",
+        "Upload": "file",
+    }.get(tag)
+    return component_type or "text"
+
+
+def _jsx_bound_identifier(attrs: str, name: str) -> str | None:
+    match = re.search(rf"\b{re.escape(name)}\s*=\s*{{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*}}", attrs)
+    if not match:
+        return None
+    return match.group(1).split(".")[-1]
+
+
 def _extract_jsx_submit_buttons(content: str) -> list[SubmitAction]:
     results: list[SubmitAction] = []
     for match in re.finditer(r"<button\b([^>]*)>(.*?)</button>|<Button\b([^>]*)>(.*?)</Button>", content, re.DOTALL | re.IGNORECASE):
@@ -558,6 +598,17 @@ def _extract_jsx_submit_buttons(content: str) -> list[SubmitAction]:
         if button_type != "submit" and not _button_text_implies_action(text):
             continue
         if text:
+            results.append(SubmitAction(text=text))
+    results.extend(_extract_jsx_modal_confirm_actions(content))
+    return results
+
+
+def _extract_jsx_modal_confirm_actions(content: str) -> list[SubmitAction]:
+    results: list[SubmitAction] = []
+    for match in re.finditer(r"<(?:[A-Za-z.]*\.)?Modal\b([^>]*?)(?:/>|>)", content, re.DOTALL):
+        attrs = match.group(1) or ""
+        text = _attr(attrs, "okText") or _attr(attrs, "confirmText") or _attr(attrs, "title") or ""
+        if text and _button_text_implies_action(text):
             results.append(SubmitAction(text=text))
     return results
 
@@ -747,10 +798,26 @@ def _extract_react_template_vars(content: str) -> list[str]:
         attr_match = re.search(r"([A-Za-z_:][A-Za-z0-9_:-]*)\s*=\s*$", line_prefix)
         if re.search(r"\bimport\s*$", line_prefix):
             continue
-        if attr_match and attr_match.group(1) in {"action", "onSubmit", "onClick", "onChange", "onBlur", "onFocus"}:
+        if attr_match and _jsx_attr_binding_is_not_display(attr_match.group(1)):
             continue
         results.append(match.group(1))
     return list(dict.fromkeys(results))
+
+
+def _jsx_attr_binding_is_not_display(attr_name: str) -> bool:
+    lower = attr_name.lower()
+    return lower.startswith("on") or lower in {
+        "action",
+        "checked",
+        "defaultchecked",
+        "disabled",
+        "loading",
+        "open",
+        "visible",
+        "required",
+        "selected",
+        "readonly",
+    }
 
 
 def _extract_vue_template_vars(content: str) -> list[str]:
