@@ -24,7 +24,7 @@ python -m pytest tests/ -q --tb=short
 上次全量测试结果：
 
 ```text
-939 passed, 6 skipped
+941 passed, 6 skipped
 ```
 
 如果只是确认 SDK 和 CLI：
@@ -71,7 +71,7 @@ ca2996b Add post-action observation and slow workflow filtering
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-939 passed, 6 skipped
+941 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -92,6 +92,7 @@ success
 - React/JSX parser 已补组件库字段识别：`Select` -> `select`、`DatePicker` -> `date`、`InputNumber` -> `number`、`Switch checked={...}` -> `boolean`、`Checkbox checked={...}` -> `boolean`、`Radio.Group` -> `radio`、`Slider` -> `number`、MUI `Autocomplete` -> `select`、`Upload` -> `file`。
 - React/JSX parser 已支持 React Hook Form：`{...register("field", { required/minLength/... })}` 会提取字段名和验证规则，`<Controller name="field" render={... <Select/> ...}>` 会按 render 组件推断字段类型。
 - React/JSX parser 已支持 Formik hook 写法：`useField("field")` spread binding 和 `getFieldProps("field")` 会提取字段名。
+- React/JSX parser 已支持 `<label htmlFor="field">Label</label>` / `<label for="field">Label</label>` 映射到字段 label，生成 workflow 时使用真实可见 label 定位输入框。
 - React/JSX parser 已识别 AntD Modal `okText` / `confirmText` / `title` 中的确认动作，能合成 destructive action + confirm action 的双点击流程。
 - JSX data display 提取已排除 `open={...}`、`checked={...}`、事件 handler、`options/dataSource/items/data/columns`、React Hook Form/Formik `register/control/render/rules/getFieldProps/useField` 等状态/配置 prop，避免把 Modal/Switch/Autocomplete 状态和表单 helper 误判为页面展示数据；保留 `value={profile.displayName}` 这类 unmatched display 诊断。
 
@@ -105,11 +106,13 @@ python -m pytest tests/test_cli.py tests/test_workflow_quality.py tests/test_val
 python -m pytest tests/test_cli.py tests/test_validation.py tests/test_workflow_quality.py -q
 62 passed
 python -m pytest tests/test_context_workflow_synthesis.py tests/e2e/test_e2e_context_verification.py tests/test_cli.py tests/test_workflow_quality.py tests/test_mcp_server.py tests/test_verification_status.py -q
-175 passed
+177 passed
 python -m pytest tests/test_context_workflow_synthesis.py tests/e2e/test_e2e_context_verification.py -q
-62 passed
+64 passed
+python -m pytest tests/test_cloud_server.py -q
+10 passed
 python -m pytest -q
-939 passed, 6 skipped
+941 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 ```

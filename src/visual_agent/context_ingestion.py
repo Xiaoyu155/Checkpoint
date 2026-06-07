@@ -514,6 +514,7 @@ def _field_from_raw(raw: dict[str, object]) -> FormField | None:
 def _extract_jsx_inputs(content: str) -> list[FormField]:
     results: list[FormField] = []
     formik_bound_fields = _jsx_formik_bound_fields(content)
+    label_map = _jsx_label_map(content)
     input_tags = (
         "input",
         "textarea",
@@ -553,7 +554,14 @@ def _extract_jsx_inputs(content: str) -> list[FormField]:
         field_type = _jsx_field_type(tag, attrs)
         if not name or field_type in {"hidden", "submit", "button", "reset"}:
             continue
-        label = _attr(attrs, "label") or _attr(attrs, "placeholder") or _attr(attrs, "aria-label") or name
+        label = (
+            _attr(attrs, "label")
+            or _attr(attrs, "placeholder")
+            or _attr(attrs, "aria-label")
+            or label_map.get(str(_attr(attrs, "id") or ""))
+            or label_map.get(name)
+            or name
+        )
         lower_name = name.lower()
         required = bool(re.search(r"\brequired(?:\s*=\s*{?true}?)?\b", attrs)) or _jsx_register_bool_option(attrs, "required")
         results.append(
@@ -569,6 +577,19 @@ def _extract_jsx_inputs(content: str) -> list[FormField]:
         )
     results.extend(_extract_jsx_controller_fields(content))
     return results
+
+
+def _jsx_label_map(content: str) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for match in re.finditer(r"<label\b([^>]*)>(.*?)</label>", content, re.DOTALL | re.IGNORECASE):
+        attrs = match.group(1) or ""
+        target = _attr(attrs, "htmlFor") or _attr(attrs, "for") or ""
+        if not target:
+            continue
+        text = _clean_text(re.sub(r"<[^>]+>", " ", match.group(2) or ""))
+        if text:
+            labels[target] = text
+    return labels
 
 
 def _jsx_formik_bound_fields(content: str) -> dict[str, str]:

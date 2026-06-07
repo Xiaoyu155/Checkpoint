@@ -338,6 +338,34 @@ def test_e2e_git_diff_verify_impl_dry_run_writes_status_and_artifacts(tmp_path: 
             "expected_yaml": ["value_from: input.email", "value_from: input.displayName"],
         },
         {
+            "name": "react_labelled_register",
+            "file_path": "src/ContactForm.tsx",
+            "task": "Verify React labelled contact form saves",
+            "base_url": "fixtures/react_labelled_register.html",
+            "fixture": "<form><label for='email'>Work email</label><input id='email' name='email' type='email'><button type='submit'>Save contact</button></form><p>Contact saved successfully</p>",
+            "before": "export function ContactForm() { return <form />; }",
+            "after": """
+            export function ContactForm() {
+              const { register } = useForm();
+              return (
+                <form>
+                  <label htmlFor="email">Work email</label>
+                  <input id="email" type="email" {...register("email", { required: true })} />
+                  <button type="submit">Save contact</button>
+                  <p>Contact saved successfully</p>
+                </form>
+              );
+            }
+            """,
+            "framework": "react",
+            "field": "",
+            "input_field": "email",
+            "matched_display": "",
+            "expected_display_count": 0,
+            "expected_min_fields": 1,
+            "expected_yaml": ["label: Work email", "value_from: input.email"],
+        },
+        {
             "name": "react_antd_select",
             "file_path": "src/ProductStatusForm.tsx",
             "task": "Verify React AntD status form saves",

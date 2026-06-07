@@ -608,6 +608,34 @@ def test_react_formik_hook_fields_are_parsed_from_spread_helpers() -> None:
     assert model.data_displays == ()
 
 
+def test_react_jsx_labels_are_mapped_to_registered_inputs() -> None:
+    jsx = """
+    function ContactForm() {
+      const { register } = useForm();
+      return (
+        <form>
+          <label htmlFor="email">Work email</label>
+          <input id="email" type="email" {...register("email", { required: true })} />
+          <button type="submit">Save contact</button>
+          <p>Contact saved successfully</p>
+        </form>
+      );
+    }
+    """
+    result = generate_workflow_from_context(
+        ctx=GenerationContext(
+            task_description="Verify contact save",
+            code_changes=(CodeChange(file_path="ContactForm.tsx", before=None, after=jsx, change_type="added"),),
+            base_url="http://localhost:3000/contact",
+            project_root=".",
+        ),
+        dry_run=True,
+    )
+
+    assert [(field.name, field.label) for field in result.semantic_model.form_fields] == [("email", "Work email")]
+    assert "label: Work email" in result.workflow_yaml
+
+
 def test_react_antd_modal_ok_text_is_parsed_as_confirm_action() -> None:
     jsx = """
     function UsersTable() {

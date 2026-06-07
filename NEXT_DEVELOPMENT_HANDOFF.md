@@ -12,7 +12,7 @@ V2 主线已经完成了大部分“代码上下文生成 → workflow 合成 �
 
 ```text
 python -m pytest
-939 passed, 6 skipped
+941 passed, 6 skipped
 
 npm test  # vscode-extension
 passed
@@ -117,7 +117,7 @@ V2 代码上下文验证主线已经收口。本轮继续推进 Phase 1 dogfoodi
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-939 passed, 6 skipped
+941 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -136,7 +136,7 @@ success
 python -m pytest tests/test_cli.py tests/test_context_workflow_synthesis.py -q
 51 passed
 python -m pytest -q
-939 passed, 6 skipped
+941 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 ```
@@ -166,17 +166,20 @@ python -m pytest tests/test_cli.py tests/test_validation.py tests/test_workflow_
 - 字段类型分别归一为 `select`、`date`、`number`、`boolean`、`radio`、`file`。
 - React/JSX parser 支持 React Hook Form：`{...register("field", { required/minLength/... })}` 会提取字段名和验证规则，`<Controller name="field" render={... <Select/> ...}>` 会按 render 组件推断字段类型。
 - React/JSX parser 支持 Formik hook 写法：`useField("field")` spread binding 和 `getFieldProps("field")` 会提取字段名。
+- React/JSX parser 支持 `<label htmlFor="field">Label</label>` / `<label for="field">Label</label>` 映射到字段 label，生成 workflow 时使用真实可见 label 定位输入框。
 - AntD Modal 的 `okText` / `confirmText` / `title` 会作为 confirm submit action 候选，用于 destructive + confirm 双点击合成。
 - JSX data display 提取已过滤状态/事件/配置类 prop binding，避免 `open={confirmOpen}`、`options={users}`、`{ register } = useForm()`、`{ getFieldProps } = useFormikContext()` 这类状态变量、数据源或 form helper 进入 unmatched displays。
-- 已新增 12 条组件/Form Hook 字段单元测试、1 条 Modal 单元测试、13 条 e2e 参数化样例。
+- 已新增 13 条组件/Form Hook/Label 字段单元测试、1 条 Modal 单元测试、14 条 e2e 参数化样例。
 
 已通过：
 
 ```text
 python -m pytest tests/test_context_workflow_synthesis.py tests/e2e/test_e2e_context_verification.py tests/test_cli.py tests/test_workflow_quality.py tests/test_mcp_server.py tests/test_verification_status.py -q
-175 passed
+177 passed
 python -m pytest tests/test_context_workflow_synthesis.py tests/e2e/test_e2e_context_verification.py -q
-62 passed
+64 passed
+python -m pytest tests/test_cloud_server.py -q
+10 passed
 ```
 
 V2 既有验证结果：
@@ -188,7 +191,7 @@ python -m pytest tests/e2e/test_e2e_context_verification.py tests/test_cli.py te
 136 passed
 
 python -m pytest tests/ -q --tb=short
-939 passed, 6 skipped
+941 passed, 6 skipped
 
 npm test --prefix vscode-extension
 passed
