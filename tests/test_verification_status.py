@@ -66,6 +66,49 @@ def test_normalize_verification_status_preserves_failed_step_fix_hint() -> None:
     assert status.next_action == "Render Dashboard after login."
 
 
+def test_next_action_for_assert_text_fail_is_actionable() -> None:
+    status = normalize_verification_status(
+        {
+            "schema_version": 1,
+            "result": "fail",
+            "workflow_name": "profile_verification",
+            "quality_score": 0.7,
+            "failed_step": {
+                "id": "assert_success",
+                "action": "assert_text",
+                "expected": "Profile saved successfully",
+                "actual": "保存成功 操作完成",
+            },
+        }
+    )
+
+    assert "Profile saved successfully" in status.next_action
+    assert "当前页面" in status.next_action
+    assert "repair-workflow" in status.next_action
+
+
+def test_next_action_for_needs_improvement_includes_score_threshold_and_gaps() -> None:
+    status = normalize_verification_status(
+        {
+            "schema_version": 1,
+            "result": "needs_workflow_improvement",
+            "workflow_name": "weak_verification",
+            "quality_score": 0.42,
+            "min_quality_score": 0.6,
+            "quality": {
+                "score": 0.42,
+                "gaps": ["no success state assertion"],
+                "recommendation": "Add wait_for_text after submit.",
+            },
+        }
+    )
+
+    assert "0.42" in status.next_action
+    assert "0.6" in status.next_action
+    assert "no success state assertion" in status.next_action
+    assert "Add wait_for_text" in status.next_action
+
+
 def test_status_file_payload_is_compact_and_includes_quality_next_action(tmp_path) -> None:
     payload = enrich_verification_payload(
         {
@@ -156,7 +199,9 @@ def test_status_file_payload_is_compact_and_includes_quality_next_action(tmp_pat
     assert status.semantic_summary.warnings == ("no success state found",)
     assert status.generation_trace == ("field email -> paste input.email",)
     assert compact["generation_trace"] == ["field email -> paste input.email"]
-    assert compact["next_action"] == "Add assert_text after submit."
+    assert "0.5" in compact["next_action"]
+    assert "no success state assertion" in compact["next_action"]
+    assert "Add assert_text after submit." in compact["next_action"]
     assert "workspace" not in compact
 
 
@@ -232,4 +277,5 @@ def test_write_verification_status_round_trips_timeout(tmp_path) -> None:
     assert status.result == "timeout"
     assert status.inputs_source == "generated_template"
     assert status.timeout_seconds == 0.0
-    assert status.next_action.startswith("Increase timeout_seconds")
+    assert status.next_action.startswith("Workflow 执行超时")
+    assert "--timeout-seconds" in status.next_action

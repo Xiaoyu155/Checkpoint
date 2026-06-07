@@ -177,7 +177,7 @@ def build_external_sample_run_plan(
     require_live_auth: bool = False,
 ) -> dict[str, Any]:
     if run_profile not in ALLOWED_EXTERNAL_RUN_PROFILES:
-        raise ValueError("External samples only support dry-run or supervised run profiles.")
+        raise ValueError("External samples only support dry-run, supervised, or semi-auto run profiles.")
     sample_root = Path(root)
     sample = find_external_sample(sample_id, sample_root)
     workflow_path = sample_root / str(sample.get("workflow") or "")

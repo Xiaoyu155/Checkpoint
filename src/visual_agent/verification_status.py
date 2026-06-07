@@ -128,14 +128,65 @@ def verification_next_action(payload: dict[str, Any]) -> str:
         fix_hint = str(failed.get("fix_hint") or "").strip()
         if fix_hint:
             return fix_hint
-        return "Inspect the failed step and update the implementation or generated workflow, then rerun verify_implementation."
+        return failed_step_next_action(failed)
     if result == "needs_workflow_improvement":
         quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
-        recommendation = str(quality.get("recommendation") or "").strip()
-        return recommendation or "Improve generated workflow assertions before treating implementation verification as meaningful."
+        score = _format_optional_number(payload.get("quality_score") if payload.get("quality_score") is not None else quality.get("score"))
+        threshold = _format_optional_number(payload.get("min_quality_score"))
+        gaps = quality.get("gaps") if isinstance(quality.get("gaps"), list) else []
+        recommendation = str(quality.get("recommendation") or "").strip() or "添加成功态断言，例如 wait_for_text、assert_text 或 wait_for_url。"
+        parts = ["生成的 workflow 质量不足"]
+        if score:
+            parts.append(f"质量分 {score}")
+        if threshold:
+            parts.append(f"低于阈值 {threshold}")
+        message = "，".join(parts) + "。"
+        if gaps:
+            message += "缺失：" + "；".join(str(gap) for gap in gaps[:3]) + "。"
+        return message + f"建议：{recommendation}"
     if result == "timeout":
-        return "Increase timeout_seconds, narrow the workflow, or run with dry-run first to diagnose slow steps."
+        timeout_seconds = _format_optional_number(payload.get("timeout_seconds"))
+        suffix = f"（{timeout_seconds}s）" if timeout_seconds else ""
+        return f"Workflow 执行超时{suffix}。建议增加 --timeout-seconds，检查页面加载速度，或先用 --run-profile dry-run 定位卡住的步骤。"
     return "Review the verification result and rerun after making changes."
+
+
+def failed_step_next_action(failed: dict[str, Any]) -> str:
+    action = str(failed.get("action") or "")
+    expected = str(failed.get("expected") or "").strip()
+    actual = str(failed.get("actual") or "").strip()
+    actual_excerpt = _actual_excerpt(actual)
+    if action == "assert_text":
+        expected_text = f"「{expected}」" if expected else "期望文本"
+        return (
+            f"页面上找不到 {expected_text}。检查：1. 表单提交后是否有成功提示；"
+            f"2. 文案是否不同{actual_excerpt}；3. 如需更新断言，运行 visual-agent repair-workflow --workflow <path>。"
+        )
+    if action in {"wait_for", "wait_for_text"}:
+        expected_text = f"「{expected}」" if expected else "目标文本或 URL"
+        return f"等待 {expected_text} 超时。请确认提交后确实显示该状态，或增加 timeout_ms / --timeout-seconds。"
+    if action == "assert_browser_ready":
+        return "页面未加载或为空。请确认 base_url 可访问、dev server 正在运行，并检查是否有首屏错误或长时间 loading。"
+    if action in {"click", "paste", "type"}:
+        return "目标元素无法操作。请检查 label、按钮文案、accessible name、selector 或元素是否被遮挡。"
+    return "检查失败步骤和 run report artifacts，修正实现或生成的 workflow 后重新运行 verify-impl。"
+
+
+def _actual_excerpt(actual: str) -> str:
+    if not actual:
+        return ""
+    compact = " ".join(actual.split())
+    if len(compact) > 180:
+        compact = compact[:177] + "..."
+    return f"；当前页面/错误信息：{compact}"
+
+
+def _format_optional_number(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    return f"{number:g}"
 
 
 def enrich_verification_payload(payload: dict[str, Any], *, workspace_root: Path) -> dict[str, Any]:

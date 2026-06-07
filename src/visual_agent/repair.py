@@ -839,7 +839,7 @@ def verify_workflow_repair(
     workflow_name = str(evidence.get("workflow") or "")
     if not workflow_name:
         return {"status": "skipped", "reason": "workflow name is unavailable"}
-    if run_profile not in {"dry-run", "supervised"}:
+    if run_profile not in {"dry-run", "supervised", "semi-auto"}:
         return {"status": "skipped", "reason": f"unsupported verify_run_profile: {run_profile}"}
     inputs = load_workspace_inputs(workspace, None, inputs_file) if inputs_file else {}
     try:

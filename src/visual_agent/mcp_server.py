@@ -20,7 +20,7 @@ from .workspace import Workspace, build_workspace_report_index, discover_workflo
 
 APP_NAME = "visual-agent"
 APP_VERSION = "0.1.0"
-RUN_PROFILE_ORDER = {"dry-run": 0, "supervised": 1, "approved": 2}
+RUN_PROFILE_ORDER = {"dry-run": 0, "supervised": 1, "semi-auto": 1, "approved": 2}
 MCP_DETAIL_RESPONSE_MAX_CHARS = 8000
 MCP_DETAIL_CONTENT_MAX_CHARS = 7000
 MCP_RESPONSE_MAX_CHARS = 8000
@@ -88,7 +88,7 @@ def mcp_tools() -> list[Tool]:
                     "workspace_root": {"type": "string"},
                     "workflow_name": {"type": "string"},
                     "inputs_file": {"type": "string"},
-                    "run_profile": {"type": "string", "enum": ["dry-run", "supervised", "approved"], "default": "dry-run"},
+                    "run_profile": {"type": "string", "enum": ["dry-run", "supervised", "semi-auto", "approved"], "default": "dry-run"},
                     "verbose": {"type": "boolean", "default": False, "description": "Return verbose run summary instead of compact report."},
                 },
                 "required": ["workspace_root", "workflow_name"],
@@ -197,7 +197,7 @@ def mcp_tools() -> list[Tool]:
                         "default": False,
                         "description": "Rerun the repaired workflow after apply. Defaults to dry-run.",
                     },
-                    "verify_run_profile": {"type": "string", "enum": ["dry-run", "supervised"], "default": "dry-run"},
+                    "verify_run_profile": {"type": "string", "enum": ["dry-run", "supervised", "semi-auto"], "default": "dry-run"},
                     "inputs_file": {"type": "string"},
                     "rollback_on_fail": {
                         "type": "boolean",
@@ -225,7 +225,7 @@ def mcp_tools() -> list[Tool]:
                     "run_id": {"type": "string", "description": "Optional run id. Defaults to latest failed run."},
                     "max_chars": {"type": "integer", "default": 12000},
                     "min_confidence": {"type": "number", "default": 0.75},
-                    "verify_run_profile": {"type": "string", "enum": ["dry-run", "supervised"], "default": "dry-run"},
+                    "verify_run_profile": {"type": "string", "enum": ["dry-run", "supervised", "semi-auto"], "default": "dry-run"},
                     "inputs_file": {"type": "string"},
                     "candidate_id": {"type": "string"},
                     "dry_run": {
@@ -442,7 +442,7 @@ def mcp_tools() -> list[Tool]:
                         "description": "Optional workflow names or workspace-relative paths to run.",
                     },
                     "max_workflows": {"type": "integer", "default": 10},
-                    "run_profile": {"type": "string", "enum": ["dry-run", "supervised"], "default": "dry-run"},
+                    "run_profile": {"type": "string", "enum": ["dry-run", "supervised", "semi-auto"], "default": "dry-run"},
                     "include_slow": {
                         "type": "boolean",
                         "default": False,
@@ -521,7 +521,7 @@ def mcp_tools() -> list[Tool]:
                     "framework_hint": {"type": "string"},
                     "model": {"type": "string", "default": "claude-haiku-4-5-20251001"},
                     "inputs": {"type": "object"},
-                    "run_profile": {"type": "string", "enum": ["dry-run", "supervised", "approved"], "default": "supervised"},
+                    "run_profile": {"type": "string", "enum": ["dry-run", "supervised", "semi-auto", "approved"], "default": "supervised"},
                     "min_quality_score": {
                         "type": "number",
                         "default": 0.6,
@@ -1075,7 +1075,7 @@ def run_verification_payload(args: dict[str, Any]) -> dict[str, Any]:
 
     workspace = require_workspace(args)
     run_profile = str(args.get("run_profile") or "dry-run")
-    if run_profile not in {"dry-run", "supervised"}:
+    if run_profile not in {"dry-run", "supervised", "semi-auto"}:
         raise ValueError(f"Unsupported run_profile: {run_profile}")
     raw_tags = args.get("tags") or ["verification"]
     if not isinstance(raw_tags, list):
@@ -1593,8 +1593,12 @@ def failed_step_payload(step: Any) -> dict[str, Any]:
 
 
 def build_fix_hint(step: Any, *, expected: str = "") -> str:
-    if step.action in {"assert_text", "wait_for"} and expected:
-        return f"Expected UI text or URL fragment was not observed: {expected}. Check that the implementation renders it after the preceding action."
+    if step.action == "assert_text" and expected:
+        return f"页面未找到期望文本：{expected}。检查提交后是否渲染成功提示；如果实际文案不同，请更新 assert_text 或运行 repair-workflow。"
+    if step.action in {"wait_for", "wait_for_text"} and expected:
+        return f"等待期望文本或 URL 超时：{expected}。确认页面会进入该状态，或增加 timeout_ms 后重试。"
+    if step.action == "assert_browser_ready":
+        return "页面未达到可验证状态。确认 base_url 可访问、dev server 正在运行，并检查首屏是否为空或仍在加载。"
     if step.action in {"click", "paste", "type"}:
         return "The target could not be acted on. Check labels, accessible names, button text, or DOM visibility in the implementation."
     return "Inspect the failed step message and the run report artifacts, then update the implementation or generated workflow semantics."

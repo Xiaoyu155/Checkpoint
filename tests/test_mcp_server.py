@@ -518,7 +518,8 @@ def test_mcp_verify_implementation_timeout_before_run_writes_status(tmp_path) ->
     assert result["workflow_path"]
     assert result["run_id"] is None
     assert result["timeout_seconds"] == 0
-    assert result["next_action"].startswith("Increase timeout_seconds")
+    assert result["next_action"].startswith("Workflow 执行超时")
+    assert "--timeout-seconds" in result["next_action"]
     assert result["semantic_summary"]["success_state_count"] >= 1
     assert status["result"] == "timeout"
     assert status["next_action"] == result["next_action"]
