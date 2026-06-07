@@ -15,6 +15,8 @@ class CiTemplateInstall:
     risk_policy_check_command: str
     risk_policy_plan_command: str
     quality_gate_command: str
+    cloud_server_command: str
+    cloud_run_command: str
 
 
 def install_ci_templates(
@@ -50,6 +52,8 @@ def install_ci_templates(
         risk_policy_check_command=risk_policy_check_command(workspace_root),
         risk_policy_plan_command=risk_policy_plan_command(workspace_root),
         quality_gate_command=quality_gate_command(workspace_root),
+        cloud_server_command=cloud_server_command(workspace_root),
+        cloud_run_command=cloud_run_command(workspace_root),
     )
 
 
@@ -63,9 +67,14 @@ def ci_template_install_to_dict(install: CiTemplateInstall) -> dict[str, Any]:
         "risk_policy_check_command": install.risk_policy_check_command,
         "risk_policy_plan_command": install.risk_policy_plan_command,
         "quality_gate_command": install.quality_gate_command,
+        "cloud_server_command": install.cloud_server_command,
+        "cloud_run_command": install.cloud_run_command,
         "notes": [
             "Run risk_policy_check_command before CI quality gates to fail fast on invalid workspace risk policy.",
             "Run risk_policy_plan_command to preview missing workspace.json quality policy defaults.",
+            "For remote CI execution, run cloud_server_command on the browser host and cloud_run_command from CI with VISUAL_AGENT_CLOUD_ENDPOINT and VISUAL_AGENT_CLOUD_API_KEY set from secrets.",
+            "Add --required-org <org> to cloud_server_command when the browser host should enforce X-Visual-Agent-Org.",
+            "Never commit cloud server API keys; use VISUAL_AGENT_CLOUD_SERVER_API_KEY and CI secret storage.",
         ],
     }
 
@@ -80,6 +89,24 @@ def risk_policy_plan_command(workspace_root: str) -> str:
 
 def quality_gate_command(workspace_root: str, *, profile: str = "ci") -> str:
     return f"python -m visual_agent.cli quality-gate --profile {profile} --workspace-root {workspace_root} --run"
+
+
+def cloud_server_command(workspace_root: str) -> str:
+    return (
+        "python -m visual_agent.cli cloud-server "
+        f"--workspace-root {workspace_root} "
+        "--host 0.0.0.0 --port 7890 "
+        "--api-key-env VISUAL_AGENT_CLOUD_SERVER_API_KEY"
+    )
+
+
+def cloud_run_command(workspace_root: str, *, workflow: str = "checkout") -> str:
+    return (
+        "python -m visual_agent.cli cloud-run "
+        f"--workspace-root {workspace_root} "
+        f"--workflow {workflow} "
+        "--execute --transport http --timeout-seconds 30 --max-retries 1 --format json"
+    )
 
 
 def github_actions_template(workspace_root: str) -> str:
@@ -114,6 +141,21 @@ jobs:
 
       - name: Run CI quality gate
         run: {quality_gate_command(workspace_root)}
+
+      # Optional remote browser execution through a separately hosted Visual Agent cloud-server.
+      # Required repository secrets:
+      #   VISUAL_AGENT_CLOUD_ENDPOINT: http(s)://<browser-host>:7890/v1/run
+      #   VISUAL_AGENT_CLOUD_API_KEY: bearer token expected by cloud-server
+      # Optional repository variable:
+      #   VISUAL_AGENT_CLOUD_ORG: org header required by cloud-server
+      # Enable this step after the browser host is reachable from CI.
+      # - name: Run remote Visual Agent workflow
+      #   env:
+      #     VISUAL_AGENT_LICENSE_TIER: pro
+      #     VISUAL_AGENT_CLOUD_ENDPOINT: ${{{{ secrets.VISUAL_AGENT_CLOUD_ENDPOINT }}}}
+      #     VISUAL_AGENT_CLOUD_API_KEY: ${{{{ secrets.VISUAL_AGENT_CLOUD_API_KEY }}}}
+      #     VISUAL_AGENT_CLOUD_ORG: ${{{{ vars.VISUAL_AGENT_CLOUD_ORG }}}}
+      #   run: {cloud_run_command(workspace_root)}
 
       - name: Upload quality reports
         if: always()

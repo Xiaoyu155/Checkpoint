@@ -123,6 +123,7 @@ passed
 - `GET /v1/run/{run_id}/report?format=json|markdown` 可下载脱敏后的持久化报告文件；只允许固定 report JSON/Markdown，不接受任意 path。
 - cloud-server 报告查询复用历史报告 tier gate：free tier 旧报告 detail 返回 HTTP 403 + `status: upgrade_required`，列表中过滤旧报告。
 - cloud-server 已支持可选鉴权：配置 `--api-key` / `--api-key-env` 后，非 health 端点要求 `Authorization: Bearer <token>`；配置 `--required-org` 后还要求匹配 `X-Visual-Agent-Org`。启动输出只展示 auth/org 是否启用，不打印 token。
+- `install-ci-templates` 已输出 `cloud_server_command` / `cloud_run_command`，GitHub Actions 模板包含可启用的远端 `cloud-run --execute --transport http` 注释块，使用 `VISUAL_AGENT_CLOUD_ENDPOINT` / `VISUAL_AGENT_CLOUD_API_KEY` secrets 和可选 `VISUAL_AGENT_CLOUD_ORG` variable。
 - Phase 3 Task 3.2 已完成：`cloud_run` 已启用真实 feature/quota gate。
 - free tier 支持每月 5 次云端执行；未超额时可执行 `cloud-run --execute --transport http`，只有远端返回 `success` 后才记录 `cloud_runs_used`。
 - free tier 超过 5 次/月时，在调用 HTTP transport 前返回 `status: upgrade_required`，包含 `reason: quota_exceeded`、`quota.used/limit/remaining` 和脱敏升级提示，不记录新 usage。
@@ -144,7 +145,9 @@ python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensi
 python -m pytest tests/test_workspace.py tests/test_mcp_server.py tests/test_cli.py tests/test_licensing.py -q
 172 passed
 python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensing.py tests/test_session.py tests/test_workspace.py tests/test_mcp_server.py -q
-203 passed
+206 passed
+python -m pytest tests/test_ci_templates.py -q
+3 passed
 ```
 
 ## 已完成能力
