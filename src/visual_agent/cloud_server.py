@@ -4,11 +4,13 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
+from .console import build_report_detail
 from .models import to_jsonable
 from .security import scrub_secrets
-from .workspace import Workspace, open_workspace, run_workspace_workflow
+from .workspace import Workspace, load_workspace_report_index, open_workspace, run_workspace_workflow
 from .workflow import parse_workflow_file
 
 
@@ -24,14 +26,23 @@ class CloudRunRequestHandler(BaseHTTPRequestHandler):
     server: CloudRunHTTPServer
 
     def do_GET(self) -> None:
-        if self.path == "/v1/health":
+        parsed = urlparse(self.path)
+        if parsed.path == "/v1/health":
             self.write_json({"status": "ok", "workspace": str(self.server.workspace_root)})
             return
-        if self.path.startswith("/v1/run/"):
-            run_id = self.path.removeprefix("/v1/run/").strip("/")
-            payload = self.server.runs.get(run_id)
-            if payload is None:
+        if parsed.path == "/v1/runs":
+            query = parse_qs(parsed.query)
+            payload = list_cloud_run_reports(self.server, limit=bounded_int(first_query_value(query, "limit"), default=20, minimum=1, maximum=100))
+            self.write_json(payload)
+            return
+        if parsed.path.startswith("/v1/run/"):
+            run_id = parsed.path.removeprefix("/v1/run/").strip("/")
+            payload = cloud_run_report_detail(self.server, run_id)
+            if payload.get("status") == "not_found":
                 self.write_json({"status": "not_found", "run_id": run_id, "message": "Run id was not found."}, status=404)
+                return
+            if payload.get("status") == "upgrade_required":
+                self.write_json(payload, status=403)
                 return
             self.write_json(payload)
             return
@@ -99,6 +110,55 @@ def execute_cloud_run_request(server: CloudRunHTTPServer, request: dict[str, Any
     }
     server.runs[result.run_id] = payload
     return payload
+
+
+def list_cloud_run_reports(server: CloudRunHTTPServer, *, limit: int = 20) -> dict[str, Any]:
+    workspace = open_workspace(server.workspace_root)
+    index = load_workspace_report_index(workspace, rebuild=True)
+    entries = index.get("entries") if isinstance(index.get("entries"), list) else []
+    selected = entries[:limit]
+    return {
+        "schema_version": 1,
+        "status": "success",
+        "workspace": str(workspace.root),
+        "total_reports": index.get("total_reports", len(entries)),
+        "returned_reports": len(selected),
+        "history_access": index.get("history_access") if isinstance(index.get("history_access"), dict) else {},
+        "reports": selected,
+    }
+
+
+def cloud_run_report_detail(server: CloudRunHTTPServer, run_id: str) -> dict[str, Any]:
+    workspace = open_workspace(server.workspace_root)
+    summary = server.runs.get(run_id)
+    try:
+        detail = build_report_detail(workspace, run_id)
+    except FileNotFoundError:
+        return summary or {"schema_version": 1, "status": "not_found", "run_id": run_id}
+    if detail.get("status") == "upgrade_required":
+        return detail
+    return {
+        "schema_version": 1,
+        "status": detail.get("status") or (summary or {}).get("status") or "unknown",
+        "run_id": detail.get("run_id") or run_id,
+        "workflow_name": detail.get("workflow_name") or (summary or {}).get("workflow_name") or "",
+        "run_profile": detail.get("run_profile") or (summary or {}).get("run_profile") or "",
+        "report": detail,
+        "summary": summary or {},
+    }
+
+
+def first_query_value(query: dict[str, list[str]], name: str) -> str | None:
+    values = query.get(name)
+    return values[0] if values else None
+
+
+def bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
 
 
 def materialize_request_workflow(workspace: Workspace, request: dict[str, Any]) -> str:

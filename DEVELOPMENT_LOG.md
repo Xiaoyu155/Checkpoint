@@ -24,7 +24,7 @@ python -m pytest tests/ -q --tb=short
 上次全量测试结果：
 
 ```text
-918 passed, 6 skipped
+919 passed, 6 skipped
 ```
 
 如果只是确认 SDK 和 CLI：
@@ -71,7 +71,7 @@ ca2996b Add post-action observation and slow workflow filtering
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-918 passed, 6 skipped
+919 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -105,7 +105,7 @@ python -m pytest tests/test_cli.py tests/test_validation.py tests/test_workflow_
 python -m pytest tests/test_context_workflow_synthesis.py tests/e2e/test_e2e_context_verification.py tests/test_cli.py tests/test_workflow_quality.py -q
 74 passed
 python -m pytest -q
-918 passed, 6 skipped
+919 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 ```
@@ -116,9 +116,11 @@ passed
 
 - 新增 `src/visual_agent/cloud_server.py`，基于 Python 标准库 `ThreadingHTTPServer`，不引入 FastAPI 依赖。
 - 新增 `cloud-server` CLI：`python -m visual_agent.cli cloud-server --workspace-root .agent-workspace --host 127.0.0.1 --port 7890 --run-profile dry-run`。
-- 服务端支持 `GET /v1/health`、`POST /v1/run`、`GET /v1/run/{run_id}`。
+- 服务端支持 `GET /v1/health`、`POST /v1/run`、`GET /v1/runs`、`GET /v1/run/{run_id}`。
 - `POST /v1/run` 兼容现有 `cloud-run --execute --transport http` 的 `workflow_name` / `workspace` / `run_profile` payload，也支持未来 `workflow_yaml` payload 落盘后执行。
 - 本地服务端执行 workspace workflow 后返回 `status`、`run_id`、`report_url`、`steps_passed`、`steps_total`；`cloud-run --execute --transport http` 已可打通本地 server。
+- `GET /v1/runs` 会返回 workspace report index 的 compact 列表；`GET /v1/run/{run_id}` 会读取持久化 workspace report detail，server 重启后仍能查询已有报告。
+- cloud-server 报告查询复用历史报告 tier gate：free tier 旧报告 detail 返回 HTTP 403 + `status: upgrade_required`，列表中过滤旧报告。
 - Phase 3 Task 3.2 已完成：`cloud_run` 已启用真实 feature/quota gate。
 - free tier 支持每月 5 次云端执行；未超额时可执行 `cloud-run --execute --transport http`，只有远端返回 `success` 后才记录 `cloud_runs_used`。
 - free tier 超过 5 次/月时，在调用 HTTP transport 前返回 `status: upgrade_required`，包含 `reason: quota_exceeded`、`quota.used/limit/remaining` 和脱敏升级提示，不记录新 usage。
@@ -139,6 +141,8 @@ python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensi
 92 passed
 python -m pytest tests/test_workspace.py tests/test_mcp_server.py tests/test_cli.py tests/test_licensing.py -q
 172 passed
+python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensing.py tests/test_session.py tests/test_workspace.py tests/test_mcp_server.py -q
+200 passed
 ```
 
 ## 已完成能力
