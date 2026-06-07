@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from time import time
 
 import pytest
 
@@ -710,6 +711,24 @@ def test_mcp_get_run_report_markdown_is_redacted(tmp_path) -> None:
     assert "Report Detail" in text
     assert "secret" not in text.lower()
     assert "cookie" not in text.lower()
+
+
+def test_mcp_get_run_report_blocks_old_history_on_free_tier(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("VISUAL_AGENT_LICENSE_TIER", raising=False)
+    monkeypatch.delenv("VISUAL_AGENT_LICENSE_FILE", raising=False)
+    workspace = init_workspace(tmp_path / "workspace")
+    run = run_workflow_payload({"workspace_root": str(workspace.root), "workflow_name": "local_html_form_workflow", "inputs_file": "demo_login.json"})
+    old_timestamp = time() - 8 * 86400
+    for suffix in (".json", ".md"):
+        os.utime(workspace.reports_dir / f"{run['run_id']}{suffix}", (old_timestamp, old_timestamp))
+
+    result = asyncio.run(call_tool("get_run_report", {"workspace_root": str(workspace.root), "run_id": run["run_id"], "format": "json"}))
+    payload = content_payload(result)
+    artifacts = list_run_artifacts_payload({"workspace_root": str(workspace.root), "run_id": run["run_id"]})
+
+    assert payload["status"] == "upgrade_required"
+    assert payload["history_access"]["reason"] == "history_window_exceeded"
+    assert artifacts["status"] == "upgrade_required"
 
 
 def test_mcp_get_run_report_scrubs_sensitive_field_names_and_values(tmp_path) -> None:

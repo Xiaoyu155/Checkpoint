@@ -24,7 +24,7 @@ python -m pytest tests/ -q --tb=short
 上次全量测试结果：
 
 ```text
-915 passed, 6 skipped
+918 passed, 6 skipped
 ```
 
 如果只是确认 SDK 和 CLI：
@@ -71,7 +71,7 @@ ca2996b Add post-action observation and slow workflow filtering
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-915 passed, 6 skipped
+918 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -105,7 +105,7 @@ python -m pytest tests/test_cli.py tests/test_validation.py tests/test_workflow_
 python -m pytest tests/test_context_workflow_synthesis.py tests/e2e/test_e2e_context_verification.py tests/test_cli.py tests/test_workflow_quality.py -q
 74 passed
 python -m pytest -q
-915 passed, 6 skipped
+918 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 ```
@@ -124,6 +124,8 @@ passed
 - free tier 超过 5 次/月时，在调用 HTTP transport 前返回 `status: upgrade_required`，包含 `reason: quota_exceeded`、`quota.used/limit/remaining` 和脱敏升级提示，不记录新 usage。
 - pro/team/enterprise tier 继续允许无限 `cloud-run --execute --transport http` 打通本地 cloud-server。
 - `usage-status` 已展示 `cloud_run_quota`，markdown 输出 cloud run limit/remaining。
+- 历史报告查询已启用 tier gate：free tier 只能查询最近 7 天 workspace reports；`workspace-reports` / `workspace-report-index` 会过滤旧报告，`workspace-report-detail` 和 MCP `get_run_report` / `list_run_artifacts` 对旧报告返回 `status: upgrade_required` / `reason: history_window_exceeded`。
+- pro/team/enterprise tier 可查询无限历史报告；`workflow_history_unlimited` 已调整为 pro feature。
 - `FeatureGatedError` 已携带 `required_tier/current_tier`，便于 CLI、MCP 或后续云端服务转成机器可读响应。
 
 本轮定向验证：
@@ -132,9 +134,11 @@ passed
 python -m pytest tests/test_cloud_server.py tests/test_cli.py::test_cloud_run_cli_execute_http_calls_local_cloud_server tests/test_cli.py::test_cloud_run_cli_execute_http_without_config_blocks_without_network -q
 5 passed
 python -m pytest tests/test_licensing.py -q
-38 passed
+40 passed
 python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensing.py tests/test_session.py -q
 92 passed
+python -m pytest tests/test_workspace.py tests/test_mcp_server.py tests/test_cli.py tests/test_licensing.py -q
+172 passed
 ```
 
 ## 已完成能力

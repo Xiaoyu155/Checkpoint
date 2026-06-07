@@ -1,11 +1,13 @@
 import json
+import os
 from pathlib import Path
 from threading import Thread
-from time import sleep as sleep_seconds
+from time import sleep as sleep_seconds, time
 
 import pytest
 
 from visual_agent.cli import main
+from visual_agent.console import build_report_detail
 from visual_agent.locks import RunLock
 from visual_agent.gui import build_gui_action_plan, execute_gui_action, safe_execute_gui_action
 from visual_agent.models import ActionStatus
@@ -218,6 +220,52 @@ def test_export_workspace_run_report_can_be_called_explicitly(tmp_path) -> None:
     assert index["total_reports"] == 1
     assert index["entries"][0]["run_id"] == result.run_id
     assert index["entries"][0]["status"] == "success"
+
+
+def test_free_tier_workspace_reports_hide_history_older_than_seven_days(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("VISUAL_AGENT_LICENSE_TIER", raising=False)
+    monkeypatch.delenv("VISUAL_AGENT_LICENSE_FILE", raising=False)
+    workspace = init_workspace(tmp_path / "agent-workspace")
+    inputs = load_workspace_inputs(workspace, None, "demo_login.json")
+    result = run_workspace_workflow(workspace, "local_html_form_workflow", inputs=inputs, dry_run=True)
+    old_timestamp = time() - 8 * 86400
+    for suffix in (".json", ".md"):
+        os.utime(workspace.reports_dir / f"{result.run_id}{suffix}", (old_timestamp, old_timestamp))
+
+    reports = list_workspace_reports(workspace)
+    index = load_workspace_report_index(workspace, rebuild=True)
+    detail = build_report_detail(workspace, result.run_id)
+
+    assert reports == ()
+    assert index["total_reports"] == 0
+    assert index["history_access"]["window_days"] == 7
+    assert detail["status"] == "upgrade_required"
+    assert detail["history_access"]["reason"] == "history_window_exceeded"
+
+    monkeypatch.setenv("VISUAL_AGENT_LICENSE_TIER", "pro")
+    pro_index = load_workspace_report_index(workspace, rebuild=False)
+    assert pro_index["total_reports"] == 1
+    assert pro_index["entries"][0]["run_id"] == result.run_id
+
+
+def test_pro_tier_workspace_reports_can_read_old_history(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("VISUAL_AGENT_LICENSE_TIER", "pro")
+    workspace = init_workspace(tmp_path / "agent-workspace")
+    inputs = load_workspace_inputs(workspace, None, "demo_login.json")
+    result = run_workspace_workflow(workspace, "local_html_form_workflow", inputs=inputs, dry_run=True)
+    old_timestamp = time() - 30 * 86400
+    for suffix in (".json", ".md"):
+        os.utime(workspace.reports_dir / f"{result.run_id}{suffix}", (old_timestamp, old_timestamp))
+
+    reports = list_workspace_reports(workspace)
+    index = load_workspace_report_index(workspace, rebuild=True)
+    detail = build_report_detail(workspace, result.run_id)
+
+    assert reports
+    assert index["total_reports"] == 1
+    assert index["history_access"]["window_days"] is None
+    assert detail["run_id"] == result.run_id
+    assert detail["status"] == "success"
 
 
 def test_workspace_report_index_filters_failed_reports(tmp_path) -> None:

@@ -11,6 +11,7 @@ from .workspace import (
     load_workspace_auto_repair_policy,
     load_workspace_report_index,
     load_workspace_report_tags,
+    workspace_report_access_payload,
     validate_workspace_risk_policy,
     workspace_status,
 )
@@ -249,6 +250,15 @@ def latest_quality_strict_policy_gate_failed(quality: dict[str, Any]) -> bool:
 
 def build_report_detail(workspace: Workspace, run_id: str) -> dict[str, Any]:
     report_path = find_report_json_path(workspace, run_id)
+    access = workspace_report_access_payload(workspace, report_path)
+    if not access["allowed"]:
+        return {
+            "schema_version": 1,
+            "status": "upgrade_required",
+            "run_id": run_id,
+            "history_access": access,
+            "message": access.get("message"),
+        }
     payload = json.loads(report_path.read_text(encoding="utf-8"))
     steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
     compact_steps = [compact_report_step(step) for step in steps if isinstance(step, dict)]
@@ -284,6 +294,21 @@ def build_report_detail(workspace: Workspace, run_id: str) -> dict[str, Any]:
 
 
 def report_detail_to_markdown(detail: dict[str, Any]) -> str:
+    if detail.get("status") == "upgrade_required":
+        access = detail.get("history_access") if isinstance(detail.get("history_access"), dict) else {}
+        return "\n".join(
+            [
+                "# Report Detail",
+                "",
+                "- Status: `upgrade_required`",
+                f"- Run ID: `{detail.get('run_id')}`",
+                f"- Feature: `{access.get('feature') or 'workflow_history_unlimited'}`",
+                f"- Current tier: `{access.get('tier') or 'free'}`",
+                f"- Required tier: `{access.get('required_tier') or 'pro'}`",
+                f"- Reason: `{access.get('reason') or 'history_window_exceeded'}`",
+                f"- Message: {detail.get('message') or access.get('message') or ''}",
+            ]
+        ).rstrip() + "\n"
     summary = detail["summary"]
     lines = [
         f"# Report Detail: {detail['workflow_name']}",

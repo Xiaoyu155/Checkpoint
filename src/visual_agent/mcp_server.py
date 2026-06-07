@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .console import build_report_detail, build_workspace_dashboard, dashboard_to_markdown, report_detail_to_markdown
+from .console import build_report_detail, build_workspace_dashboard, dashboard_to_markdown, find_report_json_path, report_detail_to_markdown
 from .gui import write_gui_action_event
 from .models import to_jsonable
 from .preflight import run_preflight
@@ -15,7 +15,7 @@ from .security import scrub_secrets
 from .validation import validate_workflow_file
 from .verification_status import enrich_verification_payload, report_artifacts, write_verification_status
 from .workflow import parse_workflow_file
-from .workspace import Workspace, build_workspace_report_index, discover_workflows, find_workflow, load_workspace_inputs, run_workspace_workflow
+from .workspace import Workspace, build_workspace_report_index, discover_workflows, find_workflow, load_workspace_inputs, run_workspace_workflow, workspace_report_access_payload
 
 
 APP_NAME = "visual-agent"
@@ -722,6 +722,8 @@ def get_run_report_payload(args: dict[str, Any]) -> dict[str, Any]:
     if not detail:
         raise FileNotFoundError(f"Run report not found: {run_id}")
     safe_detail = scrub_secrets(detail)
+    if isinstance(safe_detail, dict) and safe_detail.get("status") == "upgrade_required":
+        return safe_detail
     if fmt == "markdown":
         content, truncated = budget_mcp_text(report_detail_to_markdown(safe_detail), max_chars=MCP_DETAIL_CONTENT_MAX_CHARS)
         return {
@@ -751,6 +753,20 @@ def get_run_report_payload(args: dict[str, Any]) -> dict[str, Any]:
 def list_run_artifacts_payload(args: dict[str, Any]) -> dict[str, Any]:
     workspace = require_workspace(args)
     run_id = require_str(args, "run_id")
+    try:
+        report_path = find_report_json_path(workspace, run_id)
+    except FileNotFoundError:
+        report_path = None
+    if report_path is not None:
+        access = workspace_report_access_payload(workspace, report_path)
+        if not access["allowed"]:
+            return {
+                "schema_version": 1,
+                "status": "upgrade_required",
+                "run_id": run_id,
+                "history_access": scrub_secrets(access),
+                "message": access.get("message"),
+            }
     artifacts = []
     for suffix in (".json", ".md"):
         path = workspace.reports_dir / f"{run_id}{suffix}"

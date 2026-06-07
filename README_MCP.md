@@ -64,9 +64,9 @@ Local usage counters are stored in `.agent-workspace/agent_session.json` and are
 .\.venv\Scripts\python.exe -m visual_agent.cli usage-status --workspace-root .agent-workspace --format markdown
 ```
 
-`usage-status` reports local runs this month, cloud runs used, the usage reset month, current local license tier, and feature access booleans. It does not print license keys or workflow inputs.
+`usage-status` reports local runs this month, cloud runs used, cloud run quota/remaining, the usage reset month, current local license tier, and feature access booleans. It does not print license keys or workflow inputs.
 
-Cloud workflow execution is still inactive by default. The reserved `run_remote_workflow()` API records `cloud_runs_used` only after an injected/remote client returns `status: success`; the default placeholder and failed remote attempts do not consume cloud usage.
+Cloud workflow execution is explicit. The `run_remote_workflow()` API records `cloud_runs_used` only after an injected/remote client returns `status: success`; failed remote attempts do not consume cloud usage. Free tier has 5 cloud runs per month; once exceeded, cloud execution returns `status: upgrade_required` before network traffic. Pro/team/enterprise tiers have unlimited cloud runs.
 
 Remote configuration readiness is local-only and does not probe the network. Set `VISUAL_AGENT_CLOUD_ENDPOINT`, `VISUAL_AGENT_CLOUD_API_KEY`, and optionally `VISUAL_AGENT_CLOUD_ORG`; `usage-status` reports endpoint, org, key-present status, blockers, and `network_probe: not_run` without printing the key.
 
@@ -86,6 +86,8 @@ Use `cloud-run` for the same safe default flow. Without `--execute`, it only pri
 .\.venv\Scripts\python.exe -m visual_agent.cli cloud-run --workspace-root .agent-workspace --workflow checkout --format markdown
 .\.venv\Scripts\python.exe -m visual_agent.cli cloud-run --workspace-root .agent-workspace --workflow checkout --execute --transport http --timeout-seconds 30 --max-retries 1 --format markdown
 ```
+
+Workspace report history is also tier gated. Free tier can query reports from the last 7 days; older reports are filtered from workspace report lists/indexes and detail/artifact queries return `status: upgrade_required` with `reason: history_window_exceeded`. Pro/team/enterprise tiers can query unlimited report history.
 
 ## Claude Desktop
 

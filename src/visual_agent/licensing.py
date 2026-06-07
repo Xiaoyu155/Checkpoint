@@ -27,17 +27,18 @@ PRO_FEATURES = frozenset(
     {
         "ci_github_check",
         "workflow_history_30d",
+        "workflow_history_unlimited",
         "priority_support",
     }
 )
 
 CLOUD_RUN_FREE_MONTHLY_LIMIT = 5
+WORKFLOW_HISTORY_FREE_DAYS = 7
 
 TEAM_FEATURES = frozenset(
     {
         "team_workspace",
         "shared_workflow_library",
-        "workflow_history_unlimited",
         "audit_log_export",
     }
 )
@@ -128,6 +129,13 @@ def monthly_feature_limit(feature: str, license_: License | None = None) -> int 
     if feature == "cloud_run" and lic.tier == "free":
         return CLOUD_RUN_FREE_MONTHLY_LIMIT
     return None
+
+
+def report_history_window_days(license_: License | None = None) -> int | None:
+    lic = license_ or get_license()
+    if _is_expired(lic):
+        lic = License(tier="free", source=lic.source, key_present=lic.key_present)
+    return WORKFLOW_HISTORY_FREE_DAYS if lic.tier == "free" else None
 
 
 def default_license_path() -> Path:

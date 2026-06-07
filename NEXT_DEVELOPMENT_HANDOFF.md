@@ -12,7 +12,7 @@ V2 主线已经完成了大部分“代码上下文生成 → workflow 合成 �
 
 ```text
 python -m pytest
-915 passed, 6 skipped
+918 passed, 6 skipped
 
 npm test  # vscode-extension
 passed
@@ -117,7 +117,7 @@ V2 代码上下文验证主线已经收口。本轮继续推进 Phase 1 dogfoodi
 python -m pytest tests/test_mcp_server.py tests/test_verification_status.py tests/test_workflow.py::test_run_profile_semi_auto_policy_allows_medium_risk_actions tests/test_workflow.py::test_semi_auto_prompts_before_mutating_action
 83 passed
 python -m pytest
-915 passed, 6 skipped
+918 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 visual-agent mcp-smoke
@@ -136,7 +136,7 @@ success
 python -m pytest tests/test_cli.py tests/test_context_workflow_synthesis.py -q
 51 passed
 python -m pytest -q
-915 passed, 6 skipped
+918 passed, 6 skipped
 npm test --prefix vscode-extension
 passed
 ```
@@ -184,7 +184,7 @@ python -m pytest tests/e2e/test_e2e_context_verification.py tests/test_cli.py te
 136 passed
 
 python -m pytest tests/ -q --tb=short
-915 passed, 6 skipped
+918 passed, 6 skipped
 
 npm test --prefix vscode-extension
 passed
@@ -222,6 +222,8 @@ passed
 - `cloud-run --execute --transport http` 已能打通本地 cloud-server。
 - Phase 3 Task 3.2 已完成：`cloud_run` 已启用真实 feature/quota gate；free tier 支持 5 次/月，超额后在发起 transport 前返回结构化 `status: upgrade_required` / `reason: quota_exceeded`，pro/team/enterprise 继续无限云端执行。
 - `usage-status` 已展示 `cloud_run_quota`，markdown 输出 cloud run limit/remaining。
+- 历史报告查询已启用 tier gate：free tier 只能查询最近 7 天 workspace reports；旧报告会在列表/索引中过滤，并在 detail/MCP artifact 查询时返回 `status: upgrade_required` / `reason: history_window_exceeded`。
+- pro/team/enterprise tier 可查询无限历史报告；`workflow_history_unlimited` 已调整为 pro feature。
 - `FeatureGatedError` 现在包含 `feature`、`required_tier`、`current_tier`；`run_remote_workflow()` 捕获该错误并返回可被 CLI/MCP 消费的升级提示，不影响本地执行和 `generate-from-diff`。
 
 已通过：
@@ -230,9 +232,11 @@ passed
 python -m pytest tests/test_cloud_server.py tests/test_cli.py::test_cloud_run_cli_execute_http_calls_local_cloud_server tests/test_cli.py::test_cloud_run_cli_execute_http_without_config_blocks_without_network -q
 5 passed
 python -m pytest tests/test_licensing.py -q
-38 passed
+40 passed
 python -m pytest tests/test_cli.py tests/test_cloud_server.py tests/test_licensing.py tests/test_session.py -q
 92 passed
+python -m pytest tests/test_workspace.py tests/test_mcp_server.py tests/test_cli.py tests/test_licensing.py -q
+172 passed
 ```
 
 下一位接手者建议先做：
@@ -269,7 +273,7 @@ V2 code-context verification 主线可以阶段性暂停。当前已覆盖：
 
 1. 跑全量 `python -m pytest` 和 `npm test --prefix vscode-extension`，确认 cloud-server 改动没有长尾回归。
 2. dogfooding `cloud-server` + `cloud-run --execute --transport http`，确认 CI/另一进程触发本地浏览器执行的链路稳定；测试环境如需执行云端链路，设置 `VISUAL_AGENT_LICENSE_TIER=pro`。
-3. 下一步可做历史报告查询的 tier gate（free 7 天、pro 无限）或继续完善 cloud-server 报告查询。
+3. 下一步可继续完善 cloud-server 报告查询，或把 cloud-server 的 run history 暴露成 HTTP list/detail endpoints。
 4. 每轮结束更新 `DEVELOPMENT_LOG.md` / `README_MCP.md` / `NEXT_DEVELOPMENT_HANDOFF.md`。
 
 ## 常用验证命令

@@ -15,6 +15,7 @@ from .capabilities import build_atomic_capability_manifest
 from .locks import RunLock, lock_to_dict, queue_to_dict
 from .models import to_jsonable
 from .preflight import run_preflight
+from .licensing import get_license, report_history_window_days
 from .reports import (
     RunSummary,
     list_run_summaries,
@@ -604,6 +605,8 @@ def list_workspace_reports(workspace: Workspace) -> tuple[dict[str, Any], ...]:
             continue
         if path.name in {"index.json", "tags.json"}:
             continue
+        if not workspace_report_access_payload(workspace, path)["allowed"]:
+            continue
         reports.append(
             {
                 "name": path.name,
@@ -622,6 +625,7 @@ def build_workspace_report_index(
     status: str | None = None,
     workflow: str | None = None,
     failed_only: bool = False,
+    include_inaccessible: bool = False,
 ) -> dict[str, Any]:
     workspace.reports_dir.mkdir(parents=True, exist_ok=True)
     entries: list[dict[str, Any]] = []
@@ -631,6 +635,8 @@ def build_workspace_report_index(
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
+            continue
+        if not include_inaccessible and not workspace_report_access_payload(workspace, path)["allowed"]:
             continue
         entry = report_index_entry(workspace, path, payload)
         annotation = load_workspace_report_tags(workspace).get(entry["run_id"])
@@ -655,11 +661,15 @@ def build_workspace_report_index(
         "total_reports": len(entries),
         "failed_reports": sum(1 for entry in entries if entry["status"] == "failed"),
         "entries": entries,
+        "history_access": {
+            "tier": get_license().tier,
+            "window_days": report_history_window_days(),
+        },
     }
 
 
 def write_workspace_report_index(workspace: Workspace) -> Path:
-    index = build_workspace_report_index(workspace)
+    index = build_workspace_report_index(workspace, include_inaccessible=True)
     path = workspace.reports_dir / "index.json"
     path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
@@ -679,14 +689,74 @@ def load_workspace_report_index(
             status=status,
             workflow=workflow,
             failed_only=failed_only,
+            include_inaccessible=True,
         )
         if status is None and workflow is None and not failed_only:
             write_workspace_report_index(workspace)
-        return index
+        return filter_workspace_report_index_for_access(workspace, index)
     path = workspace.reports_dir / "index.json"
     if not path.exists():
         write_workspace_report_index(workspace)
-    return json.loads(path.read_text(encoding="utf-8"))
+    return filter_workspace_report_index_for_access(workspace, json.loads(path.read_text(encoding="utf-8")))
+
+
+def workspace_report_access_payload(workspace: Workspace, report_path: Path) -> dict[str, Any]:
+    license_ = get_license()
+    window_days = report_history_window_days(license_)
+    modified_at = report_path.stat().st_mtime
+    age_days = max(0.0, (time() - modified_at) / 86400)
+    allowed = window_days is None or age_days <= float(window_days)
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "feature": "workflow_history_unlimited",
+        "tier": license_.tier,
+        "allowed": allowed,
+        "window_days": window_days,
+        "age_days": round(age_days, 3),
+        "modified_at": modified_at,
+        "path": report_path.relative_to(workspace.root).as_posix()
+        if report_path.is_relative_to(workspace.root)
+        else str(report_path),
+    }
+    if not allowed:
+        payload.update(
+            {
+                "status": "upgrade_required",
+                "reason": "history_window_exceeded",
+                "required_tier": "pro",
+                "message": (
+                    f"Report is {age_days:.1f} days old; free tier can query reports from the last "
+                    f"{window_days} days. Upgrade to pro for unlimited report history."
+                ),
+            }
+        )
+    return payload
+
+
+def filter_workspace_report_index_for_access(workspace: Workspace, index: dict[str, Any]) -> dict[str, Any]:
+    entries = index.get("entries") if isinstance(index.get("entries"), list) else []
+    visible_entries: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        raw_path = entry.get("json_report")
+        if raw_path:
+            path = Path(str(raw_path))
+            if not path.is_absolute():
+                path = workspace.root / path
+            if path.exists() and not workspace_report_access_payload(workspace, path)["allowed"]:
+                continue
+        visible_entries.append(entry)
+    return {
+        **index,
+        "total_reports": len(visible_entries),
+        "failed_reports": sum(1 for entry in visible_entries if entry.get("status") == "failed"),
+        "entries": visible_entries,
+        "history_access": {
+            "tier": get_license().tier,
+            "window_days": report_history_window_days(),
+        },
+    }
 
 
 def report_index_entry(workspace: Workspace, report_path: Path, payload: dict[str, Any]) -> dict[str, Any]:

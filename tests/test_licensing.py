@@ -16,7 +16,7 @@ from visual_agent.cloud import (
     remote_client_from_env,
     run_remote_workflow,
 )
-from visual_agent.licensing import FeatureGatedError, check_feature, get_license, monthly_feature_limit, require_feature
+from visual_agent.licensing import FeatureGatedError, check_feature, get_license, monthly_feature_limit, report_history_window_days, require_feature
 from visual_agent.session import load_agent_session, record_cloud_run_usage
 
 
@@ -87,6 +87,8 @@ def test_get_license_reads_local_json_file(tmp_path: Path, monkeypatch) -> None:
     assert license_.key_present is True
     assert check_feature("cloud_run") is True
     assert check_feature("team_workspace") is False
+    assert check_feature("workflow_history_unlimited") is True
+    assert report_history_window_days() is None
 
 
 def test_expired_license_downgrades_feature_checks(tmp_path: Path, monkeypatch) -> None:
@@ -99,6 +101,7 @@ def test_expired_license_downgrades_feature_checks(tmp_path: Path, monkeypatch) 
     assert check_feature("local_run") is True
     assert check_feature("cloud_run") is True
     assert monthly_feature_limit("cloud_run") == 5
+    assert report_history_window_days() == 7
 
 
 def test_feature_gated_error_message_is_available_for_future_gates() -> None:
