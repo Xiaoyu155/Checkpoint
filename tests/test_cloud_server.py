@@ -333,6 +333,108 @@ steps:
     assert isinstance(create_event["duration_ms"], float)
 
 
+def test_cloud_server_retention_max_reports_prunes_old_report_pairs(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    (workspace.fixtures_dir / "ready.html").write_text("<p>Ready</p>", encoding="utf-8")
+    (workspace.workflows_dir / "ready.yaml").write_text(
+        """
+schema_version: 1
+name: ready
+version: 1
+steps:
+  - id: observe
+    action: observe_html
+    path: fixtures/ready.html
+  - id: assert_ready
+    action: assert_text
+    text: Ready
+""".strip(),
+        encoding="utf-8",
+    )
+    server = create_cloud_server(workspace_root=workspace.root, port=0, retention_max_reports=2)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    payloads: list[dict] = []
+    try:
+        endpoint = f"http://127.0.0.1:{server.server_port}/v1/run"
+        for _ in range(3):
+            body = json.dumps({"workflow_name": "ready", "workspace": str(workspace.root), "run_profile": "dry-run"}).encode("utf-8")
+            request = Request(endpoint, data=body, headers={"Content-Type": "application/json"}, method="POST")
+            with urlopen(request, timeout=10) as response:
+                payloads.append(json.loads(response.read().decode("utf-8")))
+        with urlopen(f"http://127.0.0.1:{server.server_port}/v1/runs?limit=5", timeout=5) as response:
+            runs_payload = json.loads(response.read().decode("utf-8"))
+        try:
+            urlopen(f"http://127.0.0.1:{server.server_port}/v1/run/{payloads[0]['run_id']}/report?format=json", timeout=5)
+        except HTTPError as exc:
+            pruned_code = exc.code
+            pruned_payload = json.loads(exc.read().decode("utf-8"))
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert payloads[-1]["retention"]["policy"]["max_reports"] == 2
+    assert payloads[-1]["retention"]["deleted_reports"] == 1
+    assert payloads[0]["run_id"] in payloads[-1]["retention"]["run_ids"]
+    assert runs_payload["total_reports"] == 2
+    assert runs_payload["returned_reports"] == 2
+    assert {report["run_id"] for report in runs_payload["reports"]} == {payloads[1]["run_id"], payloads[2]["run_id"]}
+    assert not (workspace.reports_dir / f"{payloads[0]['run_id']}.json").exists()
+    assert not (workspace.reports_dir / f"{payloads[0]['run_id']}.md").exists()
+    assert (workspace.reports_dir / "index.json").exists()
+    assert pruned_code == 404
+    assert pruned_payload["status"] == "not_found"
+
+
+def test_cloud_server_retention_days_prunes_old_reports_only(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    (workspace.fixtures_dir / "ready.html").write_text("<p>Ready</p>", encoding="utf-8")
+    (workspace.workflows_dir / "ready.yaml").write_text(
+        """
+schema_version: 1
+name: ready
+version: 1
+steps:
+  - id: observe
+    action: observe_html
+    path: fixtures/ready.html
+  - id: assert_ready
+    action: assert_text
+    text: Ready
+""".strip(),
+        encoding="utf-8",
+    )
+    server = create_cloud_server(workspace_root=workspace.root, port=0, retention_days=1)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        endpoint = f"http://127.0.0.1:{server.server_port}/v1/run"
+        body = json.dumps({"workflow_name": "ready", "workspace": str(workspace.root), "run_profile": "dry-run"}).encode("utf-8")
+        request = Request(endpoint, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        with urlopen(request, timeout=10) as response:
+            old_payload = json.loads(response.read().decode("utf-8"))
+        old_timestamp = time() - 2 * 86400
+        for suffix in (".json", ".md"):
+            os.utime(workspace.reports_dir / f"{old_payload['run_id']}{suffix}", (old_timestamp, old_timestamp))
+        request = Request(endpoint, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        with urlopen(request, timeout=10) as response:
+            new_payload = json.loads(response.read().decode("utf-8"))
+        with urlopen(f"http://127.0.0.1:{server.server_port}/v1/runs?limit=5", timeout=5) as response:
+            runs_payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert new_payload["retention"]["policy"]["days"] == 1
+    assert new_payload["retention"]["reasons"][old_payload["run_id"]] == "older_than_retention_days"
+    assert not (workspace.reports_dir / f"{old_payload['run_id']}.json").exists()
+    assert (workspace.reports_dir / f"{new_payload['run_id']}.json").exists()
+    assert runs_payload["total_reports"] == 1
+    assert runs_payload["reports"][0]["run_id"] == new_payload["run_id"]
+
+
 def test_cloud_server_runs_endpoint_supports_pagination_and_filters(tmp_path) -> None:
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     (workspace.fixtures_dir / "ready.html").write_text("<p>Ready</p>", encoding="utf-8")

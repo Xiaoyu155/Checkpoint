@@ -6,7 +6,7 @@ import secrets
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
@@ -14,7 +14,7 @@ from uuid import uuid4
 from .console import build_report_detail
 from .models import to_jsonable
 from .security import scrub_secrets
-from .workspace import Workspace, load_workspace_report_index, open_workspace, run_workspace_workflow, workspace_report_access_payload
+from .workspace import Workspace, load_workspace_report_index, open_workspace, run_workspace_workflow, workspace_report_access_payload, write_workspace_report_index
 from .workflow import parse_workflow_file
 
 
@@ -28,6 +28,8 @@ class CloudRunHTTPServer(ThreadingHTTPServer):
         api_key: str = "",
         required_org: str = "",
         audit_log: str | Path = "",
+        retention_max_reports: int = 0,
+        retention_days: float = 0.0,
     ):
         super().__init__(server_address, CloudRunRequestHandler)
         self.workspace_root = Path(workspace_root).resolve()
@@ -35,6 +37,8 @@ class CloudRunHTTPServer(ThreadingHTTPServer):
         self.api_key = str(api_key or "")
         self.required_org = str(required_org or "")
         self.audit_log = Path(audit_log).resolve() if audit_log else None
+        self.retention_max_reports = max(0, int(retention_max_reports or 0))
+        self.retention_days = max(0.0, float(retention_days or 0.0))
         self.runs: dict[str, dict[str, Any]] = {}
 
 
@@ -306,7 +310,79 @@ def execute_cloud_run_request(server: CloudRunHTTPServer, request: dict[str, Any
         "failed_step": failed_steps[0].id if failed_steps else "",
     }
     server.runs[result.run_id] = payload
+    retention = prune_cloud_server_reports(server, workspace)
+    if retention["enabled"]:
+        payload["retention"] = retention
     return payload
+
+
+def prune_cloud_server_reports(server: CloudRunHTTPServer, workspace: Workspace) -> dict[str, Any]:
+    policy = {
+        "max_reports": server.retention_max_reports,
+        "days": server.retention_days,
+    }
+    if server.retention_max_reports <= 0 and server.retention_days <= 0:
+        return {
+            "schema_version": 1,
+            "enabled": False,
+            "policy": policy,
+            "deleted_reports": 0,
+            "deleted_files": 0,
+            "run_ids": [],
+        }
+    reports_dir = workspace.reports_dir
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    candidates: list[dict[str, Any]] = []
+    for path in reports_dir.glob("*.json"):
+        if path.name in {"index.json", "tags.json"}:
+            continue
+        run_id = path.stem
+        try:
+            modified_at = path.stat().st_mtime
+        except OSError:
+            continue
+        candidates.append({"run_id": run_id, "json_path": path, "modified_at": modified_at})
+    candidates.sort(key=lambda item: item["modified_at"], reverse=True)
+
+    delete_reasons: dict[str, str] = {}
+    if server.retention_days > 0:
+        cutoff = time() - server.retention_days * 86400
+        for item in candidates:
+            if item["modified_at"] < cutoff:
+                delete_reasons[str(item["run_id"])] = "older_than_retention_days"
+    remaining = [item for item in candidates if str(item["run_id"]) not in delete_reasons]
+    if server.retention_max_reports > 0:
+        for item in remaining[server.retention_max_reports :]:
+            delete_reasons[str(item["run_id"])] = "over_retention_max_reports"
+
+    deleted_files = 0
+    deleted_run_ids: list[str] = []
+    for item in candidates:
+        run_id = str(item["run_id"])
+        if run_id not in delete_reasons:
+            continue
+        deleted_run_ids.append(run_id)
+        for suffix in (".json", ".md"):
+            report_path = safe_report_file_path(reports_dir, run_id, suffix=suffix)
+            if report_path is None or not report_path.exists():
+                continue
+            try:
+                report_path.unlink()
+                deleted_files += 1
+            except OSError:
+                continue
+        server.runs.pop(run_id, None)
+    if deleted_files:
+        write_workspace_report_index(workspace)
+    return {
+        "schema_version": 1,
+        "enabled": True,
+        "policy": policy,
+        "deleted_reports": len(deleted_run_ids),
+        "deleted_files": deleted_files,
+        "run_ids": deleted_run_ids,
+        "reasons": {run_id: delete_reasons[run_id] for run_id in deleted_run_ids},
+    }
 
 
 def list_cloud_run_reports(
@@ -485,6 +561,8 @@ def create_cloud_server(
     api_key: str = "",
     required_org: str = "",
     audit_log: str | Path = "",
+    retention_max_reports: int = 0,
+    retention_days: float = 0.0,
 ) -> CloudRunHTTPServer:
     return CloudRunHTTPServer(
         (host, int(port)),
@@ -493,6 +571,8 @@ def create_cloud_server(
         api_key=api_key,
         required_org=required_org,
         audit_log=audit_log,
+        retention_max_reports=retention_max_reports,
+        retention_days=retention_days,
     )
 
 
@@ -506,6 +586,8 @@ def serve_cloud_server(
     api_key_env: str = "VISUAL_AGENT_CLOUD_SERVER_API_KEY",
     required_org: str = "",
     audit_log: str | Path = "",
+    retention_max_reports: int = 0,
+    retention_days: float = 0.0,
 ) -> None:
     resolved_api_key = api_key or str(os.environ.get(api_key_env) or "")
     server = create_cloud_server(
@@ -516,6 +598,8 @@ def serve_cloud_server(
         api_key=resolved_api_key,
         required_org=required_org,
         audit_log=audit_log,
+        retention_max_reports=retention_max_reports,
+        retention_days=retention_days,
     )
     print(
         json.dumps(
@@ -529,6 +613,11 @@ def serve_cloud_server(
                     "org_required": bool(required_org),
                     "audit_log_enabled": bool(audit_log),
                     "audit_log": str(Path(audit_log).resolve()) if audit_log else "",
+                    "retention": {
+                        "max_reports": server.retention_max_reports,
+                        "days": server.retention_days,
+                        "enabled": server.retention_max_reports > 0 or server.retention_days > 0,
+                    },
                 }
             ),
             ensure_ascii=False,

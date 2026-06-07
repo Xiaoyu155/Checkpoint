@@ -375,6 +375,8 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_server.add_argument("--api-key-env", default="VISUAL_AGENT_CLOUD_SERVER_API_KEY", help="Environment variable containing bearer token. Default: VISUAL_AGENT_CLOUD_SERVER_API_KEY.")
     cloud_server.add_argument("--required-org", default="", help="Optional required X-Visual-Agent-Org header value.")
     cloud_server.add_argument("--audit-log", default="", help="Optional redacted JSONL request audit log path.")
+    cloud_server.add_argument("--retention-max-reports", type=int, default=0, help="Keep only the newest N workspace reports. Default: 0 disables count retention.")
+    cloud_server.add_argument("--retention-days", type=float, default=0.0, help="Delete workspace reports older than this many days. Default: 0 disables age retention.")
 
     save_task = subparsers.add_parser("save-task-context", help="Save AI task state before switching windows.")
     save_task.add_argument("--task", required=True, help="Current task description.")
@@ -1715,6 +1717,8 @@ def main(argv: list[str] | None = None) -> int:
             api_key_env=args.api_key_env,
             required_org=args.required_org,
             audit_log=args.audit_log,
+            retention_max_reports=args.retention_max_reports,
+            retention_days=args.retention_days,
         )
         return 0
     if args.command == "save-task-context":

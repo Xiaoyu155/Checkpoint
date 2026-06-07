@@ -95,6 +95,8 @@ The minimal `cloud-server` exposes the same reports over HTTP. Use `GET /v1/runs
 
 Add `--audit-log .agent-workspace/audit/cloud_server.jsonl` to append a redacted JSONL event for each non-health request, including auth failures, run creation, report list/detail, and report downloads. Audit events record endpoint, status, HTTP status, run id, workflow, run profile, org, path, query keys, duration, and remote address; they do not record authorization headers, bearer tokens, raw request bodies, or workflow inputs.
 
+Use `--retention-max-reports <n>` and/or `--retention-days <days>` to prune old workspace report pairs after each cloud run. Retention is disabled by default; when enabled it only removes top-level `{run_id}.json` / `{run_id}.md` report files, preserves `index.json`, `tags.json`, and report subdirectories, rebuilds the report index, and includes a `retention` summary in the run response when files are deleted or the policy is active.
+
 `install-ci-templates` includes remote cloud-run wiring hints. The generated GitHub Actions workflow keeps the remote execution step commented out until a browser host is reachable; when enabled, configure `VISUAL_AGENT_CLOUD_ENDPOINT` and `VISUAL_AGENT_CLOUD_API_KEY` as repository secrets and optionally `VISUAL_AGENT_CLOUD_ORG` as a repository variable.
 
 ## Claude Desktop
