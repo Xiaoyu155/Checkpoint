@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -15,10 +17,20 @@ from .workflow import parse_workflow_file
 
 
 class CloudRunHTTPServer(ThreadingHTTPServer):
-    def __init__(self, server_address: tuple[str, int], workspace_root: str | Path, default_run_profile: str = "dry-run"):
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        workspace_root: str | Path,
+        default_run_profile: str = "dry-run",
+        *,
+        api_key: str = "",
+        required_org: str = "",
+    ):
         super().__init__(server_address, CloudRunRequestHandler)
         self.workspace_root = Path(workspace_root).resolve()
         self.default_run_profile = default_run_profile
+        self.api_key = str(api_key or "")
+        self.required_org = str(required_org or "")
         self.runs: dict[str, dict[str, Any]] = {}
 
 
@@ -29,6 +41,8 @@ class CloudRunRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/v1/health":
             self.write_json({"status": "ok", "workspace": str(self.server.workspace_root)})
+            return
+        if not self.require_authorized():
             return
         if parsed.path == "/v1/runs":
             query = parse_qs(parsed.query)
@@ -52,6 +66,8 @@ class CloudRunRequestHandler(BaseHTTPRequestHandler):
         if self.path != "/v1/run":
             self.write_json({"status": "not_found", "message": "Unknown endpoint."}, status=404)
             return
+        if not self.require_authorized():
+            return
         try:
             body = self.read_json()
             payload = execute_cloud_run_request(self.server, body)
@@ -72,11 +88,53 @@ class CloudRunRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
+        self.close_connection = True
+
+    def require_authorized(self) -> bool:
+        failure = cloud_server_auth_failure(
+            headers={key.lower(): value for key, value in self.headers.items()},
+            api_key=self.server.api_key,
+            required_org=self.server.required_org,
+        )
+        if failure is None:
+            return True
+        self.write_json(failure, status=401 if failure["reason"] == "unauthorized" else 403)
+        return False
 
     def log_message(self, _format: str, *_args: Any) -> None:
         return
+
+
+def cloud_server_auth_failure(
+    *,
+    headers: dict[str, str],
+    api_key: str = "",
+    required_org: str = "",
+) -> dict[str, Any] | None:
+    if api_key:
+        auth = str(headers.get("authorization") or "")
+        prefix = "Bearer "
+        token = auth[len(prefix) :].strip() if auth.startswith(prefix) else ""
+        if not token or not secrets.compare_digest(token, api_key):
+            return {
+                "schema_version": 1,
+                "status": "unauthorized",
+                "reason": "unauthorized",
+                "message": "Missing or invalid bearer token.",
+            }
+    if required_org:
+        org = str(headers.get("x-visual-agent-org") or "")
+        if org != required_org:
+            return {
+                "schema_version": 1,
+                "status": "forbidden",
+                "reason": "org_forbidden",
+                "message": "Request org is not allowed.",
+            }
+    return None
 
 
 def execute_cloud_run_request(server: CloudRunHTTPServer, request: dict[str, Any]) -> dict[str, Any]:
@@ -180,8 +238,16 @@ def create_cloud_server(
     host: str = "127.0.0.1",
     port: int = 7890,
     run_profile: str = "dry-run",
+    api_key: str = "",
+    required_org: str = "",
 ) -> CloudRunHTTPServer:
-    return CloudRunHTTPServer((host, int(port)), workspace_root, default_run_profile=run_profile)
+    return CloudRunHTTPServer(
+        (host, int(port)),
+        workspace_root,
+        default_run_profile=run_profile,
+        api_key=api_key,
+        required_org=required_org,
+    )
 
 
 def serve_cloud_server(
@@ -190,11 +256,31 @@ def serve_cloud_server(
     host: str = "127.0.0.1",
     port: int = 7890,
     run_profile: str = "dry-run",
+    api_key: str = "",
+    api_key_env: str = "VISUAL_AGENT_CLOUD_SERVER_API_KEY",
+    required_org: str = "",
 ) -> None:
-    server = create_cloud_server(workspace_root=workspace_root, host=host, port=port, run_profile=run_profile)
+    resolved_api_key = api_key or str(os.environ.get(api_key_env) or "")
+    server = create_cloud_server(
+        workspace_root=workspace_root,
+        host=host,
+        port=port,
+        run_profile=run_profile,
+        api_key=resolved_api_key,
+        required_org=required_org,
+    )
     print(
         json.dumps(
-            to_jsonable({"status": "listening", "host": host, "port": port, "workspace": str(Path(workspace_root).resolve())}),
+            to_jsonable(
+                {
+                    "status": "listening",
+                    "host": host,
+                    "port": port,
+                    "workspace": str(Path(workspace_root).resolve()),
+                    "auth_required": bool(resolved_api_key),
+                    "org_required": bool(required_org),
+                }
+            ),
             ensure_ascii=False,
         )
     )

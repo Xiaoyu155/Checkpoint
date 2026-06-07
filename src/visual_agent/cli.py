@@ -371,6 +371,9 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_server.add_argument("--host", default="127.0.0.1", help="Host to bind. Default: 127.0.0.1.")
     cloud_server.add_argument("--port", type=int, default=7890, help="Port to bind. Default: 7890.")
     cloud_server.add_argument("--run-profile", choices=RUN_PROFILE_CHOICES, default="dry-run", help="Default run profile for requests.")
+    cloud_server.add_argument("--api-key", default="", help="Optional bearer token required for cloud-server requests. Prefer --api-key-env.")
+    cloud_server.add_argument("--api-key-env", default="VISUAL_AGENT_CLOUD_SERVER_API_KEY", help="Environment variable containing bearer token. Default: VISUAL_AGENT_CLOUD_SERVER_API_KEY.")
+    cloud_server.add_argument("--required-org", default="", help="Optional required X-Visual-Agent-Org header value.")
 
     save_task = subparsers.add_parser("save-task-context", help="Save AI task state before switching windows.")
     save_task.add_argument("--task", required=True, help="Current task description.")
@@ -1707,6 +1710,9 @@ def main(argv: list[str] | None = None) -> int:
             host=args.host,
             port=args.port,
             run_profile=args.run_profile,
+            api_key=args.api_key,
+            api_key_env=args.api_key_env,
+            required_org=args.required_org,
         )
         return 0
     if args.command == "save-task-context":

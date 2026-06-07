@@ -127,6 +127,89 @@ steps:
     assert runs_payload["returned_reports"] == 0
 
 
+def test_cloud_server_auth_requires_bearer_token_and_org(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    (workspace.fixtures_dir / "ready.html").write_text("<p>Ready</p>", encoding="utf-8")
+    (workspace.workflows_dir / "ready.yaml").write_text(
+        """
+schema_version: 1
+name: ready
+version: 1
+steps:
+  - id: observe
+    action: observe_html
+    path: fixtures/ready.html
+  - id: assert_ready
+    action: assert_text
+    text: Ready
+""".strip(),
+        encoding="utf-8",
+    )
+    server = create_cloud_server(workspace_root=workspace.root, port=0, api_key="server-secret", required_org="team-a")
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    unauthorized: dict = {}
+    unauthorized_code = 0
+    forbidden: dict = {}
+    forbidden_code = 0
+    try:
+        endpoint = f"http://127.0.0.1:{server.server_port}/v1/run"
+        body = json.dumps({"workflow_name": "ready", "workspace": str(workspace.root), "run_profile": "dry-run"}).encode("utf-8")
+        request = Request(endpoint, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            urlopen(request, timeout=10)
+        except HTTPError as exc:
+            unauthorized = json.loads(exc.read().decode("utf-8"))
+            unauthorized_code = exc.code
+
+        wrong_org_request = Request(
+            endpoint,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer server-secret",
+                "X-Visual-Agent-Org": "team-b",
+            },
+            method="POST",
+        )
+        try:
+            urlopen(wrong_org_request, timeout=10)
+        except HTTPError as exc:
+            forbidden = json.loads(exc.read().decode("utf-8"))
+            forbidden_code = exc.code
+
+        authorized_request = Request(
+            endpoint,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer server-secret",
+                "X-Visual-Agent-Org": "team-a",
+            },
+            method="POST",
+        )
+        with urlopen(authorized_request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        runs_request = Request(
+            f"http://127.0.0.1:{server.server_port}/v1/runs",
+            headers={"Authorization": "Bearer server-secret", "X-Visual-Agent-Org": "team-a"},
+        )
+        with urlopen(runs_request, timeout=5) as response:
+            runs_payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert unauthorized_code == 401
+    assert unauthorized["status"] == "unauthorized"
+    assert "server-secret" not in json.dumps(unauthorized)
+    assert forbidden_code == 403
+    assert forbidden["reason"] == "org_forbidden"
+    assert payload["status"] == "success"
+    assert runs_payload["returned_reports"] == 1
+
+
 def test_http_cloud_transport_can_call_local_cloud_server(tmp_path) -> None:
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     (workspace.fixtures_dir / "ready.html").write_text("<p>Ready</p>", encoding="utf-8")

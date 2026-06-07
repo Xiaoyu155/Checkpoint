@@ -91,6 +91,8 @@ Workspace report history is also tier gated. Free tier can query reports from th
 
 The minimal `cloud-server` exposes the same reports over HTTP. Use `GET /v1/runs` for compact report history and `GET /v1/run/{run_id}` for one persisted report detail. These endpoints reuse the same history tier gate: free tier old reports are filtered from lists and return HTTP 403 with `status: upgrade_required` when fetched directly.
 
+`cloud-server` supports optional request authentication. Start it with `--api-key-env VISUAL_AGENT_CLOUD_SERVER_API_KEY` (default) or `--api-key`, and non-health endpoints require `Authorization: Bearer <token>`. Add `--required-org <org>` to require a matching `X-Visual-Agent-Org` header. The server startup output only reports whether auth/org checks are enabled; it does not print the token.
+
 ## Claude Desktop
 
 Example config:
