@@ -1,4 +1,4 @@
-"""Visual Agent — local-first visual automation SDK for AI coding agents."""
+﻿"""Checkpoint — local-first visual automation SDK for AI coding agents."""
 
 from .capture import Screenshot
 from .locks import VisualLock
@@ -35,3 +35,4 @@ __all__ = [
 ]
 
 __version__ = "0.1.0"
+

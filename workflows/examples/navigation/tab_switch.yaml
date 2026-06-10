@@ -1,0 +1,25 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: tab_switch
+version: 1
+description: Verify switching tabs updates visible content.
+tags: [verification, fast, navigation, example]
+category: navigation
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
+steps:
+  - id: observe_tabs
+    action: observe_browser
+    url: "http://localhost:3000/settings"
+  - id: browser_ready
+    action: assert_browser_ready
+    min_text_length: 1
+    min_interactive: 1
+  - id: open_security_tab
+    action: click
+    target: { text: "Security", role: tab }
+    browser_post_action_observe: true
+  - id: verify_security_panel
+    action: assert_text
+    text: "Security settings"

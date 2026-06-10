@@ -1,8 +1,8 @@
-# Visual Agent for Codex
+﻿# Checkpoint for Codex
 
-Visual Agent gives Codex a local execution layer for workflows that should be
+Checkpoint gives Codex a local execution layer for workflows that should be
 repeatable, permissioned, and auditable. Codex can write code and reason about
-the task; Visual Agent can run local browser or desktop workflows and return
+the task; Checkpoint can run local browser or desktop workflows and return
 redacted reports.
 
 ## Generate The Brief
@@ -12,6 +12,8 @@ redacted reports.
 ```
 
 Give the generated brief to Codex when you want it to use local workflows.
+The first AGENTS.md rule should be: read `.visual-agent-status.md` for current
+verification state before planning fixes.
 
 ## Connect Codex
 
@@ -37,7 +39,7 @@ python -m visual_agent.cli connect cursor --workspace-root .agent-workspace
 5. Read `get_run_report` before accepting the result.
 6. If a run fails, call `summarize_latest_failure`, then `list_run_artifacts` if more detail is needed.
 7. After code changes, call `run_verification` when verification workflows exist.
-8. When no workflow exists for a UI change, call `generate_workflow_from_context` or run `verify-impl` so Visual Agent generates a workflow from the current code diff.
+8. When no workflow exists for a UI change, call `generate_workflow_from_context` or run `verify-impl` so Checkpoint generates a workflow from the current code diff.
 
 ## Project Workspace Rule
 
@@ -54,15 +56,16 @@ Before running workflows in a new Codex chat, confirm the workspace belongs to
 the current project:
 
 ```powershell
-python -m visual_agent.cli workspace-status --root .agent-workspace
+python -m visual_agent.cli show-status --workspace-root .agent-workspace
 ```
 
-The output includes `root` and `project_root`. If `project_root` is not the
-project Codex is editing, stop and initialize the correct workspace.
+The output includes the workspace root, project root, and the latest failure
+or pass state. If `project_root` is not the project Codex is editing, stop and
+initialize the correct workspace.
 
 ## Resume After Reopening Codex
 
-Codex chat memory is not the source of truth. Visual Agent stores pass/fail
+Codex chat memory is not the source of truth. Checkpoint stores pass/fail
 state, latest failure, reports, screenshots, and audit data inside the project
 workspace. In a new Codex chat, start with:
 
@@ -72,6 +75,13 @@ python -m visual_agent.cli context-snapshot --workspace-root .agent-workspace --
 
 MCP clients should call `get_session_context` first. If there is a failure, call
 `summarize_latest_failure` before reading full reports.
+
+For the fastest local check, read the project root `.visual-agent-status.md` or
+run:
+
+```powershell
+python -m visual_agent.cli show-status --workspace-root .agent-workspace --format markdown
+```
 
 ## Fast Verification
 
@@ -137,7 +147,7 @@ affects:
 
 Codex must not treat unit tests as a substitute for product interaction. When a
 task changes UI, forms, navigation, checkout, auth, or visible copy, run at
-least one Visual Agent workflow that actually observes and operates the UI.
+least one Checkpoint workflow that actually observes and operates the UI.
 
 Use `dry-run` first to validate selectors and safety, then use `supervised` for
 real low/medium-risk clicks and typing:
@@ -147,7 +157,7 @@ python -m visual_agent.cli run-workflow --file examples/workflows/form-fill/brow
 python -m visual_agent.cli run-workflow --file examples/workflows/form-fill/browser_form_workflow.yaml --inputs-file examples/inputs/demo_login.json --run-profile supervised
 ```
 
-For browser pages, prefer `observe_browser` plus semantic targets. Visual Agent
+For browser pages, prefer `observe_browser` plus semantic targets. Checkpoint
 captures the DOM, finds controls by label/text/role/selector, and executes
 native Playwright `click`/`fill` actions. This is faster and more reliable than
 OCR for web UI:
@@ -194,16 +204,16 @@ available, use OCR-based actions:
 
 Window title aliases such as `window_title_contains` and
 `window_title_candidates` are treated as target-window capture parameters.
-Visual Agent foregrounds the target, captures it, minimizes it after capture,
+Checkpoint foregrounds the target, captures it, minimizes it after capture,
 and restores the previously active window unless `post_capture: keep` is set.
 
 ## Visual Desktop Behavior
 
-Visual Agent uses a global visual lock for screen/OCR/VLM/UIA foreground
+Checkpoint uses a global visual lock for screen/OCR/VLM/UIA foreground
 operations. Multiple projects can run non-visual checks in parallel, but visual
 steps are serialized so agents do not fight over the same physical desktop.
 
-When a visual step uses `bring_to_front: true`, Visual Agent foregrounds the
+When a visual step uses `bring_to_front: true`, Checkpoint foregrounds the
 target window, captures evidence, minimizes that target window by default, and
 restores the previous foreground window.
 
@@ -236,3 +246,4 @@ window:
 - Treat the report as the source of truth.
 - Do not print cookies, tokens, passwords, storage state, or model credentials.
 - Prefer compact context tools over full reports when the goal is to continue coding.
+

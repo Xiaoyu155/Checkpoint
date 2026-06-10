@@ -1,10 +1,14 @@
-# Visual Agent
+# Checkpoint
 
-Local-first workflow automation for AI assistants.
+[![CI](https://github.com/Xiaoyu155/visual-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Xiaoyu155/visual-agent/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Visual Agent lets Claude Code, Codex, Cursor, Claude Desktop, and other MCP clients run browser and desktop workflows on your machine with permission profiles, audit trails, screenshots, reports, queues, and failure diagnostics.
+Local-first verification runtime for AI agents.
 
-It is not another one-step browser remote control. It is a local execution layer for repeatable, reviewable workflows.
+Checkpoint gives Codex, Claude Code, Cursor, Claude Desktop, and other MCP clients a repeatable local execution layer. Agents can initialize a workspace, run implementation checks, read stable status files, and consume structured failure output without guessing from terminal logs.
+
+It is not a one-step browser remote control or a visual demo tool. The primary contract is verified local workflow execution with reviewable reports, screenshots, audit trails, permission profiles, and machine-readable failure diagnostics. DOM, UIA, OCR, and visual fallback providers are used as execution details behind that contract.
 
 ## What It Does
 
@@ -23,7 +27,7 @@ After running `bootstrap.ps1`, the following are ready with no extra configurati
 | --- | --- | --- |
 | DOM browser automation | **Ready** | Playwright Chromium installed by bootstrap |
 | YAML workflow execution | **Ready** | dry-run, supervised, approved profiles |
-| MCP server (10 tools) | **Ready** | Codex, Claude Code, Cursor, VS Code, Claude Desktop |
+| MCP server | **Ready** | Codex, Claude Code, Cursor, VS Code, Claude Desktop |
 | Run reports and audit logs | **Ready** | Screenshots, failure diagnosis, queue |
 | Windows UIA desktop automation | **Ready** | Windows only, no extra install needed |
 
@@ -45,6 +49,13 @@ Look for the `perception` section in the output to see which providers are activ
 
 ## Install
 
+From PyPI after release:
+
+```powershell
+pip install visual-agent
+python -m playwright install chromium
+```
+
 From a source checkout on Windows:
 
 ```powershell
@@ -55,17 +66,24 @@ powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
 
 The bootstrap script checks Python, creates or reuses `.venv`, installs core dependencies, installs `[web,mcp]` extras, installs Playwright Chromium into `.pw-browsers`, initializes `.agent-workspace`, and writes MCP client config examples.
 
-## Quickstart
+## Quick Start
 
-Run the local dry-run demo:
+From a source checkout, create a workspace and run the first verification loop:
 
 ```powershell
-.\.venv\Scripts\python.exe -m visual_agent.cli demo-workspace-check --root .agent-workspace --format markdown
+.\.venv\Scripts\python.exe -m visual_agent.cli init --root .agent-workspace
+.\.venv\Scripts\python.exe -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify the current change" --run-profile dry-run --format markdown
+.\.venv\Scripts\python.exe -m visual_agent.cli show-status --workspace-root .agent-workspace
 ```
 
-For real work, use one `.agent-workspace` per project. Multiple Codex/Cursor
-windows can use Visual Agent at the same time as long as each window points at
-its own project workspace.
+`verify-impl` can infer a local app URL from `package.json`, `vite.config.*`, `next.config.*`, or `manifest.json`. You can also pass an explicit app URL or fixture:
+
+```powershell
+.\.venv\Scripts\python.exe -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify login redirects" --base-url http://127.0.0.1:5173 --run-profile dry-run --format markdown
+.\.venv\Scripts\python.exe -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify login fixture" --base-url fixtures/login_demo.html --run-profile dry-run --format markdown
+```
+
+For real work, use one `.agent-workspace` per project. Multiple Codex/Cursor windows can use Checkpoint at the same time as long as each window points at its own project workspace.
 
 For fast checks, target the relevant workflow instead of running every visual
 contract:
@@ -74,19 +92,43 @@ contract:
 .\.venv\Scripts\python.exe -m visual_agent.cli verify --workspace-root .agent-workspace --workflow checkout_verification --wait-lock --format markdown
 ```
 
+Run the supervised browser demo path with real Playwright fill/click actions:
+
+```powershell
+.\.venv\Scripts\python.exe -m visual_agent.cli demo-workspace-check --root .agent-workspace --overwrite --run-profile supervised --format markdown
+```
+
 ### Verification Loop
 
-Visual Agent's core value is detecting regressions automatically after code
+Checkpoint's core value is detecting regressions automatically after code
 changes. After the dry-run demo passes, try the verification loop:
 
 1. Run `workspace-run --workflow checkout_verification` - all green.
 2. Change one button label in `examples/web/checkout_verification_demo.html`.
-3. Run again - Visual Agent reports the exact text mismatch in the failing step.
+3. Run again - Checkpoint reports the exact text mismatch in the failing step.
 4. Read `context-snapshot` - a <= 500-token summary tells you what changed and
    where to look.
 5. Fix the label, run again - green.
 
 See [docs/quickstart.md](docs/quickstart.md) for the full walkthrough.
+For the current audit and risk review, see [docs/audit_report.md](docs/audit_report.md).
+For the next-stage execution plan, see [docs/next_phase_plan.md](docs/next_phase_plan.md).
+
+## Example Workflows
+
+Public starter workflows live under [`workflows/examples`](workflows/examples):
+
+- [`auth`](workflows/examples/auth): login, redirect, register, logout, password reset.
+- [`forms`](workflows/examples/forms): contact, search, filters, multi-step forms, inline edit.
+- [`navigation`](workflows/examples/navigation): home smoke, tabs, breadcrumbs, pagination, deep links.
+- [`ecommerce`](workflows/examples/ecommerce): product list/detail, cart, checkout, order confirmation.
+- [`states`](workflows/examples/states): empty, loading, error, success toast, offline fallback.
+- [`admin`](workflows/examples/admin): dashboard, data table, create/edit/delete records.
+- [`mobile_h5`](workflows/examples/mobile_h5): 375x812 mobile H5 starter flows.
+- [`demo-app`](examples/demo-app): Vue 3 + Vite demo with smoke and regression workflows.
+- [`nextjs-demo`](examples/nextjs-demo): Next.js SSR demo with smoke and regression workflows.
+
+Screenshot placeholder: add `docs/images/example-workflows.png` before release, showing the VS Code Workflow Library with one example copied into a project.
 
 For WeChat Mini Program work, see
 [docs/miniprogram_verification.md](docs/miniprogram_verification.md). Visual
@@ -116,6 +158,16 @@ Run release checks:
 
 ## MCP Setup
 
+Use the dedicated [MCP integration guide](docs/mcp-integration.md) for copy-ready Cursor, Claude Code, VS Code, and Claude Desktop configuration.
+
+Recommended agent startup path:
+
+```powershell
+.\.venv\Scripts\python.exe -m visual_agent.cli context-snapshot --workspace-root .agent-workspace --format markdown
+.\.venv\Scripts\python.exe -m visual_agent.cli show-status --workspace-root .agent-workspace
+.\.venv\Scripts\python.exe -m visual_agent.cli mcp-smoke --workspace-root .agent-workspace --format markdown
+```
+
 Generate local MCP client configuration:
 
 ```powershell
@@ -139,8 +191,11 @@ Available MCP tools:
 - `get_workspace_dashboard`
 - `get_latest_failure`
 - `summarize_latest_failure`
-- `get_session_context`
+- `get_failure_details`
+- `get_visual_status`
+- `verify_workflow`
 - `run_verification`
+- `generate_workflow`
 
 Generate a coding-agent brief:
 
@@ -148,6 +203,15 @@ Generate a coding-agent brief:
 .\.venv\Scripts\python.exe -m visual_agent.cli coding-agent-brief --client codex --workspace-root .agent-workspace --format markdown
 .\.venv\Scripts\python.exe -m visual_agent.cli coding-agent-brief --client vscode --workspace-root .agent-workspace --format markdown
 ```
+
+Generate editor integrations or export a workflow to Playwright Test:
+
+```powershell
+.\.venv\Scripts\python.exe -m visual_agent.cli generate-integrations --root . --workspace-root .agent-workspace
+.\.venv\Scripts\python.exe -m visual_agent.cli export-to-playwright workflows\examples\auth\login_basic.yaml --output login_basic.spec.ts
+```
+
+For the standard 5-minute onboarding path, start with [`examples/demo-app`](examples/demo-app) and the workflow suite under [`examples/demo-app/workflows`](examples/demo-app/workflows).
 
 Safety defaults:
 
@@ -161,7 +225,7 @@ Safety defaults:
 
 ## Comparison
 
-| Capability | Playwright MCP | Windows-MCP | Visual Agent |
+| Capability | Playwright MCP | Windows-MCP | Checkpoint |
 | --- | --- | --- | --- |
 | Browser automation | Yes | No | Yes |
 | Windows UIA | No | Yes | Yes |
@@ -176,6 +240,9 @@ Safety defaults:
 ## Docs
 
 - [English Quickstart](docs/quickstart.md)
+- [Workflow schema](docs/workflow-schema.md)
+- [Long-term vision](docs/long_term_vision.md)
+- [MCP integration](docs/mcp-integration.md)
 - [Agent handoff guide](docs/agent_handoff.md)
 - [Codex usage guide](docs/codex.md)
 - [MCP Server README](README_MCP.md)
@@ -183,11 +250,16 @@ Safety defaults:
 - [Cursor MCP setup](docs/mcp_cursor.md)
 - [Claude Code MCP setup](docs/mcp_claude_code.md)
 - [VS Code MCP setup](docs/mcp_vscode.md)
-- [Visual Agent for Codex](docs/codex.md)
-- [Visual Agent for VS Code](docs/vscode.md)
+- [Checkpoint for Codex](docs/codex.md)
+- [Checkpoint for VS Code](docs/vscode.md)
+- [JetBrains plugin spec](docs/jetbrains-plugin-spec.md)
 - [Release checklist](docs/release_checklist.md)
+- [CI/CD](docs/ci-cd.md)
 - [Product positioning](docs/product_positioning.md)
-- [Example workflows](examples/workflows/README.md)
+- [Marketplace API spec](docs/marketplace-api.md)
+- [Terms](docs/terms.md)
+- [Security policy](SECURITY.md)
+- [Example workflows](workflows/examples)
 
 ## Development
 

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -15,12 +15,13 @@ from .context_ingestion import (
     ingest_context,
     summarize_data_displays,
 )
+from .llm_providers import LLMBackend, resolve_llm_backend, run_llm_completion
 from .security import scrub_secrets
 from .workflow import parse_workflow_file, workflow_from_dict
 from .workflow_quality import WorkflowQualityScore, score_workflow_quality
 
 
-LLM_SYSTEM_PROMPT = """You generate Visual Agent workflow YAML for local UI verification.
+LLM_SYSTEM_PROMPT = """You generate Checkpoint workflow YAML for local UI verification.
 
 Return only valid YAML, without markdown fences or explanation.
 
@@ -83,6 +84,7 @@ def generate_workflow_from_context(
     model_id: str = "claude-haiku-4-5-20251001",
 ) -> WorkflowGenerationResult:
     model = ingest_context(ctx)
+    backend = resolve_llm_backend(model_id)
     workflow_name = _task_to_workflow_name(ctx.task_description)
     description = f"Auto-generated verification for: {ctx.task_description[:120]}"
     warnings = list(model.parse_warnings)
@@ -91,7 +93,7 @@ def generate_workflow_from_context(
         yaml_text = synthesize_workflow(model, workflow_name, description)
     else:
         try:
-            yaml_text = synthesize_workflow_with_llm(model, ctx, workflow_name, description, model_id=model_id)
+            yaml_text = synthesize_workflow_with_llm(model, ctx, workflow_name, description, backend=backend)
             generation_method = "llm"
         except Exception as exc:
             warnings.append(f"llm fallback unavailable: {type(exc).__name__}: {exc}")
@@ -443,25 +445,22 @@ def synthesize_workflow_with_llm(
     workflow_name: str,
     description: str,
     *,
-    model_id: str,
+    backend: LLMBackend,
 ) -> str:
-    yaml_text = _generate_with_anthropic(model, ctx, workflow_name, description, model_id=model_id)
+    yaml_text = _generate_with_llm_backend(model, ctx, workflow_name, description, backend=backend)
     yaml_text = _strip_markdown_fences(yaml_text)
     _validate_generated_yaml(yaml_text)
     return yaml_text
 
 
-def _generate_with_anthropic(
+def _generate_with_llm_backend(
     model: UISemanticModel,
     ctx: GenerationContext,
     workflow_name: str,
     description: str,
     *,
-    model_id: str,
+    backend: LLMBackend,
 ) -> str:
-    import anthropic
-
-    client = anthropic.Anthropic()
     code_summary = "\n\n".join(
         f"=== {change.file_path} ({change.change_type}) ===\n{change.after[:2000]}"
         for change in ctx.code_changes
@@ -492,25 +491,10 @@ def _generate_with_anthropic(
         f"Description: {description}\n\n"
         f"Static semantic summary:\n{json.dumps(semantic_summary, ensure_ascii=False, indent=2)}\n\n"
         f"Changed code:\n{code_summary}\n\n"
-        "Generate one Visual Agent workflow YAML that verifies the task. "
+        "Generate one Checkpoint workflow YAML that verifies the task. "
         "Use value_from: input.<field> for user-entered values and never hardcode credentials."
     )
-    message = client.messages.create(
-        model=model_id,
-        max_tokens=1800,
-        system=LLM_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    content = getattr(message, "content", [])
-    if not content:
-        raise RuntimeError("Anthropic returned an empty response.")
-    first = content[0]
-    text = getattr(first, "text", None)
-    if text is None and isinstance(first, dict):
-        text = first.get("text")
-    if not text:
-        raise RuntimeError("Anthropic response did not contain text.")
-    return str(text)
+    return run_llm_completion(backend=backend, system_prompt=LLM_SYSTEM_PROMPT, prompt=prompt, max_tokens=1800)
 
 
 def _save_workflow(yaml_text: str, workflow_name: str, project_root: Path, output_path: Path | None) -> Path:
@@ -742,3 +726,4 @@ def _validate_generated_yaml(yaml_text: str) -> None:
     if not isinstance(payload, dict):
         raise ValueError("YAML root must be an object.")
     workflow_from_dict(payload)
+

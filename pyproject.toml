@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Local-first workflow automation runtime for AI assistants with MCP, audit trails, and safety profiles."
 requires-python = ">=3.10"
 authors = [
-    { name = "Visual Agent contributors" },
+    { name = "Checkpoint contributors" },
 ]
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -29,6 +29,12 @@ test = [
 ]
 mcp = [
     "mcp>=1.0.0",
+]
+cloud = [
+    "boto3>=1.34.0",
+    "celery>=5.3.0",
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
 ]
 
 [project.scripts]

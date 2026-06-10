@@ -1,10 +1,17 @@
 {
   "name": "visual-agent",
-  "displayName": "Visual Agent",
+  "displayName": "Checkpoint",
   "description": "UI verification co-pilot for AI coding assistants. Run workflows, see results, and keep context across coding sessions.",
   "version": "0.1.0",
   "publisher": "visual-agent",
   "license": "MIT",
+  "icon": "icons/visual-agent.png",
+  "keywords": [
+    "visual testing",
+    "playwright",
+    "AI",
+    "workflow"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/Xiaoyu155/visual-agent.git",
@@ -26,7 +33,7 @@
       "activitybar": [
         {
           "id": "visual-agent",
-          "title": "Visual Agent",
+          "title": "Checkpoint",
           "icon": "icons/visual-agent.svg"
         }
       ]
@@ -41,57 +48,116 @@
     },
     "commands": [
       {
+        "command": "visualAgent.quickActions",
+        "title": "Checkpoint: Quick Actions"
+      },
+      {
+        "command": "visualAgent.initWorkspace",
+        "title": "Checkpoint: Init Workspace"
+      },
+      {
         "command": "visualAgent.runAll",
-        "title": "Visual Agent: Run All Workflows"
+        "title": "Checkpoint: Run All Workflows"
       },
       {
         "command": "visualAgent.runLiveSupervised",
-        "title": "Visual Agent: Run Live Supervised Workflows"
+        "title": "Checkpoint: Run Live Supervised Workflows"
       },
       {
         "command": "visualAgent.runAffected",
-        "title": "Visual Agent: Run Affected Workflows"
+        "title": "Checkpoint: Run Affected Workflows"
       },
       {
         "command": "visualAgent.verifyCurrentChange",
-        "title": "Visual Agent: Verify Current Change"
+        "title": "Checkpoint: Verify Current Change"
+      },
+      {
+        "command": "visualAgent.verifyImplementation",
+        "title": "x-agent: Verify Implementation"
       },
       {
         "command": "visualAgent.showLastVerification",
-        "title": "Visual Agent: Show Last AI Verification"
+        "title": "Checkpoint: Show Last AI Verification"
       },
       {
         "command": "visualAgent.showLatestFailure",
-        "title": "Visual Agent: Show Latest Failure"
+        "title": "Checkpoint: Show Latest Failure"
       },
       {
         "command": "visualAgent.autoRepair",
-        "title": "Visual Agent: Auto Repair Latest Failure"
+        "title": "Checkpoint: Auto Repair Latest Failure"
       },
       {
         "command": "visualAgent.generateWorkflow",
-        "title": "Visual Agent: Generate Workflow from Description"
+        "title": "Checkpoint: Generate Workflow from Description"
+      },
+      {
+        "command": "visualAgent.newWorkflow",
+        "title": "Checkpoint: New Workflow"
+      },
+      {
+        "command": "visualAgent.openExamples",
+        "title": "Checkpoint: Open Examples"
+      },
+      {
+        "command": "visualAgent.copyExampleWorkflow",
+        "title": "Checkpoint: Copy Example Workflow"
       },
       {
         "command": "visualAgent.browserSmoke",
-        "title": "Visual Agent: Browser Smoke URL"
+        "title": "Checkpoint: Browser Smoke URL"
       },
       {
         "command": "visualAgent.connectCloud",
-        "title": "Visual Agent: Connect to Cloud (Pro)"
+        "title": "Checkpoint: Connect to Cloud (Pro)"
       },
       {
         "command": "visualAgent.refresh",
-        "title": "Visual Agent: Refresh"
+        "title": "Checkpoint: Refresh"
+      }
+    ],
+    "walkthroughs": [
+      {
+        "id": "visualAgentOnboarding",
+        "title": "Verify with Checkpoint",
+        "description": "Initialize a local workspace, verify an implementation, and inspect the result.",
+        "steps": [
+          {
+            "id": "visualAgentInit",
+            "title": "Initialize a workspace",
+            "description": "Run `Checkpoint: Init Workspace` from the Command Palette.",
+            "completionEvents": [
+              "onCommand:visualAgent.initWorkspace"
+            ]
+          },
+          {
+            "id": "visualAgentVerify",
+            "title": "Verify an implementation",
+            "description": "Run `x-agent: Verify Implementation` from the Command Palette. Leave the URL blank to let Checkpoint infer it.",
+            "completionEvents": [
+              "onCommand:visualAgent.verifyImplementation",
+              "onCommand:visualAgent.verifyCurrentChange"
+            ]
+          },
+          {
+            "id": "visualAgentInspect",
+            "title": "Inspect status and failures",
+            "description": "Use `Checkpoint: Show Last AI Verification` or `Checkpoint: Show Latest Failure` after a run.",
+            "completionEvents": [
+              "onCommand:visualAgent.showLastVerification",
+              "onCommand:visualAgent.showLatestFailure"
+            ]
+          }
+        ]
       }
     ],
     "configuration": {
-      "title": "Visual Agent",
+      "title": "Checkpoint",
       "properties": {
         "visualAgent.workspaceRoot": {
           "type": "string",
           "default": ".agent-workspace",
-          "description": "Workspace root for Visual Agent data."
+          "description": "Workspace root for Checkpoint data."
         },
         "visualAgent.runOnSave": {
           "type": "boolean",
@@ -112,6 +178,11 @@
           "type": "string",
           "default": "python",
           "description": "Path to Python interpreter."
+        },
+        "visualAgent.enableTelemetry": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable Checkpoint telemetry when supported by the Python package. Default: off."
         },
         "visualAgent.maxNotificationChars": {
           "type": "number",
@@ -164,7 +235,7 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
-    "test": "npm run compile && node test/agentStatus.test.js",
+    "test": "npm run compile && node test/agentStatus.test.js && node test/integration/bridge.test.js",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package"
@@ -176,3 +247,4 @@
     "typescript": "^5.0.0"
   }
 }
+

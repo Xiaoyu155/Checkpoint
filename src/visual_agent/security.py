@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import re
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,6 +44,23 @@ SECRET_TEXT_PATTERNS = (
     re.compile(r"(?i)((?:api[_-]?key|password|passwd|pwd|token|secret|authorization|bearer|cookie)\s*[:=]\s*)[^\s,&|;`'\"]{3,}"),
 )
 
+PRIVATE_HOST_SUFFIXES = (".local", ".localdomain", ".internal", ".intranet", ".corp", ".lan")
+PRIVATE_HOSTS = {"localhost"}
+PRIVATE_IP_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in (
+        "127.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "169.254.0.0/16",
+        "100.64.0.0/10",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+    )
+)
+
 
 def scrub_secrets(value: Any, *, extra_secrets: tuple[str, ...] | list[str] | set[str] = ()) -> Any:
     if isinstance(value, dict):
@@ -80,3 +99,27 @@ def contains_secret_text(text: str, *, extra_secrets: tuple[str, ...] | list[str
         if str(secret) and str(secret) in value:
             return True
     return any(pattern.search(value) for pattern in SECRET_TEXT_PATTERNS)
+
+
+def validate_workflow_url(url: str) -> tuple[bool, str | None]:
+    raw = str(url or "").strip()
+    if not raw:
+        return False, "URL is empty."
+    parsed = urlparse(raw)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        return False, f"Unsupported URL scheme: {parsed.scheme or 'missing'}"
+    host = str(parsed.hostname or "").strip().lower()
+    if not host:
+        return False, "URL is missing a host."
+    if host in PRIVATE_HOSTS:
+        return True, None
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        if host.endswith(".localhost") or any(host.endswith(suffix) for suffix in PRIVATE_HOST_SUFFIXES):
+            return False, f"Blocked private host: {host}"
+        return True, None
+    if any(ip in network for network in PRIVATE_IP_NETWORKS) or ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+        return False, f"Blocked private IP address: {host}"
+    return True, None

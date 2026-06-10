@@ -1,8 +1,10 @@
-# Claude Code MCP Setup
+﻿# Claude Code MCP Setup
 
-This guide connects Claude Code to Visual Agent through a local stdio MCP server.
+This guide connects Claude Code to Checkpoint through a local stdio MCP server.
+Add `@.visual-agent-status.md` to Claude Code project context so the current
+verification state follows window switches.
 
-## 1. Bootstrap Visual Agent
+## 1. Bootstrap Checkpoint
 
 ```powershell
 cd "D:\longxia agent"
@@ -61,6 +63,7 @@ Expected result:
 
 - `visual-agent` appears as connected or pending approval.
 - The server exposes workflow tools plus `get_session_context`, `summarize_latest_failure`, and `run_verification`.
+- The server exposes `get_visual_status` for structured `.visual-agent-status.md` reads.
 
 ## 4. Test A Workflow
 
@@ -96,3 +99,4 @@ If the server is pending, approve it from `/mcp`. If the server cannot start, ch
 
 - Claude Code MCP documentation: https://code.claude.com/docs/en/mcp
 - Claude Code CLI reference: https://docs.anthropic.com/en/docs/claude-code/cli-usage
+

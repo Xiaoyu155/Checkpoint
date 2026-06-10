@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import asyncio
+import os
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from threading import Thread
 from time import monotonic, strftime, time
 from typing import Any, Literal
 from uuid import uuid4
@@ -167,6 +171,150 @@ def quality_report_root(
 
 def quality_gate_to_dict(result: QualityGateResult) -> dict[str, Any]:
     return to_jsonable(result)
+
+
+def quality_gate_to_junit_xml(result: QualityGateResult) -> str:
+    tests = list(result.steps)
+    strict_gate = result.risk_summary.get("strict_policy_gate") if isinstance(result.risk_summary.get("strict_policy_gate"), dict) else {}
+    strict_failed = bool(strict_gate.get("failed", False))
+    failed_steps = [step for step in tests if step.status == "failed"]
+    skipped_steps = [step for step in tests if step.status == "planned"]
+    synthetic_strict_case = strict_failed and not failed_steps
+    total_tests = len(tests) + (1 if synthetic_strict_case else 0)
+    failure_count = len(failed_steps) + (1 if synthetic_strict_case else 0)
+    skipped_count = len(skipped_steps)
+    suite = ET.Element(
+        "testsuite",
+        attrib={
+            "name": f"visual-agent-quality-gate:{result.profile}",
+            "tests": str(total_tests),
+            "failures": str(failure_count),
+            "errors": "0",
+            "skipped": str(skipped_count),
+            "time": f"{result.elapsed_seconds:.6f}",
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        },
+    )
+    properties = ET.SubElement(suite, "properties")
+    for key, value in (
+        ("run_id", result.run_id),
+        ("profile", result.profile),
+        ("status", result.status),
+        ("risk_level", result.risk_summary.get("risk_level", "ok")),
+        ("warning_count", result.risk_summary.get("warning_count", 0)),
+    ):
+        ET.SubElement(properties, "property", attrib={"name": str(key), "value": str(value)})
+    for step in tests:
+        testcase = ET.SubElement(
+            suite,
+            "testcase",
+            attrib={
+                "classname": "visual_agent.quality_gate",
+                "name": step.name,
+                "time": f"{float(step.elapsed_seconds or 0.0):.6f}",
+            },
+        )
+        if step.status == "failed":
+            failure = ET.SubElement(
+                testcase,
+                "failure",
+                attrib={"message": f"Step {step.name} failed", "type": "QualityGateStepFailure"},
+            )
+            failure.text = junit_failure_text(step)
+        elif step.status == "planned":
+            ET.SubElement(testcase, "skipped", attrib={"message": "Quality gate was planned only."})
+    if synthetic_strict_case:
+        testcase = ET.SubElement(
+            suite,
+            "testcase",
+            attrib={
+                "classname": "visual_agent.quality_gate",
+                "name": "strict_policy_gate",
+                "time": "0.000000",
+            },
+        )
+        failure = ET.SubElement(
+            testcase,
+            "failure",
+            attrib={"message": "Strict policy gate failed", "type": "StrictPolicyGateFailure"},
+        )
+        failure.text = junit_strict_policy_text(result.risk_summary)
+    return ET.tostring(suite, encoding="utf-8", xml_declaration=True).decode("utf-8")
+
+
+def quality_gate_to_step_summary(result: QualityGateResult, *, junit_output: str | None = None) -> str:
+    lines = [
+        "## Checkpoint Quality Gate",
+        "",
+        f"- Run ID: `{result.run_id}`",
+        f"- Profile: `{result.profile}`",
+        f"- Status: `{result.status}`",
+        f"- Elapsed seconds: {result.elapsed_seconds}",
+        f"- Risk level: `{result.risk_summary.get('risk_level', 'ok')}`",
+        f"- Risk warnings: {result.risk_summary.get('warning_count', 0)}",
+    ]
+    strict_gate = result.risk_summary.get("strict_policy_gate") if isinstance(result.risk_summary.get("strict_policy_gate"), dict) else {}
+    if strict_gate:
+        lines.extend(
+            [
+                "",
+                "### Strict Policy Gate",
+                "",
+                f"- Enabled: {strict_gate.get('enabled', False)}",
+                f"- Failed: {strict_gate.get('failed', False)}",
+                f"- Risk policy errors: {strict_gate.get('risk_policy_error_count', 0)}",
+                f"- Secret scan findings: {strict_gate.get('secret_scan_finding_count', 0)}",
+            ]
+        )
+    failed_steps = [step for step in result.steps if step.status == "failed"]
+    if failed_steps:
+        lines.extend(["", "### Failed Steps", ""])
+        for step in failed_steps:
+            lines.append(f"- `{step.name}` ({step.exit_code})")
+    if junit_output:
+        lines.extend(["", f"JUnit: `{junit_output}`"])
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_quality_gate_step_summary(result: QualityGateResult, *, junit_output: str | None = None, summary_path: str | Path | None = None) -> Path | None:
+    path_value = summary_path or os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path_value:
+        return None
+    path = Path(path_value)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(quality_gate_to_step_summary(result, junit_output=junit_output))
+    return path
+
+
+def junit_failure_text(step: QualityGateStep) -> str:
+    parts = [
+        f"name={step.name}",
+        f"status={step.status}",
+    ]
+    if step.exit_code is not None:
+        parts.append(f"exit_code={step.exit_code}")
+    if step.stdout:
+        parts.append("stdout=" + redact_secret_text(step.stdout)[:2000])
+    if step.stderr:
+        parts.append("stderr=" + redact_secret_text(step.stderr)[:2000])
+    return "\n".join(parts)
+
+
+def junit_strict_policy_text(risk_summary: dict[str, Any]) -> str:
+    strict_gate = risk_summary.get("strict_policy_gate") if isinstance(risk_summary.get("strict_policy_gate"), dict) else {}
+    policy_check = risk_summary.get("risk_policy_check") if isinstance(risk_summary.get("risk_policy_check"), dict) else {}
+    secret_scan = risk_summary.get("secret_scan") if isinstance(risk_summary.get("secret_scan"), dict) else {}
+    return "\n".join(
+        [
+            f"enabled={strict_gate.get('enabled', False)}",
+            f"failed={strict_gate.get('failed', False)}",
+            f"risk_policy_error_count={policy_check.get('error_count', 0)}",
+            f"risk_policy_warning_count={policy_check.get('warning_count', 0)}",
+            f"secret_scan_finding_count={secret_scan.get('finding_count', 0)}",
+        ]
+    )
 
 
 def build_quality_gate_risk_summary(*, workspace_root: str | Path | None = None, profile: str | None = None) -> dict[str, Any]:
@@ -684,8 +832,9 @@ def build_release_check_plan(*, workspace_root: str | Path = ".agent-workspace")
         {"id": "install_check", "command": f"{python} -m visual_agent.cli install-check --format markdown", "required": True},
         {"id": "doctor", "command": f"{python} -m visual_agent.cli doctor", "required": True},
         {"id": "capabilities", "command": f"{python} -m visual_agent.cli atomic-capabilities", "required": True},
-        {"id": "init_workspace", "command": f"{python} -m visual_agent.cli init-workspace --root {workspace} --overwrite", "required": True},
+        {"id": "init_workspace", "command": f"{python} -m visual_agent.cli init --root {workspace} --overwrite", "required": True},
         {"id": "demo_workspace_check", "command": f"{python} -m visual_agent.cli demo-workspace-check --root {workspace} --overwrite", "required": True},
+        {"id": "release_trial", "command": f"{python} -m visual_agent.cli release-trial --workspace-root {workspace} --format markdown", "required": True},
         {"id": "demo_run", "command": f"{python} -m visual_agent.cli workspace-run --root {workspace} --workflow local_html_form_workflow --inputs-file demo_login.json", "required": True},
         {"id": "report_index", "command": f"{python} -m visual_agent.cli workspace-report-index --root {workspace} --rebuild", "required": True},
         {"id": "mcp_client_config", "command": f"{python} -m visual_agent.cli mcp-client-config --workspace-root {workspace} --client cursor --format json", "required": True},
@@ -902,6 +1051,11 @@ def build_coding_agent_brief(
             "safe_default": True,
         },
         {
+            "name": "get_visual_status",
+            "purpose": "Read .visual-agent-status.md as structured JSON for the current verification state.",
+            "safe_default": True,
+        },
+        {
             "name": "get_latest_failure",
             "purpose": "Fetch the newest failed report and diagnosis without asking the human to find a run id.",
             "safe_default": True,
@@ -923,6 +1077,10 @@ def build_coding_agent_brief(
             "command": f"{python} -m visual_agent.cli workspace-dashboard --root {workspace} --format markdown",
         },
         {
+            "id": "show_status",
+            "command": f"{python} -m visual_agent.cli show-status --workspace-root {workspace} --format markdown",
+        },
+        {
             "id": "quality_gate",
             "command": f"{python} -m visual_agent.cli quality-gate --profile ci --workspace-root {workspace} --run --fail-on-secret-leak",
         },
@@ -936,6 +1094,7 @@ def build_coding_agent_brief(
         "Never request approved run_profile unless the workspace policy explicitly allows it and the human asked for it.",
     ]
     rules = [
+        "Read .visual-agent-status.md for current verification state before planning fixes.",
         "Start with dry-run. Escalate to supervised or approved only after explicit human approval.",
         "Treat missing auth_state as a blocker, not as a reason to bypass login or scrape protected data.",
         "Read run reports before claiming success; the report is the source of truth.",
@@ -947,7 +1106,7 @@ def build_coding_agent_brief(
         "client": client_key,
         "repo_root": repo,
         "workspace_root": workspace,
-        "positioning": "Visual Agent is the local execution layer for coding agents: persistent workflows, permission profiles, and audited reports.",
+        "positioning": "Checkpoint is the local execution layer for coding agents: persistent workflows, permission profiles, and audited reports.",
         "mcp": {
             "server_name": "visual-agent",
             "config_client_shape": config_client,
@@ -973,6 +1132,8 @@ def build_coding_agent_brief(
 def coding_agent_brief_to_markdown(brief: dict[str, Any]) -> str:
     lines = [
         "# Coding Agent Brief",
+        "",
+        "> Read `.visual-agent-status.md` for current verification state before planning fixes.",
         "",
         f"- Client: `{brief.get('client')}`",
         f"- Repo root: `{brief.get('repo_root')}`",
@@ -1087,18 +1248,34 @@ def mcp_smoke_check_to_markdown(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def run_demo_workspace_check(*, root: str | Path = ".agent-workspace", overwrite: bool = False) -> dict[str, Any]:
+def run_demo_workspace_check(
+    *,
+    root: str | Path = ".agent-workspace",
+    overwrite: bool = False,
+    run_profile: str = "dry-run",
+    workflow_name: str | None = None,
+    with_demo: bool = True,
+    inputs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from .workspace import init_workspace, run_workspace_workflow, validate_workspace, write_workspace_report_index
 
-    workspace = init_workspace(root, overwrite=overwrite)
+    if run_profile not in {"dry-run", "supervised", "semi-auto"}:
+        raise ValueError(f"Unsupported demo run profile: {run_profile}")
+    workspace = init_workspace(root, overwrite=overwrite, with_demo=with_demo)
     validation = validate_workspace(workspace)
     validation_ok = all(item.valid for item in validation)
+    workflow_name = workflow_name or ("browser_form_workflow" if run_profile != "dry-run" else "local_html_form_workflow")
+    if inputs is None:
+        if workflow_name in {"browser_form_workflow", "local_html_form_workflow"}:
+            inputs = {"username": "demo_user", "password": "demo_password"}
+        else:
+            inputs = {}
     result = run_workspace_workflow(
         workspace,
-        "local_html_form_workflow",
-        inputs={"username": "demo_user", "password": "demo_password"},
-        dry_run=True,
-        run_profile="dry-run",
+        workflow_name,
+        inputs=inputs,
+        dry_run=run_profile == "dry-run",
+        run_profile=run_profile,
         export_report=True,
     )
     index_path = write_workspace_report_index(workspace)
@@ -1112,11 +1289,153 @@ def run_demo_workspace_check(*, root: str | Path = ".agent-workspace", overwrite
         "workspace_root": str(workspace.root),
         "status": "success" if validation_ok and not failed_steps else "failed",
         "validation_ok": validation_ok,
-        "workflow": "local_html_form_workflow",
+        "workflow": workflow_name,
+        "run_profile": run_profile,
         "run_id": result.run_id,
         "failed_steps": failed_steps,
         "report_index": str(index_path),
     }
+
+
+def run_release_trial(
+    *,
+    workspace_root: str | Path = ".agent-workspace",
+    overwrite: bool = True,
+    run_profile: str = "supervised",
+    cloud_org: str = "team-a",
+    cloud_user: str = "release-trial",
+    cloud_api_key: str = "release-trial-key",
+) -> dict[str, Any]:
+    from .cloud import build_http_cloud_transport, execute_remote_workflow_plan
+    from .console import build_workspace_dashboard, dashboard_to_markdown
+    from .cloud_server import create_cloud_server
+    from .reports import build_run_history_report, run_history_report_to_markdown, write_run_history_report
+    from .visual_status import append_cloud_run_history
+    from .workspace import discover_workflows, init_workspace, open_workspace
+
+    if run_profile not in {"dry-run", "supervised", "semi-auto"}:
+        raise ValueError(f"Unsupported release trial run profile: {run_profile}")
+
+    workspace_path = Path(workspace_root).resolve()
+    workspace_exists = workspace_path.exists()
+    workspace = open_workspace(workspace_path) if workspace_exists else init_workspace(workspace_path, with_demo=True, overwrite=overwrite)
+    workflows = discover_workflows(workspace, include_slow=True)
+    selected_workflow = "browser_form_workflow" if run_profile != "dry-run" else "local_html_form_workflow"
+    if workflows:
+        workflow_names = {ref.name for ref in workflows}
+        if selected_workflow not in workflow_names:
+            selected_workflow = workflows[0].name
+    seed_demo = not workspace_exists or not workflows
+    demo_inputs = {"username": "demo_user", "password": "demo_password"} if selected_workflow in {"browser_form_workflow", "local_html_form_workflow"} else {}
+    demo_result = run_demo_workspace_check(
+        root=workspace.root,
+        overwrite=overwrite if not workspace_exists else False,
+        run_profile=run_profile,
+        workflow_name=selected_workflow,
+        with_demo=seed_demo,
+        inputs=demo_inputs,
+    )
+    inputs_file = "demo_login.json" if (workspace.inputs_dir / "demo_login.json").exists() else None
+    mcp_result = run_mcp_smoke_check(workspace_root=workspace.root, workflow=selected_workflow, inputs_file=inputs_file)
+
+    workflow_name = str(demo_result.get("workflow") or selected_workflow)
+    server = create_cloud_server(
+        workspace_root=workspace.root,
+        port=0,
+        api_key=cloud_api_key,
+        required_org=cloud_org,
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        transport = build_http_cloud_transport(
+            endpoint=f"http://127.0.0.1:{server.server_port}/v1/run",
+            api_key=cloud_api_key,
+            org=cloud_org,
+            user_id=cloud_user,
+        )
+        cloud_result = execute_remote_workflow_plan(
+            workflow_name,
+            workspace.root,
+            run_profile=run_profile,
+            inputs_file=inputs_file,
+            execute=True,
+            transport=transport,
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    cloud_run_result = cloud_result.get("result") if isinstance(cloud_result.get("result"), dict) else {}
+    if cloud_run_result:
+        try:
+            append_cloud_run_history(workspace.root, cloud_run_result)
+        except Exception:
+            pass
+
+    dashboard = build_workspace_dashboard(workspace, limit=5)
+    dashboard_markdown = dashboard_to_markdown(dashboard)
+    run_history_report = build_run_history_report(workspace.root, limit=10)
+    run_history_report_markdown = run_history_report_to_markdown(run_history_report)
+    run_history_report["ai_summary"] = {
+        "schema_version": 1,
+        "provider": "none",
+        "model": None,
+        "status": "generated",
+        "source": "deterministic",
+        "text": run_history_report_markdown.splitlines()[0] if run_history_report_markdown else "Release trial report generated.",
+        "prompt": None,
+        "error": None,
+    }
+    report_path = write_run_history_report(workspace.root, output_path=workspace.root / "reports" / "release_trial_report.html", limit=10)
+
+    checks = [
+        {
+            "id": "demo_workspace_check",
+            "status": demo_result.get("status") or "failed",
+            "workflow": demo_result.get("workflow") or "",
+            "run_id": demo_result.get("run_id") or "",
+        },
+        {
+            "id": "mcp_smoke",
+            "status": mcp_result.get("status") or "failed",
+            "workflow": mcp_result.get("workflow") or selected_workflow,
+            "run_id": mcp_result.get("run_id") or "",
+            "check_count": mcp_result.get("check_count") or 0,
+        },
+        {
+            "id": "cloud_run",
+            "status": cloud_run_result.get("status") or "failed",
+            "workflow_name": cloud_run_result.get("workflow_name") or workflow_name,
+            "run_id": cloud_run_result.get("run_id") or "",
+            "workflow_source": cloud_run_result.get("workflow_source") or cloud_result.get("workflow_source") or "",
+            "workflow_id": cloud_run_result.get("workflow_id") or cloud_result.get("workflow_id") or "",
+            "network_sent": bool(cloud_result.get("network_sent", False)),
+        },
+    ]
+    failed = [item for item in checks if item.get("status") != "success"]
+    status = "success" if not failed else "failed"
+    result = {
+        "schema_version": 1,
+        "workspace_root": str(workspace.root),
+        "status": status,
+        "run_profile": run_profile,
+        "cloud_org": cloud_org,
+        "cloud_user": cloud_user,
+        "checks": checks,
+        "failed_count": len(failed),
+        "demo_workspace_check": demo_result,
+        "mcp_smoke": mcp_result,
+        "cloud_run": cloud_result,
+        "workspace_dashboard": dashboard,
+        "workspace_dashboard_markdown": dashboard_markdown,
+        "run_history_report": run_history_report,
+        "run_history_report_markdown": run_history_report_markdown,
+        "run_history_report_path": str(report_path),
+    }
+    result["release_trial_bundle"] = write_release_trial_bundle(workspace.root, result)
+    return result
 
 
 def demo_workspace_check_to_markdown(result: dict[str, Any]) -> str:
@@ -1127,6 +1446,7 @@ def demo_workspace_check_to_markdown(result: dict[str, Any]) -> str:
         f"- Status: `{result.get('status')}`",
         f"- Validation OK: `{result.get('validation_ok')}`",
         f"- Workflow: `{result.get('workflow')}`",
+        f"- Run profile: `{result.get('run_profile') or 'dry-run'}`",
         f"- Run id: `{result.get('run_id')}`",
         f"- Report index: `{result.get('report_index')}`",
     ]
@@ -1138,3 +1458,95 @@ def demo_workspace_check_to_markdown(result: dict[str, Any]) -> str:
                 lines.append(f"- `{step.get('id')}` {step.get('message') or ''}")
     lines.append("")
     return "\n".join(lines)
+
+
+def release_trial_to_markdown(result: dict[str, Any]) -> str:
+    lines = [
+        "# Release Trial",
+        "",
+        f"- Workspace root: `{result.get('workspace_root')}`",
+        f"- Status: `{result.get('status')}`",
+        f"- Run profile: `{result.get('run_profile')}`",
+        f"- Cloud org: `{result.get('cloud_org')}`",
+        f"- Cloud user: `{result.get('cloud_user')}`",
+        "",
+        "| id | status | run_id |",
+        "| --- | --- | --- |",
+    ]
+    for check in result.get("checks", []) if isinstance(result.get("checks"), list) else []:
+        if isinstance(check, dict):
+            lines.append(
+                "| "
+                + " | ".join(
+                    markdown_cell(value)
+                    for value in (check.get("id"), check.get("status"), check.get("run_id"))
+                )
+                + " |"
+            )
+    demo = result.get("demo_workspace_check") if isinstance(result.get("demo_workspace_check"), dict) else {}
+    mcp = result.get("mcp_smoke") if isinstance(result.get("mcp_smoke"), dict) else {}
+    cloud = result.get("cloud_run") if isinstance(result.get("cloud_run"), dict) else {}
+    dashboard = result.get("workspace_dashboard") if isinstance(result.get("workspace_dashboard"), dict) else {}
+    report = result.get("run_history_report") if isinstance(result.get("run_history_report"), dict) else {}
+    if demo:
+        lines.extend(["", "## Demo Workspace", "", demo_workspace_check_to_markdown(demo).strip()])
+    if mcp:
+        lines.extend(["", "## MCP Smoke", "", mcp_smoke_check_to_markdown(mcp).strip()])
+    if cloud:
+        cloud_run = cloud.get("result") if isinstance(cloud.get("result"), dict) else {}
+        lines.extend(
+            [
+                "",
+                "## Cloud Run",
+                "",
+                f"- Status: `{cloud.get('status') or 'failed'}`",
+                f"- Run id: `{cloud_run.get('run_id') or cloud.get('run_id') or ''}`",
+                f"- Workflow source: `{cloud_run.get('workflow_source') or cloud.get('workflow_source') or ''}`",
+            ]
+        )
+    if dashboard:
+        health = dashboard.get("health") if isinstance(dashboard.get("health"), dict) else {}
+        lines.extend(
+            [
+                "",
+                "## Workspace Dashboard",
+                "",
+                f"- Health: `{health.get('status') or 'unknown'}`",
+                f"- Issues: {', '.join(health.get('issues') or []) or 'none'}",
+                f"- Report path: `{result.get('run_history_report_path') or ''}`",
+            ]
+        )
+    if report:
+        lines.extend(
+            [
+                "",
+                "## Run History Report",
+                "",
+                f"- Total runs: `{report.get('summary', {}).get('total_runs', 0) if isinstance(report.get('summary'), dict) else 0}`",
+                f"- Pass rate: `{round(float(report.get('summary', {}).get('pass_rate') or 0.0) * 100, 1) if isinstance(report.get('summary'), dict) else 0.0}%`",
+            ]
+        )
+    bundle = result.get("release_trial_bundle") if isinstance(result.get("release_trial_bundle"), dict) else {}
+    if bundle:
+        lines.extend(
+            [
+                "",
+                "## Bundle",
+                "",
+                f"- JSON: `{bundle.get('json') or ''}`",
+                f"- Markdown: `{bundle.get('markdown') or ''}`",
+            ]
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_release_trial_bundle(workspace_root: str | Path, result: dict[str, Any]) -> dict[str, str]:
+    workspace = Path(workspace_root).resolve()
+    reports_dir = workspace / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    bundle_json = reports_dir / "release_trial_bundle.json"
+    bundle_markdown = reports_dir / "release_trial_bundle.md"
+    bundle_json.write_text(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2), encoding="utf-8")
+    bundle_markdown.write_text(release_trial_to_markdown(result), encoding="utf-8")
+    return {"json": str(bundle_json), "markdown": str(bundle_markdown)}

@@ -33,6 +33,26 @@
       ]
     },
     {
+      "id": "applications",
+      "title": "Demo application workflows",
+      "workflows": [
+        "examples/demo-app/workflows/home_smoke.yaml",
+        "examples/demo-app/workflows/login_smoke.yaml",
+        "examples/demo-app/workflows/login_regression.yaml",
+        "examples/demo-app/workflows/list_smoke.yaml",
+        "examples/demo-app/workflows/list_regression.yaml",
+        "examples/demo-app/workflows/form_smoke.yaml",
+        "examples/demo-app/workflows/form_regression.yaml",
+        "examples/nextjs-demo/workflows/home_smoke.yaml",
+        "examples/nextjs-demo/workflows/login_smoke.yaml",
+        "examples/nextjs-demo/workflows/login_regression.yaml",
+        "examples/nextjs-demo/workflows/list_smoke.yaml",
+        "examples/nextjs-demo/workflows/list_regression.yaml",
+        "examples/nextjs-demo/workflows/form_smoke.yaml",
+        "examples/nextjs-demo/workflows/form_regression.yaml"
+      ]
+    },
+    {
       "id": "checkout",
       "title": "Checkout verification workflows",
       "workflows": [

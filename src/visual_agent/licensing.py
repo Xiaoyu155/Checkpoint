@@ -32,7 +32,7 @@ PRO_FEATURES = frozenset(
     }
 )
 
-CLOUD_RUN_FREE_MONTHLY_LIMIT = 5
+CLOUD_RUN_FREE_MONTHLY_LIMIT = 50
 WORKFLOW_HISTORY_FREE_DAYS = 7
 
 TEAM_FEATURES = frozenset(
@@ -146,6 +146,20 @@ def default_license_path() -> Path:
     if home:
         return Path(home).expanduser() / "license.json"
     return Path.home() / ".visual-agent" / "license.json"
+
+
+def activate_license(key: str, *, tier: TierName = "pro", seats: int = 1, path: str | Path | None = None) -> License:
+    license_path = Path(path) if path is not None else default_license_path()
+    license_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "tier": tier,
+        "seats": max(1, int(seats or 1)),
+        "expires_at": None,
+        "license_key": str(key),
+        "activated_at": time(),
+    }
+    license_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return License(tier=tier, seats=payload["seats"], source=str(license_path), key_present=True)
 
 
 def _license_from_env() -> License | None:

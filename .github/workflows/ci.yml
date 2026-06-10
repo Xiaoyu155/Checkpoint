@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  python:
+    name: Python tests and lint
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ruff
+          python -m pip install -e ".[test,web,mcp,cloud]"
+
+      - name: Ruff lint
+        run: ruff check src tests cloud_api
+
+      - name: Run fast verification workflows
+        run: python -m visual_agent.cli verify --workspace-root .agent-workspace --tags fast --max-workflows 5 --run-profile dry-run --wait-lock --format json
+
+      - name: Run Visual Agent quality gate
+        run: python -m visual_agent.cli quality-gate --profile ci --workspace-root .agent-workspace --run --fail-on-risk-policy-error --fail-on-secret-leak --ci --junit-output .runs/quality_gates/junit.xml
+
+      - name: Upload quality reports
+        id: upload_quality_reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-agent-quality-reports
+          path: |
+            .runs/quality_gates/**
+            .agent-workspace/reports/quality_gates/**
+            .agent-workspace/reports/regression_runs/**
+          if-no-files-found: ignore
+
+      - name: Comment PR failure
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: python -m visual_agent.cli github-pr-comment --report-root .runs --quality-root .runs/quality_gates --artifact-url "${{ steps.upload_quality_reports.outputs.artifact-url }}" --format markdown
+
+  vscode-extension:
+    name: VS Code extension compile
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: vscode-extension/package-lock.json
+
+      - name: Install dependencies
+        working-directory: vscode-extension
+        run: npm ci
+
+      - name: Compile and test
+        working-directory: vscode-extension
+        run: npm test

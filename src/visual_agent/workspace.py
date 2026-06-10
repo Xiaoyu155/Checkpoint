@@ -56,6 +56,9 @@ class WorkflowRef:
     author: str = ""
     description: str = ""
     license: str = ""
+    quality_score: float | None = None
+    published_at: float | None = None
+    published_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -189,10 +192,35 @@ def open_workspace(root: str | Path) -> Workspace:
     return workspace
 
 
+def workspace_framework_hint(workspace: Workspace) -> str | None:
+    try:
+        from .preflight import detect_project_type
+    except Exception:
+        detect_project_type = None  # type: ignore[assignment]
+    manifest_path = workspace.root / "workspace.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        manifest = None
+    if not isinstance(manifest, dict):
+        manifest = None
+    if isinstance(manifest, dict):
+        value = manifest.get("framework_hint")
+        if value:
+            return str(value)
+    if detect_project_type is not None:
+        try:
+            return detect_project_type(workspace.root)
+        except Exception:
+            return None
+    return None
+
+
 def copy_demo_assets(workspace: Workspace, *, overwrite: bool = False) -> None:
     repo_root = Path(__file__).resolve().parent.parent.parent
     copies = [
         (repo_root / "examples" / "local_html_form_workflow.yaml", workspace.workflows_dir / "local_html_form_workflow.yaml"),
+        (repo_root / "examples" / "browser_form_workflow.yaml", workspace.workflows_dir / "browser_form_workflow.yaml"),
         (
             repo_root / "examples" / "workflows" / "checkout" / "checkout_verification.yaml",
             workspace.workflows_dir / "checkout_verification.yaml",
@@ -211,6 +239,12 @@ def copy_demo_assets(workspace: Workspace, *, overwrite: bool = False) -> None:
         text = workflow_path.read_text(encoding="utf-8")
         text = text.replace("examples/web/login_demo.html", "fixtures/login_demo.html")
         workflow_path.write_text(text, encoding="utf-8")
+
+    browser_workflow_path = workspace.workflows_dir / "browser_form_workflow.yaml"
+    if browser_workflow_path.exists():
+        text = browser_workflow_path.read_text(encoding="utf-8")
+        text = text.replace("examples/web/login_demo.html", "fixtures/login_demo.html")
+        browser_workflow_path.write_text(text, encoding="utf-8")
 
     checkout_workflow_path = workspace.workflows_dir / "checkout_verification.yaml"
     if checkout_workflow_path.exists():
@@ -308,6 +342,9 @@ def discover_workflows(workspace: Workspace, *, include_slow: bool = False) -> t
                 author=str(metadata["author"]),
                 description=str(metadata["description"]),
                 license=str(metadata["license"]),
+                quality_score=metadata.get("quality_score"),
+                published_at=metadata.get("published_at"),
+                published_url=str(metadata.get("published_url") or ""),
             )
         )
     return tuple(refs)
@@ -359,11 +396,14 @@ def find_workflow(workspace: Workspace, name_or_path: str) -> WorkflowRef:
                 else str(candidate),
                 tags=tuple(metadata["tags"]),
                 affects=tuple(metadata["affects"]),
-                visibility=str(metadata["visibility"]),
-                author=str(metadata["author"]),
-                description=str(metadata["description"]),
-                license=str(metadata["license"]),
-            )
+            visibility=str(metadata["visibility"]),
+            author=str(metadata["author"]),
+            description=str(metadata["description"]),
+            license=str(metadata["license"]),
+            quality_score=metadata.get("quality_score"),
+            published_at=metadata.get("published_at"),
+            published_url=str(metadata.get("published_url") or ""),
+        )
 
     for ref in discover_workflows(workspace, include_slow=True):
         if ref.name == name_or_path or ref.relative_path == name_or_path:
@@ -503,6 +543,7 @@ def run_workspace_workflow(
     lock_wait_seconds: float = 0.0,
     lock_poll_seconds: float = 0.5,
     export_report: bool = True,
+    from_step: str | None = None,
 ) -> WorkflowRunResult:
     ref = find_workflow(workspace, workflow_name)
     workflow = parse_workflow_file(ref.path)
@@ -539,7 +580,9 @@ def run_workspace_workflow(
             synthetic_on_capture_fail=synthetic_on_capture_fail,
             inputs=inputs or {},
             sensitive_fields=sensitive_fields,
+            workspace_root=workspace.root,
             resume_from=resume_from,
+            from_step=from_step,
             use_lock=use_lock and outer_lock is None,
             lock_ttl_seconds=lock_ttl_seconds,
             queue_when_locked=queue_when_locked and outer_lock is None,
@@ -564,6 +607,15 @@ def run_workspace_workflow(
             from .workflow_index import update_workflow_index
 
             update_workflow_index(workspace.root, ref)
+        except Exception:
+            pass
+        try:
+            from .telemetry import record_run
+            from .visual_status import append_run_history, write_status_file
+
+            write_status_file(workspace.project_root, result)
+            append_run_history(workspace.root, workflow, result)
+            record_run(workspace.root, workflow, result, project_type=workspace_framework_hint(workspace) or None)
         except Exception:
             pass
         return result
@@ -1201,7 +1253,7 @@ def regression_test_draft(run_id: str, fixture_path: Path, report: dict[str, Any
         f"    assert observation.elements\n"
         f"    # Source workflow: {workflow_name}\n"
         f"    # Failed step: {failed_step}\n"
-        "    # TODO: replace this smoke check with the selector/assertion that failed.\n"
+        "    # Replace this smoke check with the selector or assertion that failed.\n"
     )
 
 
@@ -1472,7 +1524,7 @@ def validate_risk_policy_manifest(
             "workspace_manifest_missing",
             "workspace.json",
             "Workspace manifest is missing.",
-            "Run init-workspace or restore workspace.json before applying risk policy.",
+            "Run init or restore workspace.json before applying risk policy.",
         )
     if manifest and not isinstance(manifest, dict):
         add_risk_policy_issue(

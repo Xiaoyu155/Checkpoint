@@ -74,6 +74,8 @@ steps:
 
     assert payload["status"] == "success"
     assert payload["workflow_name"] == "ready"
+    assert payload["workflow_source"] == "workspace"
+    assert payload["workflow_id"] == ""
     assert payload["steps_passed"] == 2
     assert payload["steps_total"] == 2
     assert run_payload["run_id"] == payload["run_id"]
@@ -85,6 +87,54 @@ steps:
     assert runs_payload["status"] == "success"
     assert runs_payload["returned_reports"] == 1
     assert runs_payload["reports"][0]["run_id"] == payload["run_id"]
+
+
+def test_cloud_server_run_endpoint_preserves_source_fields(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    (workspace.fixtures_dir / "ready.html").write_text("<p>Ready</p>", encoding="utf-8")
+    (workspace.workflows_dir / "ready.yaml").write_text(
+        """
+schema_version: 1
+name: ready
+version: 1
+steps:
+  - id: observe
+    action: observe_html
+    path: fixtures/ready.html
+  - id: assert_ready
+    action: assert_text
+    text: Ready
+""".strip(),
+        encoding="utf-8",
+    )
+    server = create_cloud_server(workspace_root=workspace.root, port=0)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        endpoint = f"http://127.0.0.1:{server.server_port}/v1/run"
+        body = json.dumps(
+            {
+                "workflow_name": "ready",
+                "workflow_source": "marketplace",
+                "workflow_id": "wf_000123",
+                "workspace": str(workspace.root),
+                "run_profile": "dry-run",
+            }
+        ).encode("utf-8")
+        request = Request(endpoint, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        with urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        with urlopen(f"http://127.0.0.1:{server.server_port}/v1/run/{payload['run_id']}", timeout=5) as response:
+            run_payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert payload["workflow_source"] == "marketplace"
+    assert payload["workflow_id"] == "wf_000123"
+    assert run_payload["workflow_source"] == "marketplace"
+    assert run_payload["workflow_id"] == "wf_000123"
 
 
 def test_cloud_server_report_detail_respects_history_gate(tmp_path, monkeypatch) -> None:

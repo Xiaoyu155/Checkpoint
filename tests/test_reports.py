@@ -142,3 +142,64 @@ def test_compact_run_report_strips_verbose_observation_elements_and_keeps_failur
     assert "elements" not in compact_text
     assert compact["steps"][1]["diagnosis"]["expected"] == "expected text: 128"
     assert len(compact_text) < len(raw) / 10
+
+
+def test_load_run_report_migrates_legacy_schema_version(tmp_path) -> None:
+    run_dir = tmp_path / "run-legacy"
+    run_dir.mkdir()
+    (run_dir / "workflow_result.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-legacy",
+                "workflow_name": "legacy_demo",
+                "runtime_version": "0.1.0",
+                "run_profile": "dry-run",
+                "steps": [
+                    {
+                        "id": "observe",
+                        "action": "observe_screen",
+                        "status": "success",
+                        "metadata": {"elapsed_seconds": 0.1},
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    summary = load_run_summary(run_dir)
+    report = load_run_report(run_dir)
+
+    assert summary.workflow_schema_version is None
+    assert report.schema_version == 1
+    assert report.status == "success"
+    assert report.workflow_name == "legacy_demo"
+    assert report.steps[0].id == "observe"
+
+
+def test_load_run_report_marks_future_schema_version_upgrade_required(tmp_path) -> None:
+    run_dir = tmp_path / "run-future"
+    run_dir.mkdir()
+    (run_dir / "workflow_result.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 999,
+                "run_id": "run-future",
+                "workflow_name": "future_demo",
+                "runtime_version": "0.1.0",
+                "run_profile": "dry-run",
+                "workflow_schema_version": 1,
+                "steps": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    summary = load_run_summary(run_dir)
+    report = load_run_report(run_dir)
+
+    assert summary.status == "upgrade_required"
+    assert report.status == "upgrade_required"
+    assert report.run_id == "run-future"

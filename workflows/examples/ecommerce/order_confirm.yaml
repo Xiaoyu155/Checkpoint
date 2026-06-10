@@ -1,0 +1,21 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: order_confirm
+version: 1
+description: Verify order confirmation page shows the order number.
+tags: [verification, fast, ecommerce, checkout, example]
+category: ecommerce
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
+steps:
+  - id: observe_confirmation
+    action: observe_browser
+    url: "http://localhost:3000/order/confirmation"
+  - id: browser_ready
+    action: assert_browser_ready
+    min_text_length: 1
+    min_interactive: 1
+  - id: verify_confirmation
+    action: assert_text
+    text: "Order confirmed"

@@ -1,8 +1,8 @@
-# Cursor MCP Setup
+﻿# Cursor MCP Setup
 
-This guide connects Cursor to Visual Agent through a local stdio MCP server.
+This guide connects Cursor to Checkpoint through a local stdio MCP server.
 
-## 1. Bootstrap Visual Agent
+## 1. Bootstrap Checkpoint
 
 ```powershell
 cd "D:\longxia agent"
@@ -69,7 +69,7 @@ Run local_html_form_workflow as a dry-run and show me the report id.
 
 Expected result:
 
-- Cursor sees the Visual Agent MCP tools.
+- Cursor sees the Checkpoint MCP tools.
 - Validation returns `valid: true`.
 - The run returns a `run_id`.
 - A report is written under `.agent-workspace\reports`.
@@ -88,3 +88,4 @@ If Cursor does not show the tools, verify `.cursor\mcp.json`, restart Cursor, an
 ## References
 
 - Cursor MCP documentation: https://docs.cursor.com/context/model-context-protocol
+

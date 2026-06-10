@@ -1,13 +1,13 @@
-# Visual Agent Quickstart
+﻿# Checkpoint Quickstart
 
-Visual Agent is a local-first automation runtime for AI assistants. It runs
+Checkpoint is a local-first automation runtime for AI assistants. It runs
 browser and desktop workflows with permissions, audit trails, screenshots,
 failure diagnostics, queues, and reports stored on your machine.
 
 ## Install
 
 Run the bootstrap script from the project root. It sets up the virtual
-environment, installs dependencies, installs Playwright Chromium, initialises
+environment, installs dependencies, installs Playwright Chromium, initializes
 `.agent-workspace`, and writes example MCP client configs.
 
 ```powershell
@@ -19,7 +19,25 @@ To install manually into an existing virtual environment:
 ```powershell
 pip install -e .[web,mcp]
 python -m playwright install chromium
-python -m visual_agent.cli init-workspace --root .agent-workspace
+```
+
+## First Three Commands
+
+From a fresh checkout, use these commands in order:
+
+```powershell
+python -m visual_agent.cli init --root .agent-workspace
+python -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify the current change" --run-profile dry-run --format markdown
+python -m visual_agent.cli show-status --workspace-root .agent-workspace
+```
+
+`verify-impl` can infer a local app URL from `package.json`, `vite.config.*`,
+`next.config.*`, or `manifest.json`. You can also pass an explicit app URL or
+fixture:
+
+```powershell
+python -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify login redirects" --base-url http://127.0.0.1:5173 --run-profile dry-run --format markdown
+python -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify login fixture" --base-url fixtures/login_demo.html --run-profile dry-run --format markdown
 ```
 
 ## Verify Your Setup
@@ -55,16 +73,17 @@ D:\project-c\.agent-workspace
 From each project root:
 
 ```powershell
-python -m visual_agent.cli init-workspace --root .agent-workspace
-python -m visual_agent.cli workspace-status --root .agent-workspace
+python -m visual_agent.cli init --root .agent-workspace
+python -m visual_agent.cli show-status --workspace-root .agent-workspace
 ```
 
-`workspace-status` shows the workspace root and project root so an agent can
-confirm it is using the right project before running visual checks.
+`show-status` shows the workspace root, project root, and current failure or
+pass state so an agent can confirm it is using the right project before running
+checks.
 
 ## Resume In A New Chat
 
-Visual Agent stores the working context in the project workspace, not in the
+Checkpoint stores the working context in the project workspace, not in the
 chat window. After reopening Codex or starting a new chat, run:
 
 ```powershell
@@ -92,7 +111,7 @@ Keep OCR/VLM workflows in their own tags, such as `visual` or `miniprogram`,
 and run them explicitly. They are much slower than DOM/UIA/file checks because
 they capture windows and extract visual text.
 
-When a visual workflow brings a target window to the foreground, Visual Agent
+When a visual workflow brings a target window to the foreground, Checkpoint
 minimizes that target window after capture and restores the previous foreground
 window by default. Use `post_capture: keep` only when a workflow intentionally
 needs to leave the target window open.
@@ -100,7 +119,7 @@ needs to leave the target window open.
 ## Verification Loop Demo
 
 This demo shows the core loop: write a verification workflow, make a breaking
-change, let Visual Agent detect it, read the compact diagnosis, fix the code,
+change, let Checkpoint detect it, read the compact diagnosis, fix the code,
 and confirm the green pass.
 
 **Step 1 - run verification (all green):**
@@ -196,3 +215,4 @@ Once connected, use `get_session_context` to resume work,
 python -m visual_agent.cli quality-gate --profile local --workspace-root .agent-workspace
 python -m visual_agent.cli quality-gate --profile ci --workspace-root .agent-workspace --run --fail-on-secret-leak
 ```
+

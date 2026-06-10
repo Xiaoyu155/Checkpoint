@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from dataclasses import dataclass
@@ -74,7 +74,7 @@ def connect_codex(workspace_root: Path, *, repo_root: Path) -> ConnectResult:
     path = repo_root / "AGENTS.md"
     section = codex_agent_section(workspace_root)
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
-    if "## Visual Agent" in existing:
+    if "## Checkpoint" in existing:
         text = replace_visual_agent_section(existing, section)
     else:
         text = existing.rstrip() + ("\n\n" if existing.strip() else "") + section
@@ -119,8 +119,9 @@ def write_json_object(path: Path, data: dict[str, Any]) -> None:
 
 def codex_agent_section(workspace_root: Path) -> str:
     return (
-        "## Visual Agent\n\n"
-        "Use Visual Agent after UI or workflow-related code changes:\n\n"
+        "## Checkpoint\n\n"
+        "Read `.visual-agent-status.md` for current verification state before planning fixes.\n\n"
+        "Use Checkpoint after UI or workflow-related code changes:\n\n"
         f"- Workspace root: `{workspace_root}`\n"
         "- Fast check: `python -m visual_agent.cli codex-check --workspace-root .agent-workspace`\n"
         "- Include slow visual/OCR workflows only when needed: add `--include-slow`\n"
@@ -130,7 +131,7 @@ def codex_agent_section(workspace_root: Path) -> str:
 
 
 def replace_visual_agent_section(existing: str, section: str) -> str:
-    marker = "## Visual Agent"
+    marker = "## Checkpoint"
     start = existing.find(marker)
     if start < 0:
         return existing.rstrip() + "\n\n" + section
@@ -148,3 +149,4 @@ def connect_result_to_dict(result: ConnectResult) -> dict[str, Any]:
         "status": result.status,
         "message": result.message,
     }
+

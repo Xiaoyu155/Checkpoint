@@ -1,4 +1,4 @@
-from visual_agent.security import contains_secret_text, redact_secret_text, scrub_secrets, text_metadata
+from visual_agent.security import contains_secret_text, redact_secret_text, scrub_secrets, text_metadata, validate_workflow_url
 
 
 def test_sensitive_text_metadata_hashes_without_length_or_preview() -> None:
@@ -97,6 +97,27 @@ def test_queue_task_redacts_sensitive_inline_inputs(tmp_path) -> None:
     assert task["inputs"]["user"] == "demo"
     assert task["inputs"]["password"]["redacted"] is True
     assert "plain-secret" not in str(task)
+
+
+def test_validate_workflow_url_allows_localhost_and_public_urls() -> None:
+    ok_localhost, reason_localhost = validate_workflow_url("http://localhost:3000/login")
+    ok_public, reason_public = validate_workflow_url("https://example.com/login")
+
+    assert ok_localhost is True
+    assert reason_localhost is None
+    assert ok_public is True
+    assert reason_public is None
+
+
+def test_validate_workflow_url_blocks_private_and_reserved_hosts() -> None:
+    blocked_private = validate_workflow_url("http://192.168.0.10/login")
+    blocked_link_local = validate_workflow_url("http://169.254.169.254/latest/meta-data")
+    blocked_local_suffix = validate_workflow_url("http://service.internal/login")
+
+    assert blocked_private[0] is False
+    assert "Blocked private IP address" in str(blocked_private[1])
+    assert blocked_link_local[0] is False
+    assert blocked_local_suffix[0] is False
 
 
 class MockRoute:

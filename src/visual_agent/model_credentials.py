@@ -51,6 +51,18 @@ PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
         "model": "gpt-4o",
         "auth_style": "bearer",
     },
+    "anthropic": {
+        "base_url": "https://api.anthropic.com/v1",
+        "endpoint": "/messages",
+        "model": "claude-3-5-haiku-latest",
+        "auth_style": "x-api-key",
+    },
+    "gemini": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta",
+        "endpoint": "/models/gemini-1.5-flash:generateContent",
+        "model": "gemini-1.5-flash",
+        "auth_style": "api-key",
+    },
 }
 PROVIDER_ALIASES = {
     "xiaomimimo": ("xiaomimimo", "xiaomi", "mimo", "小米", "小米mimo"),
@@ -59,6 +71,8 @@ PROVIDER_ALIASES = {
     "deepseek": ("deepseek",),
     "volcengine": ("火山", "volcengine", "ark", "doubao"),
     "openai": ("openai", "gpt", "gpt-4", "gpt-4o"),
+    "anthropic": ("anthropic", "claude"),
+    "gemini": ("gemini", "google"),
 }
 
 
@@ -74,7 +88,7 @@ def inspect_model_credentials(
     env_secret = load_provider_secret_from_env(preferred)
     if not path.exists():
         providers = [env_credential_entry(preferred)] if env_secret else []
-        return {
+        result = {
             "schema_version": 1,
             "source": str(path),
             "source_exists": False,
@@ -85,6 +99,8 @@ def inspect_model_credentials(
             "providers": providers,
             "redacted": True,
         }
+        result["suggestion"] = model_credentials_suggestion(result)
+        return result
     text = path.read_text(encoding="utf-8-sig")
     providers = discover_model_credentials(text)
     if env_secret and not any(item["provider"] == preferred for item in providers):
@@ -96,7 +112,7 @@ def inspect_model_credentials(
     if selected_provider is None and allow_auto_select and fallback_entry:
         selected_provider = str(fallback_entry.get("provider") or "")
         auto_selected = True
-    return {
+    result = {
         "schema_version": 1,
         "source": str(path),
         "source_exists": True,
@@ -107,6 +123,28 @@ def inspect_model_credentials(
         "providers": providers,
         "redacted": True,
     }
+    result["suggestion"] = model_credentials_suggestion(result)
+    return result
+
+
+def model_credentials_suggestion(result: dict[str, Any]) -> str:
+    if result.get("preferred_available"):
+        return ""
+    providers = result.get("providers") if isinstance(result.get("providers"), list) else []
+    available = [
+        str(item.get("provider") or "")
+        for item in providers
+        if isinstance(item, dict) and int(item.get("secret_count") or 0) > 0 and str(item.get("provider") or "")
+    ]
+    if "anthropic" in available:
+        return "Anthropic key detected, use --preferred anthropic or choose a Claude model such as --model claude-3-5-haiku-latest."
+    if "openai" in available:
+        return "OpenAI key detected, use --preferred openai or choose an OpenAI model such as --model gpt-4o."
+    if "gemini" in available:
+        return "Gemini key detected, use --preferred gemini or choose a Gemini model such as --model gemini-1.5-flash."
+    preferred = str(result.get("preferred_provider") or DEFAULT_MODEL_PROVIDER)
+    env_name = f"VISUAL_AGENT_{normalize_provider(preferred).upper()}_API_KEY"
+    return f"No {preferred} key found. Add it to {result.get('source') or DEFAULT_MODEL_CREDENTIAL_FILE} or set {env_name}."
 
 
 def build_model_api_probe_plan(
@@ -378,6 +416,10 @@ def load_provider_secret_from_env(provider: str) -> str | None:
     ]
     if normalized == "openai":
         names.append("OPENAI_API_KEY")
+    if normalized == "anthropic":
+        names.append("ANTHROPIC_API_KEY")
+    if normalized == "gemini":
+        names.extend(["GEMINI_API_KEY", "GOOGLE_API_KEY"])
     for name in names:
         value = os.environ.get(name)
         if value:
@@ -455,6 +497,8 @@ def model_credentials_to_markdown(result: dict[str, Any]) -> str:
                 )
                 + " |"
             )
+    if result.get("suggestion"):
+        lines.extend(["", f"Hint: {result['suggestion']}"])
     lines.append("")
     return "\n".join(lines)
 
@@ -539,6 +583,8 @@ def build_auth_headers(provider: str, secret: str) -> dict[str, str]:
     defaults = PROVIDER_DEFAULTS.get(normalize_provider(provider), {})
     if defaults.get("auth_style") == "api-key":
         return {"api-key": secret}
+    if defaults.get("auth_style") == "x-api-key":
+        return {"x-api-key": secret}
     return {"Authorization": f"Bearer {secret}"}
 
 

@@ -1,8 +1,8 @@
-# Claude Desktop MCP Setup
+﻿# Claude Desktop MCP Setup
 
-This guide connects Claude Desktop to Visual Agent through a local stdio MCP server.
+This guide connects Claude Desktop to Checkpoint through a local stdio MCP server.
 
-## 1. Bootstrap Visual Agent
+## 1. Bootstrap Checkpoint
 
 ```powershell
 cd "D:\longxia agent"
@@ -87,3 +87,4 @@ Expected result:
 
 - Claude Desktop local MCP setup: https://support.anthropic.com/en/articles/10949351-getting-started-with-local-mcp-servers-on-claude-desktop
 - Model Context Protocol local server tutorial: https://modelcontextprotocol.io/docs/tutorials/use-local-mcp-server
+

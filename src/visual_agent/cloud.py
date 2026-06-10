@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from .licensing import FeatureGatedError, get_license, monthly_feature_limit, require_feature
@@ -14,12 +15,14 @@ from .security import scrub_secrets
 CloudWorkflowClient = Callable[[str, Path], dict[str, Any]]
 CloudTransport = Callable[[dict[str, Any]], dict[str, Any]]
 HttpOpener = Callable[[Request, float], Any]
+MarketplaceTransport = Callable[[str], dict[str, Any]]
 
 
 def cloud_config_status() -> dict[str, Any]:
     endpoint = str(os.environ.get("VISUAL_AGENT_CLOUD_ENDPOINT") or "").strip()
     api_key_present = bool(os.environ.get("VISUAL_AGENT_CLOUD_API_KEY"))
     org = str(os.environ.get("VISUAL_AGENT_CLOUD_ORG") or "").strip()
+    user_id = str(os.environ.get("VISUAL_AGENT_CLOUD_USER") or "").strip()
     blockers: list[str] = []
     if not endpoint:
         blockers.append("missing_endpoint")
@@ -31,6 +34,7 @@ def cloud_config_status() -> dict[str, Any]:
         "endpoint": endpoint,
         "api_key_present": api_key_present,
         "org": org,
+        "user_id": user_id,
         "blockers": blockers,
         "network_probe": "not_run",
     }
@@ -43,6 +47,9 @@ def build_remote_workflow_request(
     run_profile: str = "dry-run",
     inputs: dict[str, Any] | None = None,
     inputs_file: str | None = None,
+    workflow_yaml: str = "",
+    workflow_source: str = "workspace",
+    workflow_id: str = "",
 ) -> dict[str, Any]:
     config = cloud_config_status()
     workspace_root = Path(workspace_root)
@@ -55,6 +62,10 @@ def build_remote_workflow_request(
         "cloud_config": config,
         "inputs": summarize_remote_inputs(inputs),
         "inputs_file": str(inputs_file or ""),
+        "workflow_yaml_provided": bool(str(workflow_yaml or "").strip()),
+        "workflow_yaml": str(workflow_yaml or ""),
+        "workflow_source": str(workflow_source or "workspace"),
+        "workflow_id": str(workflow_id or ""),
         "network_probe": "not_run",
     }
 
@@ -75,14 +86,22 @@ def filter_remote_workflow_response(response: dict[str, Any]) -> dict[str, Any]:
     status = str(response.get("status") or "unknown")
     if status not in {"success", "failed", "queued", "running", "blocked", "upgrade_required", "unknown"}:
         status = "unknown"
-    return {
+    run_id = str(response.get("run_id") or response.get("id") or "")
+    payload = {
         "schema_version": 1,
         "remote_schema_version": str(response.get("schema_version") or ""),
         "status": status,
-        "run_id": str(response.get("run_id") or ""),
+        "run_id": run_id,
         "report_url": str(response.get("report_url") or ""),
         "message": str(scrub_secrets(response.get("message") or ""))[:500],
     }
+    if response.get("workflow_source"):
+        payload["workflow_source"] = str(response.get("workflow_source") or "")
+    if response.get("workflow_id"):
+        payload["workflow_id"] = str(response.get("workflow_id") or "")
+    if response.get("artifact_url"):
+        payload["artifact_url"] = str(response.get("artifact_url") or "")
+    return payload
 
 
 def build_http_cloud_transport(
@@ -90,6 +109,7 @@ def build_http_cloud_transport(
     endpoint: str,
     api_key: str,
     org: str = "",
+    user_id: str = "",
     timeout_seconds: float = 30.0,
     max_retries: int = 0,
     retry_backoff_seconds: float = 0.0,
@@ -99,6 +119,7 @@ def build_http_cloud_transport(
     endpoint = endpoint.strip()
     api_key = api_key.strip()
     org = org.strip()
+    user_id = user_id.strip()
 
     def transport(request: dict[str, Any]) -> dict[str, Any]:
         import json
@@ -112,6 +133,8 @@ def build_http_cloud_transport(
         }
         if org:
             headers["X-Visual-Agent-Org"] = org
+        if user_id:
+            headers["X-Visual-Agent-User"] = user_id
         attempts = max(0, int(max_retries)) + 1
         last_result: dict[str, Any] | None = None
         for attempt in range(attempts):
@@ -174,17 +197,167 @@ def http_cloud_transport_from_env(
     endpoint = str(os.environ.get("VISUAL_AGENT_CLOUD_ENDPOINT") or "").strip()
     api_key = str(os.environ.get("VISUAL_AGENT_CLOUD_API_KEY") or "").strip()
     org = str(os.environ.get("VISUAL_AGENT_CLOUD_ORG") or "").strip()
+    user_id = str(os.environ.get("VISUAL_AGENT_CLOUD_USER") or "").strip()
     if not endpoint or not api_key:
         return None
     return build_http_cloud_transport(
         endpoint=endpoint,
         api_key=api_key,
         org=org,
+        user_id=user_id,
         timeout_seconds=timeout_seconds,
         max_retries=max_retries,
         retry_backoff_seconds=retry_backoff_seconds,
         opener=opener,
     )
+
+
+def marketplace_config_status() -> dict[str, Any]:
+    endpoint = str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_ENDPOINT") or "").strip()
+    api_key_present = bool(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_API_KEY"))
+    org = str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_ORG") or "").strip()
+    user_id = str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_USER") or "").strip()
+    blockers: list[str] = []
+    if not endpoint:
+        blockers.append("missing_endpoint")
+    return {
+        "schema_version": 1,
+        "available": not blockers,
+        "endpoint": endpoint,
+        "api_key_present": api_key_present,
+        "org": org,
+        "user_id": user_id,
+        "blockers": blockers,
+        "network_probe": "not_run",
+    }
+
+
+def build_http_marketplace_transport(
+    *,
+    endpoint: str,
+    api_key: str = "",
+    org: str = "",
+    user_id: str = "",
+    timeout_seconds: float = 30.0,
+    opener: HttpOpener | None = None,
+) -> MarketplaceTransport:
+    opener = opener or (lambda request, timeout: urlopen(request, timeout=timeout))
+    endpoint = endpoint.rstrip("/")
+    api_key = api_key.strip()
+    org = org.strip()
+    user_id = user_id.strip()
+
+    def transport(path: str) -> dict[str, Any]:
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "visual-agent-cloud-marketplace/1",
+        }
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        if org:
+            headers["X-Visual-Agent-Org"] = org
+        if user_id:
+            headers["X-Visual-Agent-User"] = user_id
+        request = Request(f"{endpoint}{path}", headers=headers, method="GET")
+        try:
+            with opener(request, float(timeout_seconds)) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+                payload = parse_http_cloud_response(raw, status_code=getattr(response, "status", 200))
+        except HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="replace")
+            payload = parse_http_cloud_error(exc.code, raw)
+        payload["http_status"] = int(payload.get("http_status") or 200)
+        return payload
+
+    return transport
+
+
+def http_marketplace_transport_from_env(
+    *,
+    timeout_seconds: float = 30.0,
+    opener: HttpOpener | None = None,
+) -> MarketplaceTransport | None:
+    endpoint = str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_ENDPOINT") or "").strip()
+    if not endpoint:
+        return None
+    return build_http_marketplace_transport(
+        endpoint=endpoint,
+        api_key=str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_API_KEY") or "").strip(),
+        org=str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_ORG") or "").strip(),
+        user_id=str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_USER") or "").strip(),
+        timeout_seconds=timeout_seconds,
+        opener=opener,
+    )
+
+
+def fetch_marketplace_workflow(
+    workflow_id: str,
+    *,
+    transport: MarketplaceTransport | None = None,
+) -> dict[str, Any]:
+    transport = transport or http_marketplace_transport_from_env()
+    if transport is None:
+        return {"status": "blocked", "message": "Marketplace client transport is not configured."}
+    workflow_id = str(workflow_id or "").strip()
+    if not workflow_id:
+        return {"status": "blocked", "message": "Workflow id is required."}
+    payload = transport(f"/api/workflows/{quote(workflow_id, safe='')}")
+    workflow = payload.get("workflow") if isinstance(payload.get("workflow"), dict) else {}
+    if not workflow:
+        workflow = {
+            "id": str(payload.get("workflow_id") or workflow_id),
+            "name": str(payload.get("name") or workflow_id),
+            "workflow_yaml": str(payload.get("workflow_yaml") or ""),
+        }
+    if not str(workflow.get("workflow_yaml") or "").strip() and not str(payload.get("workflow_yaml") or "").strip():
+        if payload.get("status") not in {"unknown", "failed"}:
+            return payload
+    return {
+        "schema_version": 1,
+        "status": "success" if isinstance(workflow, dict) and workflow else "failed",
+        "workflow_id": workflow_id,
+        "workflow": workflow,
+        "transport_response": payload,
+    }
+
+
+def save_marketplace_workflow(
+    workspace_root: Path,
+    workflow_id: str,
+    *,
+    transport: MarketplaceTransport | None = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    from .workspace import init_workspace, open_workspace
+
+    workspace_path = Path(workspace_root)
+    workspace = open_workspace(workspace_path) if workspace_path.exists() else init_workspace(workspace_path, with_demo=False, overwrite=False)
+    result = fetch_marketplace_workflow(workflow_id, transport=transport)
+    if result.get("status") != "success":
+        return result
+    workflow = result.get("workflow") if isinstance(result.get("workflow"), dict) else {}
+    workflow_yaml = str(workflow.get("workflow_yaml") or "")
+    if not workflow_yaml.strip():
+        return {"status": "failed", "message": "Marketplace workflow payload did not include workflow_yaml."}
+    name = str(workflow.get("name") or workflow_id).strip() or workflow_id
+    path = workspace.workflows_dir / f"{name}.yaml"
+    if path.exists() and not overwrite:
+        return {
+            "status": "blocked",
+            "reason": "workflow_exists",
+            "path": str(path),
+            "workflow_id": workflow_id,
+            "workflow_name": name,
+        }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(workflow_yaml.rstrip() + "\n", encoding="utf-8")
+    return {
+        "status": "success",
+        "workflow_id": workflow_id,
+        "workflow_name": name,
+        "path": str(path),
+        "workflow": workflow,
+    }
 
 
 def remote_client_from_env(
@@ -193,6 +366,9 @@ def remote_client_from_env(
     run_profile: str = "dry-run",
     inputs: dict[str, Any] | None = None,
     inputs_file: str | None = None,
+    workflow_yaml: str = "",
+    workflow_source: str = "workspace",
+    workflow_id: str = "",
 ) -> CloudWorkflowClient:
     def client(workflow_name: str, workspace_root: Path) -> dict[str, Any]:
         request = build_remote_workflow_request(
@@ -201,6 +377,9 @@ def remote_client_from_env(
             run_profile=run_profile,
             inputs=inputs,
             inputs_file=inputs_file,
+            workflow_yaml=workflow_yaml,
+            workflow_source=workflow_source,
+            workflow_id=workflow_id,
         )
         if request["status"] != "ready":
             return {
@@ -235,6 +414,9 @@ def execute_remote_workflow_plan(
     run_profile: str = "dry-run",
     inputs: dict[str, Any] | None = None,
     inputs_file: str | None = None,
+    workflow_yaml: str = "",
+    workflow_source: str = "workspace",
+    workflow_id: str = "",
     execute: bool = False,
     transport: CloudTransport | None = None,
 ) -> dict[str, Any]:
@@ -245,6 +427,9 @@ def execute_remote_workflow_plan(
         run_profile=run_profile,
         inputs=inputs,
         inputs_file=inputs_file,
+        workflow_yaml=workflow_yaml,
+        workflow_source=workflow_source,
+        workflow_id=workflow_id,
     )
     payload: dict[str, Any] = {
         "schema_version": 1,
@@ -259,6 +444,9 @@ def execute_remote_workflow_plan(
             run_profile=run_profile,
             inputs=inputs,
             inputs_file=inputs_file,
+            workflow_yaml=workflow_yaml,
+            workflow_source=workflow_source,
+            workflow_id=workflow_id,
         )(workflow_name, workspace_root)
         return payload
 
@@ -267,6 +455,9 @@ def execute_remote_workflow_plan(
         run_profile=run_profile,
         inputs=inputs,
         inputs_file=inputs_file,
+        workflow_yaml=workflow_yaml,
+        workflow_source=workflow_source,
+        workflow_id=workflow_id,
     )
     result = run_remote_workflow(workflow_name, workspace_root, client=client)
     payload["result"] = result

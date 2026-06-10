@@ -15,6 +15,7 @@ def test_capability_manifest_lists_core_capabilities() -> None:
     assert "observe_vision" in names
     assert "observe_fixture" in names
     assert "click" in names
+    assert "click_visual" in names
     assert "run-workflow" in names
     assert manifest.available_count > 0
 
@@ -45,6 +46,7 @@ def test_capabilities_include_planner_visible_atomic_specs() -> None:
     assert by_name["observe_vision"].planner_visible is True
     assert by_name["observe_browser"].input_schema is not None
     assert by_name["click"].dry_run_supported is True
+    assert by_name["click_visual"].dry_run_supported is True
     assert by_name["press_key"].dry_run_supported is True
     assert by_name["press_key"].input_schema["required"] == ["keys"]
     assert by_name["press_key"].input_schema["fields"]["target"] == "Target?"
@@ -56,6 +58,7 @@ def test_capabilities_include_planner_visible_atomic_specs() -> None:
     assert by_name["request_api"].input_schema["required"] == ["url"]
     assert by_name["observe_state"].planner_visible is True
     assert by_name["assert_no_error"].kind == "assertion"
+    assert by_name["assert_visual_text"].kind == "assertion"
     assert by_name["assert_browser_ready"].kind == "assertion"
     assert by_name["assert_product_contract"].kind == "assertion"
     assert by_name["assert_ai_response_quality"].kind == "assertion"
@@ -76,10 +79,12 @@ def test_atomic_capability_manifest_excludes_dependencies_and_hidden_commands() 
     assert "press_key" in names
     assert "refresh_browser" in names
     assert "click_text" in names
+    assert "click_visual" in names
     assert "wait_for_text" in names
     assert "request_api" in names
     assert "observe_state" in names
     assert "assert_no_error" in names
+    assert "assert_visual_text" in names
     assert "assert_browser_ready" in names
     assert "assert_product_contract" in names
     assert "assert_ai_response_quality" in names

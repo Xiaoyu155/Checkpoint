@@ -1,0 +1,19 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: nextjs_demo_login_smoke
+version: 1
+description: Smoke test the Next.js login page.
+tags: [verification, fast, nextjs_demo]
+visibility: private
+author: visual-agent-team
+license: ""
+steps:
+  - id: observe_login
+    action: observe_browser
+    url: http://localhost:3000/login
+  - id: assert_ready
+    action: assert_browser_ready
+    min_text_length: 1
+  - id: assert_login_header
+    action: assert_text
+    text: Sign in to Next.js Demo

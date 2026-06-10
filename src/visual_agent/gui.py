@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import threading
@@ -201,7 +201,7 @@ def build_console_window_model(
     queue_opts = queue_options(dashboard)
     return {
         "schema_version": 1,
-        "title": f"Visual Agent Console - {workspace.root.name}",
+        "title": f"Checkpoint Console - {workspace.root.name}",
         "workspace_root": str(workspace.root),
         "dashboard": dashboard,
         "external_sample_readiness": readiness,
@@ -3372,3 +3372,4 @@ def jsonish(value: Any) -> str:
     import json
 
     return json.dumps(value, ensure_ascii=False, indent=2)
+

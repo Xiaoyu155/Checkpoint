@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -128,6 +128,8 @@ def workspace_session_snapshot_text(workspace: Path, *, max_chars: int = MAX_SNA
     else:
         text = _session_to_snapshot_text(session)
     text = append_latest_repair_summary(workspace, text)
+    status_path = workspace.parent / ".visual-agent-status.md"
+    text = text.rstrip() + f"\n\nVisual status file: {status_path.resolve()}"
     return clamp_ai_text(text, max_chars=max_chars, suffix="...[truncated, use MCP tools for details]")
 
 
@@ -310,7 +312,7 @@ def _estimate_tokens(session: AgentSession) -> int:
 
 
 def _session_to_snapshot_text(session: AgentSession) -> str:
-    lines = ["## Visual Agent Context"]
+    lines = ["## Checkpoint Context"]
     lines.append(f"Status: {len(session.failing_workflows)} failing / {len(session.passing_workflows)} passing")
 
     if session.latest_failure is not None:
@@ -405,3 +407,4 @@ def _sanitize_text(text: str) -> str:
     for word in SENSITIVE_WORDS:
         safe = re.sub(re.escape(word), "[redacted]", safe, flags=re.IGNORECASE)
     return safe
+

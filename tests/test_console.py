@@ -24,7 +24,7 @@ def test_workspace_dashboard_summarizes_empty_workspace(tmp_path) -> None:
     assert dashboard["auto_repair_policy"]["min_confidence"] == 0.75
     assert dashboard["auto_repair_policy"]["max_risk_level"] == "medium"
     assert dashboard["auto_repair_policy"]["source"] == "defaults"
-    assert dashboard["workspace"]["workflow_count"] == 2
+    assert dashboard["workspace"]["workflow_count"] == 3
     assert dashboard["reports"]["total"] == 0
     assert dashboard["quality_gates"]["total"] == 0
     assert dashboard["queue"]["total"] == 0
@@ -78,6 +78,7 @@ def test_release_check_cli_outputs_markdown(capsys) -> None:
 
     assert exit_code == 0
     assert output.startswith("# Release Check Plan")
+    assert "visual_agent.cli init --root .agent-workspace --overwrite" in output
     assert "install-check" in output
     assert "mcp-smoke" in output
     assert "quality-gate --profile ci" in output

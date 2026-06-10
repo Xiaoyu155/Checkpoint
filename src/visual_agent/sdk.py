@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
@@ -16,7 +16,7 @@ from .workflow_types import WorkflowContext
 
 
 class VisualSession:
-    """Programmable Visual Agent session for Python scripts and tests."""
+    """Programmable Checkpoint session for Python scripts and tests."""
 
     def __init__(
         self,
@@ -253,3 +253,4 @@ class VisualSession:
                 point=Point(x=0, y=0),
             ),
         )
+

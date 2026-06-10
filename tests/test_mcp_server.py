@@ -22,6 +22,7 @@ from visual_agent.mcp_server import (
     run_workflow_payload,
     validate_workflow_payload,
     verify_implementation_payload,
+    verify_workflow_payload,
 )
 from visual_agent.workspace import init_workspace
 
@@ -40,12 +41,14 @@ def test_mcp_tools_include_expected_names() -> None:
         "list_workflows",
         "validate_workflow",
         "run_workflow",
+        "verify_workflow",
         "get_run_report",
         "list_run_artifacts",
         "get_workspace_dashboard",
         "get_latest_failure",
         "summarize_latest_failure",
         "diagnose_failure",
+        "get_failure_details",
         "repair_workflow",
         "auto_repair_failure",
         "list_repair_history",
@@ -57,6 +60,7 @@ def test_mcp_tools_include_expected_names() -> None:
         "run_browser_smoke",
         "run_browser_smoke_suite",
         "get_session_context",
+        "get_visual_status",
         "save_task_context",
         "run_verification",
         "generate_workflow_from_context",
@@ -626,6 +630,33 @@ def test_mcp_run_workflow_defaults_to_compact_report_and_supports_verbose(tmp_pa
     assert "failed_steps" in verbose
 
 
+def test_mcp_verify_workflow_returns_verification_contract(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace")
+
+    result = verify_workflow_payload(
+        {"workspace_root": str(workspace.root), "workflow_name": "local_html_form_workflow", "inputs_file": "demo_login.json"}
+    )
+
+    assert result["schema_version"] == 1
+    assert result["result"] == "pass"
+    assert result["workflow"] == "local_html_form_workflow"
+    assert result["run_profile"] == "dry-run"
+    assert result["run_id"]
+    assert result["steps_passed"] == result["steps_total"]
+    assert result["structured_failure"] is None
+
+
+def test_mcp_verify_workflow_error_returns_structured_failure(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+
+    result = verify_workflow_payload({"workspace_root": str(workspace.root), "workflow_name": "missing"})
+
+    assert result["result"] == "error"
+    assert result["structured_failure"]["schema_version"] == 1
+    assert result["structured_failure"]["root_cause"] == "env_error"
+    assert result["suggestion"]
+
+
 def test_mcp_run_workflow_rejects_approved_outside_whitelist(tmp_path) -> None:
     workspace = init_workspace(tmp_path / "workspace")
 
@@ -883,6 +914,10 @@ def test_mcp_latest_failure_returns_failed_report_with_diagnosis(tmp_path) -> No
     assert result["status"] == "found"
     assert result["report"]["status"] == "failed"
     assert result["report"]["failure"]["diagnosis"]["expected"]
+    assert result["report"]["failure"]["diagnosis"]["structured_failure"]["root_cause"] in {
+        "assertion_wrong",
+        "element_missing",
+    }
 
 
 def test_mcp_session_context_and_failure_summary_stay_within_budget(tmp_path) -> None:
@@ -938,6 +973,9 @@ def test_mcp_diagnose_failure_and_repair_workflow_return_ai_ready_payloads(tmp_p
     diagnosis = content_payload(
         asyncio.run(call_tool("diagnose_failure", {"workspace_root": str(workspace.root), "run_id": run["run_id"]}))
     )
+    details = content_payload(
+        asyncio.run(call_tool("get_failure_details", {"workspace_root": str(workspace.root), "run_id": run["run_id"]}))
+    )
     repair = content_payload(
         asyncio.run(call_tool("repair_workflow", {"workspace_root": str(workspace.root), "run_id": run["run_id"]}))
     )
@@ -945,11 +983,87 @@ def test_mcp_diagnose_failure_and_repair_workflow_return_ai_ready_payloads(tmp_p
     assert diagnosis["status"] == "found"
     assert diagnosis["failed_step"]["id"] == "assert_missing"
     assert "repair_prompt" in diagnosis
+    assert details["status"] == "found"
+    assert details["structured_failure"]["step_id"] == "assert_missing"
+    assert details["structured_failure"]["root_cause"] in {"assertion_wrong", "element_missing"}
+    assert details["structured_failure"]["suggested_fix"]
     assert repair["status"] == "suggested"
     assert repair["repair"]["classification"] == "app_bug"
     assert repair["source"] == "deterministic"
     assert repair["repair"]["candidates"][0]["id"] == "manual_investigation"
     assert repair["repair"]["candidates"][0]["apply_supported"] is False
+
+
+def test_mcp_get_failure_details_marks_nextjs_hydration_mismatch_as_known_issue(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    run_id = "nextjs-hydration"
+    run_dir = workspace.runs_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.joinpath("workflow_result.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": run_id,
+                "workflow_name": "nextjs_demo_login_smoke",
+                "workflow_schema_version": 1,
+                "runtime_version": "0.1.0",
+                "run_profile": "dry-run",
+                "status": "failed",
+                "total_steps": 2,
+                "succeeded_steps": 1,
+                "failed_step": "assert_ready",
+                "dry_run_actions": 0,
+                "elapsed_seconds": 2.0,
+                "artifacts": {},
+                "downloads": [],
+                "steps": [
+                    {
+                        "id": "observe",
+                        "action": "observe_browser",
+                        "status": "success",
+                        "message": "",
+                        "metadata": {},
+                    },
+                    {
+                        "id": "assert_ready",
+                        "action": "assert_text",
+                        "status": "failed",
+                        "message": "Hydration mismatch warning surfaced.",
+                        "metadata": {
+                            "failure_diagnosis": {
+                                "step_id": "assert_ready",
+                                "action": "assert_text",
+                                "expected": "checkout ready",
+                                "actual": (
+                                    "A tree hydrated but some attributes of the server rendered HTML didn't match the client "
+                                    "properties. https://react.dev/link/hydration-mismatch"
+                                ),
+                                "observation": {
+                                    "visible_text": [
+                                        "A tree hydrated but some attributes of the server rendered HTML didn't match the client properties.",
+                                        "https://react.dev/link/hydration-mismatch",
+                                    ]
+                                },
+                                "artifacts": {},
+                            }
+                        },
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    details = content_payload(
+        asyncio.run(call_tool("get_failure_details", {"workspace_root": str(workspace.root), "run_id": run_id}))
+    )
+
+    assert details["status"] == "found"
+    assert details["structured_failure"]["root_cause"] == "known_issue"
+    assert "hydration mismatch" in details["structured_failure"]["suggested_fix"].lower()
+    assert details["report_path"].endswith(f"reports\\{run_id}.json")
 
 
 def test_mcp_list_repair_history_returns_recorded_attempts(tmp_path) -> None:
@@ -1706,6 +1820,29 @@ def test_mcp_generate_workflow_dry_run_returns_valid_yaml(tmp_path) -> None:
     assert payload["saved_to"] is None
     assert "observe_browser" in payload["yaml"]
     assert "visibility: private" in payload["yaml"]
+    assert payload["quality_score"] >= 0
+
+
+def test_mcp_generate_workflow_accepts_page_type_hint(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+
+    payload = content_payload(
+        asyncio.run(
+            call_tool(
+                "generate_workflow",
+                {
+                    "workspace_root": str(workspace.root),
+                    "description": "Verify product page loads",
+                    "page_type": "ecommerce",
+                    "dry_run": True,
+                },
+            )
+        )
+    )
+
+    assert payload["status"] == "success"
+    assert "ecommerce" in payload["yaml"]
+    assert "[page_type:" not in payload["yaml"]
 
 
 def test_mcp_save_task_context_updates_session_context(tmp_path) -> None:

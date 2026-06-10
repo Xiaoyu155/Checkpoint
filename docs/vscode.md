@@ -1,6 +1,6 @@
-# Visual Agent for VS Code
+﻿# Checkpoint for VS Code
 
-Visual Agent can be used from VS Code through MCP-compatible agent extensions
+Checkpoint can be used from VS Code through MCP-compatible agent extensions
 or by running the CLI in the integrated terminal.
 
 ## Generate A VS Code MCP Config
@@ -21,7 +21,7 @@ same command, args, cwd, and `PYTHONPATH` values.
 
 ## Verify Current Change
 
-The bundled VS Code extension contributes `Visual Agent: Verify Current Change`.
+The bundled VS Code extension contributes `Checkpoint: Verify Current Change`.
 It prompts for a task description and a base URL or fixture path, then runs
 `verify-impl --format markdown`, refreshes the sidebar/status bar, and opens the
 latest verification markdown.
@@ -31,12 +31,12 @@ Use dry-run first unless the workflow needs real browser actions.
 ## Useful Agent Requests
 
 ```text
-Use Visual Agent to inspect workspace health, list workflows, dry-run the
+Use Checkpoint to inspect workspace health, list workflows, dry-run the
 local form workflow, and summarize the report.
 ```
 
 ```text
-Use Visual Agent to fetch the latest failed workflow report and explain the
+Use Checkpoint to fetch the latest failed workflow report and explain the
 recovery suggestion before editing code.
 ```
 
@@ -57,3 +57,4 @@ Prefer `get_session_context` when resuming work and `summarize_latest_failure`
 when a failure summary is enough. Full reports and large lists are budgeted for
 MCP output and may return `truncated: true` with a local report or artifact
 hint.
+

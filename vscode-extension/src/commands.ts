@@ -1,4 +1,6 @@
-import * as vscode from "vscode";
+﻿import * as vscode from "vscode";
+import * as fs from "fs";
+import * as path from "path";
 import { agentStatusMarkdown, readAgentStatus } from "./agentStatus";
 import {
   autoRepairFailure,
@@ -7,16 +9,47 @@ import {
   runCodexCheck,
   runVerificationAllWithProfile,
   showLatestFailure,
+  renderLatestFailureMarkdown,
   verifyImplementationFromDiff,
   workspacePath
 } from "./bridge";
 import { refreshStatusBar } from "./statusBar";
-import { WorkflowTreeProvider } from "./sidebar";
+import { examplesRoot, WorkflowTreeProvider } from "./sidebar";
 
 export function registerCommands(context: vscode.ExtensionContext, treeProvider: WorkflowTreeProvider): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("visualAgent.refresh", async () => {
       await refresh(treeProvider);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("visualAgent.quickActions", async () => {
+      const action = await vscode.window.showQuickPick(
+        [
+          { label: "Init Workspace", command: "visualAgent.initWorkspace" },
+          { label: "Verify Implementation", command: "visualAgent.verifyImplementation" },
+          { label: "Run All", command: "visualAgent.runAll" },
+          { label: "Show Failure", command: "visualAgent.showLatestFailure" },
+          { label: "Generate Workflow", command: "visualAgent.generateWorkflow" }
+        ],
+        { placeHolder: "Checkpoint quick actions" }
+      );
+      if (action) {
+        await vscode.commands.executeCommand(action.command);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("visualAgent.initWorkspace", async () => {
+      const result = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: "Checkpoint: initializing workspace..." },
+        () => runCli(["init", "--root", getWorkspaceRoot()], { workspaceRoot: false })
+      );
+      await refresh(treeProvider);
+      showOutputPanel("visualAgentInitWorkspace", "Checkpoint: Init Workspace", result.output || "No init output.");
+      showCliResult("Init workspace", result);
     })
   );
 
@@ -35,13 +68,13 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
             runProfile: "supervised"
           }
         ],
-        { placeHolder: "Choose Visual Agent run mode" }
+        { placeHolder: "Choose Checkpoint run mode" }
       );
       if (!mode) {
         return;
       }
       const result = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `Visual Agent: running all workflows (${mode.runProfile})...` },
+        { location: vscode.ProgressLocation.Notification, title: `Checkpoint: running all workflows (${mode.runProfile})...` },
         () => runVerificationAllWithProfile(mode.runProfile)
       );
       await refresh(treeProvider);
@@ -60,7 +93,7 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
         return;
       }
       const result = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: "Visual Agent: running live supervised workflows..." },
+        { location: vscode.ProgressLocation.Notification, title: "Checkpoint: running live supervised workflows..." },
         () => runVerificationAllWithProfile("supervised")
       );
       await refresh(treeProvider);
@@ -71,7 +104,7 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
   context.subscriptions.push(
     vscode.commands.registerCommand("visualAgent.runAffected", async () => {
       const result = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: "Visual Agent: running affected workflows..." },
+        { location: vscode.ProgressLocation.Notification, title: "Checkpoint: running affected workflows..." },
         () => runCodexCheck()
       );
       await refresh(treeProvider);
@@ -81,77 +114,13 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
 
   context.subscriptions.push(
     vscode.commands.registerCommand("visualAgent.verifyCurrentChange", async () => {
-      const taskDescription = await vscode.window.showInputBox({
-        prompt: "Describe the implementation change to verify.",
-        placeHolder: "Verify profile form saves and displays the updated profile name."
-      });
-      if (!taskDescription) {
-        return;
-      }
-      const baseUrl = await vscode.window.showInputBox({
-        prompt: "App URL or workspace fixture path used as the workflow entry point.",
-        placeHolder: "http://localhost:3000/profile or fixtures/profile.html"
-      });
-      if (!baseUrl) {
-        return;
-      }
-      const mode = await vscode.window.showQuickPick(
-        [
-          {
-            label: "Dry Run",
-            description: "Generate, quality-gate, and run without real clicks or inputs.",
-            runProfile: "dry-run" as const
-          },
-          {
-            label: "Live Supervised",
-            description: "Run real browser actions with supervised permissions.",
-            runProfile: "supervised" as const
-          }
-        ],
-        { placeHolder: "Choose implementation verification mode" }
-      );
-      if (!mode) {
-        return;
-      }
-      const includeUntracked = await vscode.window.showQuickPick(
-        [
-          {
-            label: "Include untracked files",
-            description: "Use tracked changes and new files in git diff.",
-            noUntracked: false
-          },
-          {
-            label: "Tracked files only",
-            description: "Ignore untracked files.",
-            noUntracked: true
-          }
-        ],
-        { placeHolder: "Choose git diff scope" }
-      );
-      if (!includeUntracked) {
-        return;
-      }
-      const result = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: "Visual Agent: verifying current change..." },
-        () =>
-          verifyImplementationFromDiff({
-            taskDescription,
-            baseUrl,
-            runProfile: mode.runProfile,
-            noUntracked: includeUntracked.noUntracked
-          })
-      );
-      await refresh(treeProvider);
-      showOutputPanel(
-        "visualAgentCurrentChangeVerification",
-        "Visual Agent: Verify Current Change",
-        result.output || "No verify-impl output."
-      );
-      const status = await readAgentStatus();
-      if (status) {
-        showOutputPanel("visualAgentLastVerification", "Visual Agent: Last AI Verification", agentStatusMarkdown(status));
-      }
-      showCliResult("Verify current change", result);
+      await verifyImplementationCommand(treeProvider);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("visualAgent.verifyImplementation", async () => {
+      await verifyImplementationCommand(treeProvider);
     })
   );
 
@@ -159,27 +128,31 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
     vscode.commands.registerCommand("visualAgent.showLastVerification", async () => {
       const status = await readAgentStatus();
       if (!status) {
-        vscode.window.showInformationMessage("Visual Agent: no AI verification status yet.");
+        vscode.window.showInformationMessage("Checkpoint: no AI verification status yet.");
         return;
       }
-      showOutputPanel("visualAgentLastVerification", "Visual Agent: Last AI Verification", agentStatusMarkdown(status));
+      showOutputPanel("visualAgentLastVerification", "Checkpoint: Last AI Verification", agentStatusMarkdown(status));
     })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("visualAgent.showLatestFailure", async () => {
       const result = await showLatestFailure();
-      showOutputPanel("visualAgentFailure", "Visual Agent: Latest Failure", result.output || "No latest failure.");
+      showOutputPanel(
+        "visualAgentFailure",
+        "Checkpoint: Latest Failure",
+        renderLatestFailureMarkdown(result.output || "No latest failure.")
+      );
     })
   );
 
   context.subscriptions.push(
     vscode.commands.registerCommand("visualAgent.autoRepair", async () => {
       const preview = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: "Visual Agent: previewing auto repair..." },
+        { location: vscode.ProgressLocation.Notification, title: "Checkpoint: previewing auto repair..." },
         () => autoRepairFailure(true)
       );
-      showOutputPanel("visualAgentAutoRepair", "Visual Agent: Auto Repair Preview", preview.output || "No auto-repair preview.");
+      showOutputPanel("visualAgentAutoRepair", "Checkpoint: Auto Repair Preview", preview.output || "No auto-repair preview.");
       if (preview.code !== 0) {
         showCliResult("Auto repair preview", preview);
         return;
@@ -204,10 +177,10 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
         {
           location: vscode.ProgressLocation.Notification,
           title: runRegression
-            ? "Visual Agent: auto repairing, promoting, and testing regression..."
+            ? "Checkpoint: auto repairing, promoting, and testing regression..."
             : promoteRegression
-              ? "Visual Agent: auto repairing and promoting regression..."
-            : "Visual Agent: auto repairing latest failure..."
+              ? "Checkpoint: auto repairing and promoting regression..."
+            : "Checkpoint: auto repairing latest failure..."
         },
         () => autoRepairFailure(false, promoteRegression, runRegression)
       );
@@ -215,10 +188,10 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
       showOutputPanel(
         "visualAgentAutoRepair",
         runRegression
-          ? "Visual Agent: Auto Repair + Regression Test"
+          ? "Checkpoint: Auto Repair + Regression Test"
           : promoteRegression
-            ? "Visual Agent: Auto Repair + Regression"
-            : "Visual Agent: Auto Repair",
+            ? "Checkpoint: Auto Repair + Regression"
+            : "Checkpoint: Auto Repair",
         result.output || "No auto-repair output."
       );
       showCliResult(
@@ -243,7 +216,7 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
       }
       const result = await runCli(["generate-workflow", "--description", description]);
       if (result.code !== 0) {
-        vscode.window.showErrorMessage("Visual Agent workflow generation failed: " + trimOutput(result.output));
+        vscode.window.showErrorMessage("Checkpoint workflow generation failed: " + trimOutput(result.output));
         return;
       }
 
@@ -254,6 +227,65 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
         return;
       }
       vscode.window.showInformationMessage("Workflow generated: " + trimOutput(result.output));
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("visualAgent.newWorkflow", async () => {
+      const name = await vscode.window.showInputBox({
+        prompt: "Workflow file name.",
+        placeHolder: "login_flow",
+        validateInput: (value) => /^[a-zA-Z0-9_-]+$/.test(value) ? undefined : "Use letters, numbers, underscores, or hyphens."
+      });
+      if (!name) {
+        return;
+      }
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      if (!workspaceFolder) {
+        vscode.window.showErrorMessage("Checkpoint: open a workspace folder before creating a workflow.");
+        return;
+      }
+      const workflowsDir = path.join(workspaceFolder.uri.fsPath, "workflows");
+      fs.mkdirSync(workflowsDir, { recursive: true });
+      const filePath = path.join(workflowsDir, `${name.replace(/\.ya?ml$/i, "")}.yaml`);
+      if (fs.existsSync(filePath)) {
+        vscode.window.showWarningMessage("Checkpoint: workflow already exists: " + filePath);
+        const doc = await vscode.workspace.openTextDocument(filePath);
+        await vscode.window.showTextDocument(doc);
+        return;
+      }
+      fs.writeFileSync(filePath, workflowTemplate(path.basename(filePath, ".yaml")), "utf8");
+      const doc = await vscode.workspace.openTextDocument(filePath);
+      await vscode.window.showTextDocument(doc);
+      await refresh(treeProvider);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("visualAgent.openExamples", async () => {
+      await treeProvider.showExamples();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("visualAgent.copyExampleWorkflow", async (sourcePath?: string) => {
+      const source = sourcePath || await pickExampleWorkflow(context);
+      if (!source) {
+        return;
+      }
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      if (!workspaceFolder) {
+        vscode.window.showErrorMessage("Checkpoint: open a workspace folder before copying an example.");
+        return;
+      }
+      const workflowsDir = path.join(workspaceFolder.uri.fsPath, "workflows");
+      fs.mkdirSync(workflowsDir, { recursive: true });
+      const destination = uniqueWorkflowPath(path.join(workflowsDir, path.basename(source)));
+      fs.copyFileSync(source, destination);
+      const doc = await vscode.workspace.openTextDocument(destination);
+      await vscode.window.showTextDocument(doc);
+      vscode.window.showInformationMessage("Checkpoint: copied example workflow to " + destination);
+      await refresh(treeProvider);
     })
   );
 
@@ -340,10 +372,10 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
         args.push("--save-workflow", workspacePath(getWorkspaceRoot() + "/" + saveWorkflow));
       }
       const result = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: "Visual Agent: running browser smoke..." },
+        { location: vscode.ProgressLocation.Notification, title: "Checkpoint: running browser smoke..." },
         () => runCli(args, { workspaceRoot: false })
       );
-      showOutputPanel("visualAgentBrowserSmoke", "Visual Agent: Browser Smoke", result.output || "No browser smoke output.");
+      showOutputPanel("visualAgentBrowserSmoke", "Checkpoint: Browser Smoke", result.output || "No browser smoke output.");
       showCliResult("Browser smoke", result);
     })
   );
@@ -352,7 +384,7 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
     vscode.commands.registerCommand("visualAgent.connectCloud", () => {
       vscode.window
         .showInformationMessage(
-          "Cloud runs are planned for the Pro plan. Local Visual Agent workflows continue to run on this machine.",
+          "Cloud runs are planned for the Pro plan. Local Checkpoint workflows continue to run on this machine.",
           "Open GitHub"
         )
         .then((action) => {
@@ -362,6 +394,135 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
         });
     })
   );
+}
+
+async function verifyImplementationCommand(treeProvider: WorkflowTreeProvider): Promise<void> {
+  const taskDescription = await vscode.window.showInputBox({
+    prompt: "Describe the implementation change to verify.",
+    placeHolder: "Verify profile form saves and displays the updated profile name."
+  });
+  if (!taskDescription) {
+    return;
+  }
+  const baseUrl = await vscode.window.showInputBox({
+    prompt: "App URL or workspace fixture path. Leave empty to infer from project config or workspace fixtures.",
+    placeHolder: "http://localhost:3000/profile or fixtures/profile.html"
+  });
+  const mode = await vscode.window.showQuickPick(
+    [
+      {
+        label: "Dry Run",
+        description: "Generate, quality-gate, and run without real clicks or inputs.",
+        runProfile: "dry-run" as const
+      },
+      {
+        label: "Live Supervised",
+        description: "Run real browser actions with supervised permissions.",
+        runProfile: "supervised" as const
+      }
+    ],
+    { placeHolder: "Choose implementation verification mode" }
+  );
+  if (!mode) {
+    return;
+  }
+  const includeUntracked = await vscode.window.showQuickPick(
+    [
+      {
+        label: "Include untracked files",
+        description: "Use tracked changes and new files in git diff.",
+        noUntracked: false
+      },
+      {
+        label: "Tracked files only",
+        description: "Ignore untracked files.",
+        noUntracked: true
+      }
+    ],
+    { placeHolder: "Choose git diff scope" }
+  );
+  if (!includeUntracked) {
+    return;
+  }
+  const result = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "Checkpoint: verifying implementation..." },
+    () =>
+      verifyImplementationFromDiff({
+        taskDescription,
+        baseUrl: baseUrl?.trim() || undefined,
+        runProfile: mode.runProfile,
+        noUntracked: includeUntracked.noUntracked
+      })
+  );
+  await refresh(treeProvider);
+  showOutputPanel(
+    "visualAgentCurrentChangeVerification",
+    "Checkpoint: Verify Implementation",
+    result.output || "No verify-impl output."
+  );
+  const status = await readAgentStatus();
+  if (status) {
+    showOutputPanel("visualAgentLastVerification", "Checkpoint: Last AI Verification", agentStatusMarkdown(status));
+  }
+  showCliResult("Verify implementation", result);
+}
+
+async function pickExampleWorkflow(context: vscode.ExtensionContext): Promise<string | undefined> {
+  const root = examplesRoot(context);
+  if (!fs.existsSync(root)) {
+    vscode.window.showWarningMessage("Checkpoint: no example workflows found.");
+    return undefined;
+  }
+  const picks: Array<{ label: string; description: string; path: string }> = [];
+  for (const category of fs.readdirSync(root).sort()) {
+    const dir = path.join(root, category);
+    if (!fs.statSync(dir).isDirectory()) {
+      continue;
+    }
+    for (const file of fs.readdirSync(dir).filter((item) => item.endsWith(".yaml")).sort()) {
+      picks.push({ label: path.basename(file, ".yaml"), description: category, path: path.join(dir, file) });
+    }
+  }
+  const pick = await vscode.window.showQuickPick(picks, { placeHolder: "Copy an example workflow into this project" });
+  return pick?.path;
+}
+
+function uniqueWorkflowPath(basePath: string): string {
+  if (!fs.existsSync(basePath)) {
+    return basePath;
+  }
+  const parsed = path.parse(basePath);
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = path.join(parsed.dir, `${parsed.name}_${index}${parsed.ext}`);
+    if (!fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return path.join(parsed.dir, `${parsed.name}_${Date.now()}${parsed.ext}`);
+}
+
+function workflowTemplate(name: string): string {
+  return `schema_version: 1
+min_runtime_version: "0.1.0"
+name: ${name.replace(/[^a-zA-Z0-9_]+/g, "_")}
+version: 1
+description: "Describe what this workflow verifies."
+tags: [verification, fast]
+visibility: private
+author: ""
+license: ""
+steps:
+  - id: observe_page
+    action: observe_browser
+    url: "http://localhost:3000"
+  - id: browser_ready
+    action: assert_browser_ready
+    min_text_length: 1
+    min_interactive: 1
+  - id: verify_expected_text
+    action: assert_text
+    text: "Expected text here"
+`;
 }
 
 export function registerRunOnSave(context: vscode.ExtensionContext, treeProvider: WorkflowTreeProvider): void {
@@ -389,9 +550,9 @@ async function refresh(treeProvider: WorkflowTreeProvider): Promise<void> {
 function showCliResult(title: string, result: { code: number; output: string }): void {
   const text = trimOutput(result.output);
   if (result.code === 0) {
-    vscode.window.showInformationMessage(`Visual Agent: ${title} completed. ${text}`);
+    vscode.window.showInformationMessage(`Checkpoint: ${title} completed. ${text}`);
   } else {
-    vscode.window.showWarningMessage(`Visual Agent: ${title} finished with issues. ${text}`);
+    vscode.window.showWarningMessage(`Checkpoint: ${title} finished with issues. ${text}`);
   }
 }
 
@@ -455,3 +616,4 @@ function splitCsv(value: string | undefined): string[] {
     .map((item) => item.trim())
     .filter(Boolean);
 }
+

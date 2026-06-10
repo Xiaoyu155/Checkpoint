@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import shutil
@@ -27,7 +27,7 @@ from .workflow_diff import workflow_text_diff
 DEFAULT_REPAIR_MODEL = "claude-haiku-4-5-20251001"
 MAX_EVIDENCE_CHARS = 12000
 REPAIR_RISK_ORDER = {"unknown": 0, "low": 1, "medium": 2, "high": 3}
-REPAIR_SYSTEM_PROMPT = """You are repairing a Visual Agent workflow or the application code it verifies.
+REPAIR_SYSTEM_PROMPT = """You are repairing a Checkpoint workflow or the application code it verifies.
 
 Return concise JSON with this shape:
 {
@@ -1518,3 +1518,4 @@ def _parse_repair_json(text: str) -> dict[str, Any]:
 def _is_auth_configuration_error(exc: Exception) -> bool:
     text = str(exc).lower()
     return any(part in text for part in ("api_key", "auth_token", "authentication", "credentials", "environment variable"))
+

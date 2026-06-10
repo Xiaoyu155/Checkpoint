@@ -1,0 +1,23 @@
+schema_version: 1
+workspace_root: .agent-workspace
+ci:
+  quality_gate_profile: ci
+  fail_on_secret_leak: true
+  fail_on_risk_policy_error: true
+  report_root: .runs/quality_gates
+  junit_output: .runs/quality_gates/junit.xml
+  timeout_seconds: 300
+verification:
+  tags: [fast]
+  max_workflows: 5
+  run_profile: dry-run
+  wait_lock: true
+  format: json
+pre_push:
+  tags: [fast]
+  max_workflows: 5
+  run_profile: dry-run
+  wait_lock: true
+  format: json
+  quality_gate_profile: ci
+  junit_output: .runs/quality_gates/junit.xml

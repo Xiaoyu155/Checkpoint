@@ -1,0 +1,33 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: filter_panel
+version: 1
+description: Verify a filter panel narrows list results.
+tags: [verification, fast, forms, list, example]
+category: forms
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
+steps:
+  - id: observe_list
+    action: observe_browser
+    url: "http://localhost:3000/items"
+  - id: browser_ready
+    action: assert_browser_ready
+    min_text_length: 1
+    min_interactive: 1
+  - id: open_filters
+    action: click
+    target: { text: "Filters", role: button }
+    browser_post_action_observe: true
+  - id: choose_active
+    action: click
+    target: { text: "Active", role: checkbox }
+    browser_post_action_observe: true
+  - id: apply_filters
+    action: click
+    target: { text: "Apply", role: button }
+    browser_post_action_observe: true
+  - id: verify_filtered_state
+    action: assert_text
+    text: "Active"

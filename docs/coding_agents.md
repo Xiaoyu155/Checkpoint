@@ -1,8 +1,8 @@
-# Coding Agents
+﻿# Coding Agents
 
-Visual Agent is useful to coding agents because it gives them a local execution
+Checkpoint is useful to coding agents because it gives them a local execution
 surface with durable workflows, explicit permission profiles, and auditable
-reports. The agent can reason about the task, while Visual Agent performs the
+reports. The agent can reason about the task, while Checkpoint performs the
 browser or desktop workflow and records what happened.
 
 ## Generate The Brief
@@ -70,3 +70,4 @@ and explain the failure diagnosis.
 - Treat `truncated: true` as a signal to use `list_run_artifacts` or a more
   specific tool rather than asking for a larger MCP response.
 - Use the run report as the source of truth.
+

@@ -14,6 +14,7 @@ MUTATING_ACTIONS = {
     "press_key",
     "refresh_browser",
     "click_text",
+    "click_visual",
     "request_api",
     "expect_download",
     "save_storage_state",

@@ -1,8 +1,10 @@
-import json
+﻿import json
 from os import utime
+from pathlib import Path
 
 from visual_agent.quality import (
     QualityGateStep,
+    QualityGateResult,
     apply_quality_gate_strict_policy,
     build_coding_agent_brief,
     build_install_check_plan,
@@ -20,9 +22,13 @@ from visual_agent.quality import (
     mcp_smoke_check_to_markdown,
     quality_gate_index_to_markdown,
     quality_gate_reports_to_markdown,
+    quality_gate_to_junit_xml,
+    quality_gate_to_step_summary,
     release_check_plan_to_markdown,
+    release_trial_to_markdown,
     run_demo_workspace_check,
     run_mcp_smoke_check,
+    run_release_trial,
     quality_gate_status,
     quality_gate_to_markdown,
     run_quality_gate,
@@ -50,7 +56,9 @@ def test_release_check_plan_lists_required_commands() -> None:
     assert any(check["id"] == "install_check" for check in plan["checks"])
     assert any(check["id"] == "mcp_smoke_cli" for check in plan["checks"])
     assert any(check["id"] == "quality_gate" for check in plan["checks"])
+    assert any(check["id"] == "release_trial" for check in plan["checks"])
     assert "demo-workspace-check" in markdown
+    assert "release-trial" in markdown
     assert "pytest tests\\test_mcp_server.py" in markdown
     assert "docs/release_checklist.md" in markdown
 
@@ -127,12 +135,26 @@ def test_coding_agent_brief_cli_renders_markdown(capsys) -> None:
 
 
 def test_demo_workspace_check_runs_local_demo(tmp_path) -> None:
-    result = run_demo_workspace_check(root=tmp_path / "workspace", overwrite=True)
+    workspace_root = tmp_path / "workspace"
+    result = run_demo_workspace_check(root=workspace_root, overwrite=True)
     markdown = demo_workspace_check_to_markdown(result)
 
     assert result["status"] == "success"
+    assert result["workflow"] == "local_html_form_workflow"
+    assert result["run_profile"] == "dry-run"
     assert result["run_id"]
+    assert (workspace_root / "workflows" / "browser_form_workflow.yaml").exists()
     assert "Demo Workspace Check" in markdown
+
+
+def test_demo_workspace_check_runs_supervised_browser_demo(tmp_path) -> None:
+    result = run_demo_workspace_check(root=tmp_path / "workspace", overwrite=True, run_profile="supervised")
+
+    assert result["status"] == "success"
+    assert result["workflow"] == "browser_form_workflow"
+    assert result["run_profile"] == "supervised"
+    assert result["run_id"]
+    assert result["failed_steps"] == []
 
 
 def test_mcp_smoke_check_runs_tool_chain(tmp_path) -> None:
@@ -144,6 +166,234 @@ def test_mcp_smoke_check_runs_tool_chain(tmp_path) -> None:
     assert result["check_count"] == 5
     assert result["run_id"]
     assert "MCP Smoke Check" in markdown
+
+
+def test_release_trial_runs_demo_mcp_and_cloud_bundle(tmp_path, monkeypatch) -> None:
+    workspace_root = tmp_path / "workspace"
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_demo_workspace_check(**kwargs):
+        calls.append(("demo", kwargs))
+        assert kwargs["with_demo"] is True
+        return {
+            "schema_version": 1,
+            "workspace_root": str(kwargs["root"]),
+            "status": "success",
+            "validation_ok": True,
+            "workflow": "browser_form_workflow",
+            "run_profile": kwargs["run_profile"],
+            "run_id": "demo-run",
+            "failed_steps": [],
+            "report_index": str(Path(kwargs["root"]) / "reports" / "index.json"),
+        }
+
+    def fake_mcp_smoke_check(**kwargs):
+        calls.append(("mcp", kwargs))
+        return {
+            "schema_version": 1,
+            "workspace_root": str(kwargs["workspace_root"]),
+            "workflow": "local_html_form_workflow",
+            "inputs_file": "demo_login.json",
+            "status": "success",
+            "check_count": 5,
+            "failed_count": 0,
+            "run_id": "mcp-run",
+            "checks": [],
+        }
+
+    class FakeServer:
+        def __init__(self) -> None:
+            self.server_port = 7891
+
+        def serve_forever(self) -> None:
+            calls.append(("serve", {}))
+
+        def shutdown(self) -> None:
+            calls.append(("shutdown", {}))
+
+        def server_close(self) -> None:
+            calls.append(("close", {}))
+
+    def fake_create_cloud_server(**kwargs):
+        calls.append(("server", kwargs))
+        return FakeServer()
+
+    def fake_build_http_cloud_transport(*, endpoint, api_key, org="", user_id="", timeout_seconds=30.0, max_retries=0, retry_backoff_seconds=0.0, opener=None):
+        calls.append(("transport", {"endpoint": endpoint, "api_key": api_key, "org": org, "user_id": user_id}))
+        return lambda request: {
+            "schema_version": 1,
+            "status": "success",
+            "run_id": "cloud-run",
+            "workflow_name": request.get("workflow_name") or "",
+            "workflow_source": request.get("workflow_source") or "",
+            "workflow_id": request.get("workflow_id") or "",
+            "report_url": "/v1/run/cloud-run",
+            "message": "Workflow completed.",
+            "steps_total": 2,
+            "steps_passed": 2,
+        }
+
+    def fake_execute_remote_workflow_plan(workflow_name, workspace_root, **kwargs):
+        calls.append(("cloud", {"workflow_name": workflow_name, "workspace_root": str(workspace_root), **kwargs}))
+        transport = kwargs.get("transport")
+        result = transport(
+            {
+                "workflow_name": workflow_name,
+                "workflow_source": "workspace",
+                "workflow_id": "",
+            }
+        )
+        return {
+            "schema_version": 1,
+            "workspace": str(workspace_root),
+            "workflow_name": workflow_name,
+            "execution_requested": True,
+            "network_sent": True,
+            "request": {"workflow_source": "workspace", "workflow_id": ""},
+            "result": {**result, "usage_recorded": True},
+        }
+
+    appended: dict[str, object] = {}
+
+    def fake_append_cloud_run_history(workspace_root, result):
+        appended["workspace_root"] = str(workspace_root)
+        appended["result"] = result
+        return workspace_root / "run_history.jsonl"
+
+    monkeypatch.setattr("visual_agent.quality.run_demo_workspace_check", fake_demo_workspace_check)
+    monkeypatch.setattr("visual_agent.quality.run_mcp_smoke_check", fake_mcp_smoke_check)
+    monkeypatch.setattr("visual_agent.cloud_server.create_cloud_server", fake_create_cloud_server)
+    monkeypatch.setattr("visual_agent.cloud.build_http_cloud_transport", fake_build_http_cloud_transport)
+    monkeypatch.setattr("visual_agent.cloud.execute_remote_workflow_plan", fake_execute_remote_workflow_plan)
+    monkeypatch.setattr("visual_agent.visual_status.append_cloud_run_history", fake_append_cloud_run_history)
+
+    result = run_release_trial(workspace_root=workspace_root, overwrite=True, run_profile="supervised")
+    markdown = release_trial_to_markdown(result)
+
+    assert result["status"] == "success"
+    assert result["failed_count"] == 0
+    assert result["checks"][0]["id"] == "demo_workspace_check"
+    assert result["checks"][1]["id"] == "mcp_smoke"
+    assert result["checks"][2]["id"] == "cloud_run"
+    assert result["checks"][2]["workflow_source"] == "workspace"
+    assert appended["workspace_root"] == str(workspace_root.resolve())
+    assert appended["result"]["workflow_name"] == "browser_form_workflow"
+    assert result["workspace_dashboard"]["health"]["status"] in {"ok", "attention"}
+    assert result["run_history_report_path"].endswith("release_trial_report.html")
+    assert result["release_trial_bundle"]["json"].endswith("release_trial_bundle.json")
+    assert result["release_trial_bundle"]["markdown"].endswith("release_trial_bundle.md")
+    assert Path(result["release_trial_bundle"]["json"]).exists()
+    assert Path(result["release_trial_bundle"]["markdown"]).exists()
+    assert "Release Trial" in markdown
+    assert "Workspace Dashboard" in markdown
+    assert "Run History Report" in markdown
+    assert "Bundle" in markdown
+    assert any(name == "server" for name, _ in calls)
+    assert any(name == "transport" for name, _ in calls)
+
+
+def test_release_trial_uses_existing_workspace_workflow_without_seed_demo(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False, overwrite=True)
+    (workspace.fixtures_dir / "ready.html").write_text("<p>Ready</p>", encoding="utf-8")
+    (workspace.workflows_dir / "ready.yaml").write_text(
+        """
+schema_version: 1
+name: ready
+version: 1
+steps:
+  - id: observe
+    action: observe_html
+    path: fixtures/ready.html
+  - id: assert_ready
+    action: assert_text
+    text: Ready
+""".strip(),
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_demo_workspace_check(**kwargs):
+        calls.append(("demo", kwargs))
+        assert kwargs["with_demo"] is False
+        return {
+            "schema_version": 1,
+            "workspace_root": str(kwargs["root"]),
+            "status": "success",
+            "validation_ok": True,
+            "workflow": kwargs["workflow_name"],
+            "run_profile": kwargs["run_profile"],
+            "run_id": "demo-run",
+            "failed_steps": [],
+            "report_index": str(Path(kwargs["root"]) / "reports" / "index.json"),
+        }
+
+    def fake_mcp_smoke_check(**kwargs):
+        calls.append(("mcp", kwargs))
+        return {
+            "schema_version": 1,
+            "workspace_root": str(kwargs["workspace_root"]),
+            "workflow": kwargs["workflow"],
+            "inputs_file": kwargs["inputs_file"],
+            "status": "success",
+            "check_count": 5,
+            "failed_count": 0,
+            "run_id": "mcp-run",
+            "checks": [],
+        }
+
+    class FakeServer:
+        def __init__(self) -> None:
+            self.server_port = 7891
+
+        def serve_forever(self) -> None:
+            calls.append(("serve", {}))
+
+        def shutdown(self) -> None:
+            calls.append(("shutdown", {}))
+
+        def server_close(self) -> None:
+            calls.append(("close", {}))
+
+    monkeypatch.setattr("visual_agent.quality.run_demo_workspace_check", fake_demo_workspace_check)
+    monkeypatch.setattr("visual_agent.quality.run_mcp_smoke_check", fake_mcp_smoke_check)
+    monkeypatch.setattr("visual_agent.cloud_server.create_cloud_server", lambda **kwargs: FakeServer())
+    monkeypatch.setattr(
+        "visual_agent.cloud.build_http_cloud_transport",
+        lambda **kwargs: (lambda request: {"schema_version": 1, "status": "success", "run_id": "cloud-run", "workflow_name": request.get("workflow_name") or "", "workflow_source": request.get("workflow_source") or "", "report_url": "/v1/run/cloud-run", "message": "Workflow completed.", "steps_total": 2, "steps_passed": 2}),
+    )
+    monkeypatch.setattr(
+        "visual_agent.cloud.execute_remote_workflow_plan",
+        lambda workflow_name, workspace_root, **kwargs: {
+            "schema_version": 1,
+            "workspace": str(workspace_root),
+            "workflow_name": workflow_name,
+            "execution_requested": True,
+            "network_sent": True,
+            "request": {"workflow_source": "workspace", "workflow_id": ""},
+            "result": {
+                "schema_version": 1,
+                "status": "success",
+                "run_id": "cloud-run",
+                "workflow_name": workflow_name,
+                "workflow_source": "workspace",
+                "report_url": "/v1/run/cloud-run",
+                "message": "Workflow completed.",
+                "steps_total": 2,
+                "steps_passed": 2,
+                "usage_recorded": True,
+            },
+        },
+    )
+    monkeypatch.setattr("visual_agent.visual_status.append_cloud_run_history", lambda *args, **kwargs: Path(args[0]) / "run_history.jsonl")
+
+    result = run_release_trial(workspace_root=workspace.root, overwrite=False, run_profile="dry-run")
+
+    assert result["status"] == "success"
+    assert result["checks"][0]["workflow"] == "ready"
+    assert result["checks"][1]["workflow"] == "ready"
+    assert result["cloud_run"]["workflow_name"] == "ready"
+    assert result["release_trial_bundle"]["json"].endswith("release_trial_bundle.json")
+    assert any(name == "demo" for name, _ in calls)
 
 
 def test_quality_gate_plan_includes_workspace_regression_when_present(tmp_path) -> None:
@@ -166,6 +416,84 @@ def test_quality_gate_dry_run_writes_no_report(tmp_path) -> None:
     assert result.report_path is None
     assert not list(tmp_path.iterdir())
     assert result.risk_summary["risk_level"] == "ok"
+
+
+def test_quality_gate_to_junit_xml_encodes_failures_and_skips() -> None:
+    result = QualityGateResult(
+        run_id="run-1",
+        profile="ci",
+        status="failed",
+        report_path=None,
+        markdown_path=None,
+        steps=(
+            QualityGateStep(
+                name="core_tests",
+                command=("python", "-m", "pytest"),
+                required=True,
+                status="failed",
+                exit_code=1,
+                elapsed_seconds=1.5,
+                stdout="stdout api_key=secret",
+                stderr="stderr token=secret",
+            ),
+            QualityGateStep(
+                name="workflow_contracts",
+                command=("python", "-m", "pytest", "tests/test_workflow_contracts.py"),
+                required=True,
+                status="planned",
+            ),
+        ),
+        elapsed_seconds=2.0,
+        risk_summary={
+            "risk_level": "warning",
+            "warning_count": 1,
+            "strict_policy_gate": {"failed": True, "enabled": True, "risk_policy_error_count": 1, "secret_scan_finding_count": 0},
+            "risk_policy_check": {"error_count": 1, "warning_count": 0},
+            "secret_scan": {"finding_count": 0},
+        },
+    )
+
+    xml = quality_gate_to_junit_xml(result)
+
+    assert xml.startswith("<?xml")
+    assert "testsuite" in xml
+    assert "core_tests" in xml
+    assert "workflow_contracts" in xml
+    assert "QualityGateStepFailure" in xml
+    assert "api_key=secret" not in xml
+    assert "token=secret" not in xml
+
+
+def test_quality_gate_to_step_summary_includes_junit_path() -> None:
+    result = QualityGateResult(
+        run_id="run-1",
+        profile="ci",
+        status="failed",
+        report_path=None,
+        markdown_path=None,
+        steps=(
+            QualityGateStep(
+                name="core_tests",
+                command=("python", "-m", "pytest"),
+                required=True,
+                status="failed",
+                exit_code=1,
+                elapsed_seconds=1.5,
+            ),
+        ),
+        elapsed_seconds=2.0,
+        risk_summary={
+            "risk_level": "warning",
+            "warning_count": 1,
+            "strict_policy_gate": {"failed": True, "enabled": True, "risk_policy_error_count": 1, "secret_scan_finding_count": 0},
+        },
+    )
+
+    summary = quality_gate_to_step_summary(result, junit_output=".runs/quality_gates/junit.xml")
+
+    assert "Checkpoint Quality Gate" in summary
+    assert "JUnit: `.runs/quality_gates/junit.xml`" in summary
+    assert "Strict Policy Gate" in summary
 
 
 def test_quality_gate_risk_summary_includes_gui_action_history(tmp_path) -> None:
@@ -603,3 +931,4 @@ def write_quality_report(
         encoding="utf-8",
     )
     utime(path, (mtime, mtime))
+

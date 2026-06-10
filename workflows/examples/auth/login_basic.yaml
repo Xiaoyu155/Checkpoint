@@ -1,0 +1,33 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: login_basic
+version: 1
+description: Verify a user can sign in and reach the dashboard.
+tags: [verification, fast, auth, example]
+category: auth
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
+steps:
+  - id: observe_login
+    action: observe_browser
+    url: "http://localhost:3000/login"
+  - id: browser_ready
+    action: assert_browser_ready
+    min_text_length: 1
+    min_interactive: 1
+  - id: fill_email
+    action: type
+    target: { label: "Email", role: input }
+    value: "demo@example.com"
+  - id: fill_password
+    action: type
+    target: { label: "Password", role: input }
+    value: "demo-password"
+  - id: submit_login
+    action: click
+    target: { text: "Sign in", role: button }
+    browser_post_action_observe: true
+  - id: verify_dashboard
+    action: assert_text
+    text: "Dashboard"

@@ -14,6 +14,7 @@ class WorkflowContext:
     run_id: str
     run_dir: Path
     inputs: dict[str, Any] = field(default_factory=dict)
+    variables: dict[str, Any] = field(default_factory=dict)
     sensitive_fields: set[str] = field(default_factory=set)
     resources: dict[str, Any] = field(default_factory=dict)
     observations: dict[str, Observation] = field(default_factory=dict)

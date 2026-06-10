@@ -1,10 +1,10 @@
-# Agent Handoff Guide
+﻿# Agent Handoff Guide
 
 Use this when opening a new Codex window or handing a project to another agent.
 
-## Update Visual Agent
+## Update Checkpoint
 
-From the Visual Agent checkout:
+From the Checkpoint checkout:
 
 ```powershell
 cd "D:\longxia agent"
@@ -21,8 +21,9 @@ after updating. Old MCP processes keep using the old imported code.
 From the product/project being edited:
 
 ```powershell
-python -m visual_agent.cli init-workspace --root .agent-workspace
-python -m visual_agent.cli workspace-status --root .agent-workspace
+python -m visual_agent.cli init --root .agent-workspace
+python -m visual_agent.cli show-status --workspace-root .agent-workspace
+python -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify the current change" --run-profile dry-run --format markdown
 ```
 
 Check that `project_root` is the project directory you are editing. Each project
@@ -63,7 +64,7 @@ window:
   bring_to_front: true
 ```
 
-Visual Agent automatically uses the global visual lock, captures evidence,
+Checkpoint automatically uses the global visual lock, captures evidence,
 minimizes the target window after capture, and restores the previous foreground
 window. Use `post_capture: keep` only when the workflow deliberately needs the
 target left open.
@@ -74,7 +75,7 @@ For OCR text coordinates on Windows, install:
 .\.venv\Scripts\python.exe -m pip install "screen-ocr[winrt]"
 ```
 
-Without `screen-ocr`, Visual Agent falls back to Tesseract or mock OCR where
+Without `screen-ocr`, Checkpoint falls back to Tesseract or mock OCR where
 configured.
 
 ## Keyboard Actions
@@ -88,3 +89,4 @@ Global key actions do not need a target:
 ```
 
 Under `dry-run`, keyboard and mouse actions do not touch the desktop.
+

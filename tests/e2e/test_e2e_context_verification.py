@@ -18,7 +18,7 @@ def test_e2e_git_diff_verify_impl_dry_run_writes_status_and_artifacts(tmp_path: 
     repo.mkdir()
     workspace = repo / ".agent-workspace"
 
-    init = run_cli("init-workspace", "--root", str(workspace), "--overwrite", cwd=repo)
+    init = run_cli("init", "--root", str(workspace), "--overwrite", cwd=repo)
     assert init.returncode == 0, init.stdout + init.stderr
 
     fixture = workspace / "fixtures" / "profile.html"
@@ -118,6 +118,8 @@ def test_e2e_git_diff_verify_impl_dry_run_writes_status_and_artifacts(tmp_path: 
         "fixtures/profile.html",
         "--run-profile",
         "dry-run",
+        "--timeout-seconds",
+        "60",
         "--min-quality-score",
         "0",
         "--no-untracked",
@@ -711,7 +713,7 @@ def test_e2e_real_frontend_samples_verify_impl_dry_run(tmp_path: Path, sample: d
     repo.mkdir()
     workspace = repo / ".agent-workspace"
 
-    init = run_cli("init-workspace", "--root", str(workspace), "--overwrite", "--no-demo", cwd=repo)
+    init = run_cli("init", "--root", str(workspace), "--overwrite", "--no-demo", cwd=repo)
     assert init.returncode == 0, init.stdout + init.stderr
 
     fixture = workspace / sample["base_url"].replace("fixtures/", "fixtures/")

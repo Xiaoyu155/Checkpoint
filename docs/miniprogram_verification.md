@@ -1,6 +1,6 @@
-# WeChat Mini Program Verification
+﻿# WeChat Mini Program Verification
 
-Visual Agent can verify a WeChat Mini Program from the outside of WeChat
+Checkpoint can verify a WeChat Mini Program from the outside of WeChat
 DevTools. It first uses Windows UI Automation to find the DevTools/project
 window, then captures the simulator region for screenshots, OCR, or VLM checks.
 
@@ -27,7 +27,8 @@ The examples include:
 ## Run The Useful Baseline
 
 ```powershell
-python -m visual_agent.cli init-workspace --root .agent-workspace
+python -m visual_agent.cli init --root .agent-workspace
+python -m visual_agent.cli show-status --workspace-root .agent-workspace
 Copy-Item examples\workflows\miniprogram\*.yaml .agent-workspace\workflows\
 Copy-Item examples\inputs\miniprogram_default.json .agent-workspace\inputs\
 python -m visual_agent.cli workspace-run --root .agent-workspace --workflow miniprogram_simulator_capture --run-profile dry-run
@@ -56,7 +57,7 @@ avoid broad words that also appear in your code editor.
 
 The default mini program workflows request `bring_to_front: true`, so Visual
 Agent restores and foregrounds the matched DevTools window before capturing the
-simulator. Visual Agent minimizes foregrounded capture windows by default after
+simulator. Checkpoint minimizes foregrounded capture windows by default after
 the screenshot/OCR evidence is collected, then restores the previous foreground
 window. Use `post_capture: keep` only when you deliberately want the target
 window left open.
@@ -115,3 +116,4 @@ python -m visual_agent.cli verify --workspace-root .agent-workspace --tags verif
 
 For true page-level acceptance, also run `miniprogram_visual_text_contract`
 with the text that must be present on the target screen.
+

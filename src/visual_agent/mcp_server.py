@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -95,6 +95,20 @@ def mcp_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="verify_workflow",
+            description="Run one workflow as a verification check and return pass/fail with structured failure details.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_root": {"type": "string"},
+                    "workflow_name": {"type": "string"},
+                    "inputs_file": {"type": "string"},
+                    "run_profile": {"type": "string", "enum": ["dry-run", "supervised", "semi-auto", "approved"], "default": "dry-run"},
+                },
+                "required": ["workspace_root", "workflow_name"],
+            },
+        ),
+        Tool(
             name="get_run_report",
             description="Return a completed run report as markdown or redacted JSON.",
             inputSchema={
@@ -168,6 +182,18 @@ def mcp_tools() -> list[Tool]:
                     "workspace_root": {"type": "string"},
                     "run_id": {"type": "string", "description": "Optional run id. Defaults to latest failed run."},
                     "max_chars": {"type": "integer", "default": 12000},
+                },
+                "required": ["workspace_root"],
+            },
+        ),
+        Tool(
+            name="get_failure_details",
+            description="Return the latest StructuredFailure JSON for coding agents to repair the current failure.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_root": {"type": "string"},
+                    "run_id": {"type": "string", "description": "Optional run id. Defaults to latest failed run."},
                 },
                 "required": ["workspace_root"],
             },
@@ -304,7 +330,7 @@ def mcp_tools() -> list[Tool]:
         ),
         Tool(
             name="list_benchmarks",
-            description="List public reference benchmark projects and scenarios for real-world Visual Agent testing.",
+            description="List public reference benchmark projects and scenarios for real-world Checkpoint testing.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -316,7 +342,7 @@ def mcp_tools() -> list[Tool]:
         ),
         Tool(
             name="build_benchmark_plan",
-            description="Create an executable Visual Agent benchmark coverage plan from public reference benchmarks.",
+            description="Create an executable Checkpoint benchmark coverage plan from public reference benchmarks.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -398,6 +424,15 @@ def mcp_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="get_visual_status",
+            description="Return the project .visual-agent-status.md as structured JSON for coding agents.",
+            inputSchema={
+                "type": "object",
+                "properties": {"workspace_root": {"type": "string"}},
+                "required": ["workspace_root"],
+            },
+        ),
+        Tool(
             name="save_task_context",
             description=(
                 "Save the AI assistant's current task state before switching windows. "
@@ -466,7 +501,7 @@ def mcp_tools() -> list[Tool]:
                     "task_description": {"type": "string"},
                     "code_changes": {
                         "type": "array",
-                        "description": "Optional. If omitted, Visual Agent reads git diff from repo_root.",
+                        "description": "Optional. If omitted, Checkpoint reads git diff from repo_root.",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -502,7 +537,7 @@ def mcp_tools() -> list[Tool]:
                     "task_description": {"type": "string"},
                     "code_changes": {
                         "type": "array",
-                        "description": "Optional. If omitted, Visual Agent reads git diff from repo_root.",
+                        "description": "Optional. If omitted, Checkpoint reads git diff from repo_root.",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -564,6 +599,15 @@ def mcp_tools() -> list[Tool]:
                         "type": "string",
                         "default": "claude-haiku-4-5-20251001",
                     },
+                    "page_type": {
+                        "type": "string",
+                        "enum": ["auth", "form", "list", "detail", "ecommerce"],
+                        "description": "Optional page type hint used to select stronger few-shot examples.",
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "Optional entry URL to use for the first observe_browser step.",
+                    },
                 },
                 "required": ["workspace_root", "description"],
             },
@@ -591,12 +635,14 @@ async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> list[
             "list_workflows": list_workflows_payload,
             "validate_workflow": validate_workflow_payload,
             "run_workflow": run_workflow_payload,
+            "verify_workflow": verify_workflow_payload,
             "get_run_report": get_run_report_payload,
             "list_run_artifacts": list_run_artifacts_payload,
             "get_workspace_dashboard": get_workspace_dashboard_payload,
             "get_latest_failure": get_latest_failure_payload,
             "summarize_latest_failure": summarize_latest_failure_payload,
             "diagnose_failure": diagnose_failure_payload,
+            "get_failure_details": get_failure_details_payload,
             "repair_workflow": repair_workflow_payload,
             "auto_repair_failure": auto_repair_failure_payload,
             "list_repair_history": list_repair_history_payload,
@@ -608,6 +654,7 @@ async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> list[
             "run_browser_smoke": run_browser_smoke_payload,
             "run_browser_smoke_suite": run_browser_smoke_suite_payload,
             "get_session_context": get_session_context_payload,
+            "get_visual_status": get_visual_status_payload,
             "save_task_context": save_task_context_payload,
             "run_verification": run_verification_payload,
             "generate_workflow_from_context": generate_workflow_from_context_payload,
@@ -712,6 +759,77 @@ def run_workflow_payload(args: dict[str, Any]) -> dict[str, Any]:
         "failed_steps": failed_steps,
         "report_hint": f"Use get_run_report with run_id='{result.run_id}' for full details.",
     }
+
+
+def verify_workflow_payload(args: dict[str, Any]) -> dict[str, Any]:
+    from .structured_failure import empty_structured_failure, structured_failure_from_diagnosis, structured_failure_to_dict
+
+    workspace = require_workspace(args)
+    workflow_name = require_str(args, "workflow_name")
+    run_profile = str(args.get("run_profile") or "dry-run")
+    if run_profile not in RUN_PROFILE_ORDER:
+        raise ValueError(f"Unsupported run_profile: {run_profile}")
+    try:
+        effective_run_profile = enforce_mcp_run_profile(workspace, workflow_name, run_profile)
+        inputs_file = args.get("inputs_file")
+        inputs = load_workspace_inputs(workspace, None, str(inputs_file)) if inputs_file else {}
+        result = run_workspace_workflow(
+            workspace,
+            workflow_name,
+            inputs=inputs,
+            dry_run=effective_run_profile == "dry-run",
+            run_profile=effective_run_profile,
+            export_report=True,
+        )
+    except Exception as exc:
+        suggestion = "Check workspace_root, workflow_name, inputs_file, and preflight errors, then rerun verify_workflow."
+        return {
+            "schema_version": 1,
+            "workspace": str(workspace.root),
+            "workflow": workflow_name,
+            "result": "error",
+            "requested_run_profile": run_profile,
+            "run_profile": None,
+            "run_id": None,
+            "steps_passed": 0,
+            "steps_total": 0,
+            "structured_failure": empty_structured_failure(message=str(exc), suggested_fix=suggestion),
+            "message": str(exc),
+            "suggestion": suggestion,
+        }
+    failed = next((step for step in result.steps if getattr(step.status, "value", str(step.status)) == "failed"), None)
+    steps_passed = sum(1 for step in result.steps if getattr(step.status, "value", str(step.status)) in {"success", "dry_run"})
+    structured_failure = None
+    if failed is not None:
+        metadata = dict(getattr(failed, "metadata", {}) or {})
+        diagnosis = metadata.get("failure_diagnosis") if isinstance(metadata.get("failure_diagnosis"), dict) else {}
+        if diagnosis:
+            structured_failure = structured_failure_to_dict(
+                structured_failure_from_diagnosis(
+                    diagnosis,
+                    project_root=workspace.project_root,
+                    workflow_name=result.workflow_name,
+                )
+            )
+        else:
+            structured_failure = empty_structured_failure(
+                message=str(getattr(failed, "message", "") or "Workflow step failed."),
+                suggested_fix="Inspect the failed step message and run report, then rerun verify_workflow.",
+            )
+    payload = {
+        "schema_version": 1,
+        "workspace": str(workspace.root),
+        "workflow": result.workflow_name,
+        "result": "pass" if failed is None else "fail",
+        "requested_run_profile": run_profile,
+        "run_profile": result.run_profile,
+        "run_id": result.run_id,
+        "steps_passed": steps_passed,
+        "steps_total": len(result.steps),
+        "structured_failure": structured_failure,
+        "report_hint": f"Use get_run_report with run_id='{result.run_id}' for full details.",
+    }
+    return scrub_secrets(payload)
 
 
 def get_run_report_payload(args: dict[str, Any]) -> dict[str, Any]:
@@ -875,6 +993,61 @@ def diagnose_failure_payload(args: dict[str, Any]) -> dict[str, Any]:
         run_id=str(args.get("run_id") or "") or None,
         max_chars=int(args.get("max_chars") or 12000),
     )
+
+
+def get_failure_details_payload(args: dict[str, Any]) -> dict[str, Any]:
+    from .reports import load_run_report
+    from .structured_failure import structured_failure_from_diagnosis, structured_failure_to_dict
+
+    workspace = require_workspace(args)
+    run_id = str(args.get("run_id") or "") or latest_failed_run_id(workspace)
+    if not run_id:
+        return {
+            "schema_version": 1,
+            "workspace": str(workspace.root),
+            "status": "none",
+            "message": "No failed workflow reports found.",
+        }
+    report = load_run_report(workspace.runs_dir / run_id)
+    failed = next((step for step in report.steps if step.status == "failed"), None)
+    if not failed:
+        return {
+            "schema_version": 1,
+            "workspace": str(workspace.root),
+            "status": "none",
+            "run_id": run_id,
+            "message": "Run has no failed step.",
+        }
+    diagnosis = failed.failure_diagnosis if isinstance(failed.failure_diagnosis, dict) else {}
+    structured = diagnosis.get("structured_failure") if isinstance(diagnosis.get("structured_failure"), dict) else None
+    if structured is None and diagnosis:
+        structured = structured_failure_to_dict(
+            structured_failure_from_diagnosis(
+                diagnosis,
+                project_root=workspace.project_root,
+                workflow_name=report.workflow_name,
+            )
+        )
+    return scrub_secrets(
+        {
+            "schema_version": 1,
+            "workspace": str(workspace.root),
+            "status": "found",
+            "run_id": run_id,
+            "workflow": report.workflow_name,
+            "failed_step": {"id": failed.id, "action": failed.action, "message": failed.message},
+            "structured_failure": structured or {},
+            "report_path": str(workspace.reports_dir / f"{run_id}.json"),
+        }
+    )
+
+
+def latest_failed_run_id(workspace: Any) -> str:
+    index = build_workspace_report_index(workspace, failed_only=True)
+    entries = index.get("entries") if isinstance(index.get("entries"), list) else []
+    if not entries:
+        return ""
+    return str(entries[0].get("run_id") or "")
 
 
 def repair_workflow_payload(args: dict[str, Any]) -> dict[str, Any]:
@@ -1058,6 +1231,19 @@ def get_session_context_payload(args: dict[str, Any]) -> dict[str, Any]:
         "snapshot": snapshot,
         "token_estimate": len(snapshot) // 4,
         "within_budget": len(snapshot) <= 2000,
+    }
+
+
+def get_visual_status_payload(args: dict[str, Any]) -> dict[str, Any]:
+    from .visual_status import read_status_file, visual_status_to_dict
+
+    workspace = require_workspace(args)
+    status = read_status_file(workspace.project_root)
+    return {
+        "schema_version": 1,
+        "workspace": str(workspace.root),
+        "project_root": str(workspace.project_root),
+        "visual_status": visual_status_to_dict(status),
     }
 
 
@@ -1641,11 +1827,14 @@ def generate_workflow_payload(args: dict[str, Any]) -> dict[str, Any]:
 
     workspace = require_workspace(args)
     description = require_str(args, "description")
+    page_type = str(args.get("page_type") or "").strip()
     result = generate_workflow_yaml(
         description=description,
         workspace_root=workspace.root,
         model=str(args.get("model") or DEFAULT_MODEL),
         dry_run=bool(args.get("dry_run", False)),
+        page_type=page_type or None,
+        url=str(args.get("url") or "").strip() or None,
     )
     return {
         "schema_version": 1,
@@ -2052,3 +2241,4 @@ async def _run() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -1,17 +1,33 @@
 from __future__ import annotations
 
 import argparse
+import platform
 import json
+import os
 import re
+import sys
+import webbrowser
 from pathlib import Path
 from typing import Any
+from importlib.metadata import PackageNotFoundError, version as package_version
+from threading import Event, Thread
 
+from . import __version__
 from .auth_state import auth_state_probe_to_markdown, build_auth_state_import_plan, import_auth_state, inspect_storage_state, probe_storage_state
 from .capabilities import build_atomic_capability_manifest, build_capability_manifest
 from .ci_templates import ci_template_install_to_dict, install_ci_templates
+from .ci_templates import ci_workflow_template
+from .integrations import (
+    export_workflow_to_playwright,
+    integration_snippets_to_dict,
+    install_integration_snippets,
+    playwright_export_to_dict,
+)
 from .console import build_report_detail, build_workspace_dashboard, dashboard_to_markdown, report_detail_to_markdown
 from .codex_check import codex_check_to_markdown, run_codex_check
 from .connect import connect_platform, connect_result_to_dict
+from .fixtures import FIXTURE_TYPES, fixture_template_payload, render_fixture_template
+from .github_pr import github_event_pr_number, github_repository_from_env, github_run_url_from_env, post_pr_comment, pr_failure_comment_result
 from .dom import DomProvider
 from .external_samples import (
     build_external_sample_batch_plan,
@@ -58,7 +74,7 @@ from .planner_generate import (
     preview_planner_draft_save,
     save_planner_draft_result,
 )
-from .preflight import run_preflight
+from .preflight import inspect_environment, run_preflight
 from .product_issues import build_product_issues, product_issues_to_markdown, write_product_issues
 from .quality import (
     build_coding_agent_brief,
@@ -75,10 +91,14 @@ from .quality import (
     quality_gate_index_to_markdown,
     quality_gate_reports_to_markdown,
     quality_gate_to_dict,
+    quality_gate_to_junit_xml,
     release_check_plan_to_markdown,
+    release_trial_to_markdown,
     run_demo_workspace_check,
     run_mcp_smoke_check,
+    run_release_trial,
     run_quality_gate,
+    write_quality_gate_step_summary,
 )
 from .recorder import (
     BrowserRecordingError,
@@ -89,12 +109,17 @@ from .recorder import (
     recording_failure_to_markdown,
 )
 from .reports import (
+    build_run_history_report,
+    build_run_history_share_payload,
+    build_run_history_ai_summary,
     list_run_summaries,
     load_run_report,
     load_run_summary,
+    run_history_report_to_markdown,
     run_report_to_dict,
     run_report_to_markdown,
     run_summary_to_dict,
+    write_run_history_report,
 )
 from .scheduler import (
     cancel_queue_task,
@@ -144,8 +169,205 @@ RUN_PROFILE_CHOICES = ["dry-run", "supervised", "semi-auto", "approved"]
 SAFE_RUN_PROFILE_CHOICES = ["dry-run", "supervised", "semi-auto"]
 
 
+def build_version_message() -> str:
+    try:
+        playwright_version = package_version("playwright")
+    except PackageNotFoundError:
+        playwright_version = "not installed"
+    except Exception:
+        playwright_version = "unavailable"
+    return "\n".join(
+        [
+            f"visual-agent {__version__}",
+            f"Python: {platform.python_version()}",
+            f"Playwright: {playwright_version}",
+            f"System: {platform.platform()}",
+            f"Executable: {sys.executable}",
+        ]
+    )
+
+
+def add_init_workspace_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--root", default=".agent-workspace", help="Workspace root directory. Default: .agent-workspace.")
+    parser.add_argument("--no-demo", action="store_true", help="Do not copy demo workflow/assets.")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite demo files if they already exist.")
+    parser.add_argument("--auto-detect", action="store_true", help="Scan a project root and generate matching fixture/workflow examples.")
+    parser.add_argument("--repo-root", default=".", help="Project root to scan for --auto-detect. Default: current directory.")
+
+
+def build_run_progress_message(progress_state: dict[str, Any]) -> str:
+    workflow_name = str(progress_state.get("workflow_name") or "workflow")
+    stage = str(progress_state.get("stage") or "running")
+    current_step = str(progress_state.get("current_step") or "")
+    current_index = int(progress_state.get("current_index") or 0)
+    total_steps = int(progress_state.get("total_steps") or 0)
+    message = str(progress_state.get("message") or "")
+    if total_steps > 0 and current_step:
+        prefix = f"Step {min(current_index + 1, total_steps)}/{total_steps}: {current_step}"
+    elif current_step:
+        prefix = current_step
+    else:
+        prefix = workflow_name
+    return f"{prefix} [{stage}]" + (f" {message}" if message else "")
+
+
+def run_workflow_with_progress(
+    runtime: WorkflowRuntime,
+    workflow: Any,
+    *,
+    progress_interval_seconds: float = 5.0,
+    **run_kwargs: Any,
+):
+    progress_state: dict[str, Any] = {
+        "workflow_name": getattr(workflow, "name", "workflow"),
+        "stage": "starting",
+        "current_step": "",
+        "current_index": -1,
+        "total_steps": len(getattr(workflow, "steps", ()) or ()),
+        "message": "",
+        "done": False,
+    }
+    stop = Event()
+    last_message = {"value": ""}
+
+    def reporter() -> None:
+        while not stop.wait(progress_interval_seconds):
+            if progress_state.get("done"):
+                return
+            message = build_run_progress_message(progress_state)
+            if message != last_message["value"]:
+                print(message, file=sys.stderr)
+                last_message["value"] = message
+
+    thread = Thread(target=reporter, name="visual-agent-progress", daemon=True)
+    thread.start()
+    try:
+        return runtime.run(workflow, progress_state=progress_state, **run_kwargs)
+    finally:
+        progress_state["done"] = True
+        stop.set()
+        thread.join(timeout=0.1)
+
+
+def _subcommand_names(parser: argparse.ArgumentParser) -> list[str]:
+    names: list[str] = []
+    for action in parser._actions:  # argparse internals, used to build completion scripts.
+        if getattr(action, "choices", None) and isinstance(action.choices, dict):
+            names.extend(str(name) for name in action.choices.keys())
+    return sorted(dict.fromkeys(names))
+
+
+def build_completion_script(shell: str, commands: list[str]) -> str:
+    command_words = " ".join(sorted(commands))
+    if shell == "bash":
+        return f"""# Checkpoint bash completion
+_visual_agent_complete() {{
+  local cur prev words cword
+  _init_completion -n : || return
+
+  if [[ $cword -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W \"{command_words}\" -- \"$cur\") )
+    return 0
+  fi
+
+  case \"${{words[1]}}\" in
+    generate-workflow)
+      COMPREPLY=( $(compgen -W \"--description --output --workspace-root --model --page-type --url --from-existing --variant --from-sitemap --limit --dry-run --format\" -- \"$cur\") )
+      return 0
+      ;;
+    run-workflow)
+      COMPREPLY=( $(compgen -W \"--workflow --file --output-dir --inputs --inputs-file --sensitive-fields --resume-from --allow-click --run-profile --from-step --skip-preflight --strict-preflight --allow-high-risk --no-lock --lock-ttl-seconds --wait-lock --queue-when-locked --lock-wait-seconds --lock-poll-seconds --synthetic-on-capture-fail\" -- \"$cur\") )
+      return 0
+      ;;
+    init|init-workspace)
+      COMPREPLY=( $(compgen -W \"--root --no-demo --overwrite --auto-detect --repo-root\" -- \"$cur\") )
+      return 0
+      ;;
+  esac
+}}
+complete -F _visual_agent_complete visual-agent
+"""
+    if shell == "zsh":
+        return f"""#compdef visual-agent
+
+_visual_agent_complete() {{
+  local -a commands
+  commands=({command_words})
+  if (( CURRENT == 2 )); then
+    _describe 'command' commands
+    return
+  fi
+
+  case $words[2] in
+    generate-workflow)
+      _arguments \
+        '--description[workflow description]:description:' \
+        '--output[output YAML file]:output file:_files' \
+        '--workspace-root[workspace root]:workspace root:_files -/' \
+        '--model[LLM model]:model:' \
+        '--page-type[page type hint]:page type:(auth form list detail ecommerce)' \
+        '--url[entry URL]:url:' \
+        '--from-existing[existing workflow]:workflow:' \
+        '--variant[variant]:variant:(mobile)' \
+        '--from-sitemap[sitemap XML path]:sitemap:_files' \
+        '--limit[maximum sitemap URLs]:limit:' \
+        '--dry-run[print without saving]' \
+        '--format[output format]:format:(json yaml)'
+      ;;
+    run-workflow)
+      _arguments \
+        '--workflow[workflow file]:workflow file:_files' \
+        '--file[deprecated alias for --workflow]:workflow file:_files' \
+        '--output-dir[output directory]:output directory:_files -/' \
+        '--inputs[workflow input JSON string]:inputs:' \
+        '--inputs-file[workflow input JSON file]:input file:_files' \
+        '--sensitive-fields[comma-separated input paths]:fields:' \
+        '--resume-from[existing run directory]:run dir:_files -/' \
+        '--allow-click[allow real click actions]' \
+        '--run-profile[execution profile]:profile:(dry-run supervised semi-auto approved)' \
+        '--from-step[start from step id]:step:' \
+        '--skip-preflight[skip runtime preflight]' \
+        '--strict-preflight[strict preflight]' \
+        '--allow-high-risk[allow high-risk actions]' \
+        '--no-lock[disable run lock]' \
+        '--lock-ttl-seconds[lock TTL]:seconds:' \
+        '--wait-lock[wait for lock]' \
+        '--queue-when-locked[queue when locked]' \
+        '--lock-wait-seconds[lock wait seconds]:seconds:' \
+        '--lock-poll-seconds[lock poll seconds]:seconds:' \
+        '--synthetic-on-capture-fail[use synthetic image on capture fail]'
+      ;;
+    init|init-workspace)
+      _arguments \
+        '--root[workspace root]:workspace root:_files -/' \
+        '--no-demo[do not copy demo assets]' \
+        '--overwrite[overwrite existing demo files]' \
+        '--auto-detect[auto-detect project type]' \
+        '--repo-root[project root to scan]:project root:_files -/'
+      ;;
+  esac
+}}
+
+compdef _visual_agent_complete visual-agent
+"""
+    raise ValueError(f"Unsupported shell: {shell}")
+
+
+def write_completion_scripts(output_dir: str | Path = ".") -> dict[str, str]:
+    parser = build_parser()
+    commands = _subcommand_names(parser)
+    output_path = Path(output_dir).resolve()
+    output_path.mkdir(parents=True, exist_ok=True)
+    bash_path = output_path / "_visual_agent_completion.sh"
+    zsh_path = output_path / "_visual_agent_completion.zsh"
+    bash_path.write_text(build_completion_script("bash", commands), encoding="utf-8")
+    zsh_path.write_text(build_completion_script("zsh", commands), encoding="utf-8")
+    return {"bash": str(bash_path), "zsh": str(zsh_path)}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="visual-agent")
+    parser.add_argument("--version", action="store_true", help="Show version and runtime information, then exit.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     click = subparsers.add_parser("click", help="Locate a target on screen and click it.")
@@ -211,7 +433,8 @@ def build_parser() -> argparse.ArgumentParser:
     resolve_uia.add_argument("--max-depth", type=int, default=4, help="Maximum UIA tree depth to inspect.")
 
     run_workflow = subparsers.add_parser("run-workflow", help="Run an audited workflow file.")
-    run_workflow.add_argument("--file", required=True, help="Workflow YAML or JSON file.")
+    run_workflow.add_argument("--workflow", default=None, help="Workflow YAML or JSON file. Recommended.")
+    run_workflow.add_argument("--file", default=None, help="Deprecated alias for --workflow.")
     run_workflow.add_argument("--output-dir", default=".runs", help="Directory for workflow run artifacts.")
     run_workflow.add_argument("--inputs", help="Workflow input JSON string.")
     run_workflow.add_argument("--inputs-file", help="Workflow input JSON file.")
@@ -224,6 +447,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="dry-run",
         help="Execution permission profile. Default is dry-run.",
     )
+    run_workflow.add_argument("--from-step", default=None, help="Start execution from the named step id.")
     run_workflow.add_argument("--skip-preflight", action="store_true", help="Skip runtime preflight checks.")
     run_workflow.add_argument("--strict-preflight", action="store_true", help="Apply strict validation during preflight.")
     run_workflow.add_argument("--allow-high-risk", action="store_true", help="Allow high-risk actions during strict preflight.")
@@ -241,8 +465,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     preflight = subparsers.add_parser("preflight-workflow", help="Run validation and capability checks without executing.")
     preflight.add_argument("--file", required=True, help="Workflow YAML or JSON file.")
+    preflight.add_argument("--workspace-root", default=None, help="Optional workspace root for environment checks and status updates.")
     preflight.add_argument("--strict", action="store_true", help="Apply production-oriented validation rules.")
     preflight.add_argument("--allow-high-risk", action="store_true", help="Allow high-risk actions in strict preflight.")
+
+    env_check = subparsers.add_parser("env-check", help="Run environment checks without executing a workflow.")
+    env_check.add_argument("--workspace-root", required=True, help="Workspace root or project root to inspect.")
+    env_check.add_argument("--host", default="127.0.0.1", help="Host to probe for the dev server. Default: 127.0.0.1.")
+    env_check.add_argument("--port", type=int, default=None, help="Optional explicit port to probe.")
+    env_check.add_argument("--dist-dir", default=None, help="Optional explicit build output directory to inspect.")
+    env_check.add_argument("--max-age-minutes", type=int, default=10, help="Maximum build age in minutes. Default: 10.")
+    env_check.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
     validate = subparsers.add_parser("validate-workflow", help="Validate a workflow file without running it.")
     validate.add_argument("--file", required=True, help="Workflow YAML or JSON file.")
@@ -260,6 +493,29 @@ def build_parser() -> argparse.ArgumentParser:
     report_run.add_argument("--run-dir", required=True, help="Run directory containing workflow_result.json.")
     report_run.add_argument("--format", choices=["json", "markdown"], default="json")
 
+    generate_report = subparsers.add_parser("generate-report", help="Generate a static HTML report from local run history.")
+    generate_report.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing run_history.jsonl.")
+    generate_report.add_argument("--output", default=None, help="Output HTML file. Default: <workspace-root>/reports/run_history_report.html.")
+    generate_report.add_argument("--limit", type=int, default=20, help="Maximum recent runs to include.")
+    generate_report.add_argument("--open", action="store_true", help="Open the generated report in the default browser.")
+    generate_report.add_argument("--share", action="store_true", help="Print a share payload with local URL and cloud placeholder.")
+    generate_report.add_argument(
+        "--summary-provider",
+        choices=["none", "anthropic", "openai"],
+        default="none",
+        help="Optional model provider for the summary paragraph. Default: none.",
+    )
+    generate_report.add_argument("--summary-model", default=None, help="Optional model name for --summary-provider.")
+    generate_report.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    generate_fixture = subparsers.add_parser("generate-fixture", help="Generate a reusable fixture template.")
+    generate_fixture.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root used to place the fixture template.")
+    generate_fixture.add_argument("--page", required=True, help="Page path or URL the fixture should describe.")
+    generate_fixture.add_argument("--name", default=None, help="Fixture name. Default is derived from --page.")
+    generate_fixture.add_argument("--type", choices=FIXTURE_TYPES, default="standard", help="Fixture type. Default: standard.")
+    generate_fixture.add_argument("--output", default=None, help="Optional fixture file path. Default: <workspace-root>/fixtures/<name>.yaml.")
+    generate_fixture.add_argument("--format", choices=["yaml", "json"], default="yaml", help="Output format. Default: yaml.")
+
     subparsers.add_parser("capabilities", help="List framework capabilities and dependency status.")
     subparsers.add_parser("atomic-capabilities", help="List planner-visible atomic capabilities.")
     doctor = subparsers.add_parser("doctor", help="Check missing capabilities.")
@@ -271,6 +527,8 @@ def build_parser() -> argparse.ArgumentParser:
     quality_gate.add_argument("--run", action="store_true", help="Execute the quality gate. Default only prints the plan.")
     quality_gate.add_argument("--timeout-seconds", type=float, default=300.0, help="Timeout per step. Default: 300.")
     quality_gate.add_argument("--report-root", help="Optional report output directory.")
+    quality_gate.add_argument("--ci", action="store_true", help="Emit JUnit XML for CI consumption instead of JSON.")
+    quality_gate.add_argument("--junit-output", default=None, help="Optional JUnit XML output path when --ci is set.")
     quality_gate.add_argument(
         "--fail-on-risk-policy-error",
         action="store_true",
@@ -311,6 +569,15 @@ def build_parser() -> argparse.ArgumentParser:
     release_check.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root to use in generated commands.")
     release_check.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
+    release_trial = subparsers.add_parser("release-trial", help="Run the real trial validation bundle on a workspace.")
+    release_trial.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root to initialize and validate.")
+    release_trial.add_argument("--overwrite", action="store_true", help="Overwrite demo files before running.")
+    release_trial.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="supervised", help="Demo/cloud run profile. Default: supervised.")
+    release_trial.add_argument("--cloud-org", default="team-a", help="Org header used for local cloud execution.")
+    release_trial.add_argument("--cloud-user", default="release-trial", help="User header used for local cloud execution.")
+    release_trial.add_argument("--cloud-api-key", default="release-trial-key", help="Bearer token used for local cloud execution.")
+    release_trial.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
     install_check = subparsers.add_parser("install-check", help="Print the local install/dependency check plan.")
     install_check.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
@@ -337,28 +604,61 @@ def build_parser() -> argparse.ArgumentParser:
     demo_workspace_check = subparsers.add_parser("demo-workspace-check", help="Initialize and dry-run the local demo workspace.")
     demo_workspace_check.add_argument("--root", default=".agent-workspace", help="Workspace root to initialize/check.")
     demo_workspace_check.add_argument("--overwrite", action="store_true", help="Overwrite demo assets before checking.")
+    demo_workspace_check.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run", help="Execution profile. Use supervised for the browser demo path.")
     demo_workspace_check.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
     context_snapshot = subparsers.add_parser("context-snapshot", help="Print compact AI context for the workspace.")
     context_snapshot.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing agent_session.json.")
     context_snapshot.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
+    show_status = subparsers.add_parser("show-status", help="Print the project .visual-agent-status.md file.")
+    show_status.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root used to infer the project root.")
+    show_status.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    stats = subparsers.add_parser("stats", help="Show local workflow run statistics from run_history.jsonl.")
+    stats.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing run_history.jsonl.")
+    stats.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    export_runs = subparsers.add_parser("export-runs", help="Export local run history as JSON or CSV.")
+    export_runs.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing run_history.jsonl.")
+    export_runs.add_argument("--output", required=True, help="Output file path.")
+    export_runs.add_argument("--format", choices=["json", "csv"], default="json", help="Export format. Default: json.")
+
     usage_status = subparsers.add_parser("usage-status", help="Show local usage counters and license feature boundaries.")
     usage_status.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing agent_session.json.")
     usage_status.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
+    usage = subparsers.add_parser("usage", help="Show local usage counters and license feature boundaries.")
+    usage.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing agent_session.json.")
+    usage.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    activate = subparsers.add_parser("activate", help="Activate a local license key.")
+    activate.add_argument("--key", required=True, help="License key to write locally.")
+    activate.add_argument("--tier", choices=["pro", "team", "enterprise"], default="pro", help="License tier to write. Default: pro.")
+    activate.add_argument("--seats", type=int, default=1, help="Licensed seats. Default: 1.")
+    activate.add_argument("--license-file", default=None, help="Optional path to write the license JSON file.")
+    activate.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
     cloud_run_plan = subparsers.add_parser("cloud-run-plan", help="Preview a cloud workflow request without sending network traffic.")
     cloud_run_plan.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root.")
     cloud_run_plan.add_argument("--workflow", required=True, help="Workflow name to run remotely in the future.")
+    cloud_run_plan.add_argument("--workflow-id", default=None, help="Optional marketplace workflow id to resolve into YAML before planning.")
     cloud_run_plan.add_argument("--run-profile", choices=RUN_PROFILE_CHOICES, default="dry-run")
     cloud_run_plan.add_argument("--inputs-file", default=None, help="Optional inputs file name to reference without reading its contents.")
+    cloud_run_plan.add_argument("--marketplace-endpoint", default="", help="Marketplace API endpoint used to resolve workflow ids.")
+    cloud_run_plan.add_argument("--marketplace-api-key", default="", help="Optional bearer token for marketplace API requests.")
+    cloud_run_plan.add_argument("--marketplace-org", default="", help="Optional marketplace org header value.")
     cloud_run_plan.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
     cloud_run = subparsers.add_parser("cloud-run", help="Plan a cloud workflow run; use --execute to request execution.")
     cloud_run.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root.")
     cloud_run.add_argument("--workflow", required=True, help="Workflow name to run remotely.")
+    cloud_run.add_argument("--workflow-id", default=None, help="Optional marketplace workflow id to resolve into YAML before execution.")
     cloud_run.add_argument("--run-profile", choices=RUN_PROFILE_CHOICES, default="dry-run")
     cloud_run.add_argument("--inputs-file", default=None, help="Optional inputs file name to reference without reading its contents.")
+    cloud_run.add_argument("--marketplace-endpoint", default="", help="Marketplace API endpoint used to resolve workflow ids.")
+    cloud_run.add_argument("--marketplace-api-key", default="", help="Optional bearer token for marketplace API requests.")
+    cloud_run.add_argument("--marketplace-org", default="", help="Optional marketplace org header value.")
     cloud_run.add_argument("--execute", action="store_true", help="Explicitly request remote execution.")
     cloud_run.add_argument("--transport", choices=["none", "http"], default="none", help="Remote transport. Default: none.")
     cloud_run.add_argument("--timeout-seconds", type=float, default=30.0, help="HTTP transport timeout when --transport http is used.")
@@ -366,7 +666,16 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_run.add_argument("--retry-backoff-seconds", type=float, default=0.0, help="Initial retry backoff for HTTP transport. Default: 0.")
     cloud_run.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
-    cloud_server = subparsers.add_parser("cloud-server", help="Run a minimal local Visual Agent cloud execution server.")
+    cloud_pull = subparsers.add_parser("cloud-pull-workflow", help="Download a public marketplace workflow into the local workspace.")
+    cloud_pull.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root to receive the workflow.")
+    cloud_pull.add_argument("--workflow-id", required=True, help="Marketplace workflow id or name to download.")
+    cloud_pull.add_argument("--marketplace-endpoint", default="", help="Marketplace API endpoint. Defaults to VISUAL_AGENT_CLOUD_MARKETPLACE_ENDPOINT.")
+    cloud_pull.add_argument("--marketplace-api-key", default="", help="Optional bearer token for marketplace API requests.")
+    cloud_pull.add_argument("--marketplace-org", default="", help="Optional marketplace org header value.")
+    cloud_pull.add_argument("--overwrite", action="store_true", help="Overwrite the destination file if it already exists.")
+    cloud_pull.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    cloud_server = subparsers.add_parser("cloud-server", help="Run a minimal local Checkpoint cloud execution server.")
     cloud_server.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root served by the cloud server.")
     cloud_server.add_argument("--host", default="127.0.0.1", help="Host to bind. Default: 127.0.0.1.")
     cloud_server.add_argument("--port", type=int, default=7890, help="Port to bind. Default: 7890.")
@@ -447,11 +756,11 @@ def build_parser() -> argparse.ArgumentParser:
     repair_rollback.add_argument("--workflow", default=None, help="Filter rollback candidate by workflow name.")
     repair_rollback.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
-    benchmarks = subparsers.add_parser("benchmarks", help="List public reference benchmarks for real-world Visual Agent testing.")
+    benchmarks = subparsers.add_parser("benchmarks", help="List public reference benchmarks for real-world Checkpoint testing.")
     benchmarks.add_argument("--category", default=None, help="Optional benchmark category filter.")
     benchmarks.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
-    benchmark_plan = subparsers.add_parser("benchmark-plan", help="Create an executable Visual Agent benchmark coverage plan.")
+    benchmark_plan = subparsers.add_parser("benchmark-plan", help="Create an executable Checkpoint benchmark coverage plan.")
     benchmark_plan.add_argument("--category", default=None, help="Optional benchmark category filter.")
     benchmark_plan.add_argument("--benchmark-id", default=None, help="Optional benchmark id filter.")
     benchmark_plan.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
@@ -477,10 +786,16 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     gen_workflow = subparsers.add_parser("generate-workflow", help="Generate a workflow YAML from a natural language description.")
-    gen_workflow.add_argument("--description", required=True, help="Natural language description of the workflow.")
+    gen_workflow.add_argument("--description", help="Natural language description of the workflow.")
     gen_workflow.add_argument("--output", default=None, help="Output YAML file path. Default: auto-named in workflows/.")
     gen_workflow.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root used to place generated workflows.")
     gen_workflow.add_argument("--model", default="claude-haiku-4-5-20251001", help="LLM model to use for generation.")
+    gen_workflow.add_argument("--page-type", choices=["auth", "form", "list", "detail", "ecommerce"], default=None, help="Optional page type hint for few-shot selection.")
+    gen_workflow.add_argument("--url", default=None, help="Entry URL to use for the first observe_browser step.")
+    gen_workflow.add_argument("--from-existing", default=None, help="Existing workflow name or path used to generate a variant.")
+    gen_workflow.add_argument("--variant", choices=["mobile"], default=None, help="Variant to generate with --from-existing.")
+    gen_workflow.add_argument("--from-sitemap", default=None, help="Sitemap XML path used to batch-generate smoke workflows.")
+    gen_workflow.add_argument("--limit", type=int, default=50, help="Maximum sitemap URLs to generate. Default: 50.")
     gen_workflow.add_argument("--dry-run", action="store_true", help="Print generated YAML without saving.")
     gen_workflow.add_argument("--format", choices=["json", "yaml"], default="json", help="Output format. Default: json.")
 
@@ -515,9 +830,19 @@ def build_parser() -> argparse.ArgumentParser:
     gen_from_diff.add_argument("--audit-log", default=None, help="Append a JSONL parser audit entry for this generation run.")
     gen_from_diff.add_argument("--format", choices=["json", "markdown", "yaml"], default="json", help="Output format. Default: json.")
 
-    verify_impl = subparsers.add_parser("verify-impl", help="Generate a workflow from git diff context and run it.")
+    verify_impl = subparsers.add_parser(
+        "verify-impl",
+        help="Generate a workflow from git diff context and run it.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  visual-agent verify-impl --task-description \"Verify login redirects\" --base-url http://127.0.0.1:5173 --run-profile dry-run\n"
+            "  visual-agent verify-impl --task-description \"Verify profile form\" --base-url fixtures/profile.html --run-profile dry-run\n"
+            "  visual-agent verify-impl --task-description \"Verify current change\" --run-profile dry-run\n"
+        ),
+    )
     verify_impl.add_argument("--task-description", required=True, help="Task or feature that the code changes implement.")
-    verify_impl.add_argument("--base-url", required=True, help="URL or local fixture path used as workflow entry point.")
+    verify_impl.add_argument("--base-url", default=None, help="URL or local fixture path used as workflow entry point. If omitted, inferred from project config or workspace fixtures.")
     verify_impl.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
     verify_impl.add_argument("--repo-root", default=".", help="Git repository root. Default: current directory.")
     verify_impl.add_argument("--base", default="HEAD", help="Git base ref for diff. Default: HEAD.")
@@ -535,10 +860,38 @@ def build_parser() -> argparse.ArgumentParser:
     agent_status.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing .vscode-agent-status.json.")
     agent_status.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
-    share_workflow = subparsers.add_parser("share-workflow", help="Share a workflow to the Visual Agent marketplace (coming soon).")
+    list_workflows_cmd = subparsers.add_parser("list-workflows", help="List indexed workflows.")
+    list_workflows_cmd.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflow_index.json.")
+    list_workflows_cmd.add_argument("--visibility", choices=["public", "private"], default=None, help="Filter by workflow visibility.")
+    list_workflows_cmd.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    search_workflows_cmd = subparsers.add_parser("search-workflows", help="Search indexed workflows by name, description, or tags.")
+    search_workflows_cmd.add_argument("query", nargs="?", default="", help="Search query.")
+    search_workflows_cmd.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflow_index.json.")
+    search_workflows_cmd.add_argument("--visibility", choices=["public", "private"], default=None, help="Filter by workflow visibility.")
+    search_workflows_cmd.add_argument("--limit", type=int, default=20, help="Maximum results. Default: 20.")
+    search_workflows_cmd.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    share_workflow = subparsers.add_parser("share-workflow", help="Mark a workflow public in the local workflow library.")
     share_workflow.add_argument("--name", required=True, help="Workflow name to share.")
     share_workflow.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
     share_workflow.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    withdraw_workflow = subparsers.add_parser("withdraw-workflow", help="Mark a workflow private in the local workflow library.")
+    withdraw_workflow.add_argument("--name", required=True, help="Workflow name to withdraw.")
+    withdraw_workflow.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
+    withdraw_workflow.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    publish_workflow = subparsers.add_parser("publish-workflow", help="Validate and publish a workflow into the local public catalog.")
+    publish_workflow.add_argument("--name", required=True, help="Workflow name to publish.")
+    publish_workflow.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
+    publish_workflow.add_argument("--min-quality-score", type=float, default=0.6, help="Minimum quality score required for publishing. Default: 0.6.")
+    publish_workflow.add_argument(
+        "--catalog-url-base",
+        default="https://visualagent.local/workflows",
+        help="Base URL used to generate the published workflow URL.",
+    )
+    publish_workflow.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
     codex_check = subparsers.add_parser("codex-check", help="Smart check for Codex/Claude Code: git-diff-aware, fast by default.")
     codex_check.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
@@ -548,9 +901,10 @@ def build_parser() -> argparse.ArgumentParser:
     codex_check.add_argument("--max-workflows", type=int, default=10, help="Maximum workflows to run. Default: 10.")
     codex_check.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
     codex_check.add_argument("--include-slow", action="store_true", help="Include workflows tagged 'slow'. Default: skipped.")
+    codex_check.add_argument("--from-step", default=None, help="Start each selected workflow from the named step id.")
     codex_check.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
-    connect = subparsers.add_parser("connect", help="Connect Visual Agent to an AI coding platform.")
+    connect = subparsers.add_parser("connect", help="Connect Checkpoint to an AI coding platform.")
     connect.add_argument("platform", choices=["claude-code", "cursor", "codex"])
     connect.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root to initialize/connect.")
     connect.add_argument("--repo-root", default=".", help="Repository root. Default: current directory.")
@@ -562,6 +916,37 @@ def build_parser() -> argparse.ArgumentParser:
     ci_templates.add_argument("--root", default=".", help="Repository root to receive generated templates. Default: current directory.")
     ci_templates.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root used by generated quality gates.")
     ci_templates.add_argument("--overwrite", action="store_true", help="Overwrite existing CI template files.")
+
+    generate_ci = subparsers.add_parser("generate-ci", help="Generate a GitHub Actions CI workflow YAML.")
+    generate_ci.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root used in generated commands.")
+    generate_ci.add_argument("--python-version", default="3.11", help="Python version to use in CI.")
+    generate_ci.add_argument("--node-version", default="20", help="Node version to use for extension compilation.")
+    generate_ci.add_argument("--output", default=None, help="Optional file path to write the workflow YAML.")
+    generate_ci.add_argument("--format", choices=["yaml", "json"], default="yaml", help="Output format. Default: yaml.")
+
+    generate_integrations = subparsers.add_parser("generate-integrations", help="Generate editor and IDE integration files for Checkpoint.")
+    generate_integrations.add_argument("--root", default=".", help="Repository root to receive generated integration files.")
+    generate_integrations.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root used in generated command snippets.")
+    generate_integrations.add_argument("--overwrite", action="store_true", help="Overwrite changed integration files.")
+    generate_integrations.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    export_playwright = subparsers.add_parser("export-to-playwright", help="Export a workflow YAML file to a Playwright Test spec.")
+    export_playwright.add_argument("workflow", help="Workflow YAML file to export.")
+    export_playwright.add_argument("--output", default=None, help="Optional output .spec.ts file.")
+    export_playwright.add_argument("--spec-name", default=None, help="Optional Playwright test title override.")
+    export_playwright.add_argument("--format", choices=["ts", "json"], default="ts", help="Output format. Default: ts.")
+
+    github_pr_comment = subparsers.add_parser("github-pr-comment", help="Build or post a GitHub PR failure comment from the latest failed run.")
+    github_pr_comment.add_argument("--report-root", default=".runs", help="Workspace run directory root containing workflow reports.")
+    github_pr_comment.add_argument("--quality-root", default=".runs/quality_gates", help="Quality gate report root.")
+    github_pr_comment.add_argument("--artifact-url", default="", help="Uploaded artifact URL to reference in the comment.")
+    github_pr_comment.add_argument("--run-url", default="", help="Workflow run URL to reference in the comment.")
+    github_pr_comment.add_argument("--event-path", default=None, help="GitHub event JSON path. Defaults to GITHUB_EVENT_PATH.")
+    github_pr_comment.add_argument("--repository", default=None, help="GitHub repository slug. Defaults to GITHUB_REPOSITORY.")
+    github_pr_comment.add_argument("--token-env", default="GITHUB_TOKEN", help="Environment variable that stores the GitHub token.")
+    github_pr_comment.add_argument("--max-screenshots", type=int, default=3, help="Maximum screenshots to mention. Default: 3.")
+    github_pr_comment.add_argument("--dry-run", action="store_true", help="Build the comment without posting it.")
+    github_pr_comment.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     external_samples = subparsers.add_parser("external-samples", help="List external business backend samples.")
     external_samples.add_argument("--root", default="examples/external_samples", help="External sample catalog root.")
@@ -725,12 +1110,14 @@ def build_parser() -> argparse.ArgumentParser:
     model_probe.add_argument("--max-completion-tokens", type=int, default=64)
     model_probe.add_argument("--format", choices=["json", "markdown"], default="json")
 
+    init_cmd = subparsers.add_parser("init", help="Initialize a visual-agent workspace.")
+    add_init_workspace_arguments(init_cmd)
+
     init_ws = subparsers.add_parser("init-workspace", help="Initialize a visual-agent workspace.")
-    init_ws.add_argument("--root", required=True, help="Workspace root directory.")
-    init_ws.add_argument("--no-demo", action="store_true", help="Do not copy demo workflow/assets.")
-    init_ws.add_argument("--overwrite", action="store_true", help="Overwrite demo files if they already exist.")
-    init_ws.add_argument("--auto-detect", action="store_true", help="Scan a project root and generate matching fixture/workflow examples.")
-    init_ws.add_argument("--repo-root", default=".", help="Project root to scan for --auto-detect. Default: current directory.")
+    add_init_workspace_arguments(init_ws)
+
+    completions = subparsers.add_parser("generate-completions", help="Generate bash and zsh completion scripts.")
+    completions.add_argument("--output-dir", default=".", help="Directory to write completion scripts. Default: current directory.")
 
     ws_status = subparsers.add_parser("workspace-status", help="Show workspace status.")
     ws_status.add_argument("--root", required=True, help="Workspace root directory.")
@@ -813,6 +1200,7 @@ def build_parser() -> argparse.ArgumentParser:
     ws_run.add_argument("--lock-poll-seconds", type=float, default=0.5, help="Seconds between lock checks when queued. Default: 0.5.")
     ws_run.add_argument("--no-report-export", action="store_true", help="Do not export JSON/Markdown reports to workspace reports/.")
     ws_run.add_argument("--synthetic-on-capture-fail", action="store_true")
+    ws_run.add_argument("--from-step", default=None, help="Start execution from the named step id.")
 
     ws_runs = subparsers.add_parser("workspace-runs", help="List workspace run summaries.")
     ws_runs.add_argument("--root", required=True, help="Workspace root directory.")
@@ -1051,6 +1439,11 @@ def doctor_priority(name: str, *, dependency: str = "", required: bool = False, 
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if "--version" in argv:
+        print(build_version_message())
+        return 0
     args = build_parser().parse_args(argv)
     if args.command == "click":
         result = VisualAgentRunner(output_dir=args.output_dir).click_target(
@@ -1129,8 +1522,17 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(to_jsonable(resolved), ensure_ascii=False, indent=2))
         return 0
     if args.command == "run-workflow":
-        workflow = parse_workflow_file(args.file)
-        inputs = load_inputs(args.inputs, args.inputs_file)
+        workflow_arg = args.workflow or args.file
+        if not workflow_arg:
+            print(format_cli_error(ValueError("run-workflow requires --workflow."), command="run-workflow"), file=sys.stderr)
+            return 1
+        workflow_path = Path(workflow_arg).resolve()
+        workflow = parse_workflow_file(workflow_path)
+        try:
+            inputs = load_inputs(args.inputs, args.inputs_file)
+        except Exception as exc:
+            print(format_cli_error(exc, command="run-workflow"), file=sys.stderr)
+            return 1
         sensitive_fields = parse_csv_set(args.sensitive_fields)
         input_check = validate_workflow_inputs(workflow, inputs, sensitive_fields=sensitive_fields)
         if not input_check["ok"]:
@@ -1145,30 +1547,67 @@ def main(argv: list[str] | None = None) -> int:
             if not preflight_result.ok:
                 print(json.dumps(to_jsonable(preflight_result), ensure_ascii=False, indent=2))
                 return 1
-        result = WorkflowRuntime(output_dir=args.output_dir).run(
+        result = run_workflow_with_progress(
+            WorkflowRuntime(output_dir=args.output_dir),
             workflow,
             dry_run=args.run_profile == "dry-run" and not args.allow_click,
             run_profile="approved" if args.allow_click else args.run_profile,
             synthetic_on_capture_fail=args.synthetic_on_capture_fail,
             inputs=inputs,
             sensitive_fields=sensitive_fields,
+            workspace_root=workflow_path.parent.parent if workflow_path.parent.name == "workflows" else workflow_path.parent,
             resume_from=args.resume_from,
+            from_step=args.from_step,
             use_lock=not args.no_lock,
             lock_ttl_seconds=args.lock_ttl_seconds,
             queue_when_locked=args.queue_when_locked or args.wait_lock,
             lock_wait_seconds=args.lock_wait_seconds,
             lock_poll_seconds=args.lock_poll_seconds,
         )
+        try:
+            from .telemetry import record_run
+            from .visual_status import append_run_history, write_status_file
+
+            workspace_root = Path(".agent-workspace").resolve()
+            workspace_root.mkdir(parents=True, exist_ok=True)
+            append_run_history(workspace_root, workflow, result)
+            write_status_file(Path.cwd(), result)
+            record_run(workspace_root, workflow, result)
+        except Exception:
+            pass
         print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
         return 0
     if args.command == "preflight-workflow":
+        workflow_path = Path(args.file).resolve()
         result = run_preflight(
-            parse_workflow_file(args.file),
+            parse_workflow_file(workflow_path),
             strict=args.strict,
             allow_high_risk=args.allow_high_risk,
+            workspace_root=args.workspace_root,
         )
+        if result.environment:
+            from .visual_status import write_environment_status_file
+
+            project_root = Path(args.workspace_root).resolve() if args.workspace_root else workflow_path.parent
+            write_environment_status_file(project_root, result.environment)
         print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
         return 0 if result.ok else 1
+    if args.command == "env-check":
+        environment = inspect_environment(
+            Path(args.workspace_root).resolve(),
+            host=args.host,
+            port=args.port,
+            dist_dir=args.dist_dir,
+            max_age_minutes=args.max_age_minutes,
+        )
+        from .visual_status import write_environment_status_file
+
+        write_environment_status_file(Path(args.workspace_root).resolve(), environment)
+        if args.format == "markdown":
+            print(environment_to_markdown(environment))
+        else:
+            print(json.dumps(to_jsonable(environment), ensure_ascii=False, indent=2))
+        return 0 if environment.get("ok") else 1
     if args.command == "validate-workflow":
         result = (
             validate_workflow_file_strict(args.file, allow_high_risk=args.allow_high_risk)
@@ -1190,6 +1629,65 @@ def main(argv: list[str] | None = None) -> int:
             print(run_report_to_markdown(report))
         else:
             print(json.dumps(run_report_to_dict(report), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "generate-report":
+        report = build_run_history_report(args.workspace_root, limit=args.limit)
+        report["ai_summary"] = build_run_history_ai_summary(report, provider=args.summary_provider, model=args.summary_model)
+        output_path = write_run_history_report(
+            args.workspace_root,
+            args.output,
+            limit=args.limit,
+            summary_provider=args.summary_provider,
+            summary_model=args.summary_model,
+        )
+        report["output_path"] = str(output_path.resolve())
+        share_payload = build_run_history_share_payload(args.workspace_root, output_path, report=report)
+        if args.open:
+            webbrowser.open(output_path.resolve().as_uri())
+        payload = {
+            "schema_version": report.get("schema_version", 1),
+            "workspace": report.get("workspace"),
+            "generated_at": report.get("generated_at"),
+            "output_path": str(output_path.resolve()),
+            "summary": report.get("summary"),
+            "ai_summary": report.get("ai_summary"),
+            "recent_run_count": len(report.get("recent_runs") or []),
+            "share": share_payload,
+        }
+        if args.format == "markdown":
+            print(run_history_report_to_markdown(report))
+        else:
+            if args.share:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                payload.pop("share", None)
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "generate-fixture":
+        workspace_root = Path(args.workspace_root).resolve()
+        workspace_root.mkdir(parents=True, exist_ok=True)
+        fixture_name = args.name or Path(str(args.page).strip("/")).name or "fixture"
+        if fixture_name == "":
+            fixture_name = "fixture"
+        payload = fixture_template_payload(
+            name=fixture_name,
+            page=args.page,
+            fixture_type=args.type,
+            description=None,
+        )
+        text = render_fixture_template(payload)
+        output_path = Path(args.output).expanduser()
+        if args.output:
+            output_path = output_path if output_path.is_absolute() else (workspace_root / output_path)
+        else:
+            output_path = workspace_root / "fixtures" / f"{fixture_name}.yaml"
+        output_path = output_path.resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(text, encoding="utf-8")
+        if args.format == "json":
+            print(json.dumps({"path": str(output_path), "payload": payload}, ensure_ascii=False, indent=2))
+        else:
+            print(str(output_path))
         return 0
     if args.command == "capabilities":
         print(json.dumps(to_jsonable(build_capability_manifest()), ensure_ascii=False, indent=2))
@@ -1233,7 +1731,16 @@ def main(argv: list[str] | None = None) -> int:
             fail_on_risk_policy_error=args.fail_on_risk_policy_error,
             fail_on_secret_leak=args.fail_on_secret_leak,
         )
-        print(json.dumps(quality_gate_to_dict(result), ensure_ascii=False, indent=2))
+        if args.ci:
+            junit_xml = quality_gate_to_junit_xml(result)
+            if args.junit_output:
+                output_path = Path(args.junit_output).expanduser().resolve()
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(junit_xml, encoding="utf-8")
+            write_quality_gate_step_summary(result, junit_output=args.junit_output)
+            print(junit_xml)
+        else:
+            print(json.dumps(quality_gate_to_dict(result), ensure_ascii=False, indent=2))
         return 0 if result.status in {"planned", "success"} else 1
     if args.command == "quality-gate-reports":
         reports = list_quality_gate_reports(
@@ -1282,6 +1789,99 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(json.dumps(ci_template_install_to_dict(result), ensure_ascii=False, indent=2))
         return 0
+    if args.command == "generate-ci":
+        workflow = ci_workflow_template(
+            workspace_root=args.workspace_root,
+            python_version=args.python_version,
+            node_version=args.node_version,
+        )
+        if args.output:
+            output_path = Path(args.output).expanduser().resolve()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(workflow, encoding="utf-8")
+        if args.format == "json":
+            print(json.dumps({"schema_version": 1, "workflow": workflow}, ensure_ascii=False, indent=2))
+        else:
+            print(workflow.rstrip())
+        return 0
+    if args.command == "generate-integrations":
+        try:
+            result = install_integration_snippets(
+                args.root,
+                workspace_root=args.workspace_root,
+                overwrite=args.overwrite,
+            )
+        except FileExistsError as exc:
+            print(json.dumps({"schema_version": 1, "status": "blocked", "message": str(exc)}, ensure_ascii=False, indent=2))
+            return 1
+        if args.format == "markdown":
+            print(
+                "\n".join(
+                    [
+                        f"Cursor rules: {result.cursor_rules}",
+                        f"Copilot instructions: {result.copilot_instructions}",
+                        f"Windsurf rules: {result.windsurf_rules}",
+                        f"JetBrains spec: {result.jetbrains_spec}",
+                    ]
+                )
+            )
+        else:
+            print(json.dumps(integration_snippets_to_dict(result), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "export-to-playwright":
+        result = export_workflow_to_playwright(
+            args.workflow,
+            output_path=args.output,
+            spec_name=args.spec_name,
+        )
+        if args.format == "json":
+            print(json.dumps(playwright_export_to_dict(result), ensure_ascii=False, indent=2))
+        else:
+            print(result.spec.rstrip())
+        return 0
+    if args.command == "github-pr-comment":
+        event_path = args.event_path or os.environ.get("GITHUB_EVENT_PATH")
+        try:
+            repository = github_repository_from_env(args.repository)
+        except ValueError as exc:
+            print(json.dumps({"schema_version": 1, "status": "blocked", "message": str(exc)}, ensure_ascii=False, indent=2))
+            return 1
+        run_url = github_run_url_from_env(args.run_url)
+        token = str(os.environ.get(args.token_env) or "").strip()
+        if not token and not args.dry_run:
+            print(json.dumps({"schema_version": 1, "status": "blocked", "message": f"Missing token env: {args.token_env}"}, ensure_ascii=False, indent=2))
+            return 1
+        number = github_event_pr_number(event_path)
+        if number is None:
+            print(json.dumps({"schema_version": 1, "status": "blocked", "message": "Unable to determine pull request number."}, ensure_ascii=False, indent=2))
+            return 1
+        payload = pr_failure_comment_result(
+            report_root=args.report_root,
+            quality_gate_root=args.quality_root,
+            artifact_url=args.artifact_url,
+            run_url=run_url,
+            max_screenshots=args.max_screenshots,
+        )
+        payload["repository"] = repository
+        payload["pull_request_number"] = number
+        if args.dry_run:
+            if args.format == "json":
+                print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+            else:
+                print(payload["body"].rstrip())
+            return 0
+        result = post_pr_comment(
+            repository=repository,
+            number=number,
+            token=token,
+            body=payload["body"],
+        )
+        payload["post_result"] = result
+        if args.format == "json":
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        else:
+            print(payload["body"].rstrip())
+        return 0 if result.get("status") == "success" else 1
     if args.command == "external-samples":
         print(json.dumps(to_jsonable(list_external_samples(args.root)), ensure_ascii=False, indent=2))
         return 0
@@ -1486,10 +2086,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
         return 0 if result.get("ready") and (not args.run or result.get("status") == "success") else 1
-    if args.command == "init-workspace":
+    if args.command in {"init-workspace", "init"}:
         framework_hint = detect_framework_from_dir(Path(args.repo_root).resolve()) if args.auto_detect else None
         workspace = init_workspace(args.root, with_demo=not args.no_demo, overwrite=args.overwrite, framework_hint=framework_hint)
-        print(json.dumps(workspace_status(workspace), ensure_ascii=False, indent=2))
+        payload = workspace_status(workspace)
+        payload["next_steps"] = init_next_steps(workspace)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "generate-completions":
+        paths = write_completion_scripts(args.output_dir)
+        print(json.dumps({"schema_version": 1, "status": "success", "scripts": paths}, ensure_ascii=False, indent=2))
         return 0
     if args.command == "workspace-status":
         print(json.dumps(workspace_status(open_workspace(args.root)), ensure_ascii=False, indent=2))
@@ -1557,6 +2163,20 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(to_jsonable(plan), ensure_ascii=False, indent=2))
         return 0
+    if args.command == "release-trial":
+        result = run_release_trial(
+            workspace_root=args.workspace_root,
+            overwrite=args.overwrite,
+            run_profile=args.run_profile,
+            cloud_org=args.cloud_org,
+            cloud_user=args.cloud_user,
+            cloud_api_key=args.cloud_api_key,
+        )
+        if args.format == "markdown":
+            print(release_trial_to_markdown(result))
+        else:
+            print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
+        return 0 if result.get("status") == "success" else 1
     if args.command == "install-check":
         plan = build_install_check_plan()
         if args.format == "markdown":
@@ -1600,7 +2220,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
         return 0 if result.get("status") == "success" else 1
     if args.command == "demo-workspace-check":
-        result = run_demo_workspace_check(root=args.root, overwrite=args.overwrite)
+        result = run_demo_workspace_check(root=args.root, overwrite=args.overwrite, run_profile=args.run_profile)
         if args.format == "markdown":
             print(demo_workspace_check_to_markdown(result))
         else:
@@ -1609,13 +2229,57 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "context-snapshot":
         from .session import workspace_session_snapshot_text
 
-        text = workspace_session_snapshot_text(Path(args.workspace_root).resolve())
+        workspace_root = Path(args.workspace_root).resolve()
+        text = workspace_session_snapshot_text(workspace_root)
         if args.format == "markdown":
             print(text)
         else:
-            print(json.dumps({"snapshot": text, "token_estimate": len(text) // 4, "within_budget": len(text) <= 2000}, ensure_ascii=False, indent=2))
+            print(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "workspace": str(workspace_root),
+                        "format": "text",
+                        "snapshot": text,
+                        "token_estimate": len(text) // 4,
+                        "within_budget": len(text) <= 2000,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
         return 0
-    if args.command == "usage-status":
+    if args.command == "show-status":
+        from .visual_status import read_status_file, visual_status_to_dict
+
+        workspace_root = Path(args.workspace_root).resolve()
+        project_root = workspace_root.parent
+        status_path = project_root / ".visual-agent-status.md"
+        status = read_status_file(project_root)
+        if args.format == "json":
+            print(json.dumps(visual_status_to_dict(status), ensure_ascii=False, indent=2))
+        else:
+            if status_path.exists():
+                print(status_path.read_text(encoding="utf-8"))
+            else:
+                print(f"No .visual-agent-status.md found at {status_path}")
+        return 0 if status is not None else 1
+    if args.command == "stats":
+        from .visual_status import local_stats
+
+        payload = local_stats(Path(args.workspace_root).resolve())
+        if args.format == "json":
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        else:
+            print(stats_to_markdown(payload))
+        return 0
+    if args.command == "export-runs":
+        from .visual_status import export_run_history
+
+        output = export_run_history(Path(args.workspace_root).resolve(), Path(args.output).resolve(), fmt=args.format)
+        print(json.dumps({"status": "success", "output": str(output), "format": args.format}, ensure_ascii=False, indent=2))
+        return 0
+    if args.command in {"usage-status", "usage"}:
         from .cloud import build_remote_workflow_request, cloud_config_status, cloud_run_quota_status
         from .licensing import check_feature, get_license
         from .session import load_agent_session
@@ -1656,22 +2320,90 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
         return 0
+    if args.command == "activate":
+        from .licensing import activate_license, default_license_path
+
+        license_path = Path(args.license_file).expanduser().resolve() if args.license_file else default_license_path()
+        license_ = activate_license(args.key, tier=args.tier, seats=args.seats, path=license_path)
+        payload = {
+            "schema_version": 1,
+            "status": "success",
+            "license_file": str(license_path),
+            "license": {
+                "tier": license_.tier,
+                "seats": license_.seats,
+                "source": license_.source,
+                "key_present": license_.key_present,
+            },
+            "message": "License written locally.",
+        }
+        if args.format == "markdown":
+            print(activate_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0
     if args.command == "cloud-run-plan":
-        from .cloud import build_remote_workflow_request, remote_client_from_env
+        from .cloud import build_remote_workflow_request, fetch_marketplace_workflow, remote_client_from_env
 
         workspace_root = Path(args.workspace_root).resolve()
+        workflow_yaml = ""
+        workflow_name = args.workflow
+        workflow_source = "workspace"
+        if getattr(args, "workflow_id", None):
+            workflow_source = "marketplace"
+            transport = None
+            if args.marketplace_endpoint:
+                from .cloud import build_http_marketplace_transport
+
+                transport = build_http_marketplace_transport(
+                    endpoint=args.marketplace_endpoint,
+                    api_key=str(args.marketplace_api_key or ""),
+                    org=str(args.marketplace_org or ""),
+                    user_id=str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_USER") or ""),
+                )
+            marketplace = fetch_marketplace_workflow(args.workflow_id, transport=transport)
+            if marketplace.get("status") != "success":
+                payload = {
+                    "schema_version": 1,
+                    "workspace": str(workspace_root),
+                    "workflow_name": workflow_name,
+                    "workflow_id": args.workflow_id,
+                    "workflow_source": workflow_source,
+                    "request": {"status": "blocked", "message": marketplace.get("message") or "Marketplace lookup failed."},
+                }
+                if args.format == "markdown":
+                    print(cloud_run_plan_to_markdown(payload))
+                else:
+                    print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+                return 1
+            workflow = marketplace.get("workflow") if isinstance(marketplace.get("workflow"), dict) else {}
+            workflow_yaml = str(workflow.get("workflow_yaml") or "")
+            workflow_name = str(workflow.get("name") or workflow_name)
         request = build_remote_workflow_request(
-            args.workflow,
+            workflow_name,
             workspace_root,
             run_profile=args.run_profile,
             inputs=None,
             inputs_file=args.inputs_file,
+            workflow_yaml=workflow_yaml,
+            workflow_source=workflow_source,
+            workflow_id=getattr(args, "workflow_id", None) or "",
         )
-        diagnostic = remote_client_from_env(run_profile=args.run_profile, inputs_file=args.inputs_file)(args.workflow, workspace_root)
+        diagnostic = remote_client_from_env(
+            run_profile=args.run_profile,
+            inputs_file=args.inputs_file,
+            workflow_yaml=workflow_yaml,
+            workflow_source=workflow_source,
+            workflow_id=getattr(args, "workflow_id", None) or "",
+        )(
+            workflow_name, workspace_root
+        )
         payload = {
             "schema_version": 1,
             "workspace": str(workspace_root),
-            "workflow_name": args.workflow,
+            "workflow_name": workflow_name,
+            "workflow_id": getattr(args, "workflow_id", None) or "",
+            "workflow_source": workflow_source,
             "request": request,
             "adapter_diagnostic": diagnostic,
         }
@@ -1681,9 +2413,45 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
         return 0
     if args.command == "cloud-run":
-        from .cloud import execute_remote_workflow_plan, http_cloud_transport_from_env
+        from .cloud import execute_remote_workflow_plan, fetch_marketplace_workflow, http_cloud_transport_from_env
 
         transport = None
+        workflow_yaml = ""
+        workflow_name = args.workflow
+        workflow_source = "workspace"
+        if getattr(args, "workflow_id", None):
+            workflow_source = "marketplace"
+            marketplace_transport = None
+            if args.marketplace_endpoint:
+                from .cloud import build_http_marketplace_transport
+
+                marketplace_transport = build_http_marketplace_transport(
+                    endpoint=args.marketplace_endpoint,
+                    api_key=str(args.marketplace_api_key or ""),
+                    org=str(args.marketplace_org or ""),
+                    user_id=str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_USER") or ""),
+                )
+            marketplace = fetch_marketplace_workflow(args.workflow_id, transport=marketplace_transport)
+            if marketplace.get("status") != "success":
+                payload = {
+                    "schema_version": 1,
+                    "workspace": str(Path(args.workspace_root).resolve()),
+                    "workflow_name": workflow_name,
+                    "workflow_id": args.workflow_id,
+                    "workflow_source": workflow_source,
+                    "execution_requested": bool(args.execute),
+                    "network_sent": False,
+                    "request": {"status": "blocked", "message": marketplace.get("message") or "Marketplace lookup failed."},
+                    "result": {"status": "failed", "message": marketplace.get("message") or "Marketplace lookup failed."},
+                }
+                if args.format == "markdown":
+                    print(cloud_run_to_markdown(payload))
+                else:
+                    print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+                return 1
+            workflow = marketplace.get("workflow") if isinstance(marketplace.get("workflow"), dict) else {}
+            workflow_yaml = str(workflow.get("workflow_yaml") or "")
+            workflow_name = str(workflow.get("name") or workflow_name)
         if args.execute and args.transport == "http":
             transport = http_cloud_transport_from_env(
                 timeout_seconds=args.timeout_seconds,
@@ -1691,20 +2459,57 @@ def main(argv: list[str] | None = None) -> int:
                 retry_backoff_seconds=args.retry_backoff_seconds,
             )
         payload = execute_remote_workflow_plan(
-            args.workflow,
+            workflow_name,
             Path(args.workspace_root).resolve(),
             run_profile=args.run_profile,
             inputs=None,
             inputs_file=args.inputs_file,
+            workflow_yaml=workflow_yaml,
+            workflow_source=workflow_source,
+            workflow_id=getattr(args, "workflow_id", None) or "",
             execute=args.execute,
             transport=transport,
         )
+        payload["workflow_id"] = getattr(args, "workflow_id", None) or ""
+        payload["workflow_source"] = workflow_source
         payload["transport"] = args.transport
+        if args.execute and isinstance(payload.get("result"), dict):
+            try:
+                from .visual_status import append_cloud_run_history
+
+                append_cloud_run_history(Path(args.workspace_root).resolve(), payload["result"])
+            except Exception:
+                pass
         if args.format == "markdown":
             print(cloud_run_to_markdown(payload))
         else:
             print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
         return 0
+    if args.command == "cloud-pull-workflow":
+        from .cloud import build_http_marketplace_transport, save_marketplace_workflow
+
+        transport = None
+        if args.marketplace_endpoint:
+            transport = build_http_marketplace_transport(
+                endpoint=args.marketplace_endpoint,
+                api_key=str(args.marketplace_api_key or ""),
+                org=str(args.marketplace_org or ""),
+                user_id=str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_USER") or ""),
+            )
+        result = save_marketplace_workflow(
+            Path(args.workspace_root).resolve(),
+            args.workflow_id,
+            transport=transport,
+            overwrite=args.overwrite,
+        )
+        if args.format == "markdown":
+            if result.get("status") == "success":
+                print(f"Downloaded `{result.get('workflow_name')}` to `{result.get('path')}`.")
+            else:
+                print(f"{result.get('status')}: {result.get('message') or result.get('reason') or 'download failed'}")
+        else:
+            print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
+        return 0 if result.get("status") == "success" else 1
     if args.command == "cloud-server":
         from .cloud_server import serve_cloud_server
 
@@ -1865,7 +2670,7 @@ def main(argv: list[str] | None = None) -> int:
 
         payload = list_public_benchmarks(category=args.category)
         if args.format == "markdown":
-            lines = ["# Visual Agent Public Benchmarks", ""]
+            lines = ["# Checkpoint Public Benchmarks", ""]
             for item in payload["benchmarks"]:
                 lines.append(f"- `{item['id']}`: {item['source']}")
             print("\n".join(lines))
@@ -1921,15 +2726,41 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(to_jsonable(report), ensure_ascii=False, indent=2))
         return 0 if report.failed == 0 else 1
     if args.command == "generate-workflow":
-        from .workflow_generator import generate_workflow_yaml
+        from .workflow_generator import generate_workflow_yaml, generate_workflow_variant, generate_workflows_from_sitemap
 
-        result = generate_workflow_yaml(
-            description=args.description,
-            workspace_root=Path(args.workspace_root).resolve(),
-            output_path=Path(args.output).resolve() if args.output else None,
-            model=args.model,
-            dry_run=args.dry_run,
-        )
+        workspace_root = Path(args.workspace_root).resolve()
+        try:
+            if args.from_existing:
+                result = generate_workflow_variant(
+                    workspace_root=workspace_root,
+                    existing=args.from_existing,
+                    variant=args.variant or "mobile",
+                    output_path=Path(args.output).resolve() if args.output else None,
+                    dry_run=args.dry_run,
+                )
+            elif args.from_sitemap:
+                result = generate_workflows_from_sitemap(
+                    sitemap_path=Path(args.from_sitemap).resolve(),
+                    workspace_root=workspace_root,
+                    output_dir=Path(args.output).resolve() if args.output else None,
+                    dry_run=args.dry_run,
+                    limit=args.limit,
+                )
+            else:
+                if not args.description:
+                    raise ValueError("generate-workflow requires --description, --from-existing, or --from-sitemap.")
+                result = generate_workflow_yaml(
+                    description=args.description,
+                    workspace_root=workspace_root,
+                    output_path=Path(args.output).resolve() if args.output else None,
+                    model=args.model,
+                    dry_run=args.dry_run,
+                    page_type=args.page_type,
+                    url=args.url,
+                )
+        except (ValueError, FileNotFoundError, RuntimeError, OSError) as exc:
+            print(format_cli_error(exc, command="generate-workflow"), file=sys.stderr)
+            return 1
         if args.format == "yaml" and result.get("yaml"):
             print(result["yaml"])
         else:
@@ -1938,7 +2769,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "workflow-lint":
         workflow_path = args.workflow_file or args.workflow
         if not workflow_path:
-            raise ValueError("workflow-lint requires a workflow path or --file.")
+            print(format_cli_error(ValueError("workflow-lint requires a workflow path or --file."), command="workflow-lint"), file=sys.stderr)
+            return 1
         result = workflow_lint_payload(Path(workflow_path), min_quality_score=args.min_quality_score)
         if args.format == "markdown":
             print(workflow_lint_to_markdown(result))
@@ -2006,24 +2838,45 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "verify-impl":
         from .mcp_server import verify_implementation_payload
 
-        workspace = open_workspace(args.workspace_root)
-        verify_args = {
-            "workspace_root": str(workspace.root),
-            "task_description": args.task_description,
-            "base_url": args.base_url,
-            "repo_root": str(Path(args.repo_root).resolve()),
-            "base": args.base,
-            "include_untracked": not args.no_untracked,
-            "framework_hint": args.framework_hint,
-            "model": args.model,
-            "run_profile": args.run_profile,
-            "min_quality_score": args.min_quality_score,
-            "timeout_seconds": args.timeout_seconds,
-            "run_negative": args.run_negative,
-        }
-        if args.inputs_file:
-            verify_args["inputs"] = load_workspace_inputs(workspace, None, args.inputs_file)
-        payload = verify_implementation_payload(verify_args)
+        try:
+            workspace = open_workspace(args.workspace_root)
+            base_url = args.base_url or infer_verify_impl_base_url(Path(args.repo_root).resolve(), workspace.root)
+            verify_args = {
+                "workspace_root": str(workspace.root),
+                "task_description": args.task_description,
+                "base_url": base_url,
+                "repo_root": str(Path(args.repo_root).resolve()),
+                "base": args.base,
+                "include_untracked": not args.no_untracked,
+                "framework_hint": args.framework_hint,
+                "model": args.model,
+                "run_profile": args.run_profile,
+                "min_quality_score": args.min_quality_score,
+                "timeout_seconds": args.timeout_seconds,
+                "run_negative": args.run_negative,
+            }
+            if args.inputs_file:
+                verify_args["inputs"] = load_workspace_inputs(workspace, None, args.inputs_file)
+            payload = verify_implementation_payload(verify_args)
+            payload["base_url"] = base_url
+        except Exception as exc:
+            suggestion = cli_error_suggestion(str(exc), command="verify-impl")
+            if args.format == "markdown":
+                print(format_cli_error(exc, command="verify-impl"), file=sys.stderr)
+            else:
+                print(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "result": "error",
+                            "message": str(exc),
+                            "suggestion": suggestion,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            return 1
         if args.format == "markdown":
             print(verify_impl_cli_markdown(payload))
         else:
@@ -2049,28 +2902,110 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(to_jsonable(status), ensure_ascii=False, indent=2))
         return 0 if status.result == "pass" else 1
+    if args.command == "list-workflows":
+        from .workflow_index import list_workflows
+
+        workspace = open_workspace(args.workspace_root)
+        ensure_workflow_index(workspace)
+        items = list_workflows(workspace.root, visibility=args.visibility)
+        payload = {"schema_version": 1, "workspace": str(workspace.root), "workflow_count": len(items), "workflows": items}
+        if args.format == "markdown":
+            print(workflow_list_to_markdown(payload))
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "search-workflows":
+        from .workflow_index import search_workflows
+
+        workspace = open_workspace(args.workspace_root)
+        ensure_workflow_index(workspace)
+        items = search_workflows(workspace.root, args.query, visibility=args.visibility, limit=args.limit)
+        payload = {
+            "schema_version": 1,
+            "workspace": str(workspace.root),
+            "query": args.query,
+            "workflow_count": len(items),
+            "workflows": items,
+        }
+        if args.format == "markdown":
+            print(workflow_list_to_markdown(payload))
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "share-workflow":
         from .workflow_index import mark_workflow_public
 
         workspace = open_workspace(args.workspace_root)
         ref = find_workflow(workspace, args.name)
+        if not ref.license:
+            ref = find_workflow(workspace, args.name)
         index_path = mark_workflow_public(workspace.root, ref)
         payload = {
-            "status": "coming_soon",
+            "status": "success",
             "workflow": ref.name,
             "visibility": "public",
+            "license": "cc-by-4.0",
             "index_path": str(index_path),
-            "message": (
-                f"Sharing workflows to the marketplace is coming soon. "
-                f"Workflow '{ref.name}' has been marked as public in your local index. "
-                "Sign up at https://visualagent.dev to publish when the marketplace launches."
-            ),
+            "message": f"Workflow '{ref.name}' is now public in the local workflow library.",
         }
         if args.format == "markdown":
             print(payload["message"])
         else:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
+    if args.command == "withdraw-workflow":
+        from .workflow_index import withdraw_workflow
+
+        workspace = open_workspace(args.workspace_root)
+        ref = find_workflow(workspace, args.name)
+        result = withdraw_workflow(workspace.root, ref)
+        payload = {
+            "status": result.get("status"),
+            "workflow": result.get("workflow"),
+            "visibility": result.get("visibility"),
+            "index_path": result.get("index_path"),
+            "message": f"Workflow '{ref.name}' is now private in the local workflow library.",
+        }
+        if args.format == "markdown":
+            print(payload["message"])
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "publish-workflow":
+        from .workflow_index import publish_workflow
+
+        workspace = open_workspace(args.workspace_root)
+        ref = find_workflow(workspace, args.name)
+        result = publish_workflow(
+            workspace.root,
+            ref,
+            min_quality_score=float(args.min_quality_score),
+            catalog_url_base=str(args.catalog_url_base),
+        )
+        if result.get("status") == "published":
+            payload = {
+                "status": "published",
+                "id": result.get("id"),
+                "name": result.get("name"),
+                "version": result.get("version"),
+                "quality_score": result.get("quality_score"),
+                "url": result.get("url"),
+                "index_path": result.get("index_path"),
+            }
+        else:
+            payload = {
+                "status": str(result.get("status") or "blocked"),
+                "reason": result.get("reason"),
+                "workflow": result.get("workflow"),
+                "quality_score": result.get("quality_score"),
+                "min_quality_score": result.get("min_quality_score"),
+                "issues": result.get("issues"),
+            }
+        if args.format == "markdown":
+            print(publish_workflow_to_markdown(payload))
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if payload["status"] == "published" else 1
     if args.command == "codex-check":
         workspace = open_workspace(args.workspace_root)
         tags = tuple(item.strip() for item in str(args.tags).split(",") if item.strip())
@@ -2082,6 +3017,7 @@ def main(argv: list[str] | None = None) -> int:
             tags=tags or ("verification",),
             max_workflows=args.max_workflows,
             run_profile=args.run_profile,
+            from_step=args.from_step,
         )
         if args.format == "markdown":
             print(codex_check_to_markdown(result))
@@ -2098,7 +3034,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         payload = connect_result_to_dict(result)
         if args.format == "markdown":
-            print(f"Connected {payload['platform']} to Visual Agent.")
+            print(f"Connected {payload['platform']} to Checkpoint.")
             print(f"Workspace: {payload['workspace_root']}")
             print(f"Config: {payload['config_path']}")
         else:
@@ -2143,6 +3079,7 @@ def main(argv: list[str] | None = None) -> int:
             synthetic_on_capture_fail=args.synthetic_on_capture_fail,
             sensitive_fields=sensitive_fields,
             resume_from=args.resume_from,
+            from_step=args.from_step,
             use_lock=not args.no_lock,
             lock_ttl_seconds=args.lock_ttl_seconds,
             queue_when_locked=args.queue_when_locked,
@@ -2506,6 +3443,8 @@ def workflow_quality_payload(quality: Any) -> dict[str, Any]:
         "forbidden_error_assertions": quality.forbidden_error_assertion_count,
         "text_from_input_references": quality.text_from_input_reference_count,
         "invalid_text_from_references": list(quality.invalid_text_from_references),
+        "visual_action_count": quality.visual_action_count,
+        "visual_assertion_count": quality.visual_assertion_count,
         "covers_success_path": quality.covers_success_path,
         "covers_error_path": quality.covers_error_path,
         "covers_data_display": quality.covers_data_display,
@@ -2528,6 +3467,8 @@ def workflow_lint_suggestions(gaps: tuple[str, ...], validation_issues: list[dic
             suggestions.append("Add a business-facing assert_text or wait_for_text for the user-visible outcome.")
         elif "error path" in lower:
             suggestions.append("Add assert_text_contract forbidden_any or assert_no_error to catch visible failure states.")
+        elif "visual workflow has no visual assertion" in lower:
+            suggestions.append("Add assert_visual_text after click_visual, or pair the visual interaction with a semantic assert_text.")
         elif "text_from references" in lower:
             suggestions.append("Fix text_from input references or add the missing fields to the inputs template.")
         else:
@@ -2728,6 +3669,88 @@ def detect_framework_from_dir(root: Path) -> str | None:
     return None
 
 
+def init_next_steps(workspace: Any) -> list[str]:
+    root = quote_cli_arg(str(workspace.root))
+    return [
+        f"visual-agent show-status --workspace-root {root}",
+        f"visual-agent verify-impl --workspace-root {root} --task-description \"Verify the current change\" --run-profile dry-run",
+        f"visual-agent workspace-status --root {root}",
+    ]
+
+
+def quote_cli_arg(value: str) -> str:
+    text = str(value)
+    if not text or any(char.isspace() for char in text):
+        return '"' + text.replace('"', '\\"') + '"'
+    return text
+
+
+def infer_verify_impl_base_url(repo_root: Path, workspace_root: Path) -> str:
+    from .preflight import detect_project_type, recommended_project_port
+
+    project_type = detect_project_type(repo_root)
+    port = infer_dev_server_port(repo_root, project_type) or recommended_project_port(project_type)
+    if port is not None:
+        return f"http://127.0.0.1:{port}"
+    fixture = first_workspace_fixture(workspace_root)
+    if fixture is not None:
+        return fixture
+    raise ValueError(
+        "verify-impl could not infer --base-url from package.json, vite.config.*, next.config.*, manifest.json, or workspace fixtures."
+    )
+
+
+def infer_dev_server_port(repo_root: Path, project_type: str | None) -> int | None:
+    package_json = repo_root / "package.json"
+    if package_json.exists():
+        try:
+            package = json.loads(package_json.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            package = {}
+        scripts = package.get("scripts") if isinstance(package, dict) and isinstance(package.get("scripts"), dict) else {}
+        for value in scripts.values():
+            port = parse_port_hint(str(value))
+            if port is not None:
+                return port
+    for name in ("vite.config.ts", "vite.config.js", "vite.config.mts", "vite.config.mjs", "next.config.js", "next.config.mjs", "next.config.ts"):
+        path = repo_root / name
+        if path.exists():
+            port = parse_port_hint(path.read_text(encoding="utf-8", errors="ignore"))
+            if port is not None:
+                return port
+    manifest = repo_root / "manifest.json"
+    if manifest.exists() and project_type == "uni-app":
+        return 8080
+    return None
+
+
+def parse_port_hint(text: str) -> int | None:
+    patterns = [
+        r"--port(?:=|\s+)(\d{2,5})",
+        r"\bport\s*[:=]\s*(\d{2,5})",
+        r"localhost:(\d{2,5})",
+        r"127\.0\.0\.1:(\d{2,5})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        port = int(match.group(1))
+        if 1 <= port <= 65535:
+            return port
+    return None
+
+
+def first_workspace_fixture(workspace_root: Path) -> str | None:
+    fixtures_dir = workspace_root / "fixtures"
+    if not fixtures_dir.exists():
+        return None
+    for path in sorted(fixtures_dir.rglob("*")):
+        if path.is_file() and path.suffix.lower() in {".html", ".htm"}:
+            return (Path("fixtures") / path.relative_to(fixtures_dir)).as_posix()
+    return None
+
+
 def generate_from_diff_cli_markdown(payload: dict[str, Any]) -> str:
     semantic = payload.get("semantic_summary") if isinstance(payload.get("semantic_summary"), dict) else {}
     quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
@@ -2836,7 +3859,7 @@ def usage_status_to_markdown(payload: dict[str, Any]) -> str:
     feature_access = payload.get("feature_access") if isinstance(payload.get("feature_access"), dict) else {}
     cloud_config = payload.get("cloud_config") if isinstance(payload.get("cloud_config"), dict) else {}
     lines = [
-        "# Visual Agent Usage",
+        "# Checkpoint Usage",
         "",
         f"- Workspace: `{payload.get('workspace')}`",
         f"- License tier: `{license_.get('tier') or 'free'}`",
@@ -2877,6 +3900,156 @@ def usage_status_to_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def environment_to_markdown(payload: dict[str, Any]) -> str:
+    port_check = payload.get("port_check") if isinstance(payload.get("port_check"), dict) else {}
+    build_checks = payload.get("build_checks") if isinstance(payload.get("build_checks"), list) else []
+    lines = [
+        "# Checkpoint Environment",
+        "",
+        f"- Project root: `{payload.get('project_root')}`",
+        f"- Project type: `{payload.get('project_type') or 'unknown'}`",
+        f"- Status: `{payload.get('status') or ('OK' if payload.get('ok') else 'WARN')}`",
+        f"- Host: `{payload.get('host') or ''}`",
+        f"- Port: `{payload.get('port') or ''}`",
+        "",
+        "## Port",
+        f"- OK: `{bool(port_check.get('ok', True))}`",
+        f"- Message: {port_check.get('message') or ''}",
+        f"- Suggestion: {port_check.get('suggestion') or ''}",
+        "",
+        "## Builds",
+    ]
+    if build_checks:
+        for check in build_checks:
+            if not isinstance(check, dict):
+                continue
+            lines.append(
+                f"- `{check.get('path')}` `{check.get('status')}` age={check.get('age_minutes')} "
+                f"{check.get('message') or ''}"
+            )
+    else:
+        lines.append("- No build outputs checked.")
+    warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
+    recommendations = payload.get("recommendations") if isinstance(payload.get("recommendations"), list) else []
+    if warnings:
+        lines.extend(["", "## Warnings", ""])
+        for warning in warnings:
+            lines.append(f"- {warning}")
+    if recommendations:
+        lines.extend(["", "## Recommendations", ""])
+        for item in recommendations:
+            lines.append(f"- {item}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def activate_to_markdown(payload: dict[str, Any]) -> str:
+    license_ = payload.get("license") if isinstance(payload.get("license"), dict) else {}
+    lines = [
+        "# License Activated",
+        "",
+        f"- License file: `{payload.get('license_file')}`",
+        f"- Tier: `{license_.get('tier') or 'pro'}`",
+        f"- Seats: `{license_.get('seats', 1)}`",
+        f"- Key present: `{bool(license_.get('key_present', False))}`",
+        "",
+        str(payload.get("message") or ""),
+    ]
+    return "\n".join(line for line in lines if line is not None).rstrip() + "\n"
+
+
+def stats_to_markdown(payload: dict[str, Any]) -> str:
+    slowest = payload.get("slowest_workflow") if isinstance(payload.get("slowest_workflow"), dict) else None
+    lines = [
+        "# Checkpoint Stats",
+        "",
+        f"- Workspace: `{payload.get('workspace')}`",
+        f"- Total runs: `{payload.get('total_runs', 0)}`",
+        f"- Passed runs: `{payload.get('passed_runs', 0)}`",
+        f"- Failed runs: `{payload.get('failed_runs', 0)}`",
+        f"- Pass rate: `{float(payload.get('pass_rate') or 0.0) * 100:.1f}%`",
+    ]
+    if slowest:
+        lines.append(f"- Slowest workflow: `{slowest.get('workflow_name')}` ({slowest.get('duration_ms')} ms)")
+    failures = payload.get("most_failed_steps") if isinstance(payload.get("most_failed_steps"), list) else []
+    if failures:
+        lines.extend(["", "## Most Failed Steps"])
+        for item in failures:
+            if isinstance(item, dict):
+                lines.append(f"- `{item.get('step')}`: `{item.get('count')}`")
+    return "\n".join(lines)
+
+
+def workflow_list_to_markdown(payload: dict[str, Any]) -> str:
+    workflows = payload.get("workflows") if isinstance(payload.get("workflows"), list) else []
+    lines = [
+        "# Workflows",
+        "",
+        f"- Workspace: `{payload.get('workspace')}`",
+        f"- Count: `{payload.get('workflow_count', len(workflows))}`",
+    ]
+    if payload.get("query") is not None:
+        lines.append(f"- Query: `{payload.get('query')}`")
+    lines.extend(["", "| name | visibility | tags | path |", "| --- | --- | --- | --- |"])
+    for item in workflows:
+        if not isinstance(item, dict):
+            continue
+        tags = ", ".join(str(tag) for tag in item.get("tags", []) if str(tag))
+        lines.append(
+            "| "
+            + " | ".join(
+                markdown_cell(value)
+                for value in (
+                    item.get("name"),
+                    item.get("visibility"),
+                    tags,
+                    item.get("path"),
+                )
+            )
+            + " |"
+        )
+    return "\n".join(lines)
+
+
+def publish_workflow_to_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Publish Workflow",
+        "",
+        f"- Status: `{payload.get('status')}`",
+    ]
+    if payload.get("workflow"):
+        lines.append(f"- Workflow: `{payload.get('workflow')}`")
+    if payload.get("quality_score") is not None:
+        lines.append(f"- Quality score: `{payload.get('quality_score')}`")
+    if payload.get("min_quality_score") is not None:
+        lines.append(f"- Minimum quality score: `{payload.get('min_quality_score')}`")
+    if payload.get("url"):
+        lines.append(f"- URL: `{payload.get('url')}`")
+    if payload.get("index_path"):
+        lines.append(f"- Index path: `{payload.get('index_path')}`")
+    if payload.get("reason"):
+        lines.append(f"- Reason: `{payload.get('reason')}`")
+    issues = payload.get("issues") if isinstance(payload.get("issues"), list) else []
+    if issues:
+        lines.extend(["", "## Issues"])
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            location = f" step {issue.get('step_id')}" if issue.get("step_id") else ""
+            lines.append(f"- [{issue.get('level')}] {location} {issue.get('message')}".rstrip())
+    return "\n".join(lines)
+
+
+def ensure_workflow_index(workspace: Any) -> None:
+    from .workflow_index import update_workflow_index
+
+    for ref in discover_workflows(workspace, include_slow=True):
+        update_workflow_index(workspace.root, ref)
+
+
+def markdown_cell(value: Any) -> str:
+    return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ")
+
+
 def cloud_run_plan_to_markdown(payload: dict[str, Any]) -> str:
     request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
     config = request.get("cloud_config") if isinstance(request.get("cloud_config"), dict) else {}
@@ -2886,6 +4059,8 @@ def cloud_run_plan_to_markdown(payload: dict[str, Any]) -> str:
         "",
         f"- Workspace: `{payload.get('workspace')}`",
         f"- Workflow: `{payload.get('workflow_name')}`",
+        f"- Workflow source: `{payload.get('workflow_source') or request.get('workflow_source') or 'workspace'}`",
+        f"- Workflow id: `{payload.get('workflow_id') or request.get('workflow_id') or ''}`",
         f"- Request status: `{request.get('status') or 'blocked'}`",
         f"- Run profile: `{request.get('run_profile') or ''}`",
         f"- Inputs file: `{request.get('inputs_file') or ''}`",
@@ -2921,6 +4096,8 @@ def cloud_run_to_markdown(payload: dict[str, Any]) -> str:
         "",
         f"- Workspace: `{payload.get('workspace')}`",
         f"- Workflow: `{payload.get('workflow_name')}`",
+        f"- Workflow source: `{payload.get('workflow_source') or request.get('workflow_source') or 'workspace'}`",
+        f"- Workflow id: `{payload.get('workflow_id') or request.get('workflow_id') or ''}`",
         f"- Execution requested: `{bool(payload.get('execution_requested', False))}`",
         f"- Transport: `{payload.get('transport') or 'none'}`",
         f"- Network sent: `{bool(payload.get('network_sent', False))}`",
@@ -2953,6 +4130,8 @@ def cloud_run_to_markdown(payload: dict[str, Any]) -> str:
                 "## Execution Result",
                 f"- Status: `{result.get('status') or 'blocked'}`",
                 f"- Run id: `{result.get('run_id') or ''}`",
+                f"- Workflow source: `{result.get('workflow_source') or payload.get('workflow_source') or request.get('workflow_source') or 'workspace'}`",
+                f"- Workflow id: `{result.get('workflow_id') or payload.get('workflow_id') or request.get('workflow_id') or ''}`",
                 f"- Report URL: `{result.get('report_url') or ''}`",
                 f"- Usage recorded: `{bool(result.get('usage_recorded', False))}`",
                 f"- Message: {result.get('message') or ''}",
@@ -2981,6 +4160,47 @@ def parse_optional_bool(value: str | None) -> bool | None:
     if value is None:
         return None
     return value.lower() == "true"
+
+
+def format_cli_error(exc: Exception | str, *, command: str = "") -> str:
+    message = str(exc).strip()
+    suggestion = cli_error_suggestion(message, command=command)
+    if suggestion:
+        return f"Error: {message}\nTry: {suggestion}"
+    return f"Error: {message}"
+
+
+def cli_error_suggestion(message: str, *, command: str = "") -> str:
+    text = message.lower()
+    if "workspace does not exist" in text:
+        return "visual-agent init --root .agent-workspace"
+    if "workflow not found" in text:
+        return "visual-agent workspace-status --root .agent-workspace, then pass one listed workflow name."
+    if "no such file or directory" in text or "filenotfounderror" in text or "not found" in text:
+        if "workspace" in text:
+            return "Run visual-agent init --root .agent-workspace, then retry with --workspace-root .agent-workspace."
+        if "workflow" in text:
+            return "Run visual-agent workspace-status --root .agent-workspace and choose an existing workflow."
+        if "inputs" in text:
+            return "Check the --inputs-file path, or place the file under .agent-workspace/inputs."
+        return "Check the path from the project root, or rerun with an absolute path."
+    if "could not infer --base-url" in text:
+        return "Pass --base-url http://127.0.0.1:5173 for a running app, or --base-url fixtures/login_demo.html for a local fixture."
+    if "generate-workflow requires --description" in text:
+        return "visual-agent generate-workflow --description \"Verify login redirects to dashboard.\""
+    if "workflow-lint requires a workflow path" in text:
+        return "visual-agent workflow-lint --file workflows/login_flow.yaml"
+    if "use either --inputs or --inputs-file" in text:
+        return "Pass only one input source, then rerun the command."
+    if "json" in text and "inputs-file" in text:
+        return f"Check {command} --inputs-file for valid JSON, then retry."
+    if "run-workflow requires --workflow" in text:
+        return "visual-agent run-workflow --workflow workflows/login_flow.yaml --inputs-file inputs/demo.json"
+    if command == "run-workflow":
+        return "visual-agent run-workflow --workflow workflows/login_flow.yaml --inputs-file inputs/demo.json"
+    if command == "generate-workflow":
+        return "visual-agent generate-workflow --description \"Describe the workflow you want.\""
+    return ""
 
 
 if __name__ == "__main__":

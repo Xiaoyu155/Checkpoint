@@ -9,6 +9,7 @@ from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
 
+from .capture import capture_visual_region
 from .audit import RunAudit
 from .diagnostics import diagnose_failure
 from .dispatcher import ActionDispatchContext, ActionDispatcher, read_path, resolve_step_value, selector_from_resolved
@@ -19,6 +20,7 @@ from .models import (
     ActionStatus,
     LocationEvidence,
     Observation,
+    Point,
     ProviderKind,
     ResolvedTarget,
     Target,
@@ -39,7 +41,9 @@ from .run_profile import MUTATING_ACTIONS, RunProfileName, ensure_step_allowed, 
 from .selector import SelectorResolver
 from .security import redact_secret_text
 from .state import StateStore, WorkflowState, hydrate_context_from_completed_steps
+from .vision import build_locator
 from .workflow_types import WorkflowContext
+from .versioning import UnsupportedSchemaVersionError, migrate_workflow_payload
 
 
 RUNTIME_VERSION = "0.1.0"
@@ -60,6 +64,9 @@ class Workflow:
     steps: tuple[WorkflowStep, ...]
     schema_version: int | None = None
     min_runtime_version: str | None = None
+    variables: dict[str, Any] = field(default_factory=dict)
+    fixtures: tuple[str, ...] = ()
+    preconditions: tuple[Any, ...] = ()
     tags: tuple[str, ...] = ()
     affects: tuple[str, ...] = ()
     description: str = ""
@@ -115,17 +122,38 @@ class WorkflowRuntime:
         synthetic_on_capture_fail: bool = False,
         inputs: dict[str, Any] | None = None,
         sensitive_fields: set[str] | None = None,
+        workspace_root: str | Path | None = None,
         resume_from: str | Path | None = None,
+        from_step: str | None = None,
         use_lock: bool = True,
         lock_ttl_seconds: float = 3600.0,
         queue_when_locked: bool = False,
         lock_wait_seconds: float = 0.0,
         lock_poll_seconds: float = 0.5,
+        progress_state: dict[str, Any] | None = None,
     ) -> WorkflowRunResult:
         profile = normalize_run_profile(str(run_profile) if run_profile is not None else None, dry_run=dry_run)
         lock = RunLock(self.audit.root_dir, ttl_seconds=lock_ttl_seconds) if use_lock else None
         lock_info = None
         queue_info = None
+
+        def update_progress(stage: str, *, current_step: str = "", current_index: int = -1, message: str = "") -> None:
+            if progress_state is None:
+                return
+            progress_state.update(
+                {
+                    "workflow_name": workflow.name,
+                    "total_steps": len(workflow.steps),
+                    "stage": stage,
+                    "current_step": current_step,
+                    "current_index": current_index,
+                    "message": message,
+                    "done": False,
+                    "updated_at": monotonic(),
+                }
+            )
+
+        update_progress("initializing")
         if lock is not None and resume_from is None:
             if queue_when_locked:
                 lock_info, queue_info = lock.acquire_with_wait(
@@ -146,6 +174,7 @@ class WorkflowRuntime:
             state_store = StateStore(run_dir)
             completed_steps = []
             state_store.save(WorkflowState(run_id=run_id, workflow_name=workflow.name, completed_steps=()))
+        update_progress("run_directory_ready")
         if lock is not None and lock_info is None:
             if queue_when_locked:
                 lock_info, queue_info = lock.acquire_with_wait(
@@ -162,13 +191,93 @@ class WorkflowRuntime:
                 run_id=run_id,
                 run_dir=run_dir,
                 inputs=inputs or {},
+                variables={},
                 sensitive_fields=sensitive_fields or set(),
+                resources={"workspace_root": str(Path(workspace_root).resolve())} if workspace_root is not None else {},
             )
+            context.variables.update(resolve_workflow_variables(workflow.variables, context))
             hydrate_context_from_completed_steps(context, tuple(completed_steps))
             results: list[WorkflowStepResult] = []
+            soft_assert_errors: list[dict[str, Any]] = []
             sensitive_values = workflow_sensitive_input_values(workflow, context.inputs, context.sensitive_fields)
 
-            for step in workflow.steps:
+            if workflow.fixtures:
+                update_progress("loading_fixtures")
+                load_workflow_fixtures(workflow.fixtures, context)
+            precondition_failed: WorkflowStepResult | None = None
+            if workflow.preconditions:
+                for precondition_index, precondition in enumerate(workflow.preconditions):
+                    update_progress(
+                        "running_preconditions",
+                        current_step=f"precondition {precondition_index + 1}/{len(workflow.preconditions)}",
+                        current_index=precondition_index,
+                    )
+                    precondition_result = self._run_precondition(
+                        precondition,
+                        context,
+                        run_profile=profile,
+                        synthetic_on_capture_fail=synthetic_on_capture_fail,
+                    )
+                    safe_precondition = redact_workflow_step_result(precondition_result, sensitive_values)
+                    results.append(safe_precondition)
+                    self._write_step_result(run_dir, safe_precondition)
+                    if precondition_result.status == ActionStatus.FAILED:
+                        if bool(precondition_result.metadata.get("soft_assert")):
+                            soft_assert_errors.append(
+                                {
+                                    "id": precondition_result.id,
+                                    "action": precondition_result.action,
+                                    "message": precondition_result.message,
+                                    "metadata": precondition_result.metadata,
+                                }
+                            )
+                            continue
+                        state_store.save(
+                            WorkflowState(
+                                run_id=run_id,
+                                workflow_name=workflow.name,
+                                completed_steps=tuple(completed_steps),
+                                failed_step=precondition_result.id,
+                            )
+                        )
+                        precondition_failed = precondition_result
+                        break
+
+            if precondition_failed is not None:
+                run_result = WorkflowRunResult(
+                    run_id=run_id,
+                    run_dir=run_dir,
+                    workflow_name=workflow.name,
+                    steps=tuple(results),
+                    workflow_schema_version=workflow.schema_version,
+                    runtime_version=RUNTIME_VERSION,
+                    run_profile=profile,
+                    run_lock=lock_to_dict(lock_info) if lock_info is not None else None,
+                    run_queue=queue_to_dict(queue_info) if queue_info is not None else None,
+                )
+                (run_dir / "workflow_result.json").write_text(
+                    json.dumps(to_jsonable(run_result), ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                if progress_state is not None:
+                    progress_state["done"] = True
+                    update_progress("finished", current_step="preconditions failed", current_index=-1, message=precondition_failed.id)
+                close_context_resources(context)
+                return run_result
+
+            step_lookup = {step.id: index for index, step in enumerate(workflow.steps)}
+            step_index = 0
+            if from_step is not None:
+                if from_step not in step_lookup:
+                    raise ValueError(f"from_step not found in workflow: {from_step}")
+                step_index = step_lookup[from_step]
+            while step_index < len(workflow.steps):
+                step = workflow.steps[step_index]
+                update_progress(
+                    "running_step",
+                    current_step=f"{step.id} ({step.action})",
+                    current_index=step_index,
+                )
                 if step.id in completed_lookup:
                     result = WorkflowStepResult(
                         id=step.id,
@@ -178,6 +287,7 @@ class WorkflowRuntime:
                         metadata={"resumed": True},
                     )
                     results.append(result)
+                    step_index += 1
                     continue
 
                 result = self._run_step(
@@ -190,6 +300,25 @@ class WorkflowRuntime:
                 results.append(safe_result)
                 self._write_step_result(run_dir, safe_result)
                 if result.status == ActionStatus.FAILED:
+                    if bool(result.metadata.get("soft_assert")):
+                        soft_assert_errors.append(
+                            {
+                                "id": result.id,
+                                "action": result.action,
+                                "message": result.message,
+                                "metadata": result.metadata,
+                            }
+                        )
+                        completed_steps.append(step.id)
+                        completed_lookup.add(step.id)
+                        state_store.save(
+                            WorkflowState(
+                                run_id=run_id,
+                                workflow_name=workflow.name,
+                                completed_steps=tuple(completed_steps),
+                            )
+                        )
+                        continue
                     state_store.save(
                         WorkflowState(
                             run_id=run_id,
@@ -208,6 +337,29 @@ class WorkflowRuntime:
                         completed_steps=tuple(completed_steps),
                     )
                 )
+                jump_to = str(result.metadata.get("jump_to") or "") if isinstance(result.metadata, dict) else ""
+                if jump_to and jump_to in step_lookup:
+                    step_index = step_lookup[jump_to]
+                    continue
+                step_index += 1
+
+            if soft_assert_errors:
+                summary_step = WorkflowStepResult(
+                    id="soft_assert_summary",
+                    action="soft_assert_summary",
+                    status=ActionStatus.FAILED,
+                    message=f"{len(soft_assert_errors)} soft assertion(s) failed",
+                    metadata={"soft_assert": True, "soft_assert_errors": soft_assert_errors},
+                )
+                results.append(summary_step)
+                state_store.save(
+                    WorkflowState(
+                        run_id=run_id,
+                        workflow_name=workflow.name,
+                        completed_steps=tuple(completed_steps),
+                        failed_step=summary_step.id,
+                    )
+                )
 
             run_result = WorkflowRunResult(
                 run_id=run_id,
@@ -224,9 +376,14 @@ class WorkflowRuntime:
                 json.dumps(to_jsonable(run_result), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            update_progress("finished", current_step="workflow complete", current_index=len(workflow.steps))
+            if progress_state is not None:
+                progress_state["done"] = True
             close_context_resources(context)
             return run_result
         finally:
+            if progress_state is not None:
+                progress_state["done"] = True
             if lock is not None:
                 lock.release()
 
@@ -409,6 +566,76 @@ class WorkflowRuntime:
                 resolved_target=resolved,
             )
 
+        if action == "set_variable":
+            name = str(require_param(params, "name")).strip()
+            if not name:
+                raise ValueError("set_variable requires name.")
+            value = extract_variable_value(params, context)
+            context.variables[name] = value
+            return WorkflowStepResult(
+                id=step.id,
+                action=action,
+                status=ActionStatus.SUCCESS,
+                message=f"variable set: {name}",
+                metadata={"name": name, "value": value},
+            )
+
+        if action == "if_text_exists":
+            observation = context.observations.get(str(params.get("observation", ""))) or context.latest_observation
+            text = normalize_text(require_param(params, "text"))
+            passed = observation_contains_text(observation, text)
+            branch = "then" if passed else "else"
+            next_step = params.get(branch)
+            metadata = {"text": text, "branch_taken": branch, "matched": passed}
+            if next_step:
+                metadata["jump_to"] = str(next_step)
+            return WorkflowStepResult(
+                id=step.id,
+                action=action,
+                status=ActionStatus.SUCCESS,
+                message=f"{branch} branch selected",
+                metadata=metadata,
+            )
+
+        if action == "run_workflow":
+            nested_name = str(require_param(params, "workflow")).strip()
+            nested_inputs = dict(context.inputs)
+            extra_inputs = params.get("inputs")
+            if isinstance(extra_inputs, dict):
+                nested_inputs.update(extra_inputs)
+            nested_dry_run = bool(params.get("dry_run", run_profile == "dry-run"))
+            nested_result = self._run_nested_workflow(
+                nested_name,
+                context,
+                run_profile=run_profile,
+                synthetic_on_capture_fail=synthetic_on_capture_fail,
+                dry_run=nested_dry_run,
+                inputs=nested_inputs,
+                from_step=str(params.get("from_step") or "") or None,
+            )
+            return WorkflowStepResult(
+                id=step.id,
+                action=action,
+                status=ActionStatus.SUCCESS if all(item.status != ActionStatus.FAILED for item in nested_result.steps) else ActionStatus.FAILED,
+                message=f"nested workflow completed: {nested_result.workflow_name}",
+                metadata={"nested_run": to_jsonable(nested_result)},
+            )
+
+        if action == "click_visual":
+            return self._click_visual(
+                step,
+                context,
+                dry_run=step_dry_run,
+                synthetic_on_capture_fail=synthetic_on_capture_fail,
+            )
+
+        if action == "assert_visual_text":
+            return self._assert_visual_text(
+                step,
+                context,
+                synthetic_on_capture_fail=synthetic_on_capture_fail,
+            )
+
         if action in self.dispatcher.actions_available:
             resolved = placeholder_resolved_target(action) if action in SELF_CONTAINED_ACTIONS and "target" not in params else self._resolve_for_action(params, context, step.id, action=action)
             action_result = self.dispatcher.execute(
@@ -452,21 +679,37 @@ class WorkflowRuntime:
             text = normalize_text(require_param(params, "text"))
             if observation is not None and observation.provider == ProviderKind.OCR and observation.metadata.get("engine_available") is False:
                 install_hint = observation.metadata.get("install_hint") or "Install and configure OCR before asserting screen text."
-                raise AssertionError(f"OCR engine unavailable; cannot assert text: {params['text']}. {install_hint}")
-            if not observation_contains_text(observation, text):
-                raise AssertionError(f"Text not found in observation: {params['text']}")
+                return self._assertion_failed(step, action, f"OCR engine unavailable; cannot assert text: {params['text']}. {install_hint}", soft=bool(params.get("soft_assert")), metadata={"expected": text, "reason": "ocr_unavailable"})
+            passed = observation_contains_text(observation, text)
+            if not passed:
+                if bool(params.get("ocr_verify")):
+                    passed = self._ocr_verify_text(context, text)
+            if not passed:
+                return self._assertion_failed(step, action, f"Text not found in observation: {params['text']}", soft=bool(params.get("soft_assert")), metadata={"expected": text, "ocr_verify": bool(params.get("ocr_verify"))})
             return WorkflowStepResult(
                 id=step.id,
                 action=action,
                 status=ActionStatus.SUCCESS,
                 message=f"text found: {params['text']}",
+                metadata={"ocr_verify": bool(params.get("ocr_verify"))},
             )
 
         if action == "assert_text_contract":
             observation = context.observations.get(str(params.get("observation", ""))) or context.latest_observation
             contract = evaluate_text_contract(observation, params)
             if not contract["passed"]:
-                raise AssertionError(text_contract_failure_message(contract))
+                if bool(params.get("ocr_verify")):
+                    contract = dict(contract)
+                    contract["ocr_verify"] = self._ocr_verify_text_contract(context, params)
+                    if contract["ocr_verify"]:
+                        return WorkflowStepResult(
+                            id=step.id,
+                            action=action,
+                            status=ActionStatus.SUCCESS,
+                            message="text contract matched",
+                            metadata={"text_contract": contract},
+                        )
+                return self._assertion_failed(step, action, text_contract_failure_message(contract), soft=bool(params.get("soft_assert")), metadata={"text_contract": contract})
             return WorkflowStepResult(
                 id=step.id,
                 action=action,
@@ -479,7 +722,7 @@ class WorkflowRuntime:
             observation = context.observations.get(str(params.get("observation", ""))) or context.latest_observation
             result = evaluate_no_error_state(observation, network_events=context.resources.get("network_events", []))
             if not result["passed"]:
-                raise AssertionError("error state detected")
+                return self._assertion_failed(step, action, "error state detected", soft=bool(params.get("soft_assert")), metadata={"no_error": result})
             return WorkflowStepResult(
                 id=step.id,
                 action=action,
@@ -492,7 +735,7 @@ class WorkflowRuntime:
             observation = context.observations.get(str(params.get("observation", ""))) or context.latest_observation
             result = evaluate_browser_readiness(observation, params, network_events=context.resources.get("network_events", []))
             if not result.passed:
-                raise AssertionError(browser_readiness_failure_message(result))
+                return self._assertion_failed(step, action, browser_readiness_failure_message(result), soft=bool(params.get("soft_assert")), metadata={"browser_ready": result})
             return WorkflowStepResult(
                 id=step.id,
                 action=action,
@@ -505,7 +748,7 @@ class WorkflowRuntime:
             observation = context.observations.get(str(params.get("observation", ""))) or context.latest_observation
             contract = evaluate_product_contract(observation, params, network_events=context.resources.get("network_events", []))
             if not contract.passed:
-                raise AssertionError(product_contract_failure_message(contract))
+                return self._assertion_failed(step, action, product_contract_failure_message(contract), soft=bool(params.get("soft_assert")), metadata={"product_contract": contract})
             return WorkflowStepResult(
                 id=step.id,
                 action=action,
@@ -518,7 +761,7 @@ class WorkflowRuntime:
             observation = context.observations.get(str(params.get("observation", ""))) or context.latest_observation_or_none
             result = evaluate_ai_response_quality(params, observation=observation)
             if not result.passed:
-                raise AssertionError(ai_quality_failure_message(result))
+                return self._assertion_failed(step, action, ai_quality_failure_message(result), soft=bool(params.get("soft_assert")), metadata={"ai_response_quality": result})
             return WorkflowStepResult(
                 id=step.id,
                 action=action,
@@ -537,7 +780,7 @@ class WorkflowRuntime:
                 page=context.resources.get("playwright_page"),
             )
             if event is None:
-                raise AssertionError(f"Network response not found: {network_assertion_label(params)}")
+                return self._assertion_failed(step, action, f"Network response not found: {network_assertion_label(params)}", soft=bool(params.get("soft_assert")), metadata={"event": None})
             return WorkflowStepResult(
                 id=step.id,
                 action=action,
@@ -552,6 +795,21 @@ class WorkflowRuntime:
         if action == "assert_file_exists":
             return self._assert_file_exists(step, context)
 
+        if action == "assert_element_exists":
+            return self._assert_element_exists(step, context)
+
+        if action == "assert_url_contains":
+            return self._assert_url_contains(step, context)
+
+        if action == "assert_count":
+            return self._assert_count(step, context)
+
+        if action == "assert_attribute":
+            return self._assert_attribute(step, context)
+
+        if action == "assert_no_layout_overlap":
+            return self._assert_no_layout_overlap(step, context)
+
         if action == "save_storage_state":
             return self._save_storage_state(step, context, dry_run=step_dry_run)
 
@@ -559,6 +817,134 @@ class WorkflowRuntime:
             return self._wait_for(step, context)
 
         raise ValueError(f"Unsupported workflow action: {action}")
+
+    def _click_visual(
+        self,
+        step: WorkflowStep,
+        context: WorkflowContext,
+        *,
+        dry_run: bool,
+        synthetic_on_capture_fail: bool,
+    ) -> WorkflowStepResult:
+        description = str(step.params.get("description") or step.params.get("text") or step.params.get("label") or "").strip()
+        if not description:
+            raise ValueError("click_visual requires description, text, or label.")
+        provider = str(step.params.get("provider") or "omniparser").strip().lower()
+        image, path, metadata = capture_visual_region(
+            step.params,
+            output_dir=context.run_dir,
+            label=f"{step.id}-visual",
+            synthetic_on_capture_fail=synthetic_on_capture_fail,
+        )
+        locator = build_locator(provider)
+        location = locator.locate(image, path, description)
+        target = Target(text=description, preferred=(ProviderKind.VISION,))
+        action_result = self.dispatcher.actions.click(
+            Point(x=location.x, y=location.y),
+            target,
+            provider=ProviderKind.VISION,
+            dry_run=dry_run,
+        )
+        action_result = ActionResult(
+            action="click_visual",
+            status=action_result.status,
+            target=action_result.target,
+            point=action_result.point,
+            provider=ProviderKind.VISION,
+            message="click skipped by dry-run" if dry_run else f"visual click: {description}",
+            metadata={
+                **metadata,
+                "provider": provider,
+                "confidence": location.confidence,
+                "reason": location.reason,
+                "screenshot_path": str(path),
+                "location": {"x": location.x, "y": location.y},
+            },
+        )
+        context.actions[step.id] = action_result
+        return WorkflowStepResult(
+            id=step.id,
+            action=step.action,
+            status=action_result.status,
+            message=action_result.message,
+            action_result=action_result,
+            metadata=action_result.metadata,
+        )
+
+    def _assert_visual_text(
+        self,
+        step: WorkflowStep,
+        context: WorkflowContext,
+        *,
+        synthetic_on_capture_fail: bool,
+    ) -> WorkflowStepResult:
+        text = normalize_text(require_param(step.params, "text"))
+        provider = str(step.params.get("provider") or "omniparser").strip().lower()
+        region = step.params.get("region")
+        image, path, metadata = capture_visual_region(
+            step.params,
+            output_dir=context.run_dir,
+            label=f"{step.id}-visual",
+            synthetic_on_capture_fail=synthetic_on_capture_fail,
+        )
+        locator = build_locator(provider)
+        elements = locator.detect(image, path, text)
+        matched_elements = [element for element in elements if self._element_matches_visual_text(element, text, region=region)]
+        if not matched_elements:
+            return self._assertion_failed(
+                step,
+                step.action,
+                f"Visual text not found: {step.params['text']}",
+                soft=bool(step.params.get("soft_assert")),
+                metadata={
+                    **metadata,
+                    "provider": provider,
+                    "screenshot_path": str(path),
+                    "text": text,
+                    "elements": list(elements)[:20],
+                },
+            )
+        return WorkflowStepResult(
+            id=step.id,
+            action=step.action,
+            status=ActionStatus.SUCCESS,
+            message=f"visual text found: {step.params['text']}",
+            metadata={
+                **metadata,
+                "provider": provider,
+                "screenshot_path": str(path),
+                "text": text,
+                "matched_elements": matched_elements,
+            },
+        )
+
+    def _element_matches_visual_text(self, element: dict[str, Any], text: str, *, region: Any = None) -> bool:
+        normalized = normalize_text(text)
+        haystack = normalize_text(" ".join(str(element.get(key) or "") for key in ("text", "label", "name", "role", "status")))
+        if normalized not in haystack:
+            return False
+        if not isinstance(region, dict):
+            return True
+        bounds = element.get("bounds") if isinstance(element.get("bounds"), dict) else None
+        if not isinstance(bounds, dict):
+            return False
+        try:
+            left = int(bounds.get("left", 0))
+            top = int(bounds.get("top", 0))
+            width = int(bounds.get("width", 0))
+            height = int(bounds.get("height", 0))
+            region_left = int(region.get("left", 0))
+            region_top = int(region.get("top", 0))
+            region_width = int(region.get("width", 0))
+            region_height = int(region.get("height", 0))
+        except (TypeError, ValueError):
+            return False
+        return not (
+            left + width <= region_left
+            or region_left + region_width <= left
+            or top + height <= region_top
+            or region_top + region_height <= top
+        )
 
     def _wait_for(self, step: WorkflowStep, context: WorkflowContext) -> WorkflowStepResult:
         params = step.params
@@ -696,6 +1082,99 @@ class WorkflowRuntime:
         ensure_action_target_exists(action, resolved, params)
         return resolved
 
+    def _run_precondition(
+        self,
+        precondition: Any,
+        context: WorkflowContext,
+        *,
+        run_profile: RunProfileName,
+        synthetic_on_capture_fail: bool,
+    ) -> WorkflowStepResult:
+        if isinstance(precondition, str):
+            item = precondition.strip()
+            if item.startswith("workflow:"):
+                nested = self._run_nested_workflow(
+                    item.removeprefix("workflow:").strip(),
+                    context,
+                    run_profile=run_profile,
+                    synthetic_on_capture_fail=synthetic_on_capture_fail,
+                    dry_run=True,
+                    inputs=context.inputs,
+                )
+                return WorkflowStepResult(
+                    id=f"precondition_{sanitize_filename(item)}",
+                    action="precondition_workflow",
+                    status=ActionStatus.SUCCESS if all(step.status != ActionStatus.FAILED for step in nested.steps) else ActionStatus.FAILED,
+                    message=f"precondition workflow completed: {nested.workflow_name}",
+                    metadata={"nested_run": to_jsonable(nested)},
+                )
+            fixture_name = item.removeprefix("fixture:").strip() if item.startswith("fixture:") else item
+            loaded = load_named_fixture(context, fixture_name)
+            return WorkflowStepResult(
+                id=f"precondition_{sanitize_filename(fixture_name)}",
+                action="load_fixture",
+                status=ActionStatus.SUCCESS,
+                message=f"fixture loaded: {fixture_name}",
+                metadata={"fixture": fixture_name, "fixture_type": loaded.get("type"), "source": loaded.get("page")},
+            )
+        if isinstance(precondition, dict):
+            kind = str(precondition.get("type") or precondition.get("kind") or "").strip()
+            value = str(precondition.get("workflow") or precondition.get("fixture") or precondition.get("value") or "").strip()
+            if kind == "workflow" or value.startswith("workflow:"):
+                workflow_name = value.removeprefix("workflow:").strip()
+                nested = self._run_nested_workflow(
+                    workflow_name,
+                    context,
+                    run_profile=run_profile,
+                    synthetic_on_capture_fail=synthetic_on_capture_fail,
+                    dry_run=bool(precondition.get("dry_run", True)),
+                    inputs=context.inputs,
+                    from_step=str(precondition.get("from_step") or "") or None,
+                )
+                return WorkflowStepResult(
+                    id=str(precondition.get("id") or f"precondition_{sanitize_filename(workflow_name)}"),
+                    action="precondition_workflow",
+                    status=ActionStatus.SUCCESS if all(step.status != ActionStatus.FAILED for step in nested.steps) else ActionStatus.FAILED,
+                    message=f"precondition workflow completed: {nested.workflow_name}",
+                    metadata={"nested_run": to_jsonable(nested)},
+                )
+            fixture_name = value.removeprefix("fixture:").strip() if value.startswith("fixture:") else value
+            loaded = load_named_fixture(context, fixture_name)
+            return WorkflowStepResult(
+                id=str(precondition.get("id") or f"precondition_{sanitize_filename(fixture_name)}"),
+                action="load_fixture",
+                status=ActionStatus.SUCCESS,
+                message=f"fixture loaded: {fixture_name}",
+                metadata={"fixture": fixture_name, "fixture_type": loaded.get("type"), "source": loaded.get("page"), "precondition": precondition.get("type") or precondition.get("kind")},
+            )
+        raise ValueError("precondition entries must be strings or objects.")
+
+    def _run_nested_workflow(
+        self,
+        workflow_name: str,
+        context: WorkflowContext,
+        *,
+        run_profile: RunProfileName,
+        synthetic_on_capture_fail: bool,
+        dry_run: bool,
+        inputs: dict[str, Any],
+        from_step: str | None = None,
+    ) -> WorkflowRunResult:
+        workflow_path = resolve_workflow_reference(workflow_name, context)
+        nested_workflow = parse_workflow_file(workflow_path)
+        nested_runtime = WorkflowRuntime(output_dir=self.audit.root_dir, providers=self.providers, dispatcher=self.dispatcher)
+        return nested_runtime.run(
+            nested_workflow,
+            dry_run=dry_run,
+            run_profile=run_profile,
+            synthetic_on_capture_fail=synthetic_on_capture_fail,
+            inputs=inputs,
+            sensitive_fields=context.sensitive_fields,
+            workspace_root=context.resources.get("workspace_root"),
+            from_step=from_step,
+            use_lock=False,
+        )
+
     def _expect_download(self, step: WorkflowStep, context: WorkflowContext, *, dry_run: bool) -> WorkflowStepResult:
         params = step.params
         page = context.resources.get("playwright_page")
@@ -774,14 +1253,26 @@ class WorkflowRuntime:
         metadata = resolve_file_assertion_target(step.params, context)
         path = Path(str(metadata["path"]))
         if not path.exists() or not path.is_file():
-            raise AssertionError(f"File not found: {path}")
+            return self._assertion_failed(step, step.action, f"File not found: {path}", soft=bool(step.params.get("soft_assert")), metadata={"path": str(path)})
         actual = file_metadata(path)
         min_bytes = step.params.get("min_bytes")
         if min_bytes is not None and int(actual["size_bytes"]) < int(min_bytes):
-            raise AssertionError(f"File too small: {actual['size_bytes']} < {min_bytes}")
+            return self._assertion_failed(
+                step,
+                step.action,
+                f"File too small: {actual['size_bytes']} < {min_bytes}",
+                soft=bool(step.params.get("soft_assert")),
+                metadata={"path": str(path), **actual},
+            )
         extension = step.params.get("extension")
         if extension and path.suffix.lower() != normalize_extension(str(extension)):
-            raise AssertionError(f"File extension mismatch: {path.suffix} != {extension}")
+            return self._assertion_failed(
+                step,
+                step.action,
+                f"File extension mismatch: {path.suffix} != {extension}",
+                soft=bool(step.params.get("soft_assert")),
+                metadata={"path": str(path), **actual},
+            )
         return WorkflowStepResult(
             id=step.id,
             action=step.action,
@@ -789,6 +1280,185 @@ class WorkflowRuntime:
             message="file assertion passed",
             metadata=actual,
         )
+
+    def _assert_element_exists(self, step: WorkflowStep, context: WorkflowContext) -> WorkflowStepResult:
+        page = context.resources.get("playwright_page")
+        selector = str(step.params.get("selector") or "").strip()
+        if not selector:
+            raise ValueError("assert_element_exists requires selector.")
+        count = self._count_selector(selector, page=page, observation=context.latest_observation)
+        if count <= 0:
+            return self._assertion_failed(
+                step,
+                step.action,
+                f"Element not found: {selector}",
+                soft=bool(step.params.get("soft_assert")),
+                metadata={"selector": selector, "count": count},
+            )
+        return WorkflowStepResult(id=step.id, action=step.action, status=ActionStatus.SUCCESS, message=f"element found: {selector}", metadata={"selector": selector, "count": count})
+
+    def _assert_url_contains(self, step: WorkflowStep, context: WorkflowContext) -> WorkflowStepResult:
+        fragment = str(step.params.get("fragment") or "").strip()
+        if not fragment:
+            raise ValueError("assert_url_contains requires fragment.")
+        current_url = self._current_url(context)
+        if fragment not in current_url:
+            return self._assertion_failed(
+                step,
+                step.action,
+                f"URL does not contain fragment: {fragment}",
+                soft=bool(step.params.get("soft_assert")),
+                metadata={"fragment": fragment, "current_url": current_url},
+            )
+        return WorkflowStepResult(id=step.id, action=step.action, status=ActionStatus.SUCCESS, message=f"url contains: {fragment}", metadata={"fragment": fragment, "current_url": current_url})
+
+    def _assert_count(self, step: WorkflowStep, context: WorkflowContext) -> WorkflowStepResult:
+        selector = str(step.params.get("selector") or "").strip()
+        if not selector:
+            raise ValueError("assert_count requires selector.")
+        page = context.resources.get("playwright_page")
+        count = self._count_selector(selector, page=page, observation=context.latest_observation)
+        min_count = int(step.params.get("min", 0) or 0)
+        max_count = int(step.params.get("max", 10**9) or 10**9)
+        if count < min_count or count > max_count:
+            return self._assertion_failed(
+                step,
+                step.action,
+                f"Count out of range for {selector}: {count} not in [{min_count}, {max_count}]",
+                soft=bool(step.params.get("soft_assert")),
+                metadata={"selector": selector, "count": count, "min": min_count, "max": max_count},
+            )
+        return WorkflowStepResult(id=step.id, action=step.action, status=ActionStatus.SUCCESS, message=f"count ok: {selector}={count}", metadata={"selector": selector, "count": count, "min": min_count, "max": max_count})
+
+    def _assert_attribute(self, step: WorkflowStep, context: WorkflowContext) -> WorkflowStepResult:
+        selector = str(step.params.get("selector") or "").strip()
+        attr = str(step.params.get("attr") or "").strip()
+        expected = step.params.get("value")
+        if not selector or not attr:
+            raise ValueError("assert_attribute requires selector and attr.")
+        page = context.resources.get("playwright_page")
+        actual = self._read_selector_attribute(selector, attr, page=page, observation=context.latest_observation)
+        if str(actual) != str(expected):
+            return self._assertion_failed(
+                step,
+                step.action,
+                f"Attribute mismatch for {selector}[{attr}]: {actual} != {expected}",
+                soft=bool(step.params.get("soft_assert")),
+                metadata={"selector": selector, "attr": attr, "value": expected, "actual": actual},
+            )
+        return WorkflowStepResult(id=step.id, action=step.action, status=ActionStatus.SUCCESS, message=f"attribute matched: {selector}[{attr}]", metadata={"selector": selector, "attr": attr, "value": expected, "actual": actual})
+
+    def _assert_no_layout_overlap(self, step: WorkflowStep, context: WorkflowContext) -> WorkflowStepResult:
+        page = context.resources.get("playwright_page")
+        if page is None:
+            raise RuntimeError("assert_no_layout_overlap requires observe_browser.")
+        overlaps = page.evaluate(
+            """
+            () => {
+              const nodes = Array.from(document.querySelectorAll('*')).filter((el) => {
+                const r = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                return r.width > 0 && r.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+              });
+              const rects = nodes.map((el) => {
+                const r = el.getBoundingClientRect();
+                return {
+                  tag: el.tagName,
+                  text: (el.innerText || el.textContent || '').trim().slice(0, 80),
+                  left: r.left,
+                  top: r.top,
+                  right: r.right,
+                  bottom: r.bottom,
+                };
+              });
+              const overlaps = [];
+              for (let i = 0; i < rects.length; i++) {
+                for (let j = i + 1; j < rects.length; j++) {
+                  const a = rects[i];
+                  const b = rects[j];
+                  const intersect = !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+                  if (intersect) {
+                    overlaps.push({a, b});
+                    if (overlaps.length >= 8) return overlaps;
+                  }
+                }
+              }
+              return overlaps;
+            }
+            """
+        )
+        overlap_list = overlaps if isinstance(overlaps, list) else []
+        if overlap_list:
+            return self._assertion_failed(
+                step,
+                step.action,
+                f"Layout overlap detected: {len(overlap_list)}",
+                soft=bool(step.params.get("soft_assert")),
+                metadata={"overlaps": overlap_list},
+            )
+        return WorkflowStepResult(id=step.id, action=step.action, status=ActionStatus.SUCCESS, message="no layout overlap detected", metadata={"overlaps": []})
+
+    def _assertion_failed(self, step: WorkflowStep, action: str, message: str, *, soft: bool, metadata: dict[str, Any] | None = None) -> WorkflowStepResult:
+        payload = {"soft_assert": soft}
+        if metadata:
+            payload.update(metadata)
+        if soft:
+            return WorkflowStepResult(id=step.id, action=action, status=ActionStatus.FAILED, message=message, metadata=payload)
+        raise AssertionError(message)
+
+    def _current_url(self, context: WorkflowContext) -> str:
+        page = context.resources.get("playwright_page")
+        if page is not None and getattr(page, "url", None):
+            return str(page.url)
+        observation = context.latest_observation
+        if observation is not None:
+            return str(observation.metadata.get("url") or observation.source or "")
+        return ""
+
+    def _count_selector(self, selector: str, *, page: Any, observation: Observation | None) -> int:
+        if page is not None:
+            try:
+                return int(page.locator(selector).count())
+            except Exception:
+                pass
+        if observation is not None and observation.elements:
+            return sum(1 for item in observation.elements if isinstance(item, dict) and selector in str(item.get("selector") or item.get("text") or ""))
+        return 0
+
+    def _read_selector_attribute(self, selector: str, attr: str, *, page: Any, observation: Observation | None) -> Any:
+        if page is not None:
+            try:
+                return page.locator(selector).first.get_attribute(attr)
+            except Exception:
+                pass
+        if observation is not None and observation.elements:
+            for item in observation.elements:
+                if not isinstance(item, dict):
+                    continue
+                if selector in str(item.get("selector") or ""):
+                    return item.get(attr)
+        return None
+
+    def _ocr_verify_text(self, context: WorkflowContext, text: str) -> bool:
+        try:
+            observation = self.providers.observe(
+                "observe_ocr",
+                {},
+                ProviderContext(
+                    run_dir=context.run_dir,
+                    synthetic_on_capture_fail=False,
+                    resources=context.resources,
+                ),
+            )
+        except Exception:
+            return False
+        return observation_contains_text(observation, text)
+
+    def _ocr_verify_text_contract(self, context: WorkflowContext, params: dict[str, Any]) -> bool:
+        text = str(params.get("text") or "").strip()
+        if not text:
+            return False
+        return self._ocr_verify_text(context, text)
 
     def _request_api(self, step: WorkflowStep, context: WorkflowContext, *, dry_run: bool) -> WorkflowStepResult:
         params = step.params
@@ -1025,6 +1695,10 @@ def parse_workflow_file(path: str | Path) -> Workflow:
 
 
 def workflow_from_dict(payload: dict[str, Any]) -> Workflow:
+    try:
+        payload = migrate_workflow_payload(payload)
+    except UnsupportedSchemaVersionError:
+        payload = dict(payload)
     raw_steps = payload.get("steps")
     if not isinstance(raw_steps, list) or not raw_steps:
         raise ValueError("Workflow requires a non-empty steps list.")
@@ -1040,12 +1714,21 @@ def workflow_from_dict(payload: dict[str, Any]) -> Workflow:
         params = {key: value for key, value in raw.items() if key not in {"id", "action"}}
         steps.append(WorkflowStep(id=step_id, action=action, params=params))
 
+    raw_variables = payload.get("variables") or {}
+    if not isinstance(raw_variables, dict):
+        raise ValueError("Workflow variables must be an object.")
+    fixtures = tuple(str(item) for item in string_sequence(payload.get("fixtures")))
+    preconditions = tuple(any_sequence(payload.get("preconditions") if payload.get("preconditions") is not None else payload.get("precondition")))
+
     return Workflow(
         name=str(payload.get("name") or "unnamed-workflow"),
         version=int(payload.get("version") or 1),
         steps=tuple(steps),
         schema_version=int(payload["schema_version"]) if payload.get("schema_version") not in (None, "") else None,
         min_runtime_version=str(payload["min_runtime_version"]) if payload.get("min_runtime_version") not in (None, "") else None,
+        variables={str(key): value for key, value in raw_variables.items()},
+        fixtures=fixtures,
+        preconditions=preconditions,
         tags=tuple(str(item) for item in payload.get("tags", []) or []),
         affects=tuple(str(item) for item in payload.get("affects", []) or []),
         description=str(payload.get("description") or ""),
@@ -1053,6 +1736,26 @@ def workflow_from_dict(payload: dict[str, Any]) -> Workflow:
         author=str(payload.get("author") or ""),
         license=str(payload.get("license") or ""),
     )
+
+
+def string_sequence(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value if str(item).strip())
+    raise ValueError("Expected a string or list of strings.")
+
+
+def any_sequence(value: Any) -> tuple[Any, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, tuple):
+        return value
+    if isinstance(value, list):
+        return tuple(value)
+    return (value,)
 
 
 def target_from_config(value: Any) -> Target:
@@ -1507,6 +2210,7 @@ def network_assertion_label(params: dict[str, Any]) -> str:
 
 def resolve_step_params(params: dict[str, Any], context: WorkflowContext) -> dict[str, Any]:
     resolved = resolve_input_refs(params, context)
+    resolved = resolve_runtime_refs(resolved, context)
     if "screenshot_from" in params and "path" not in resolved:
         resolved["path"] = str(resolve_screenshot_source(params["screenshot_from"], context))
     return resolved
@@ -1542,6 +2246,158 @@ def resolve_input_ref(value_from: str, key: str, context: WorkflowContext) -> An
     if value_from.startswith("input."):
         return read_path(context.inputs, value_from.removeprefix("input."))
     raise ValueError(f"Unsupported {key} path: {value_from}")
+
+
+def resolve_runtime_refs(value: Any, context: WorkflowContext) -> Any:
+    if isinstance(value, dict):
+        return {key: resolve_runtime_refs(item, context) for key, item in value.items()}
+    if isinstance(value, list):
+        return [resolve_runtime_refs(item, context) for item in value]
+    if not isinstance(value, str):
+        return value
+    return replace_runtime_placeholders(value, context)
+
+
+def replace_runtime_placeholders(text: str, context: WorkflowContext) -> Any:
+    pattern = re.compile(r"\$\{([A-Za-z0-9_.-]+)\}")
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return text
+    if len(matches) == 1 and matches[0].span() == (0, len(text)):
+        name = matches[0].group(1)
+        if name in context.variables:
+            return context.variables[name]
+        if name.startswith("input."):
+            try:
+                return read_path(context.inputs, name.removeprefix("input."))
+            except KeyError:
+                return ""
+        return ""
+
+    def substitute(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name in context.variables:
+            return str(context.variables[name])
+        if name.startswith("input."):
+            try:
+                return str(read_path(context.inputs, name.removeprefix("input.")))
+            except KeyError:
+                return ""
+        return ""
+
+    return pattern.sub(substitute, text)
+
+
+def resolve_workflow_variables(raw_variables: dict[str, Any], context: WorkflowContext) -> dict[str, Any]:
+    resolved: dict[str, Any] = {}
+    for key, value in raw_variables.items():
+        resolved[key] = resolve_runtime_refs(resolve_input_refs(value, context), replace(context, variables=resolved))
+    return resolved
+
+
+def load_workflow_fixtures(fixture_names: tuple[str, ...], context: WorkflowContext) -> dict[str, Any]:
+    loaded: dict[str, Any] = {}
+    fixtures = context.resources.setdefault("fixtures", {})
+    if not isinstance(fixtures, dict):
+        fixtures = {}
+        context.resources["fixtures"] = fixtures
+    for fixture_name in fixture_names:
+        payload = load_named_fixture(context, fixture_name)
+        fixtures[fixture_name] = payload
+        loaded[fixture_name] = payload
+    return loaded
+
+
+def load_named_fixture(context: WorkflowContext, fixture_name: str) -> dict[str, Any]:
+    candidate = Path(fixture_name)
+    roots: list[Path] = []
+    workspace_root = context.resources.get("workspace_root")
+    if isinstance(workspace_root, str) and workspace_root:
+        roots.append(Path(workspace_root))
+    roots.append(context.run_dir.parent)
+    roots.append(Path.cwd())
+    if candidate.is_absolute() and candidate.exists():
+        return load_fixture_file(candidate)
+    suffixes = ("", ".yaml", ".yml", ".json")
+    for root in roots:
+        for suffix in suffixes:
+            path = candidate if suffix == "" else candidate.with_suffix(suffix) if candidate.suffix else root / "fixtures" / f"{fixture_name}{suffix}"
+            if suffix == "" and not candidate.is_absolute():
+                path = root / "fixtures" / fixture_name
+            if path.exists():
+                return load_fixture_file(path)
+    raise FileNotFoundError(f"Fixture not found: {fixture_name}")
+
+
+def load_fixture_file(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".json":
+        payload = json.loads(text)
+    else:
+        try:
+            import yaml
+        except ImportError as exc:
+            raise RuntimeError("PyYAML is required for YAML fixtures. Run: pip install PyYAML") from exc
+        payload = yaml.safe_load(text)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Fixture file must contain an object: {path}")
+    return payload
+
+
+def resolve_workflow_reference(workflow_name: str, context: WorkflowContext) -> Path:
+    candidate = Path(workflow_name)
+    roots: list[Path] = []
+    workspace_root = context.resources.get("workspace_root")
+    if isinstance(workspace_root, str) and workspace_root:
+        roots.append(Path(workspace_root))
+    roots.append(context.run_dir.parent)
+    roots.append(Path.cwd())
+    suffixes = ("", ".yaml", ".yml", ".json")
+    if candidate.is_absolute() and candidate.exists():
+        return candidate
+    for root in roots:
+        for suffix in suffixes:
+            if candidate.suffix and suffix == "":
+                path = root / candidate
+            else:
+                path = root / "workflows" / (candidate.name if candidate.suffix else f"{workflow_name}{suffix}")
+            if path.exists():
+                return path
+    raise FileNotFoundError(f"Workflow not found: {workflow_name}")
+
+
+def extract_variable_value(params: dict[str, Any], context: WorkflowContext) -> Any:
+    if "value" in params:
+        return params["value"]
+    if "value_from" in params:
+        return resolve_runtime_refs(resolve_input_ref(str(params["value_from"]), "value_from", context), context)
+    source = str(params.get("from_text") or "").strip()
+    if not source:
+        raise ValueError("set_variable requires value, value_from, or from_text.")
+    page = context.resources.get("playwright_page")
+    if page is not None:
+        try:
+            locator = page.locator(source)
+            if locator.count() > 0:
+                text = locator.first.text_content()
+                if text is not None:
+                    return str(text).strip()
+        except Exception:
+            pass
+    observation = context.latest_observation_or_none
+    if observation is not None:
+        for element in observation.elements:
+            if not isinstance(element, dict):
+                continue
+            selector = str(element.get("selector") or "")
+            text = str(element.get("text") or "").strip()
+            if source == selector or source in text or source in selector:
+                if text:
+                    return text
+                for key in ("value", "label", "name", "aria_label"):
+                    if element.get(key):
+                        return str(element[key])
+    return source
 
 
 def workflow_sensitive_input_values(workflow: Workflow, inputs: dict[str, Any], sensitive_fields: set[str]) -> tuple[str, ...]:

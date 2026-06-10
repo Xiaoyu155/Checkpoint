@@ -110,14 +110,37 @@ class CloudRunRequestHandler(BaseHTTPRequestHandler):
             payload = cloud_run_report_detail(self.server, run_id)
             if payload.get("status") == "not_found":
                 self.write_json({"status": "not_found", "run_id": run_id, "message": "Run id was not found."}, status=404)
-                self.audit_request("run_detail", payload, started_at=started_at, http_status=404, run_id=run_id)
+                self.audit_request(
+                    "run_detail",
+                    payload,
+                    started_at=started_at,
+                    http_status=404,
+                    run_id=run_id,
+                    workflow_source=str(payload.get("workflow_source") or ""),
+                    workflow_id=str(payload.get("workflow_id") or ""),
+                )
                 return
             if payload.get("status") == "upgrade_required":
                 self.write_json(payload, status=403)
-                self.audit_request("run_detail", payload, started_at=started_at, http_status=403, run_id=run_id)
+                self.audit_request(
+                    "run_detail",
+                    payload,
+                    started_at=started_at,
+                    http_status=403,
+                    run_id=run_id,
+                    workflow_source=str(payload.get("workflow_source") or ""),
+                    workflow_id=str(payload.get("workflow_id") or ""),
+                )
                 return
             self.write_json(payload)
-            self.audit_request("run_detail", payload, started_at=started_at, run_id=run_id)
+            self.audit_request(
+                "run_detail",
+                payload,
+                started_at=started_at,
+                run_id=run_id,
+                workflow_source=str(payload.get("workflow_source") or ""),
+                workflow_id=str(payload.get("workflow_id") or ""),
+            )
             return
         self.write_json({"status": "not_found", "message": "Unknown endpoint."}, status=404)
         self.audit_request("unknown", {"status": "not_found"}, started_at=started_at, http_status=404)
@@ -144,6 +167,8 @@ class CloudRunRequestHandler(BaseHTTPRequestHandler):
             started_at=started_at,
             http_status=http_status,
             workflow_name=str(body.get("workflow_name") or body.get("workflow") or payload.get("workflow_name") or ""),
+            workflow_source=str(body.get("workflow_source") or payload.get("workflow_source") or ""),
+            workflow_id=str(body.get("workflow_id") or payload.get("workflow_id") or ""),
             run_profile=str(body.get("run_profile") or payload.get("run_profile") or self.server.default_run_profile),
             workspace_provided=bool(body.get("workspace")),
             workflow_yaml_provided=bool(str(body.get("workflow_yaml") or "").strip()),
@@ -284,6 +309,8 @@ def execute_cloud_run_request(server: CloudRunHTTPServer, request: dict[str, Any
     workspace = open_workspace(request.get("workspace") or server.workspace_root)
     workflow_name = materialize_request_workflow(workspace, request)
     run_profile = str(request.get("run_profile") or server.default_run_profile or "dry-run")
+    workflow_source = str(request.get("workflow_source") or ("inline" if str(request.get("workflow_yaml") or "").strip() else "workspace"))
+    workflow_id = str(request.get("workflow_id") or "")
     inputs = request.get("inputs")
     if not isinstance(inputs, dict) or "provided" in inputs:
         inputs = {}
@@ -302,6 +329,8 @@ def execute_cloud_run_request(server: CloudRunHTTPServer, request: dict[str, Any
         "status": status,
         "run_id": result.run_id,
         "workflow_name": result.workflow_name,
+        "workflow_source": workflow_source,
+        "workflow_id": workflow_id,
         "run_profile": result.run_profile,
         "report_url": f"/v1/run/{result.run_id}",
         "steps_passed": sum(1 for step in result.steps if getattr(step.status, "value", str(step.status)) in {"success", "dry_run"}),
@@ -441,6 +470,8 @@ def cloud_run_report_detail(server: CloudRunHTTPServer, run_id: str) -> dict[str
         "status": detail.get("status") or (summary or {}).get("status") or "unknown",
         "run_id": detail.get("run_id") or run_id,
         "workflow_name": detail.get("workflow_name") or (summary or {}).get("workflow_name") or "",
+        "workflow_source": detail.get("workflow_source") or (summary or {}).get("workflow_source") or "",
+        "workflow_id": detail.get("workflow_id") or (summary or {}).get("workflow_id") or "",
         "run_profile": detail.get("run_profile") or (summary or {}).get("run_profile") or "",
         "report": detail,
         "summary": summary or {},

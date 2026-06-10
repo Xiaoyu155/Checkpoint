@@ -4,8 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .security import validate_workflow_url
 from .models import ProviderKind
 from .workflow import RUNTIME_VERSION, SUPPORTED_WORKFLOW_SCHEMA_VERSION, Workflow, parse_workflow_file, target_from_config
+from .versioning import UnsupportedSchemaVersionError, CURRENT_WORKFLOW_SCHEMA_VERSION
 
 
 SUPPORTED_ACTIONS = {
@@ -25,6 +27,7 @@ SUPPORTED_ACTIONS = {
     "press_key",
     "refresh_browser",
     "click_text",
+    "click_visual",
     "wait_for_text",
     "request_api",
     "assert_text",
@@ -36,6 +39,15 @@ SUPPORTED_ACTIONS = {
     "assert_response",
     "expect_download",
     "assert_file_exists",
+    "assert_element_exists",
+    "assert_url_contains",
+    "assert_count",
+    "assert_attribute",
+    "assert_no_layout_overlap",
+    "assert_visual_text",
+    "set_variable",
+    "if_text_exists",
+    "run_workflow",
     "save_storage_state",
     "wait_for",
 }
@@ -50,6 +62,14 @@ REQUIRED_PARAMS = {
     "paste": ("target",),
     "expect_download": ("target",),
     "assert_text": ("text",),
+    "assert_visual_text": ("text",),
+    "assert_element_exists": ("selector",),
+    "assert_url_contains": ("fragment",),
+    "assert_count": ("selector",),
+    "assert_attribute": ("selector", "attr", "value"),
+    "set_variable": ("name",),
+    "if_text_exists": ("text",),
+    "run_workflow": ("workflow",),
     "request_api": ("url",),
     "wait_for": ("condition",),
 }
@@ -63,6 +83,12 @@ ASSERTION_ACTIONS = {
     "assert_ai_response_quality",
     "assert_response",
     "assert_file_exists",
+    "assert_element_exists",
+    "assert_url_contains",
+    "assert_count",
+    "assert_attribute",
+    "assert_no_layout_overlap",
+    "assert_visual_text",
 }
 HIGH_RISK_ACTIONS = {"save_storage_state"}
 MUTATING_ACTIONS = {
@@ -72,11 +98,13 @@ MUTATING_ACTIONS = {
     "press_key",
     "refresh_browser",
     "click_text",
+    "click_visual",
     "request_api",
     "expect_download",
     "save_storage_state",
 }
 SENSITIVE_NAME_HINTS = ("password", "passwd", "pwd", "token", "secret", "key", "cookie", "id_card", "ssn")
+PROHIBITED_COMMAND_FIELDS = {"shell", "command", "script", "cmd", "bash", "powershell", "exec", "execute", "subprocess", "system"}
 
 
 @dataclass(frozen=True)
@@ -120,6 +148,8 @@ def validate_workflow(
             issues.append(ValidationIssue("error", step.id, "Duplicate step id."))
         seen_ids.add(step.id)
 
+        validate_prohibited_shell_fields(step.id, step.params, issues)
+
         if step.action not in SUPPORTED_ACTIONS:
             issues.append(ValidationIssue("error", step.id, f"Unsupported action: {step.action}"))
             continue
@@ -139,6 +169,14 @@ def validate_workflow(
 
         if step.action == "resolve":
             has_resolved_target = True
+        if step.action == "set_variable" and "name" not in step.params:
+            issues.append(ValidationIssue("error", step.id, "Missing required parameter: name"))
+        if step.action == "set_variable" and not any(key in step.params for key in ("value", "value_from", "from_text")):
+            issues.append(ValidationIssue("error", step.id, "set_variable requires value, value_from, or from_text."))
+        if step.action == "if_text_exists" and "then" not in step.params:
+            issues.append(ValidationIssue("warning", step.id, "if_text_exists should define then branch."))
+        if step.action == "run_workflow" and missing_param(step.params, "workflow"):
+            issues.append(ValidationIssue("error", step.id, "Missing required parameter: workflow"))
         if step.action == "wait_for" and wait_for_has_target_condition(step.params):
             has_resolved_target = True
 
@@ -186,6 +224,8 @@ def validate_workflow(
         validate_request_api(step.id, step.action, step.params, issues)
         validate_wait_for(step.id, step.action, step.params, issues)
         validate_retry_safety(step.id, step.action, step.params, issues)
+        validate_assertion_features(step.id, step.action, step.params, issues)
+        validate_url_security(step.id, step.action, step.params, issues)
         if strict:
             validate_strict_step(step.id, step.action, step.params, issues, allow_high_risk=allow_high_risk)
 
@@ -259,8 +299,101 @@ def validate_press_key(step_id: str, action: str, params: dict[str, Any], issues
 def validate_text_action(step_id: str, action: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:
     if action == "click_text" and not any(key in params for key in ("text", "label", "contains_text")):
         issues.append(ValidationIssue("error", step_id, "click_text requires text, label, or contains_text."))
+    if action == "click_visual" and not any(key in params for key in ("description", "text", "label")):
+        issues.append(ValidationIssue("error", step_id, "click_visual requires description, text, or label."))
     if action == "wait_for_text" and not any(key in params for key in ("text", "contains_text")):
         issues.append(ValidationIssue("error", step_id, "wait_for_text requires text or contains_text."))
+    if action == "assert_visual_text" and "text" not in params:
+        issues.append(ValidationIssue("error", step_id, "assert_visual_text requires text."))
+
+
+def validate_assertion_features(step_id: str, action: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:
+    if action in ASSERTION_ACTIONS and "soft_assert" in params and not isinstance(params.get("soft_assert"), bool):
+        issues.append(ValidationIssue("error", step_id, "soft_assert must be a boolean."))
+    if action in ASSERTION_ACTIONS and "ocr_verify" in params and not isinstance(params.get("ocr_verify"), bool):
+        issues.append(ValidationIssue("error", step_id, "ocr_verify must be a boolean."))
+    if action == "assert_count":
+        if "min" in params:
+            try:
+                int(params["min"])
+            except (TypeError, ValueError):
+                issues.append(ValidationIssue("error", step_id, "assert_count.min must be an integer."))
+        if "max" in params:
+            try:
+                int(params["max"])
+            except (TypeError, ValueError):
+                issues.append(ValidationIssue("error", step_id, "assert_count.max must be an integer."))
+        if "min" not in params and "max" not in params:
+            issues.append(ValidationIssue("warning", step_id, "assert_count should specify min or max."))
+    if action == "assert_attribute" and "attr" not in params:
+        issues.append(ValidationIssue("error", step_id, "assert_attribute requires attr."))
+
+
+def validate_prohibited_shell_fields(step_id: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:
+    for path in _find_prohibited_shell_fields(params):
+        issues.append(ValidationIssue("error", step_id, f"Prohibited shell command field: {path}"))
+
+
+def _find_prohibited_shell_fields(value: Any, *, prefix: str = "") -> list[str]:
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            key_name = str(key)
+            path = f"{prefix}.{key_name}" if prefix else key_name
+            if key_name.lower() in PROHIBITED_COMMAND_FIELDS:
+                found.append(path)
+            found.extend(_find_prohibited_shell_fields(item, prefix=path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            found.extend(_find_prohibited_shell_fields(item, prefix=f"{prefix}[{index}]"))
+    return found
+
+
+def validate_url_security(step_id: str, action: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:
+    if action == "observe_browser":
+        validate_literal_url(step_id, "url", params, issues)
+    elif action == "observe_dom":
+        validate_literal_url(step_id, "url", params, issues)
+    elif action == "request_api":
+        validate_literal_url(step_id, "url", params, issues)
+    elif action == "wait_for" and params.get("condition") == "url":
+        validate_literal_url(step_id, "url", params, issues)
+        validate_literal_url(step_id, "url_from", params, issues)
+
+
+def validate_literal_url(step_id: str, field_name: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:
+    if field_name not in params:
+        return
+    value = params.get(field_name)
+    if value in (None, ""):
+        return
+    value_text = str(value).strip()
+    if not value_text or _looks_like_runtime_reference(value_text):
+        return
+    if _looks_like_workspace_local_path(value_text):
+        return
+    ok, reason = validate_workflow_url(value_text)
+    if not ok:
+        issues.append(ValidationIssue("error", step_id, f"{field_name} rejected by SSRF policy: {reason}"))
+
+
+def _looks_like_runtime_reference(value: str) -> bool:
+    text = value.strip()
+    return text.startswith("input.") or text.startswith("${") or text.startswith("{{") or text.startswith("workflow.")
+
+
+def _looks_like_workspace_local_path(value: str) -> bool:
+    text = value.strip()
+    if "://" in text:
+        return False
+    path = Path(text)
+    if path.is_absolute():
+        return True
+    if text.startswith(("./", "../", ".\\", "..\\")):
+        return True
+    if "/" in text or "\\" in text:
+        return True
+    return bool(path.suffix)
 
 
 def validate_post_action_observe(step_id: str, action: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:
@@ -483,15 +616,20 @@ def validate_workflow_schema(workflow: Workflow, issues: list[ValidationIssue], 
             ValidationIssue(
                 "error" if strict else "warning",
                 "workflow",
-                "Workflow schema_version is missing; add schema_version: 1 for forward compatibility.",
+                f"Workflow schema_version is missing; add schema_version: {CURRENT_WORKFLOW_SCHEMA_VERSION} for forward compatibility.",
             )
         )
     elif workflow.schema_version != SUPPORTED_WORKFLOW_SCHEMA_VERSION:
+        migration_hint = UnsupportedSchemaVersionError(
+            "workflow",
+            workflow.schema_version,
+            SUPPORTED_WORKFLOW_SCHEMA_VERSION,
+        ).migration_hint
         issues.append(
             ValidationIssue(
                 "error",
                 "workflow",
-                f"Unsupported workflow schema_version: {workflow.schema_version}. Supported: {SUPPORTED_WORKFLOW_SCHEMA_VERSION}.",
+                f"Unsupported workflow schema_version: {workflow.schema_version}. Supported: {SUPPORTED_WORKFLOW_SCHEMA_VERSION}. {migration_hint}",
             )
         )
 

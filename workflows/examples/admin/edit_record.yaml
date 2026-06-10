@@ -1,0 +1,33 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: edit_record
+version: 1
+description: Verify admin record editing flow.
+tags: [verification, admin, crud, forms, example]
+category: admin
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
+steps:
+  - id: observe_records
+    action: observe_browser
+    url: "http://localhost:3000/admin/users"
+  - id: browser_ready
+    action: assert_browser_ready
+    min_text_length: 1
+    min_interactive: 1
+  - id: open_edit
+    action: click
+    target: { text: "Edit", role: button }
+    browser_post_action_observe: true
+  - id: update_name
+    action: type
+    target: { label: "Name", role: input }
+    value: "Updated User"
+  - id: save_record
+    action: click
+    target: { text: "Save", role: button }
+    browser_post_action_observe: true
+  - id: verify_updated
+    action: assert_text
+    text: "Updated User"

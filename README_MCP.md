@@ -1,12 +1,12 @@
-# Visual Agent MCP Server
+# Checkpoint MCP Server
 
-Turn AI assistant commands into auditable local workflows.
+Turn AI agent requests into auditable local workflow runs.
 
-Playwright MCP gives you a browser remote control. Windows-MCP gives you a desktop remote control. Visual Agent MCP gives you a local workflow runtime with permissions, audit trails, reports, and failure recovery.
+Checkpoint MCP gives you a local workflow runtime with permissions, audit trails, reports, and failure recovery. It is designed for coding agents that need stable, redacted, budgeted context instead of raw terminal logs.
 
 ## What You Get
 
-| Feature | Playwright MCP | Windows-MCP | Visual Agent MCP |
+| Feature | Playwright MCP | Windows-MCP | Checkpoint MCP |
 | --- | --- | --- | --- |
 | Browser automation | yes | no | yes |
 | Windows desktop UIA | no | yes | yes |
@@ -32,9 +32,17 @@ Before connecting a client, run the release check plan and MCP smoke tests:
 .\.venv\Scripts\python.exe -m pytest tests\test_mcp_server.py tests\e2e\test_e2e_mcp.py -q
 ```
 
+## Agent Startup Order
+
+Before asking an agent to run or fix workflows, give it this order:
+
+1. Read `.visual-agent-status.md` if it exists.
+2. Run `context-snapshot` for compact current state.
+3. Use MCP tools in this order: `get_visual_status`, `get_workspace_dashboard`, `list_workflows`, then `verify_workflow`, `run_verification`, or `run_workflow`.
+
 ## Local License Metadata
 
-Visual Agent remains local-first by default. Paid feature boundaries are visible through `visual_agent.licensing.check_feature()` and enforced locally for cloud execution quota and report history until remote license validation is activated.
+Checkpoint remains local-first by default. Paid feature boundaries are visible through `visual_agent.licensing.check_feature()` and enforced locally for cloud execution quota and report history until remote license validation is activated.
 
 For development and future activation testing, local license metadata can be provided with environment variables:
 
@@ -123,21 +131,24 @@ Workflow tools:
 - `list_workflows`: list available workflows and latest run status. Large lists are truncated with `omitted_count`.
 - `validate_workflow`: run workflow validation and preflight checks without execution.
 - `run_workflow`: run a workflow. Defaults to `dry-run`.
+- `verify_workflow`: run one workflow and return pass/fail with `structured_failure`.
 - `get_run_report`: return markdown or redacted JSON for a completed run. Large reports are truncated and include `report_hint`.
 - `list_run_artifacts`: list reports, screenshots, downloads, and run artifacts under the workspace. Large lists are truncated with `omitted_count`.
 
 AI context tools:
 
+- `get_visual_status`: return the structured `.visual-agent-status.md` snapshot.
 - `summarize_latest_failure`: return a compact latest-failure summary for coding agents.
 - `get_session_context`: return a compact session snapshot for resuming work in a new chat.
 - `run_verification`: run workflows tagged `verification` and return an AI-ready pass/fail report.
-- `generate_workflow_from_context`: generate a verification workflow from changed code. If `code_changes` is omitted, Visual Agent reads git diff from `repo_root`.
+- `generate_workflow_from_context`: generate a verification workflow from changed code. If `code_changes` is omitted, Checkpoint reads git diff from `repo_root`.
 - `verify_implementation`: generate a workflow from changed code, check generated workflow quality, run it, and return `pass`, `fail`, `needs_workflow_improvement`, or `timeout`.
 
 Compatibility and dashboard tools:
 
 - `get_workspace_dashboard`: return workspace health, queue, reports, and quality status.
 - `get_latest_failure`: return the latest failed workflow report and diagnosis. Prefer `summarize_latest_failure` when token budget matters.
+- `get_failure_details`: return the latest `StructuredFailure` JSON for the current failure.
 
 ## Response Budgets
 
@@ -187,8 +198,9 @@ Example `workspace.json` section:
 - "Run local_html_form_workflow as a dry-run."
 - "Show the report for run 20260602-123456-abcd1234."
 - "Show the workspace dashboard and summarize any attention items."
+- "Read the current visual status and resume from the latest failure."
 - "Fetch the latest failed workflow report and explain the recovery suggestion."
-- "Call get_session_context and tell me the current Visual Agent state."
+- "Call get_session_context and tell me the current Checkpoint state."
 - "Summarize the latest failure without reading the full report."
 - "Run verification workflows after my code change."
 - "Generate a workflow from my current git diff with base_url=http://localhost:3000/login."
@@ -203,10 +215,10 @@ After an AI coding assistant changes UI code, prefer the context-aware loop:
 
 Useful arguments:
 
-- `workspace_root`: Visual Agent workspace, usually `.agent-workspace`.
+- `workspace_root`: Checkpoint workspace, usually `.agent-workspace`.
 - `task_description`: the implementation task being verified.
 - `base_url`: app URL or local fixture path used as the workflow entry point.
-- `code_changes`: optional explicit changed files. If omitted, Visual Agent reads git diff from `repo_root`.
+- `code_changes`: optional explicit changed files. If omitted, Checkpoint reads git diff from `repo_root`.
 - `repo_root`: git repository root for automatic diff collection.
 - `min_quality_score`: default `0.6`; lower only when you intentionally accept a weak workflow.
 - `timeout_seconds`: default `30`; returns `result: timeout` when exceeded.

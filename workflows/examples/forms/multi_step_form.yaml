@@ -1,0 +1,36 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: multi_step_form
+version: 1
+description: Verify a multi-step form advances and completes.
+tags: [verification, forms, example]
+category: forms
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
+steps:
+  - id: observe_step_one
+    action: observe_browser
+    url: "http://localhost:3000/onboarding"
+  - id: browser_ready
+    action: assert_browser_ready
+    min_text_length: 1
+    min_interactive: 1
+  - id: fill_first_step
+    action: type
+    target: { label: "Company name", role: input }
+    value: "Demo Co"
+  - id: next_step
+    action: click
+    target: { text: "Next", role: button }
+    browser_post_action_observe: true
+  - id: verify_step_two
+    action: assert_text
+    text: "Step 2"
+  - id: finish
+    action: click
+    target: { text: "Finish", role: button }
+    browser_post_action_observe: true
+  - id: verify_complete
+    action: assert_text
+    text: "Setup complete"

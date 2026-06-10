@@ -1,4 +1,4 @@
-﻿# Visual Agent Framework
+﻿# Checkpoint Framework
 
 This project is organized around a stable automation kernel:
 
@@ -64,8 +64,10 @@ without changing the workflow runtime dispatch loop.
 - `--queue-when-locked` turns lock contention into a bounded local wait queue
   and records wait time/attempts in `run_queue`.
 - Failed steps include `metadata.failure_diagnosis` with expected state,
-  observed state, screenshot artifact when available, and deterministic recovery
-  suggestions.
+  observed state, screenshot artifact when available, deterministic recovery
+  suggestions, and structured failure classification.
+- Known framework noise can be labeled explicitly as `known_issue` so repeated
+  demo warnings do not get mistaken for generic regressions.
 - When a screenshot artifact exists, failure diagnosis performs a best-effort
   OCR pass and stores the result under `failure_diagnosis.evidence.ocr`.
 - The same failure path also performs a best-effort VLM pass and stores the
@@ -231,8 +233,9 @@ workspace/
 Commands:
 
 ```powershell
-.\.venv\Scripts\python.exe -m visual_agent.cli init-workspace --root .agent-workspace
-.\.venv\Scripts\python.exe -m visual_agent.cli workspace-status --root .agent-workspace
+.\.venv\Scripts\python.exe -m visual_agent.cli init --root .agent-workspace
+.\.venv\Scripts\python.exe -m visual_agent.cli show-status --workspace-root .agent-workspace
+.\.venv\Scripts\python.exe -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify the current change" --run-profile dry-run --format markdown
 .\.venv\Scripts\python.exe -m visual_agent.cli workspace-validate --root .agent-workspace --strict
 .\.venv\Scripts\python.exe -m visual_agent.cli workspace-planner-context --root .agent-workspace
 .\.venv\Scripts\python.exe -m visual_agent.cli workspace-check-plan --root .agent-workspace --file workflows/local_html_form_workflow.yaml
@@ -619,3 +622,4 @@ To add a new action:
 3. Register it on `ActionDispatcher`.
 4. Keep dry-run behavior first.
 5. Add workflow dispatch and tests.
+

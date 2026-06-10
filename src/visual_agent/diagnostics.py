@@ -6,6 +6,7 @@ from typing import Any
 from .dom import normalize_text
 from .models import Observation, to_jsonable
 from .ocr import observe_ocr
+from .structured_failure import classify_root_cause, structured_failure_from_diagnosis, structured_failure_to_dict
 from .vlm import observe_vision
 from .workflow_types import WorkflowContext
 
@@ -49,6 +50,12 @@ def diagnose_failure(
         "recovery_suggestions": suggestions,
         "model_prompt": build_reflection_prompt(expected, actual),
     }
+    root_cause, confidence = classify_root_cause(diagnosis)
+    structured = structured_failure_from_diagnosis(diagnosis)
+    diagnosis["root_cause"] = root_cause
+    diagnosis["confidence"] = confidence
+    diagnosis["suggested_fix"] = structured.suggested_fix
+    diagnosis["structured_failure"] = structured_failure_to_dict(structured)
     return diagnosis
 
 

@@ -3,6 +3,9 @@ import pytest
 from pathlib import Path
 from threading import Thread
 from time import sleep as sleep_seconds
+from typing import Any
+
+from PIL import Image
 
 from visual_agent.dispatcher import ActionDispatcher
 from visual_agent.locks import RunLock
@@ -104,6 +107,24 @@ def test_workflow_from_dict_parses_affects() -> None:
     assert workflow.affects == ("src/payment/", "templates/checkout.html")
 
 
+def test_workflow_from_dict_parses_variables_fixtures_and_preconditions() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "control-flow",
+            "version": 1,
+            "variables": {"greeting": "Hello"},
+            "fixtures": ["auth_standard"],
+            "preconditions": ["fixture:auth_standard", {"type": "workflow", "workflow": "child"}],
+            "steps": [{"id": "observe", "action": "observe_screen"}],
+        }
+    )
+
+    assert workflow.variables == {"greeting": "Hello"}
+    assert workflow.fixtures == ("auth_standard",)
+    assert len(workflow.preconditions) == 2
+    assert workflow.preconditions[0] == "fixture:auth_standard"
+
+
 def test_url_matches_condition_returns_false_for_invalid_regex() -> None:
     assert url_matches_condition("https://example.test/orders", {"url_regex": "["}) is False
 
@@ -161,6 +182,18 @@ def product_page_observation(params, context) -> Observation:
 
 def error_page_observation(params, context) -> Observation:
     return Observation(provider=ProviderKind.DOM, source="product", elements=({"text": "请求失败，请稍后重试"},))
+
+
+def profile_uid_observation(params, context) -> Observation:
+    return Observation(
+        provider=ProviderKind.DOM,
+        source="profile",
+        elements=(
+            {"selector": "#profile .uid", "text": "UID-42"},
+            {"selector": "#profile .status", "text": "Child ready"},
+        ),
+        metadata={"url": "https://example.test/profile"},
+    )
 
 
 def test_workflow_observe_state_returns_structured_page_state(tmp_path) -> None:
@@ -251,6 +284,75 @@ def test_workflow_assert_ai_response_quality_fails_template_answer(tmp_path) -> 
 
     assert result.steps[-1].status == ActionStatus.FAILED
     assert "AI response quality failed" in result.steps[-1].message
+
+
+def test_workflow_runtime_supports_variables_branching_nested_workflow_and_preconditions(tmp_path) -> None:
+    registry = ProviderRegistry()
+    registry.register("observe_fixture", profile_uid_observation)
+    (tmp_path / "fixtures").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "workflows").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "fixtures" / "auth_standard.yaml").write_text(
+        """
+schema_version: 1
+name: auth_standard
+type: standard
+page: /login
+data:
+  users: []
+""".strip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "workflows" / "child.yaml").write_text(
+        """
+schema_version: 1
+name: child
+version: 1
+steps:
+  - id: observe_child
+    action: observe_fixture
+  - id: assert_child_ready
+    action: assert_text
+    text: Child ready
+""".strip(),
+        encoding="utf-8",
+    )
+    runtime = WorkflowRuntime(tmp_path, providers=registry)
+    workflow = Workflow(
+        name="parent",
+        version=1,
+        variables={"greeting": "Hello"},
+        fixtures=("auth_standard",),
+        preconditions=("fixture:auth_standard",),
+        steps=(
+            WorkflowStep("observe", "observe_fixture", {}),
+            WorkflowStep("set_uid", "set_variable", {"name": "user_id", "from_text": "#profile .uid"}),
+            WorkflowStep("branch", "if_text_exists", {"text": "UID-42", "then": "run_child", "else": "skip_failure"}),
+            WorkflowStep("skip_failure", "assert_text", {"text": "should not run"}),
+            WorkflowStep("run_child", "run_workflow", {"workflow": "child"}),
+            WorkflowStep("final", "assert_text", {"text": "${user_id}"}),
+        ),
+    )
+
+    result = runtime.run(workflow, dry_run=True, workspace_root=tmp_path)
+
+    assert result.steps[0].action == "load_fixture"
+    assert result.steps[1].action == "observe_fixture"
+    assert result.steps[2].action == "set_variable"
+    assert result.steps[2].metadata["value"] == "UID-42"
+    assert result.steps[3].action == "if_text_exists"
+    assert result.steps[3].metadata["jump_to"] == "run_child"
+    assert all(step.id != "skip_failure" for step in result.steps)
+    run_child = next(step for step in result.steps if step.action == "run_workflow")
+    assert run_child.status == ActionStatus.SUCCESS
+    assert run_child.metadata["nested_run"]["workflow_name"] == "child"
+    assert result.steps[-1].status == ActionStatus.SUCCESS
+
+    rerun = runtime.run(workflow, dry_run=True, workspace_root=tmp_path, from_step="run_child")
+
+    assert rerun.steps[0].action == "load_fixture"
+    assert rerun.steps[1].action == "run_workflow"
+    assert rerun.steps[-1].action == "assert_text"
+    assert all(step.action not in {"observe_fixture", "set_variable", "if_text_exists"} for step in rerun.steps[1:])
 
 
 def test_workflow_request_api_dry_run_feeds_assert_response(tmp_path) -> None:
@@ -355,9 +457,20 @@ def test_workflow_runtime_runs_screen_resolve_click_dry_run(tmp_path) -> None:
     assert (result.run_dir / "observe.json").exists()
     assert payload["steps"][-1]["action_result"]["status"] == "dry_run"
     assert payload["runtime_version"] == "0.1.0"
-    assert payload["workflow_schema_version"] is None
+    assert payload["workflow_schema_version"] == 1
     assert "run_lock" in payload
     assert not (tmp_path / "workflow.lock").exists()
+
+
+def test_workflow_from_dict_missing_schema_version_is_upgraded() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "screen-demo",
+            "steps": [{"id": "observe", "action": "observe_screen"}],
+        }
+    )
+
+    assert workflow.schema_version == 1
 
 
 def test_workflow_runtime_wraps_visual_steps_with_visual_lock(tmp_path, monkeypatch) -> None:
@@ -1210,6 +1323,50 @@ def test_workflow_runtime_resume_skips_completed_steps(tmp_path) -> None:
     assert all(step.metadata.get("resumed") is True for step in resumed.steps)
 
 
+def test_workflow_runtime_supports_click_visual_and_assert_visual_text(tmp_path, monkeypatch) -> None:
+    class FakeLocator:
+        def locate(self, image, image_path, target):
+            return type("Location", (), {"x": 120, "y": 80, "confidence": 0.91, "reason": "fake match"})()
+
+        def detect(self, image, image_path, target):
+            return (
+                {
+                    "text": "Save button",
+                    "label": "Save button",
+                    "role": "button",
+                    "confidence": 0.91,
+                    "bounds": {"left": 100, "top": 60, "width": 40, "height": 40},
+                },
+            )
+
+    monkeypatch.setattr("visual_agent.workflow.build_locator", lambda provider: FakeLocator())
+    monkeypatch.setattr(
+        "visual_agent.workflow.capture_visual_region",
+        lambda params, output_dir, label, synthetic_on_capture_fail=False: (
+            Image.new("RGB", (200, 200)),
+            tmp_path / f"{label}.png",
+            {"capture_label": label},
+        ),
+    )
+
+    workflow = workflow_from_dict(
+        {
+            "name": "desktop_visual",
+            "steps": [
+                {"id": "click", "action": "click_visual", "description": "Save button", "provider": "omniparser"},
+                {"id": "assert_text", "action": "assert_visual_text", "text": "Save button", "provider": "omniparser"},
+            ],
+        }
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path).run(workflow, dry_run=True)
+
+    assert result.steps[0].action == "click_visual"
+    assert result.steps[0].status == ActionStatus.DRY_RUN
+    assert result.steps[1].action == "assert_visual_text"
+    assert result.steps[1].status == ActionStatus.SUCCESS
+
+
 def test_workflow_runtime_fails_when_input_missing(tmp_path) -> None:
     workflow = parse_workflow_file("examples/local_html_form_workflow.yaml")
 
@@ -1258,6 +1415,10 @@ def test_workflow_wait_for_times_out(tmp_path) -> None:
     assert diagnosis["dom_excerpt"][0]["text"]
     assert "model_prompt" in diagnosis
     assert diagnosis["recovery_suggestions"]
+    assert diagnosis["root_cause"] in {"assertion_wrong", "element_missing"}
+    assert diagnosis["confidence"] > 0
+    assert diagnosis["structured_failure"]["step_id"] == "wait_missing"
+    assert diagnosis["structured_failure"]["suggested_fix"]
 
 
 def test_workflow_wait_for_combined_text_selector_and_url_conditions(tmp_path) -> None:
@@ -1336,6 +1497,7 @@ def test_workflow_failure_diagnosis_handles_missing_observation(tmp_path) -> Non
     assert "Add or fix an observe_* step" in diagnosis["recovery_suggestions"][0]
     assert diagnosis["evidence"]["ocr"]["available"] is False
     assert diagnosis["evidence"]["vision"]["available"] is False
+    assert diagnosis["structured_failure"]["root_cause"] in {"element_missing", "env_error", "assertion_wrong"}
 
 
 def test_workflow_failure_diagnosis_runs_ocr_when_screenshot_exists(tmp_path) -> None:
@@ -1808,3 +1970,93 @@ def test_browser_business_backend_workflow_runs_when_playwright_browser_availabl
     assert by_id["assert_page_changed"].status == ActionStatus.SUCCESS
     assert by_id["download_exception_order"].status == ActionStatus.SUCCESS
     assert by_id["assert_downloaded_file"].status == ActionStatus.SUCCESS
+
+
+def test_soft_assert_continues_and_summarizes_failures(tmp_path: Path) -> None:
+    fixture_path = tmp_path / "page_fixture.json"
+    fixture_path.write_text(
+        json.dumps(
+            {
+                "provider": "dom",
+                "source": "file:///page.html",
+                "elements": [
+                    {"selector": "#ok", "text": "Ready"},
+                    {"selector": "p", "text": "Ready"},
+                ],
+                "metadata": {"url": "file:///page.html"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    workflow = Workflow(
+        name="soft",
+        version=1,
+        steps=(
+            WorkflowStep(id="observe", action="observe_fixture", params={"path": str(fixture_path)}),
+            WorkflowStep(id="soft_url", action="assert_url_contains", params={"fragment": "missing-fragment", "soft_assert": True}),
+            WorkflowStep(id="assert_ready", action="assert_text", params={"text": "Ready"}),
+        ),
+        schema_version=1,
+        min_runtime_version="0.1.0",
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path).run(workflow, dry_run=True)
+
+    assert result.steps[-1].action == "soft_assert_summary"
+    assert any(step.id == "soft_url" and step.status == ActionStatus.FAILED for step in result.steps)
+    assert any(step.id == "assert_ready" and step.status == ActionStatus.SUCCESS for step in result.steps)
+
+
+def test_new_assertion_helpers_cover_element_url_count_attribute_and_overlap() -> None:
+    runtime = WorkflowRuntime(output_dir=Path("runs"))
+
+    class DummyLocator:
+        def __init__(self, count: int, attrs: dict[str, Any]) -> None:
+            self._count = count
+            self._attrs = attrs
+
+        def count(self) -> int:
+            return self._count
+
+        @property
+        def first(self):  # type: ignore[override]
+            return self
+
+        def get_attribute(self, attr: str):
+            return self._attrs.get(attr)
+
+    class DummyPage:
+        def __init__(self) -> None:
+            self.url = "https://example.test/dashboard"
+
+        def locator(self, selector: str) -> DummyLocator:
+            counts = {"#submit": 2, ".item": 3}
+            attrs = {"id": "submit", "disabled": "false"}
+            return DummyLocator(counts.get(selector, 0), attrs)
+
+        def evaluate(self, _script: str):
+            return []
+
+    page = DummyPage()
+    context = WorkflowContext(
+        run_id="run",
+        run_dir=Path("runs"),
+        resources={"playwright_page": page},
+        observations={
+            "observe": Observation(
+                provider=ProviderKind.DOM,
+                source=page.url,
+                elements=(
+                    {"selector": "#submit", "text": "Ready", "disabled": "false"},
+                    {"selector": ".item", "text": "Item 1"},
+                ),
+            )
+        },
+    )
+
+    assert runtime._assert_element_exists(WorkflowStep("exists", "assert_element_exists", {"selector": "#submit"}), context).status == ActionStatus.SUCCESS
+    assert runtime._assert_url_contains(WorkflowStep("url", "assert_url_contains", {"fragment": "/dashboard"}), context).status == ActionStatus.SUCCESS
+    assert runtime._assert_count(WorkflowStep("count", "assert_count", {"selector": ".item", "min": 1, "max": 5}), context).status == ActionStatus.SUCCESS
+    assert runtime._assert_attribute(WorkflowStep("attr", "assert_attribute", {"selector": "#submit", "attr": "disabled", "value": "false"}), context).status == ActionStatus.SUCCESS
+    assert runtime._assert_no_layout_overlap(WorkflowStep("overlap", "assert_no_layout_overlap", {}), context).status == ActionStatus.SUCCESS

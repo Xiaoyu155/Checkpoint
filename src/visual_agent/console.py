@@ -450,6 +450,7 @@ def report_failure_detail(failed_step: str | None, steps: list[Any]) -> dict[str
         return {
             "failed_step": str(step.get("id") or failed_step or ""),
             "action": step.get("action"),
+            "provider": step.get("provider"),
             "message": step.get("message"),
             "expected": diagnosis.get("expected") if diagnosis else None,
             "actual": diagnosis.get("actual") if diagnosis else None,

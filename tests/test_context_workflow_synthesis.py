@@ -1157,7 +1157,7 @@ def test_generate_low_confidence_context_uses_llm_fallback(monkeypatch) -> None:
         ```
         """
 
-    monkeypatch.setattr("visual_agent.workflow_synthesis._generate_with_anthropic", fake_generate)
+    monkeypatch.setattr("visual_agent.workflow_synthesis._generate_with_llm_backend", fake_generate)
     ctx = GenerationContext(
         task_description="Verify canvas widget",
         code_changes=(CodeChange(file_path="widget.txt", before=None, after="custom widget renders Widget ready", change_type="added"),),
@@ -1176,7 +1176,7 @@ def test_generate_low_confidence_context_falls_back_when_llm_unavailable(monkeyp
     def fake_generate(*_args, **_kwargs) -> str:
         raise ImportError("anthropic")
 
-    monkeypatch.setattr("visual_agent.workflow_synthesis._generate_with_anthropic", fake_generate)
+    monkeypatch.setattr("visual_agent.workflow_synthesis._generate_with_llm_backend", fake_generate)
     ctx = GenerationContext(
         task_description="Verify unknown widget",
         code_changes=(CodeChange(file_path="widget.txt", before=None, after="opaque widget code", change_type="added"),),

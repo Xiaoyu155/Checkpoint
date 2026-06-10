@@ -1,4 +1,4 @@
-# Release Checklist
+﻿# Release Checklist
 
 Run this checklist before publishing a release, demo, or public branch.
 
@@ -23,8 +23,11 @@ Run this checklist before publishing a release, demo, or public branch.
 ## Workspace Demo
 
 ```powershell
-.\.venv\Scripts\python.exe -m visual_agent.cli init-workspace --root .agent-workspace --overwrite
+.\.venv\Scripts\python.exe -m visual_agent.cli init --root .agent-workspace --overwrite
+.\.venv\Scripts\python.exe -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify the current change" --run-profile dry-run --format markdown
+.\.venv\Scripts\python.exe -m visual_agent.cli show-status --workspace-root .agent-workspace
 .\.venv\Scripts\python.exe -m visual_agent.cli demo-workspace-check --root .agent-workspace --overwrite --format markdown
+.\.venv\Scripts\python.exe -m visual_agent.cli release-trial --workspace-root .agent-workspace --run-profile supervised --format markdown
 .\.venv\Scripts\python.exe -m visual_agent.cli workspace-run --root .agent-workspace --workflow local_html_form_workflow --inputs-file demo_login.json
 .\.venv\Scripts\python.exe -m visual_agent.cli workspace-report-index --root .agent-workspace --rebuild
 .\.venv\Scripts\python.exe -m visual_agent.cli workspace-dashboard --root .agent-workspace --format markdown
@@ -40,6 +43,14 @@ Run this checklist before publishing a release, demo, or public branch.
 
 ```powershell
 .\.venv\Scripts\python.exe -m visual_agent.cli quality-gate --profile ci --workspace-root .agent-workspace --run --fail-on-secret-leak
+```
+
+## CI Hooks
+
+```powershell
+git config core.hooksPath .githooks
+.\.venv\Scripts\python.exe -m visual_agent.cli verify --workspace-root .agent-workspace --tags fast --max-workflows 5 --run-profile dry-run --wait-lock --format json
+.\.venv\Scripts\python.exe -m visual_agent.cli quality-gate --profile ci --workspace-root .agent-workspace --run --fail-on-risk-policy-error --fail-on-secret-leak --ci --junit-output .runs/quality_gates/junit.xml
 ```
 
 ## MCP Smoke
@@ -75,9 +86,11 @@ Run this checklist before publishing a release, demo, or public branch.
 
 ## Latest Verification
 
-Last checked on 2026-06-03:
+Last checked on 2026-06-10:
 
 - Editable install with `[web,mcp]`: passed.
 - `doctor`: passed for required capabilities; OCR/VLM are optional and not configured.
+- `init`, `verify-impl`, `show-status`, `context-snapshot`, and `release-trial`: passed on a temporary workspace.
 - Workspace demo, dashboard, MCP smoke, and CI quality gate: passed on a temporary release workspace.
-- Full test suite: `564 passed`.
+- Targeted regression suites for `structured_failure`, MCP failure details, `visual_status`, and demo/browser workflows: passed.
+

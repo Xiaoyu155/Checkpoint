@@ -55,6 +55,7 @@ def run_codex_check(
     max_workflows: int = 10,
     run_profile: str = "dry-run",
     changed: list[str] | None = None,
+    from_step: str | None = None,
 ) -> CodexCheckResult:
     changed_paths = changed if changed is not None else changed_files(base=base, cwd=Path(repo_root))
     all_refs = list(discover_workflows(workspace, include_slow=True))
@@ -64,7 +65,7 @@ def run_codex_check(
     selected = affected_workflows(runnable, changed=changed_paths)
     selected = selected[: max(0, int(max_workflows))]
     results = [
-        run_one_codex_workflow(workspace, ref, run_profile=run_profile)
+        run_one_codex_workflow(workspace, ref, run_profile=run_profile, from_step=from_step)
         for ref in selected
     ]
     return CodexCheckResult(
@@ -82,7 +83,7 @@ def workflow_has_tags(ref: WorkflowRef, tags: tuple[str, ...]) -> bool:
     return requested.issubset(set(ref.tags))
 
 
-def run_one_codex_workflow(workspace: Workspace, ref: WorkflowRef, *, run_profile: str) -> CodexWorkflowCheck:
+def run_one_codex_workflow(workspace: Workspace, ref: WorkflowRef, *, run_profile: str, from_step: str | None = None) -> CodexWorkflowCheck:
     started = monotonic()
     try:
         result = run_workspace_workflow(
@@ -93,6 +94,7 @@ def run_one_codex_workflow(workspace: Workspace, ref: WorkflowRef, *, run_profil
             export_report=True,
             queue_when_locked=True,
             lock_wait_seconds=30.0,
+            from_step=from_step,
         )
     except Exception as exc:
         return CodexWorkflowCheck(

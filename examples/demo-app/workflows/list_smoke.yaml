@@ -1,0 +1,22 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: demo_app_list_smoke
+version: 1
+description: Smoke test the list tab.
+tags: [verification, fast, demo_app]
+visibility: private
+author: visual-agent-team
+license: ""
+steps:
+  - id: observe_home
+    action: observe_browser
+    url: http://localhost:4173
+  - id: assert_ready
+    action: assert_browser_ready
+    min_text_length: 1
+  - id: open_list
+    action: click_text
+    text: List
+  - id: assert_list_header
+    action: assert_text
+    text: Items

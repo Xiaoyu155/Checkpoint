@@ -8,7 +8,7 @@ from .helpers import ROOT, run_cli
 @pytest.fixture()
 def e2e_workspace(tmp_path: Path) -> Path:
     workspace = tmp_path / "agent-workspace"
-    result = run_cli("init-workspace", "--root", str(workspace), "--overwrite")
+    result = run_cli("init", "--root", str(workspace), "--overwrite")
     assert result.returncode == 0, result.stdout + result.stderr
     return workspace
 

@@ -6,7 +6,15 @@ from typing import Any
 from .context_ingestion import UISemanticModel
 
 
-ASSERTION_ACTIONS = frozenset({"wait_for", "assert_browser_ready", "assert_text", "assert_text_contract", "assert_no_error", "wait_for_text"})
+ASSERTION_ACTIONS = frozenset({
+    "wait_for",
+    "assert_browser_ready",
+    "assert_text",
+    "assert_visual_text",
+    "assert_text_contract",
+    "assert_no_error",
+    "wait_for_text",
+})
 STRUCTURAL_ACTIONS = frozenset({"assert_browser_ready"})
 
 
@@ -20,6 +28,8 @@ class WorkflowQualityScore:
     forbidden_error_assertion_count: int
     text_from_input_reference_count: int
     invalid_text_from_references: tuple[str, ...]
+    visual_action_count: int
+    visual_assertion_count: int
     covers_success_path: bool
     covers_error_path: bool
     covers_data_display: bool
@@ -55,12 +65,15 @@ def score_workflow_quality(workflow_yaml: str, model: UISemanticModel | None = N
     text_from_references = _text_from_references(dict_steps)
     invalid_text_from_references = _invalid_text_from_references(text_from_references, model)
     text_from_input_reference_count = len(text_from_references) - len(invalid_text_from_references)
+    visual_action_count = sum(1 for step in dict_steps if step.get("action") in {"click_visual", "assert_visual_text"})
+    visual_assertion_count = sum(1 for step in dict_steps if step.get("action") == "assert_visual_text")
     assertion_density = len(assertion_steps) / total_steps
     covers_success = any(_step_covers_success(step) for step in dict_steps)
     error_coverage_strength = _error_coverage_strength(dict_steps)
     covers_error = error_coverage_strength > 0
     covers_data = any(_step_covers_data_display(step, model) for step in dict_steps)
     model_coverage = _model_success_coverage(dict_steps, model)
+    visual_coverage = (visual_assertion_count / visual_action_count) if visual_action_count else 1.0
 
     score = (
         min(assertion_density / 0.3, 1.0) * 0.30
@@ -68,6 +81,7 @@ def score_workflow_quality(workflow_yaml: str, model: UISemanticModel | None = N
         + (1.0 if covers_success else 0.0) * 0.20
         + error_coverage_strength * 0.10
         + model_coverage * 0.10
+        + (0.05 * min(visual_coverage, 1.0) if visual_action_count else 0.0)
     )
     gaps: list[str] = []
     if not covers_success:
@@ -78,6 +92,8 @@ def score_workflow_quality(workflow_yaml: str, model: UISemanticModel | None = N
         gaps.append(f"low assertion density ({assertion_density:.0%})")
     if not business_assertions:
         gaps.append("no business assertions")
+    if visual_action_count and not visual_assertion_count:
+        gaps.append("visual workflow has no visual assertion")
     if model and model.success_states and model_coverage < 0.5:
         gaps.append(f"only {model_coverage:.0%} of expected success states are verified")
     if invalid_text_from_references:
@@ -92,6 +108,8 @@ def score_workflow_quality(workflow_yaml: str, model: UISemanticModel | None = N
         forbidden_error_assertion_count=forbidden_error_assertion_count,
         text_from_input_reference_count=text_from_input_reference_count,
         invalid_text_from_references=tuple(invalid_text_from_references),
+        visual_action_count=visual_action_count,
+        visual_assertion_count=visual_assertion_count,
         covers_success_path=covers_success,
         covers_error_path=covers_error,
         covers_data_display=covers_data,
@@ -101,7 +119,7 @@ def score_workflow_quality(workflow_yaml: str, model: UISemanticModel | None = N
 
 
 def _step_covers_success(step: dict[str, Any]) -> bool:
-    if step.get("action") not in {"wait_for", "assert_text"}:
+    if step.get("action") not in {"wait_for", "assert_text", "assert_visual_text"}:
         return False
     return any(step.get(key) for key in ("text", "text_from", "url_contains", "url_contains_from"))
 
@@ -187,6 +205,9 @@ def _model_success_coverage(steps: list[dict[str, Any]], model: UISemanticModel 
 def _build_recommendation(gaps: list[str]) -> str:
     if not gaps:
         return "Workflow quality is good."
+    joined = " ".join(gaps).lower()
+    if "visual workflow has no visual assertion" in joined:
+        return "Add assert_visual_text after the visual interaction, or pair the visual action with a semantic assert_text."
     if "success state" in gaps[0]:
         return "Add a wait_for or assert_text step after submit that verifies the expected result."
     if "error path" in gaps[0]:
@@ -206,6 +227,8 @@ def _zero_score(reason: str) -> WorkflowQualityScore:
         forbidden_error_assertion_count=0,
         text_from_input_reference_count=0,
         invalid_text_from_references=(),
+        visual_action_count=0,
+        visual_assertion_count=0,
         covers_success_path=False,
         covers_error_path=False,
         covers_data_display=False,

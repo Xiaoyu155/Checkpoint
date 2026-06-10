@@ -36,6 +36,60 @@ def test_validate_workflow_rejects_action_without_target_or_resolve() -> None:
     assert any("requires a target" in issue.message for issue in result.issues)
 
 
+def test_validate_workflow_rejects_private_urls() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "private-url",
+            "steps": [
+                {"id": "observe", "action": "observe_browser", "url": "http://192.168.0.10/login"},
+                {"id": "request", "action": "request_api", "url": "http://169.254.169.254/latest/meta-data"},
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert not result.valid
+    assert any("SSRF policy" in issue.message for issue in result.issues)
+
+
+def test_validate_workflow_accepts_workspace_relative_browser_urls() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "local-url",
+            "steps": [
+                {"id": "observe", "action": "observe_browser", "url": "fixtures/simple_form.html"},
+                {"id": "ready", "action": "assert_browser_ready", "min_text_length": 1},
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert result.valid
+
+
+def test_validate_workflow_rejects_shell_like_fields() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "shell-like",
+            "steps": [
+                {
+                    "id": "observe",
+                    "action": "observe_html",
+                    "path": "examples/web/login_demo.html",
+                    "command": "rm -rf /",
+                }
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert not result.valid
+    assert any("Prohibited shell command field" in issue.message for issue in result.issues)
+
+
 def test_validate_workflow_accepts_press_key_with_target_and_keys() -> None:
     workflow = workflow_from_dict(
         {
@@ -128,6 +182,27 @@ def test_validate_workflow_accepts_post_action_observe() -> None:
                     "keys": "enter",
                     "post_action_observe": {"wait_seconds": 0, "assert_text": "提交成功", "mock_text": "提交成功"},
                 },
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert result.valid
+
+
+def test_validate_workflow_accepts_control_flow_and_variables() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "control-flow",
+            "variables": {"greeting": "Hello"},
+            "fixtures": ["auth_standard"],
+            "preconditions": ["fixture:auth_standard"],
+            "steps": [
+                {"id": "observe", "action": "observe_html", "path": "examples/web/login_demo.html"},
+                {"id": "set_uid", "action": "set_variable", "name": "user_id", "from_text": "#profile .uid"},
+                {"id": "branch", "action": "if_text_exists", "text": "Hello", "then": "nested"},
+                {"id": "nested", "action": "run_workflow", "workflow": "child"},
             ],
         }
     )
@@ -575,6 +650,7 @@ def test_validation_rejects_future_schema_version() -> None:
 
     assert not result.valid
     assert any("Unsupported workflow schema_version" in issue.message for issue in result.issues)
+    assert any("Run workflow-migrate" in issue.message for issue in result.issues)
 
 
 def test_validation_rejects_future_runtime_requirement() -> None:

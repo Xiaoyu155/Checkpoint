@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 
@@ -40,6 +40,7 @@ def test_connect_codex_writes_agents_instructions(tmp_path) -> None:
     text = (repo / "AGENTS.md").read_text(encoding="utf-8")
 
     assert result.config_path == repo / "AGENTS.md"
-    assert "## Visual Agent" in text
+    assert "## Checkpoint" in text
     assert "codex-check" in text
     assert "context-snapshot" in text
+

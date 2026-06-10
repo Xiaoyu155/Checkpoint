@@ -1,6 +1,6 @@
-# VLM Setup
+﻿# VLM Setup
 
-Visual Agent uses structured providers first: DOM for browsers and Windows UIA
+Checkpoint uses structured providers first: DOM for browsers and Windows UIA
 for desktop apps. A VLM is optional and only acts as a visual fallback when
 structured selectors cannot locate a target.
 
@@ -41,7 +41,7 @@ Local VLM support requires model-specific dependencies and model files:
 ```
 
 Then configure the workflow or environment for the selected local engine. If no
-local model is configured, Visual Agent can still run DOM and UIA workflows.
+local model is configured, Checkpoint can still run DOM and UIA workflows.
 
 ## OCR
 
@@ -60,3 +60,4 @@ Then install the Tesseract binary for Windows and make sure it is on `PATH`.
 - Run `doctor` to confirm whether cloud, local VLM, OCR, DOM, and UIA providers
   are available.
 - Prefer DOM/UIA selectors. Use VLM only as a fallback.
+

@@ -47,6 +47,7 @@ def test_init_workspace_creates_dirs_and_demo(tmp_path) -> None:
     assert workspace.fixtures_dir.exists()
     assert (workspace.root / "workspace.json").exists()
     assert {workflow.name for workflow in discover_workflows(workspace)} == {
+        "browser_form_workflow",
         "checkout_verification",
         "local_html_form_workflow",
     }
@@ -85,7 +86,7 @@ def test_validate_workspace_accepts_demo(tmp_path) -> None:
 
     results = validate_workspace(workspace)
 
-    assert len(results) == 2
+    assert len(results) == 3
     assert all(result.valid for result in results)
 
 
@@ -444,10 +445,10 @@ def test_workspace_status_reports_counts(tmp_path) -> None:
 
     assert status["project_root"] == str(workspace.project_root)
     assert status["framework_hint"] is None
-    assert status["workflow_count"] == 2
+    assert status["workflow_count"] == 3
     assert status["report_count"] == 0
     assert status["regression_test_count"] == 0
-    assert status["valid_workflows"] == 2
+    assert status["valid_workflows"] == 3
     assert status["invalid_workflows"] == 0
 
 

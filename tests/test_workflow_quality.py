@@ -144,3 +144,53 @@ def test_score_workflow_quality_gives_assert_no_error_partial_error_credit() -> 
     assert score.covers_error_path is True
     assert score.forbidden_error_assertion_count == 0
     assert score.total_score < 1.0
+
+
+def test_score_workflow_quality_counts_visual_assertions() -> None:
+    yaml_text = """
+    schema_version: 1
+    min_runtime_version: "0.1.0"
+    name: desktop_login
+    version: 1
+    steps:
+      - id: observe_screen
+        action: observe_screen
+      - id: click_login
+        action: click_visual
+        description: Login button
+      - id: verify_login
+        action: assert_visual_text
+        text: Dashboard
+    """
+
+    score = score_workflow_quality(yaml_text)
+
+    assert score.visual_action_count == 2
+    assert score.visual_assertion_count == 1
+    assert score.covers_success_path is True
+    assert "visual workflow has no visual assertion" not in score.gaps
+
+
+def test_score_workflow_quality_flags_visual_workflows_without_visual_assertions() -> None:
+    yaml_text = """
+    schema_version: 1
+    min_runtime_version: "0.1.0"
+    name: desktop_login
+    version: 1
+    steps:
+      - id: observe_screen
+        action: observe_screen
+      - id: click_login
+        action: click_visual
+        description: Login button
+      - id: verify_login
+        action: assert_text
+        text: Dashboard
+    """
+
+    score = score_workflow_quality(yaml_text)
+
+    assert score.visual_action_count == 1
+    assert score.visual_assertion_count == 0
+    assert "visual workflow has no visual assertion" in score.gaps
+    assert score.recommendation.startswith("Add assert_visual_text")

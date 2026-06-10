@@ -1,6 +1,6 @@
-# VS Code MCP Setup
+﻿# VS Code MCP Setup
 
-Visual Agent exposes an MCP server that can be used by VS Code agent tooling.
+Checkpoint exposes an MCP server that can be used by VS Code agent tooling.
 
 Generate the config from the repository root:
 
@@ -35,3 +35,4 @@ Use `get_session_context` to resume work, `summarize_latest_failure` for a
 compact failure diagnosis, and `run_verification` after code changes. Oversized
 MCP responses are truncated and include metadata such as `truncated`,
 `omitted_count`, or `report_hint`.
+

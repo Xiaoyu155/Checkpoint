@@ -37,11 +37,7 @@ Workspace
   -> Quality Gate Report Index
 ```
 
-当前所有核心功能都有测试覆盖，最新测试结果：
-
-```text
-334 passed, 3 skipped
-```
+当前所有核心功能都有测试覆盖，近期的关键回归和文档收口验证已通过。
 
 ## 关键技术路线
 
@@ -91,6 +87,7 @@ Workspace
 - Planner 安全 Workspace 上下文：workflow、inputs 文件、fixtures、runs、capabilities
 - Planner 草案安全校验：能力白名单、风险拦截、workspace 路径边界、dry-run 强制
 - 失败诊断：失败 step 自动记录预期、实际观测、截图 artifact、恢复建议和模型反思 prompt
+- 失败诊断 known_issue 标注：已知框架噪音可在结构化输出中明确标记，避免被误判成普通回归
 - OCR 感知闭环：`observe_ocr` + `OCRSelectorStrategy` + mock OCR workflow
 - 失败诊断 OCR 二次观测：截图 artifact 存在时自动补充 `failure_diagnosis.evidence.ocr`
 - VLM 感知闭环：`observe_vision` + `VisionSelectorStrategy` + mock VLM workflow
@@ -165,7 +162,7 @@ Workspace
 初始化 workspace：
 
 ```powershell
-.\.venv\Scripts\python.exe -m visual_agent.cli init-workspace --root .agent-workspace --overwrite
+.\.venv\Scripts\python.exe -m visual_agent.cli init --root .agent-workspace --overwrite
 ```
 
 安装模板：
@@ -187,7 +184,7 @@ Workspace
 查看工程：
 
 ```powershell
-.\.venv\Scripts\python.exe -m visual_agent.cli workspace-status --root .agent-workspace
+.\.venv\Scripts\python.exe -m visual_agent.cli show-status --workspace-root .agent-workspace
 .\.venv\Scripts\python.exe -m visual_agent.cli workspace-runs --root .agent-workspace --limit 5
 .\.venv\Scripts\python.exe -m visual_agent.cli workspace-planner-context --root .agent-workspace
 .\.venv\Scripts\python.exe -m visual_agent.cli workspace-check-plan --root .agent-workspace --file workflows/order_entry.yaml
@@ -445,7 +442,7 @@ Workspace 导出：
 - `workspace-run` 默认导出 `reports/<run-id>.json`。
 - `workspace-run` 默认导出 `reports/<run-id>.md`。
 - `workspace-run` 默认刷新 `reports/index.json`。
-- `workspace-status` 输出 `report_count` 和最近报告文件。
+- `show-status` 输出 workspace 状态、最近报告文件和当前 failure 线索。
 - `workspace-planner-context` 输出报告索引条目，供 GUI/Planner 读取，不读取 inputs 内容。
 - `workspace-report-index` 支持 `--status` / `--workflow` / `--failed-only` 过滤。
 - `workspace-report-detail` 按 run_id 输出报告详情，包含步骤表、失败诊断、下载、artifact 和人工标注。
@@ -976,3 +973,4 @@ OCR/Vision 已有 mock 和可选真实后端入口：
 - 展示 workflows、runs、capabilities。
 - 展示 report 列表和详情。
 - 提供 Run Dry、Run Next、Cancel、Retry，并保持 dry-run 默认模式。
+

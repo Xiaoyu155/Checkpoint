@@ -44,7 +44,7 @@ def test_require_feature_allows_limited_cloud_run_on_free_tier(monkeypatch) -> N
     clear_license_env(monkeypatch)
 
     require_feature("cloud_run")
-    assert monthly_feature_limit("cloud_run") == 5
+    assert monthly_feature_limit("cloud_run") == 50
 
 
 def test_require_feature_allows_cloud_run_on_pro_tier(monkeypatch) -> None:
@@ -100,7 +100,7 @@ def test_expired_license_downgrades_feature_checks(tmp_path: Path, monkeypatch) 
     assert get_license().tier == "pro"
     assert check_feature("local_run") is True
     assert check_feature("cloud_run") is True
-    assert monthly_feature_limit("cloud_run") == 5
+    assert monthly_feature_limit("cloud_run") == 50
     assert report_history_window_days() == 7
 
 
@@ -130,12 +130,12 @@ def test_cloud_run_free_tier_records_usage_until_quota(tmp_path: Path, monkeypat
     assert calls == 1
     assert session is not None
     assert session.cloud_runs_used == 1
-    assert cloud_run_quota_status(tmp_path)["remaining"] == 4
+    assert cloud_run_quota_status(tmp_path)["remaining"] == 49
 
 
 def test_cloud_run_returns_upgrade_required_when_free_quota_exceeded(tmp_path: Path, monkeypatch) -> None:
     clear_license_env(monkeypatch)
-    record_cloud_run_usage(tmp_path, count=5)
+    record_cloud_run_usage(tmp_path, count=50)
     calls = 0
 
     def fake_client(_workflow_name: str, _workspace_root: Path) -> dict:
@@ -150,11 +150,11 @@ def test_cloud_run_returns_upgrade_required_when_free_quota_exceeded(tmp_path: P
     assert result["feature"] == "cloud_run"
     assert result["required_tier"] == "pro"
     assert result["current_tier"] == "free"
-    assert result["quota"]["used"] == 5
+    assert result["quota"]["used"] == 50
     assert result["quota"]["remaining"] == 0
     assert result["usage_recorded"] is False
     assert calls == 0
-    assert load_agent_session(tmp_path).cloud_runs_used == 5
+    assert load_agent_session(tmp_path).cloud_runs_used == 50
 
 
 def test_cloud_run_placeholder_still_raises_without_client_on_paid_tier(tmp_path: Path, monkeypatch) -> None:

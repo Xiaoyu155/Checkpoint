@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -41,7 +41,7 @@ def build_planner_draft_prompt(workspace: Workspace, instruction: str, *, run_li
         "queue": context.get("queue"),
     }
     return (
-        "You generate safe Visual Agent workflow YAML drafts.\n"
+        "You generate safe Checkpoint workflow YAML drafts.\n"
         "Return only YAML, no markdown fences and no explanation.\n"
         "Rules:\n"
         "- schema_version must be 1.\n"
@@ -464,3 +464,4 @@ def planner_draft_result_to_markdown(result: dict[str, Any]) -> str:
 
 def markdown_cell(value: Any) -> str:
     return str(value if value is not None else "").replace("|", "\\|").replace("\n", " ").strip()
+

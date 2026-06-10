@@ -60,6 +60,10 @@ def hydrate_context_from_completed_steps(context: WorkflowContext, completed_ste
             context.observations[step_id] = observation_from_dict(payload["observation"])
         if payload.get("resolved_target"):
             context.resolved_targets[step_id] = resolved_target_from_dict(payload["resolved_target"])
+        if payload.get("action") == "set_variable" and isinstance(payload.get("metadata"), dict):
+            name = payload["metadata"].get("name")
+            if name:
+                context.variables[str(name)] = payload["metadata"].get("value")
 
 
 def resolved_target_from_dict(payload: dict[str, Any]) -> ResolvedTarget:

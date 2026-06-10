@@ -5,6 +5,7 @@ from pathlib import Path
 
 from visual_agent.failure_summary import build_failure_summary
 from visual_agent.session import AgentSession, FailureSummary, session_path
+from visual_agent.structured_failure import STRUCTURED_FAILURE_V1_FIELDS, structured_failure_from_diagnosis, structured_failure_from_dict
 
 
 def write_session(workspace: Path, session: AgentSession) -> None:
@@ -80,7 +81,39 @@ def test_build_failure_summary_returns_found_with_correct_fields(tmp_path: Path)
     assert summary["actual"] == "ready text missing"
     assert summary["hint"] == "Render the ready state."
     assert summary["artifacts"] == "runs/run-fail"
+    assert summary["structured_failure"]["step_id"] == "assert_ready"
+    assert tuple(summary["structured_failure"].keys()) == STRUCTURED_FAILURE_V1_FIELDS
+    assert summary["structured_failure"]["schema_version"] == 1
+    assert summary["structured_failure"]["root_cause"] in {"assertion_wrong", "element_missing"}
     assert "checkout" in summary["suggested_next_prompt"]
+
+
+def test_build_failure_summary_infers_visual_provider_for_visual_action(tmp_path: Path) -> None:
+    write_session(
+        tmp_path,
+        AgentSession(
+            updated_at=0.0,
+            passing_workflows=[],
+            failing_workflows=["desktop_login"],
+            latest_failure=FailureSummary(
+                workflow="desktop_login",
+                run_id="run-visual",
+                step_id="click_login",
+                action="click_visual",
+                expected="login button",
+                actual="button not found",
+                hint="Use the visual locator output.",
+                artifact_dir="runs/run-visual",
+            ),
+            next_action="Fix desktop login.",
+            token_estimate=1,
+        ),
+    )
+
+    summary = build_failure_summary(tmp_path)
+
+    assert summary["visual_provider"] == "omniparser"
+    assert summary["structured_failure"]["provider"] == "omniparser"
 
 
 def test_build_failure_summary_scrubs_secrets_in_output(tmp_path: Path) -> None:
@@ -155,3 +188,51 @@ def test_build_failure_summary_token_estimate_is_accurate(tmp_path: Path) -> Non
     summary = build_failure_summary(tmp_path)
 
     assert summary["token_estimate"] == len(summary["suggested_next_prompt"]) // 4
+
+
+def test_structured_failure_marks_nextjs_hydration_mismatch_as_known_issue() -> None:
+    diagnosis = {
+        "step_id": "assert_ready",
+        "action": "assert_text",
+        "expected": "checkout ready",
+        "actual": (
+            "A tree hydrated but some attributes of the server rendered HTML didn't match the client properties. "
+            "This won't be patched up. https://react.dev/link/hydration-mismatch"
+        ),
+        "observation": {
+            "visible_text": [
+                "A tree hydrated but some attributes of the server rendered HTML didn't match the client properties.",
+                "https://react.dev/link/hydration-mismatch",
+            ]
+        },
+        "artifacts": {},
+    }
+
+    structured = structured_failure_from_diagnosis(diagnosis)
+
+    assert structured.root_cause == "known_issue"
+    assert "hydration mismatch" in structured.suggested_fix.lower()
+
+
+def test_structured_failure_migrates_legacy_payload_to_v1() -> None:
+    structured = structured_failure_from_dict(
+        {
+            "step_id": "assert_ready",
+            "action": "assert_text",
+            "provider": "dom",
+            "expected": "ready",
+            "actual_visible": ["ready"],
+            "page_url": "https://example.test",
+            "page_state": "authenticated",
+            "screenshot_path": "runs/run-1/failure.png",
+            "root_cause": "assertion_wrong",
+            "confidence": 0.8,
+            "suggested_fix": "Update the assertion.",
+            "related_files": ["workflows/checkout.yaml"],
+        }
+    )
+
+    assert structured.step_id == "assert_ready"
+    assert structured.action == "assert_text"
+    assert structured.provider == "dom"
+    assert structured.root_cause == "assertion_wrong"

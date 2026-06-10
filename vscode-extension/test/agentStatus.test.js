@@ -231,10 +231,28 @@ function testBuildVerifyImplementationArgs() {
   ]);
 }
 
+function testBuildVerifyImplementationArgsAllowsInferredBaseUrl() {
+  const args = buildVerifyImplementationArgs({
+    taskDescription: "Verify current change",
+    runProfile: "dry-run"
+  });
+
+  assert.deepStrictEqual(args, [
+    "verify-impl",
+    "--task-description",
+    "Verify current change",
+    "--run-profile",
+    "dry-run",
+    "--format",
+    "markdown"
+  ]);
+}
+
 testNormalizeSnakeCasePayload();
 testNormalizeFailedStepPayload();
 testTimeoutPayload();
 testNegativeFailureElevatesSeverity();
 testUnknownResult();
 testBuildVerifyImplementationArgs();
+testBuildVerifyImplementationArgsAllowsInferredBaseUrl();
 console.log("agentStatus tests passed");

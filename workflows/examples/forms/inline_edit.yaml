@@ -1,0 +1,33 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: inline_edit
+version: 1
+description: Verify inline editing saves an updated value.
+tags: [verification, fast, forms, crud, example]
+category: forms
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
+steps:
+  - id: observe_profile
+    action: observe_browser
+    url: "http://localhost:3000/profile"
+  - id: browser_ready
+    action: assert_browser_ready
+    min_text_length: 1
+    min_interactive: 1
+  - id: edit_display_name
+    action: click
+    target: { text: "Edit", role: button }
+    browser_post_action_observe: true
+  - id: type_display_name
+    action: type
+    target: { label: "Display name", role: input }
+    value: "Demo User"
+  - id: save_display_name
+    action: click
+    target: { text: "Save", role: button }
+    browser_post_action_observe: true
+  - id: verify_updated_name
+    action: assert_text
+    text: "Demo User"
