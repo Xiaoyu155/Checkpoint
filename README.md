@@ -111,9 +111,6 @@ changes. After the dry-run demo passes, try the verification loop:
 5. Fix the label, run again - green.
 
 See [docs/quickstart.md](docs/quickstart.md) for the full walkthrough.
-For the current audit and risk review, see [docs/audit_report.md](docs/audit_report.md).
-For the next-stage execution plan, see [docs/next_phase_plan.md](docs/next_phase_plan.md).
-
 ## Example Workflows
 
 Public starter workflows live under [`workflows/examples`](workflows/examples):
