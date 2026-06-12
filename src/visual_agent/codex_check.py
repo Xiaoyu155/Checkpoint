@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import monotonic
-from typing import Any
 
 from .git_diff import affected_workflows, changed_files
 from .models import ActionStatus

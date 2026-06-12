@@ -246,7 +246,6 @@ def test_detect_cloud_vision_backend_uses_model_credentials_file(tmp_path, monke
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     status = detect_cloud_vision_backend({"provider": "openai", "credential_source": str(key_file)})
-    text = json.dumps(status, ensure_ascii=False)
 
     assert status["available"] is True
     assert status["provider"] == "openai"

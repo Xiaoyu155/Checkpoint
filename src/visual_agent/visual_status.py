@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import ActionStatus, to_jsonable
+from .models import ActionStatus
 from .structured_failure import HYDRATION_MISMATCH_MARKERS
 from .workflow import Workflow, WorkflowRunResult
 

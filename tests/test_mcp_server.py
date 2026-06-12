@@ -1256,7 +1256,7 @@ def test_mcp_auto_repair_failure_blocks_high_risk_health(tmp_path) -> None:
         encoding="utf-8",
     )
     run = run_workflow_payload({"workspace_root": str(workspace.root), "workflow_name": "typo_failure"})
-    verified = content_payload(
+    content_payload(
         asyncio.run(call_tool("auto_repair_failure", {"workspace_root": str(workspace.root), "run_id": run["run_id"]}))
     )
     history = content_payload(asyncio.run(call_tool("list_repair_history", {"workspace_root": str(workspace.root)})))

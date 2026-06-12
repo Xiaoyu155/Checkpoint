@@ -12,7 +12,7 @@ from typing import Any
 from .capture import capture_visual_region
 from .audit import RunAudit
 from .diagnostics import diagnose_failure
-from .dispatcher import ActionDispatchContext, ActionDispatcher, read_path, resolve_step_value, selector_from_resolved
+from .dispatcher import ActionDispatchContext, ActionDispatcher, read_path, selector_from_resolved
 from .dom import normalize_text
 from .locks import RunLock, VisualLock, lock_to_dict, queue_to_dict
 from .models import (

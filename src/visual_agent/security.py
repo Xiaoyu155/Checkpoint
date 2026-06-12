@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import re
+from pathlib import PurePosixPath, PureWindowsPath
 from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import Any
@@ -117,6 +118,16 @@ def validate_workflow_url(url: str) -> tuple[bool, str | None]:
         return False, "URL is empty."
     parsed = urlparse(raw)
     scheme = parsed.scheme.lower()
+    if scheme == "file":
+        host = str(parsed.hostname or "").strip().lower()
+        if host and not is_loopback_host(host):
+            return False, f"Blocked non-local file URL host: {host}"
+        path = str(parsed.path or "").strip()
+        if not path:
+            return False, "File URL is missing a path."
+        if PureWindowsPath(path.lstrip("/")).is_absolute() or PurePosixPath(path).is_absolute():
+            return True, None
+        return False, "File URL path must be absolute."
     if scheme not in {"http", "https"}:
         return False, f"Unsupported URL scheme: {parsed.scheme or 'missing'}"
     host = str(parsed.hostname or "").strip().lower()

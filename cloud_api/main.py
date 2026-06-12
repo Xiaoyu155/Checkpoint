@@ -18,7 +18,6 @@ from .marketplace import (
 )
 from .models import RunRequest, RunStatus, run_result_from_cloud_payload
 from visual_agent.security import scrub_secrets
-from visual_agent.workspace import open_workspace
 from .worker import execute_workflow_run
 
 

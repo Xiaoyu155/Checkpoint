@@ -276,12 +276,14 @@ def run_next_queue_task(workspace: Workspace) -> dict[str, Any]:
         )
         annotate_queue_run(workspace, task, result)
     except Exception as exc:
+        error_message = str(exc)
+
         def fail_update(state: dict[str, Any]) -> QueueTask:
             current = find_task(state, task.task_id)
             should_retry = current.attempts <= current.max_retries
             status = "pending" if should_retry else "failed"
-            updated = replace_task(state, task.task_id, status=status, last_error=str(exc))
-            append_history(state, updated, event="retry_scheduled" if should_retry else "failed", message=str(exc))
+            updated = replace_task(state, task.task_id, status=status, last_error=error_message)
+            append_history(state, updated, event="retry_scheduled" if should_retry else "failed", message=error_message)
             return updated
 
         updated = _locked_update_queue_state(workspace, fail_update)
@@ -289,7 +291,7 @@ def run_next_queue_task(workspace: Workspace) -> dict[str, Any]:
             "ran": True,
             "task": queue_task_to_dict(updated),
             "result": None,
-            "message": str(exc),
+            "message": error_message,
         }
 
     failed = any(step.status == ActionStatus.FAILED for step in result.steps)

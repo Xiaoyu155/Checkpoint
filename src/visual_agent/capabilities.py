@@ -574,8 +574,6 @@ def provider_input_schema(action: str) -> dict[str, Any]:
                 "fallback_to_screen": "boolean?",
                 "*_from": "input.path?",
                 "*_default": "fallback value?",
-                "language": "tesseract language?",
-                "lang": "tesseract language?",
             },
         },
         "observe_vision": {

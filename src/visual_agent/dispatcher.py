@@ -243,14 +243,12 @@ class ActionDispatcher:
             params,
             exclude={"text", "contains_text", "timeout_seconds", "poll_seconds", "dry_run"},
         )
-        last_source = None
         while True:
             observation = observe_ocr_image(
                 ocr_options,
                 Path(context.workflow_context.run_dir),
                 synthetic_on_capture_fail=bool(params.get("synthetic_on_capture_fail", False)),
             )
-            last_source = observation.source
             evidence = OCRSelectorStrategy().locate(target, observation)
             if evidence is not None:
                 return ActionResult(

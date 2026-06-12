@@ -837,7 +837,7 @@ def run_history_report_to_html(report: dict[str, Any]) -> str:
         "</head>",
         "<body>",
         "<div class=\"wrap\">",
-        f"<h1>Checkpoint Run Report</h1>",
+        "<h1>Checkpoint Run Report</h1>",
         f"<p class=\"muted small\">Workspace: <code>{html.escape(str(report.get('workspace') or ''))}</code></p>",
         f"<p class=\"muted small\">Generated: <code>{html.escape(str(report.get('generated_at') or ''))}</code></p>",
         "<div class=\"grid stats\">",

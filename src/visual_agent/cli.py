@@ -7,7 +7,7 @@ import os
 import sys
 import webbrowser
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from importlib.metadata import PackageNotFoundError, version as package_version
 from threading import Event, Thread
 
@@ -22,7 +22,7 @@ from .cli_repair import REPAIR_COMMANDS
 from .cli_runner import RUNNER_COMMANDS
 from .cli_runtime import RUNTIME_COMMANDS
 from .cli_verification import VERIFICATION_COMMANDS
-from .cli_workflow import WORKFLOW_COMMANDS, add_workflow_parsers, detect_framework_from_dir, generate_from_diff_cli_markdown, verify_impl_cli_markdown
+from .cli_workflow import WORKFLOW_COMMANDS, add_workflow_parsers, detect_framework_from_dir, generate_from_diff_cli_markdown as generate_from_diff_cli_markdown, verify_impl_cli_markdown as verify_impl_cli_markdown
 from .cli_workspace_queue import WORKSPACE_QUEUE_COMMANDS
 from .cli_workspace_manage import WORKSPACE_MANAGE_COMMANDS
 from .cli_workspace_read import WORKSPACE_READ_COMMANDS
@@ -71,6 +71,9 @@ from .workspace import (
 
 DEFAULT_CLI_NAME = "visual-agent"
 CLI_ALIASES = {"visual-agent", "checkpoint"}
+
+if TYPE_CHECKING:
+    from .workflow import WorkflowRuntime
 
 
 def current_cli_name() -> str:

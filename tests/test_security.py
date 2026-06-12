@@ -121,6 +121,25 @@ def test_validate_workflow_url_allows_loopback_ips() -> None:
     assert reason_ipv6 is None
 
 
+def test_validate_workflow_url_allows_local_absolute_file_urls() -> None:
+    ok_windows, reason_windows = validate_workflow_url("file:///D:/project/examples/login.html")
+    ok_posix, reason_posix = validate_workflow_url("file:///tmp/project/login.html")
+
+    assert ok_windows is True
+    assert reason_windows is None
+    assert ok_posix is True
+    assert reason_posix is None
+
+
+def test_validate_workflow_url_blocks_remote_or_relative_file_urls() -> None:
+    blocked_remote = validate_workflow_url("file://example.com/share/login.html")
+    blocked_missing = validate_workflow_url("file://")
+
+    assert blocked_remote[0] is False
+    assert "Blocked non-local file URL host" in str(blocked_remote[1])
+    assert blocked_missing[0] is False
+
+
 def test_validate_workflow_url_blocks_private_and_reserved_hosts() -> None:
     blocked_private = validate_workflow_url("http://192.168.0.10/login")
     blocked_link_local = validate_workflow_url("http://169.254.169.254/latest/meta-data")

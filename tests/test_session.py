@@ -5,7 +5,6 @@ from pathlib import Path
 
 from visual_agent.models import ActionStatus
 from visual_agent.session import (
-    AiTaskContext,
     AgentSession,
     FailureSummary,
     _estimate_tokens,

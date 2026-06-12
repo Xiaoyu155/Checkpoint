@@ -392,7 +392,7 @@ def build_workflow_system_prompt(description: str, *, page_type: str | None = No
         WORKFLOW_SYSTEM_PROMPT.rstrip()
         + "\n\n"
         + f"Few-shot examples for the detected page type ({category_label}). Use their structure, metadata, and assertion style.\n"
-        + f"Prefer the closest example in this category first, then adapt the step names, targets, and assertions to the user description.\n"
+        + "Prefer the closest example in this category first, then adapt the step names, targets, and assertions to the user description.\n"
         + "\n".join(
             f"### Example {index + 1} ({category_label})\n{example}"
             for index, example in enumerate(examples)
@@ -613,4 +613,3 @@ def _is_auth_configuration_error(exc: Exception) -> bool:
             "missing endpoint",
         )
     )
-

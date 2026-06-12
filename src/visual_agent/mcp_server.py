@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 from .console import build_report_detail, report_detail_to_markdown
 from .mcp_audit import audit_mcp_call, workspace_for_audit
-from .mcp_common import (
+from .mcp_common import (  # noqa: F401
     MCP_DETAIL_CONTENT_MAX_CHARS,
     MCP_DETAIL_RESPONSE_MAX_CHARS,
     MCP_STRUCTURED_LIST_MAX_CHARS,
@@ -22,14 +22,14 @@ from .mcp_common import (
     safe_artifact,
     safe_workspace_child,
 )
-from .models import to_jsonable
-from .preflight import run_preflight
+from .models import to_jsonable as to_jsonable
+from .preflight import run_preflight as run_preflight
 from .reports import compact_run_report
-from .run_profile import RUN_PROFILE_CHOICES
+from .run_profile import RUN_PROFILE_CHOICES as RUN_PROFILE_CHOICES
 from .security import scrub_secrets
 from .verification_status import enrich_verification_payload, report_artifacts, write_verification_status
-from .workflow import parse_workflow_file
-from .workspace import Workspace, build_workspace_report_index, find_workflow, load_workspace_inputs, run_workspace_workflow
+from .workflow import parse_workflow_file as parse_workflow_file
+from .workspace import Workspace, build_workspace_report_index, find_workflow as find_workflow, load_workspace_inputs, run_workspace_workflow
 from .mcp_workspace_read import (
     get_run_report_payload,
     get_workspace_dashboard_payload,
@@ -47,7 +47,7 @@ from .mcp_repair import (
 from .mcp_benchmarks import build_benchmark_draft_payload, build_benchmark_plan_payload, list_benchmarks_payload
 from .mcp_browser import run_browser_smoke_payload, run_browser_smoke_suite_payload
 from .mcp_generation_format import quality_gate_payload, semantic_summary_payload
-from .mcp_policy import RUN_PROFILE_ORDER, enforce_mcp_run_profile, mcp_config
+from .mcp_policy import RUN_PROFILE_ORDER, enforce_mcp_run_profile, mcp_config as mcp_config
 from .mcp_response import budget_mcp_payload, mcp_error_payload
 from .mcp_session import get_session_context_payload, get_visual_status_payload, save_task_context_payload
 
