@@ -186,7 +186,7 @@ def quality_gate_to_junit_xml(result: QualityGateResult) -> str:
     suite = ET.Element(
         "testsuite",
         attrib={
-            "name": f"visual-agent-quality-gate:{result.profile}",
+            "name": f"checkpoint-quality-gate:{result.profile}",
             "tests": str(total_tests),
             "failures": str(failure_count),
             "errors": "0",

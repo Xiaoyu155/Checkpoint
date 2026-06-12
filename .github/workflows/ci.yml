@@ -36,7 +36,7 @@ jobs:
       - name: Run fast verification workflows
         run: python -m visual_agent.cli verify --workspace-root .agent-workspace --tags fast --max-workflows 5 --run-profile dry-run --wait-lock --format json
 
-      - name: Run Visual Agent quality gate
+      - name: Run Checkpoint quality gate
         run: python -m visual_agent.cli quality-gate --profile ci --workspace-root .agent-workspace --run --fail-on-risk-policy-error --fail-on-secret-leak --ci --junit-output .runs/quality_gates/junit.xml
 
       - name: Upload quality reports
@@ -44,7 +44,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: visual-agent-quality-reports
+          name: checkpoint-quality-reports
           path: |
             .runs/quality_gates/**
             .agent-workspace/reports/quality_gates/**

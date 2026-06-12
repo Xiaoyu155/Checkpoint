@@ -31,8 +31,8 @@ def install_ci_templates(
     overwrite: bool = False,
 ) -> CiTemplateInstall:
     target_root = Path(root)
-    workflow_path = target_root / ".github" / "workflows" / "visual-agent-quality-gate.yml"
-    config_path = target_root / ".github" / "visual-agent.yml"
+    workflow_path = target_root / ".github" / "workflows" / "checkpoint-quality-gate.yml"
+    config_path = target_root / ".github" / "checkpoint.yml"
     powershell_path = target_root / "scripts" / "quality_gate.ps1"
     batch_path = target_root / "scripts" / "quality_gate.bat"
     hooks_dir = target_root / ".githooks"
@@ -94,9 +94,9 @@ def ci_template_install_to_dict(install: CiTemplateInstall) -> dict[str, Any]:
         "notes": [
             "Run risk_policy_check_command before CI quality gates to fail fast on invalid workspace risk policy.",
             "Run risk_policy_plan_command to preview missing workspace.json quality policy defaults.",
-            "For remote CI execution, run cloud_server_command on the browser host and cloud_run_command from CI with VISUAL_AGENT_CLOUD_ENDPOINT and VISUAL_AGENT_CLOUD_API_KEY set from secrets.",
+            "For remote CI execution, run cloud_server_command on the browser host and cloud_run_command from CI with CHECKPOINT_CLOUD_ENDPOINT and CHECKPOINT_CLOUD_API_KEY set from secrets.",
             "Add --required-org <org> to cloud_server_command when the browser host should enforce X-Visual-Agent-Org.",
-            "Never commit cloud server API keys; use VISUAL_AGENT_CLOUD_SERVER_API_KEY and CI secret storage.",
+            "Never commit cloud server API keys; use CHECKPOINT_CLOUD_SERVER_API_KEY and CI secret storage.",
             "Run hook_setup_command once to activate the .githooks pre-push hook.",
             "The pre-push hook runs fast_verify_command before the full quality gate.",
         ],
@@ -120,7 +120,7 @@ def cloud_server_command(workspace_root: str) -> str:
         "python -m visual_agent.cli cloud-server "
         f"--workspace-root {workspace_root} "
         "--host 0.0.0.0 --port 7890 "
-        "--api-key-env VISUAL_AGENT_CLOUD_SERVER_API_KEY"
+        "--api-key-env CHECKPOINT_CLOUD_SERVER_API_KEY"
     )
 
 
@@ -183,17 +183,17 @@ jobs:
 
       # Optional remote browser execution through a separately hosted Checkpoint cloud-server.
       # Required repository secrets:
-      #   VISUAL_AGENT_CLOUD_ENDPOINT: http(s)://<browser-host>:7890/v1/run
-      #   VISUAL_AGENT_CLOUD_API_KEY: bearer token expected by cloud-server
+      #   CHECKPOINT_CLOUD_ENDPOINT: http(s)://<browser-host>:7890/v1/run
+      #   CHECKPOINT_CLOUD_API_KEY: bearer token expected by cloud-server
       # Optional repository variable:
-      #   VISUAL_AGENT_CLOUD_ORG: org header required by cloud-server
+      #   CHECKPOINT_CLOUD_ORG: org header required by cloud-server
       # Enable this step after the browser host is reachable from CI.
       # - name: Run remote Checkpoint workflow
       #   env:
-      #     VISUAL_AGENT_LICENSE_TIER: pro
-      #     VISUAL_AGENT_CLOUD_ENDPOINT: ${{{{ secrets.VISUAL_AGENT_CLOUD_ENDPOINT }}}}
-      #     VISUAL_AGENT_CLOUD_API_KEY: ${{{{ secrets.VISUAL_AGENT_CLOUD_API_KEY }}}}
-      #     VISUAL_AGENT_CLOUD_ORG: ${{{{ vars.VISUAL_AGENT_CLOUD_ORG }}}}
+      #     CHECKPOINT_LICENSE_TIER: pro
+      #     CHECKPOINT_CLOUD_ENDPOINT: ${{{{ secrets.CHECKPOINT_CLOUD_ENDPOINT }}}}
+      #     CHECKPOINT_CLOUD_API_KEY: ${{{{ secrets.CHECKPOINT_CLOUD_API_KEY }}}}
+      #     CHECKPOINT_CLOUD_ORG: ${{{{ vars.CHECKPOINT_CLOUD_ORG }}}}
       #   run: {cloud_run_command(workspace_root)}
 
       - name: Upload quality reports
@@ -201,7 +201,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: visual-agent-quality-reports
+          name: checkpoint-quality-reports
           path: |
             .runs/quality_gates/**
             {workspace_root}/reports/quality_gates/**
@@ -311,7 +311,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: visual-agent-quality-reports
+          name: checkpoint-quality-reports
           path: |
             .runs/quality_gates/**
             {workspace_root}/reports/quality_gates/**

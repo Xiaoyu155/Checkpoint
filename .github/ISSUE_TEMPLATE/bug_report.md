@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a reproducible Visual Agent problem
+about: Report a reproducible Checkpoint problem
 title: "[Bug]: "
 labels: bug
 assignees: ""
@@ -20,7 +20,7 @@ What happened?
 
 - OS:
 - Python version:
-- Visual Agent version:
+- Checkpoint version:
 - Playwright installed: yes/no
 - VS Code extension version, if relevant:
 

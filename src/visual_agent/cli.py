@@ -518,7 +518,7 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     cloud_server.add_argument("--port", type=int, default=7890, help="Port to bind. Default: 7890.")
     cloud_server.add_argument("--run-profile", choices=RUN_PROFILE_CHOICES, default="dry-run", help="Default run profile for requests.")
     cloud_server.add_argument("--api-key", default="", help="Optional bearer token required for cloud-server requests. Prefer --api-key-env.")
-    cloud_server.add_argument("--api-key-env", default="VISUAL_AGENT_CLOUD_SERVER_API_KEY", help="Environment variable containing bearer token. Default: VISUAL_AGENT_CLOUD_SERVER_API_KEY.")
+    cloud_server.add_argument("--api-key-env", default="CHECKPOINT_CLOUD_SERVER_API_KEY", help="Environment variable containing bearer token. Default: CHECKPOINT_CLOUD_SERVER_API_KEY.")
     cloud_server.add_argument("--required-org", default="", help="Optional required X-Visual-Agent-Org header value.")
     cloud_server.add_argument("--audit-log", default="", help="Optional redacted JSONL request audit log path.")
     cloud_server.add_argument("--retention-max-reports", type=int, default=0, help="Keep only the newest N workspace reports. Default: 0 disables count retention.")

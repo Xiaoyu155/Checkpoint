@@ -2,7 +2,7 @@
 
 ## Reporting A Vulnerability
 
-Please report vulnerabilities privately by email to `security@visualagent.dev`.
+Please report vulnerabilities privately through GitHub Security Advisories or by contacting the project maintainer directly.
 
 Do not open a public issue for suspected vulnerabilities, secrets exposure, SSRF, unsafe workflow execution, or authentication bypasses.
 
@@ -30,4 +30,4 @@ Out of scope:
 
 ## Safe Handling
 
-Visual Agent reports and fixtures must not include secrets, cookies, tokens, private customer data, or production credentials.
+Checkpoint reports and fixtures must not include secrets, cookies, tokens, private customer data, or production credentials.

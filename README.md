@@ -1,6 +1,6 @@
 # Checkpoint
 
-[![CI](https://github.com/Xiaoyu155/visual-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Xiaoyu155/visual-agent/actions/workflows/ci.yml)
+[![CI](https://github.com/Xiaoyu155/Checkpoint/actions/workflows/ci.yml/badge.svg)](https://github.com/Xiaoyu155/Checkpoint/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -59,12 +59,12 @@ python -m playwright install chromium
 From a source checkout on Windows:
 
 ```powershell
-git clone <your-repo-url> visual-agent
-cd visual-agent
-powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
+git clone https://github.com/Xiaoyu155/Checkpoint.git
+cd Checkpoint
+powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 -Step all
 ```
 
-The bootstrap script checks Python, creates or reuses `.venv`, installs core dependencies, installs `[web,mcp]` extras, installs Playwright Chromium into `.pw-browsers`, initializes `.agent-workspace`, and writes MCP client config examples.
+The bootstrap script checks Python, creates or reuses `.venv`, installs core dependencies, installs `[web,mcp]` extras, installs Playwright Chromium into `.pw-browsers`, initializes `.agent-workspace`, writes MCP client config examples, and runs a local onboarding smoke check.
 
 Checkpoint's preferred CLI command is `checkpoint`. The legacy command `visual-agent` and `python -m visual_agent.cli` remain supported because the Python package is still named `visual-agent`.
 
@@ -128,8 +128,6 @@ Public starter workflows live under [`workflows/examples`](workflows/examples):
 - [`mobile_h5`](workflows/examples/mobile_h5): 375x812 mobile H5 starter flows.
 - [`demo-app`](examples/demo-app): Vue 3 + Vite demo with smoke and regression workflows.
 - [`nextjs-demo`](examples/nextjs-demo): Next.js SSR demo with smoke and regression workflows.
-
-Screenshot placeholder: add `docs/images/example-workflows.png` before release, showing the VS Code Workflow Library with one example copied into a project.
 
 For WeChat Mini Program work, see
 [docs/miniprogram_verification.md](docs/miniprogram_verification.md). Visual

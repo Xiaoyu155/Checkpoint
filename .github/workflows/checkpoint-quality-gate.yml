@@ -1,4 +1,4 @@
-name: Visual Agent Quality Gate
+name: Checkpoint Quality Gate
 
 on:
   push:
@@ -43,7 +43,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: visual-agent-quality-reports
+          name: checkpoint-quality-reports
           path: |
             .runs/quality_gates/**
             .agent-workspace/reports/quality_gates/**

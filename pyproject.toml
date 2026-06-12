@@ -46,9 +46,9 @@ visual-agent-mcp = "visual_agent.mcp_server:main"
 visual_agent = "visual_agent.pytest_plugin"
 
 [project.urls]
-Homepage = "https://github.com/Xiaoyu155/visual-agent"
-Repository = "https://github.com/Xiaoyu155/visual-agent"
-Issues = "https://github.com/Xiaoyu155/visual-agent/issues"
+Homepage = "https://github.com/Xiaoyu155/Checkpoint"
+Repository = "https://github.com/Xiaoyu155/Checkpoint"
+Issues = "https://github.com/Xiaoyu155/Checkpoint/issues"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

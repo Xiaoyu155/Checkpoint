@@ -3,13 +3,13 @@
 Checkpoint uses three layers for CI coverage:
 
 1. GitHub Actions for pull request and push validation.
-2. Repository-local Checkpoint config in `.github/visual-agent.yml`.
+2. Repository-local Checkpoint config in `.github/checkpoint.yml`.
 3. A pre-push hook under `.githooks/pre-push`.
 
 ## Files
 
 - `.github/workflows/ci.yml`: main CI workflow.
-- `.github/visual-agent.yml`: repository defaults for verification tags, quality gate profile, and JUnit output.
+- `.github/checkpoint.yml`: repository defaults for verification tags, quality gate profile, and JUnit output.
 - `.githooks/pre-push`: fast local gate before push.
 
 ## Local Setup
@@ -33,7 +33,7 @@ python -m visual_agent.cli quality-gate --profile ci --workspace-root .agent-wor
 
 ## PR Feedback
 
-On pull request runs, the CI workflow uploads `visual-agent-quality-reports` and then posts a PR comment with:
+On pull request runs, the CI workflow uploads `checkpoint-quality-reports` and then posts a PR comment with:
 
 - The failed workflow run summary.
 - The quality gate summary.

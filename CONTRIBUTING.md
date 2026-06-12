@@ -1,21 +1,21 @@
 # Contributing
 
-Thanks for helping improve Visual Agent. This project is a local-first automation runtime, so changes should preserve safety, auditability, and structured-first execution.
+Thanks for helping improve Checkpoint. This project is a local-first verification runtime for AI coding assistants, so changes should preserve safety, auditability, and structured-first execution.
 
 ## Local Setup
 
 ```powershell
-git clone <your-repo-url> visual-agent
-cd visual-agent
-powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
+git clone https://github.com/Xiaoyu155/Checkpoint.git
+cd Checkpoint
+powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 -Step all
 ```
 
-The bootstrap script creates `.venv`, installs editable dependencies, installs `[web,mcp]` extras, installs Playwright Chromium into `.pw-browsers`, initializes `.agent-workspace`, and writes MCP config examples.
+The bootstrap script creates `.venv`, installs editable dependencies, installs `[web,mcp]` extras, installs Playwright Chromium into `.pw-browsers`, initializes `.agent-workspace`, writes MCP config examples, and runs the onboarding smoke check.
 
 ## Run Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pytest tests --ignore=tests/e2e -q
 ```
 
 Focused checks:
@@ -38,7 +38,7 @@ Focused checks:
 ## Pull Request Checklist
 
 - [ ] Run focused tests for the changed area.
-- [ ] Run full `pytest -q` before opening the PR.
+- [ ] Run full non-e2e tests before opening the PR: `python -m pytest tests --ignore=tests/e2e -q`.
 - [ ] Update docs when CLI flags, workflows, MCP tools, or safety defaults change.
 - [ ] Avoid committing `.venv`, `.pw-browsers`, `.agent-workspace`, `.agent-auth`, `.runs`, auth-state files, or credential files.
 - [ ] Explain any skipped real-account validation and its prerequisites.

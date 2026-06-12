@@ -8,6 +8,7 @@ The format is based on Keep a Changelog, and this project uses semantic versioni
 
 ### Added
 
+- Repository-facing support documentation for GitHub visitors.
 - Context-aware workflow generation from code changes via `generate_workflow_from_context`.
 - Single-call implementation verification via `verify_implementation`, including generation, quality scoring, workflow execution, compact failure diagnosis, status-file updates, quality thresholds, and timeout handling.
 - Git-diff workflow synthesis commands: `generate-from-diff` and `verify-impl`.
@@ -25,6 +26,10 @@ The format is based on Keep a Changelog, and this project uses semantic versioni
 
 ### Changed
 
+- Public repository links, issue templates, CI workflow names, and support/security docs now use the Checkpoint brand and `Xiaoyu155/Checkpoint` repository path.
+- Core CLI, MCP, and workspace modules were split below the repository's module-size governance thresholds while preserving compatibility entrypoints.
+- Cloud server request handling now rejects workspace escapes and run-profile privilege escalation.
+- Local onboarding now runs `doctor` and a demo smoke check through `scripts/bootstrap.ps1 -Step all`.
 - `generate_workflow_from_context` and `verify_implementation` can now collect code changes from git diff when `code_changes` is omitted.
 - `verify_implementation` now uses the generated input template automatically when callers do not provide explicit inputs.
 - Static workflow synthesis now adds an `assert_text_contract` forbidden-text check for known parsed error messages, and workflow quality scoring recognizes that as error-state coverage.
@@ -33,6 +38,11 @@ The format is based on Keep a Changelog, and this project uses semantic versioni
 - Verification status payloads now include `inputs_path` and `inputs_source`.
 - `verify_implementation` blocks low-quality generated workflows by default when quality is below `0.6`, returning `needs_workflow_improvement` instead of a weak pass/fail signal.
 - `verify_implementation` supports `timeout_seconds` and returns `timeout` when the generated workflow run exceeds the budget.
+
+### Fixed
+
+- Loopback URLs such as `http://127.0.0.1:5173` are allowed by workflow URL validation while private and link-local SSRF targets remain blocked.
+- Dry-run workflow generation falls back to the offline template when model authentication or endpoint configuration is missing.
 
 ## [0.1.0] - 2026-06-03
 

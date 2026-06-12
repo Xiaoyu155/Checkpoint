@@ -8,7 +8,7 @@ assignees: ""
 
 ## Problem
 
-What workflow or verification problem should Visual Agent solve?
+What workflow or verification problem should Checkpoint solve?
 
 ## Proposed Solution
 

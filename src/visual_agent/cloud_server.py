@@ -728,7 +728,7 @@ def serve_cloud_server(
     port: int = 7890,
     run_profile: str = "dry-run",
     api_key: str = "",
-    api_key_env: str = "VISUAL_AGENT_CLOUD_SERVER_API_KEY",
+    api_key_env: str = "CHECKPOINT_CLOUD_SERVER_API_KEY",
     required_org: str = "",
     audit_log: str | Path = "",
     retention_max_reports: int = 0,

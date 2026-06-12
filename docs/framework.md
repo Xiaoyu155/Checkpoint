@@ -537,7 +537,7 @@ Without `--run` it prints the planned commands; with `--run` it executes them
 and writes JSON/Markdown reports under `reports/quality_gates/`. It also
 refreshes `reports/quality_gates/index.json`; `quality-gate-index` can rebuild
 or filter that index for GUI and Planner reads.
-`install-ci-templates` installs `.github/workflows/visual-agent-quality-gate.yml`,
+`install-ci-templates` installs `.github/workflows/checkpoint-quality-gate.yml`,
 `scripts/quality_gate.ps1`, and `scripts/quality_gate.bat` so local and CI
 release checks call the same risk policy check and `quality-gate` entrypoints.
 

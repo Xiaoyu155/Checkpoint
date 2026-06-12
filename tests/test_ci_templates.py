@@ -26,7 +26,7 @@ def test_install_ci_templates_writes_quality_gate_files(tmp_path) -> None:
     assert result.quality_gate_command == "python -m visual_agent.cli quality-gate --profile ci --workspace-root .agent-workspace --run"
     assert result.cloud_server_command == (
         "python -m visual_agent.cli cloud-server --workspace-root .agent-workspace "
-        "--host 0.0.0.0 --port 7890 --api-key-env VISUAL_AGENT_CLOUD_SERVER_API_KEY"
+        "--host 0.0.0.0 --port 7890 --api-key-env CHECKPOINT_CLOUD_SERVER_API_KEY"
     )
     assert result.cloud_run_command == (
         "python -m visual_agent.cli cloud-run --workspace-root .agent-workspace --workflow checkout "
@@ -41,10 +41,10 @@ def test_install_ci_templates_writes_quality_gate_files(tmp_path) -> None:
     assert "workspace-risk-policy-check --root .agent-workspace" in workflow
     assert "verify --workspace-root .agent-workspace --tags fast --max-workflows 5 --run-profile dry-run --wait-lock --format json" in workflow
     assert "quality-gate --profile ci --workspace-root .agent-workspace --run --fail-on-risk-policy-error --fail-on-secret-leak --ci --junit-output .runs/quality_gates/junit.xml" in workflow
-    assert "VISUAL_AGENT_CLOUD_ENDPOINT" in workflow
-    assert "VISUAL_AGENT_CLOUD_API_KEY" in workflow
+    assert "CHECKPOINT_CLOUD_ENDPOINT" in workflow
+    assert "CHECKPOINT_CLOUD_API_KEY" in workflow
     assert "cloud-run --workspace-root .agent-workspace" in workflow
-    assert "VISUAL_AGENT_CLOUD_SERVER_API_KEY" not in workflow
+    assert "CHECKPOINT_CLOUD_SERVER_API_KEY" not in workflow
     assert "schema_version: 1" in result.github_config.read_text(encoding="utf-8")
     assert "pre_push:" in result.github_config.read_text(encoding="utf-8")
     assert "quality-gate --profile ci --workspace-root .agent-workspace --run --fail-on-risk-policy-error --fail-on-secret-leak --ci --junit-output .runs/quality_gates/junit.xml" in result.pre_push_hook.read_text(encoding="utf-8")
@@ -78,14 +78,14 @@ def test_install_ci_templates_cli(tmp_path, capsys) -> None:
     output = capsys.readouterr().out
 
     assert exit_code == 0
-    assert "visual-agent-quality-gate.yml" in output
+    assert "checkpoint-quality-gate.yml" in output
     assert "risk_policy_check_command" in output
     assert "cloud_server_command" in output
     assert "cloud_run_command" in output
     assert "hook_setup_command" in output
     assert "workspace-risk-policy-plan --root workspace" in output
-    assert (tmp_path / ".github" / "workflows" / "visual-agent-quality-gate.yml").exists()
-    assert (tmp_path / ".github" / "visual-agent.yml").exists()
+    assert (tmp_path / ".github" / "workflows" / "checkpoint-quality-gate.yml").exists()
+    assert (tmp_path / ".github" / "checkpoint.yml").exists()
     assert (tmp_path / ".githooks" / "pre-push").exists()
     assert (tmp_path / "scripts" / "quality_gate.ps1").exists()
 
