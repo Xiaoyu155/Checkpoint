@@ -18,6 +18,7 @@ model_api_keys.txt
 .agent-workspace/workflow_index.json
 .agent-workspace/repair_history.jsonl
 .agent-workspace/workflows/external_samples/
+.agent-workspace/workflows/.cloud_inline/
 .agent-workspace/browser-checks/
 .visual-agent-status.md
 smoke_results/

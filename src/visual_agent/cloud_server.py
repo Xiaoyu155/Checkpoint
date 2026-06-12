@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -12,10 +12,55 @@ from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from .console import build_report_detail
+from .env import env_get
 from .models import to_jsonable
-from .security import scrub_secrets
+from .run_profile import run_profile_privilege
+from .security import is_loopback_host, scrub_secrets
 from .workspace import Workspace, load_workspace_report_index, open_workspace, run_workspace_workflow, workspace_report_access_payload, write_workspace_report_index
 from .workflow import parse_workflow_file
+
+
+class CloudRequestError(ValueError):
+    """A client request that must be rejected with HTTP 400 rather than executed."""
+
+    def __init__(self, message: str, *, reason: str = "invalid_request") -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class CloudServerConfigError(ValueError):
+    """A server configuration that is unsafe to start."""
+
+
+@dataclass(frozen=True)
+class CloudRunRequest:
+    workspace: Workspace
+    run_profile: str
+    workflow_name: str
+    workflow_source: str
+    workflow_id: str
+    inputs: dict[str, Any]
+    temporary_workflow_path: Path | None = None
+
+    @classmethod
+    def from_payload(cls, server: CloudRunHTTPServer, payload: dict[str, Any]) -> "CloudRunRequest":
+        workspace = resolve_request_workspace(server, payload)
+        run_profile = resolve_request_run_profile(server, payload)
+        workflow_name, temporary_workflow_path = materialize_request_workflow(workspace, payload)
+        workflow_source = str(payload.get("workflow_source") or ("inline" if temporary_workflow_path else "workspace"))
+        workflow_id = str(payload.get("workflow_id") or "")
+        inputs = payload.get("inputs")
+        if not isinstance(inputs, dict) or "provided" in inputs:
+            inputs = {}
+        return cls(
+            workspace=workspace,
+            run_profile=run_profile,
+            workflow_name=workflow_name,
+            workflow_source=workflow_source,
+            workflow_id=workflow_id,
+            inputs=inputs,
+            temporary_workflow_path=temporary_workflow_path,
+        )
 
 
 class CloudRunHTTPServer(ThreadingHTTPServer):
@@ -157,6 +202,13 @@ class CloudRunRequestHandler(BaseHTTPRequestHandler):
         try:
             body = self.read_json()
             payload = execute_cloud_run_request(self.server, body)
+        except CloudRequestError as exc:
+            payload = {
+                "schema_version": 1,
+                "status": "rejected",
+                "reason": exc.reason,
+                "message": str(scrub_secrets(str(exc)))[:500],
+            }
         except Exception as exc:
             payload = {"status": "failed", "message": str(scrub_secrets(str(exc)))[:500]}
         http_status = 200 if payload.get("status") in {"success", "failed"} else 400
@@ -305,23 +357,57 @@ def append_cloud_server_audit(server: CloudRunHTTPServer, event: dict[str, Any])
         return
 
 
+def resolve_request_workspace(server: CloudRunHTTPServer, request: dict[str, Any]) -> Workspace:
+    """Open the server's workspace, rejecting any client attempt to target another path.
+
+    The server is bound to a single workspace root. Honoring an arbitrary client-supplied
+    path would allow reads/writes (including materialized workflow YAML) outside that root.
+    """
+    requested = request.get("workspace")
+    if requested in (None, ""):
+        return open_workspace(server.workspace_root)
+    try:
+        resolved = Path(str(requested)).resolve()
+    except (OSError, ValueError):
+        raise CloudRequestError("Invalid workspace path.", reason="workspace_forbidden")
+    if resolved != server.workspace_root:
+        raise CloudRequestError(
+            "Request workspace must match the server workspace root.",
+            reason="workspace_forbidden",
+        )
+    return open_workspace(server.workspace_root)
+
+
+def resolve_request_run_profile(server: CloudRunHTTPServer, request: dict[str, Any]) -> str:
+    """Return a validated run profile that does not exceed the server-configured default."""
+    default = str(server.default_run_profile or "dry-run")
+    requested = str(request.get("run_profile") or default).strip() or default
+    try:
+        requested_privilege = run_profile_privilege(requested)
+        permitted = run_profile_privilege(default)
+    except ValueError:
+        raise CloudRequestError(f"Unsupported run_profile: {requested}", reason="invalid_run_profile")
+    if requested_privilege > permitted:
+        raise CloudRequestError(
+            f"Requested run_profile '{requested}' exceeds server-permitted '{default}'.",
+            reason="run_profile_forbidden",
+        )
+    return requested
+
+
 def execute_cloud_run_request(server: CloudRunHTTPServer, request: dict[str, Any]) -> dict[str, Any]:
-    workspace = open_workspace(request.get("workspace") or server.workspace_root)
-    workflow_name = materialize_request_workflow(workspace, request)
-    run_profile = str(request.get("run_profile") or server.default_run_profile or "dry-run")
-    workflow_source = str(request.get("workflow_source") or ("inline" if str(request.get("workflow_yaml") or "").strip() else "workspace"))
-    workflow_id = str(request.get("workflow_id") or "")
-    inputs = request.get("inputs")
-    if not isinstance(inputs, dict) or "provided" in inputs:
-        inputs = {}
-    result = run_workspace_workflow(
-        workspace,
-        workflow_name,
-        inputs=inputs,
-        dry_run=run_profile == "dry-run",
-        run_profile=run_profile,
-        export_report=True,
-    )
+    cloud_request = CloudRunRequest.from_payload(server, request)
+    try:
+        result = run_workspace_workflow(
+            cloud_request.workspace,
+            cloud_request.workflow_name,
+            inputs=cloud_request.inputs,
+            dry_run=cloud_request.run_profile == "dry-run",
+            run_profile=cloud_request.run_profile,
+            export_report=True,
+        )
+    finally:
+        cleanup_temporary_workflow(cloud_request.temporary_workflow_path)
     failed_steps = [step for step in result.steps if getattr(step.status, "value", str(step.status)) == "failed"]
     status = "failed" if failed_steps else "success"
     payload = {
@@ -329,8 +415,8 @@ def execute_cloud_run_request(server: CloudRunHTTPServer, request: dict[str, Any
         "status": status,
         "run_id": result.run_id,
         "workflow_name": result.workflow_name,
-        "workflow_source": workflow_source,
-        "workflow_id": workflow_id,
+        "workflow_source": cloud_request.workflow_source,
+        "workflow_id": cloud_request.workflow_id,
         "run_profile": result.run_profile,
         "report_url": f"/v1/run/{result.run_id}",
         "steps_passed": sum(1 for step in result.steps if getattr(step.status, "value", str(step.status)) in {"success", "dry_run"}),
@@ -339,7 +425,7 @@ def execute_cloud_run_request(server: CloudRunHTTPServer, request: dict[str, Any
         "failed_step": failed_steps[0].id if failed_steps else "",
     }
     server.runs[result.run_id] = payload
-    retention = prune_cloud_server_reports(server, workspace)
+    retention = prune_cloud_server_reports(server, cloud_request.workspace)
     if retention["enabled"]:
         payload["retention"] = retention
     return payload
@@ -570,17 +656,44 @@ def normalize_filter_value(value: str | None) -> str | None:
     return text or None
 
 
-def materialize_request_workflow(workspace: Workspace, request: dict[str, Any]) -> str:
+def materialize_request_workflow(workspace: Workspace, request: dict[str, Any]) -> tuple[str, Path | None]:
     workflow_yaml = request.get("workflow_yaml")
     if isinstance(workflow_yaml, str) and workflow_yaml.strip():
         workflow_id = uuid4().hex[:8]
-        path = workspace.workflows_dir / f"cloud_request_{workflow_id}.yaml"
+        inline_dir = workspace.workflows_dir / ".cloud_inline"
+        inline_dir.mkdir(parents=True, exist_ok=True)
+        path = inline_dir / f"cloud_request_{workflow_id}.yaml"
         path.write_text(workflow_yaml.rstrip() + "\n", encoding="utf-8")
-        return parse_workflow_file(path).name
+        parse_workflow_file(path)
+        return path.relative_to(workspace.workflows_dir).as_posix(), path
     workflow_name = str(request.get("workflow_name") or request.get("workflow") or "").strip()
     if not workflow_name:
         raise ValueError("Request requires workflow_name or workflow_yaml.")
-    return workflow_name
+    return workflow_name, None
+
+
+def cleanup_temporary_workflow(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return
+    try:
+        path.parent.rmdir()
+    except OSError:
+        return
+
+
+def validate_cloud_server_auth_config(*, host: str, api_key: str = "", required_org: str = "") -> None:
+    if is_loopback_host(host):
+        return
+    if api_key or required_org:
+        return
+    raise CloudServerConfigError(
+        "Refusing to start cloud server on a non-loopback host without api_key or required_org. "
+        "Bind to 127.0.0.1 for local-only development, or configure authentication."
+    )
 
 
 def create_cloud_server(
@@ -595,6 +708,7 @@ def create_cloud_server(
     retention_max_reports: int = 0,
     retention_days: float = 0.0,
 ) -> CloudRunHTTPServer:
+    validate_cloud_server_auth_config(host=host, api_key=api_key, required_org=required_org)
     return CloudRunHTTPServer(
         (host, int(port)),
         workspace_root,
@@ -620,7 +734,8 @@ def serve_cloud_server(
     retention_max_reports: int = 0,
     retention_days: float = 0.0,
 ) -> None:
-    resolved_api_key = api_key or str(os.environ.get(api_key_env) or "")
+    resolved_api_key = api_key or str(env_get(api_key_env) or "")
+    validate_cloud_server_auth_config(host=host, api_key=resolved_api_key, required_org=required_org)
     server = create_cloud_server(
         workspace_root=workspace_root,
         host=host,

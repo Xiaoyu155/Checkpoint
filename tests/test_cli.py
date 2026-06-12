@@ -3,6 +3,7 @@
 import json
 import subprocess
 import socketserver
+import sys
 import time
 from pathlib import Path
 from threading import Thread
@@ -55,9 +56,22 @@ def test_version_flag_prints_runtime_info(capsys) -> None:
 
     assert code == 0
     assert "visual-agent 0.1.0" in output
+    assert "Product: Checkpoint" in output
     assert "Python:" in output
     assert "Playwright:" in output
     assert "System:" in output
+
+
+def test_checkpoint_entrypoint_prints_brand_aligned_version(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["checkpoint", "--version"])
+
+    code = main()
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert "checkpoint 0.1.0" in output
+    assert "Product: Checkpoint" in output
+    assert "Package: visual-agent" in output
 
 
 def test_codex_check_cli_returns_one_when_any_workflow_fails(tmp_path, capsys, monkeypatch) -> None:
@@ -326,6 +340,31 @@ def test_init_short_alias_uses_default_root(tmp_path: Path, capsys, monkeypatch)
 
     assert code == 0
     assert payload["root"] == str((tmp_path / ".agent-workspace").resolve())
+
+
+def test_workspace_run_outputs_markdown_when_requested(tmp_path: Path, capsys) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace")
+
+    code = main(
+        [
+            "workspace-run",
+            "--root",
+            str(workspace.root),
+            "--workflow",
+            "local_html_form_workflow",
+            "--inputs-file",
+            "demo_login.json",
+            "--run-profile",
+            "dry-run",
+            "--format",
+            "markdown",
+        ]
+    )
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert "# Run Report: local_html_form_workflow" in output
+    assert "- Status: `success`" in output
 
 
 def test_model_credentials_inspect_suggests_anthropic_fallback(tmp_path: Path, capsys) -> None:

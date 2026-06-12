@@ -109,6 +109,18 @@ def test_validate_workflow_url_allows_localhost_and_public_urls() -> None:
     assert reason_public is None
 
 
+def test_validate_workflow_url_allows_loopback_ips() -> None:
+    # The documented verify-impl flow targets http://127.0.0.1:<port>; loopback must be
+    # allowed for consistency with the "localhost" host name.
+    ok_ipv4, reason_ipv4 = validate_workflow_url("http://127.0.0.1:5173/login")
+    ok_ipv6, reason_ipv6 = validate_workflow_url("http://[::1]:5173/login")
+
+    assert ok_ipv4 is True
+    assert reason_ipv4 is None
+    assert ok_ipv6 is True
+    assert reason_ipv6 is None
+
+
 def test_validate_workflow_url_blocks_private_and_reserved_hosts() -> None:
     blocked_private = validate_workflow_url("http://192.168.0.10/login")
     blocked_link_local = validate_workflow_url("http://169.254.169.254/latest/meta-data")

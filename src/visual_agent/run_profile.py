@@ -5,6 +5,9 @@ from typing import Literal
 
 
 RunProfileName = Literal["dry-run", "supervised", "semi-auto", "approved"]
+RUN_PROFILE_ORDER: tuple[RunProfileName, ...] = ("dry-run", "supervised", "semi-auto", "approved")
+RUN_PROFILE_CHOICES = list(RUN_PROFILE_ORDER)
+SAFE_RUN_PROFILE_CHOICES = list(RUN_PROFILE_ORDER[:-1])
 
 HIGH_RISK_ACTIONS = {"save_storage_state"}
 MUTATING_ACTIONS = {
@@ -55,6 +58,13 @@ RUN_PROFILES = {
         allow_high_risk=True,
     ),
 }
+
+
+def run_profile_privilege(name: str) -> int:
+    normalized = name.strip().lower()
+    if normalized not in RUN_PROFILES:
+        raise ValueError(f"Unsupported run profile: {name}")
+    return RUN_PROFILE_ORDER.index(normalized)  # type: ignore[arg-type]
 
 
 def normalize_run_profile(value: str | None, *, dry_run: bool = True) -> RunProfileName:

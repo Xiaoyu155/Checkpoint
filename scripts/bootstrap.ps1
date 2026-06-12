@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("all", "python", "venv", "install", "extras", "browsers", "workspace", "mcp-config")]
+    [ValidateSet("all", "python", "venv", "install", "extras", "browsers", "workspace", "mcp-config", "smoke")]
     [string]$Step = "all",
     [string]$Python = "python",
     [string]$Extras = "web,mcp",
@@ -162,6 +162,28 @@ function Write-McpConfig {
     Write-Host "  $cursorPath"
 }
 
+function Run-OnboardingSmoke {
+    if (-not (Test-Path $VenvPython)) {
+        Ensure-Venv
+    }
+    if (-not (Test-Path (Join-Path $WorkspacePath "workspace.json"))) {
+        Initialize-Workspace
+    }
+    Push-Location $RepoRoot
+    try {
+        & $VenvPython -m visual_agent.cli doctor
+        if ($LASTEXITCODE -ne 0) {
+            throw "doctor failed."
+        }
+        & $VenvPython -m visual_agent.cli demo-workspace-check --root $WorkspaceRoot --format markdown
+        if ($LASTEXITCODE -ne 0) {
+            throw "demo-workspace-check failed."
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
 if ($Step -eq "python" -or $Step -eq "all") {
     Invoke-Step "python" { Test-PythonVersion }
 }
@@ -190,11 +212,17 @@ if ($Step -eq "mcp-config" -or $Step -eq "all") {
     Invoke-Step "mcp-config" { Write-McpConfig }
 }
 
+if ($Step -eq "smoke" -or $Step -eq "all") {
+    Invoke-Step "smoke" { Run-OnboardingSmoke }
+}
+
 Write-Host ""
 Write-Host "Bootstrap step '$Step' completed."
 if ($Step -eq "all") {
     Write-Host "Next steps:"
-    Write-Host "  .\.venv\Scripts\python.exe -m visual_agent.cli demo-workspace-check --root $WorkspaceRoot --format markdown"
     Write-Host "  .\.venv\Scripts\python.exe -m visual_agent.cli mcp-smoke --workspace-root $WorkspaceRoot --format markdown"
     Write-Host "  .\.venv\Scripts\python.exe -m visual_agent.cli workspace-gui --root $WorkspaceRoot"
+} elseif ($Step -ne "smoke") {
+    Write-Host "Smoke check:"
+    Write-Host "  powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 -Step smoke"
 }

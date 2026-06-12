@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import json
 import importlib.util
-import os
 from pathlib import Path
 import re
 from typing import Any
@@ -12,6 +11,7 @@ import urllib.request
 from PIL import Image
 
 from .capture import apply_capture_region, capture_visual_region
+from .env import env_get
 from .model_credentials import (
     normalize_provider,
     resolve_model_provider_config,
@@ -509,16 +509,16 @@ def detect_cloud_vision_backend(params: dict[str, Any] | None = None) -> dict[st
     params = params or {}
     provider = normalize_provider(
         params.get("provider")
-        or os.environ.get("VISUAL_AGENT_VLM_PROVIDER")
-        or os.environ.get("VISUAL_AGENT_MODEL_PROVIDER")
+        or env_get("VISUAL_AGENT_VLM_PROVIDER")
+        or env_get("VISUAL_AGENT_MODEL_PROVIDER")
         or "openai"
     )
     config = resolve_model_provider_config(
-        source=params.get("credential_source") or os.environ.get("VISUAL_AGENT_VLM_CREDENTIAL_FILE"),
+        source=params.get("credential_source") or env_get("VISUAL_AGENT_VLM_CREDENTIAL_FILE"),
         preferred_provider=provider,
-        api_key=str(params.get("api_key") or os.environ.get("VISUAL_AGENT_VLM_API_KEY") or ""),
-        base_url=str(params.get("base_url") or os.environ.get("VISUAL_AGENT_VLM_BASE_URL") or ""),
-        model=str(params.get("model") or os.environ.get("VISUAL_AGENT_VLM_MODEL") or ""),
+        api_key=str(params.get("api_key") or env_get("VISUAL_AGENT_VLM_API_KEY") or ""),
+        base_url=str(params.get("base_url") or env_get("VISUAL_AGENT_VLM_BASE_URL") or ""),
+        model=str(params.get("model") or env_get("VISUAL_AGENT_VLM_MODEL") or ""),
     )
     blockers = list(config.get("blockers") or [])
     return {

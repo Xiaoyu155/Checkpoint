@@ -104,12 +104,18 @@ def suggest_workflow_repair(
     max_chars: int = MAX_EVIDENCE_CHARS,
     apply: bool = False,
     min_confidence: float = 0.75,
-    verify: bool = False,
+    rerun_verification: bool = False,
     verify_run_profile: str = "dry-run",
     inputs_file: str | None = None,
     rollback_on_fail: bool = False,
     candidate_id: str | None = None,
+    **legacy_options: Any,
 ) -> dict[str, Any]:
+    if "verify" in legacy_options:
+        rerun_verification = bool(legacy_options.pop("verify"))
+    if legacy_options:
+        unknown = ", ".join(sorted(str(key) for key in legacy_options))
+        raise TypeError(f"Unsupported repair option(s): {unknown}")
     evidence = build_failure_evidence_pack(workspace_root, run_id=run_id, max_chars=max_chars)
     if evidence.get("status") != "found":
         return evidence
@@ -122,7 +128,7 @@ def suggest_workflow_repair(
             repair=repair,
             apply=apply,
             min_confidence=min_confidence,
-            verify=verify,
+            rerun_verification=rerun_verification,
             verify_run_profile=verify_run_profile,
             inputs_file=inputs_file,
             rollback_on_fail=rollback_on_fail,
@@ -193,7 +199,7 @@ def auto_repair_failure(
                 max_chars=max_chars,
                 apply=False,
                 min_confidence=effective_min_confidence,
-                verify=False,
+                rerun_verification=False,
                 verify_run_profile=verify_run_profile,
                 inputs_file=inputs_file,
                 rollback_on_fail=False,
@@ -227,7 +233,7 @@ def auto_repair_failure(
         max_chars=max_chars,
         apply=not dry_run,
         min_confidence=effective_min_confidence,
-        verify=not dry_run,
+        rerun_verification=not dry_run,
         verify_run_profile=verify_run_profile,
         inputs_file=inputs_file,
         rollback_on_fail=not dry_run,
@@ -631,7 +637,7 @@ def build_workflow_repair_plan(
     repair: dict[str, Any] | None = None,
     apply: bool = False,
     min_confidence: float = 0.75,
-    verify: bool = False,
+    rerun_verification: bool = False,
     verify_run_profile: str = "dry-run",
     inputs_file: str | None = None,
     rollback_on_fail: bool = False,
@@ -648,7 +654,7 @@ def build_workflow_repair_plan(
             "confidence": confidence,
             "applied": False,
             "apply_requested": bool(apply),
-            "verify_requested": bool(verify),
+            "verify_requested": bool(rerun_verification),
             "rollback_on_fail": bool(rollback_on_fail),
         }
     if plan.get("status") != "proposed":
@@ -657,7 +663,7 @@ def build_workflow_repair_plan(
             "candidate_id": selected_candidate_id or "manual_investigation",
             "applied": False,
             "apply_requested": bool(apply),
-            "verify_requested": bool(verify),
+            "verify_requested": bool(rerun_verification),
             "rollback_on_fail": bool(rollback_on_fail),
         }
     plan = {
@@ -665,7 +671,7 @@ def build_workflow_repair_plan(
         "confidence": confidence,
         "candidate_id": selected_candidate_id or "deterministic_workflow_patch",
         "apply_requested": bool(apply),
-        "verify_requested": bool(verify),
+        "verify_requested": bool(rerun_verification),
         "rollback_on_fail": bool(rollback_on_fail),
         "applied": False,
     }
@@ -679,7 +685,7 @@ def build_workflow_repair_plan(
         }
     applied = apply_workflow_repair_plan(evidence, plan)
     merged = {**plan, **applied}
-    if verify and merged.get("applied") is True:
+    if rerun_verification and merged.get("applied") is True:
         merged["verification"] = verify_workflow_repair(
             evidence,
             run_profile=verify_run_profile,

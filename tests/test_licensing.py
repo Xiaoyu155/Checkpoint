@@ -70,6 +70,22 @@ def test_get_license_reads_env_tier(monkeypatch) -> None:
     assert check_feature("team_workspace") is True
 
 
+def test_get_license_prefers_checkpoint_env_tier(monkeypatch) -> None:
+    clear_license_env(monkeypatch)
+    monkeypatch.setenv("VISUAL_AGENT_LICENSE_TIER", "pro")
+    monkeypatch.setenv("VISUAL_AGENT_LICENSE_SEATS", "2")
+    monkeypatch.setenv("CHECKPOINT_LICENSE_TIER", "team")
+    monkeypatch.setenv("CHECKPOINT_LICENSE_SEATS", "4")
+    monkeypatch.setenv("CHECKPOINT_LICENSE_KEY", "checkpoint_test_secret")
+
+    license_ = get_license()
+
+    assert license_.tier == "team"
+    assert license_.seats == 4
+    assert license_.source == "env"
+    assert license_.key_present is True
+
+
 def test_get_license_reads_local_json_file(tmp_path: Path, monkeypatch) -> None:
     clear_license_env(monkeypatch)
     license_file = tmp_path / "license.json"
@@ -234,6 +250,22 @@ def test_cloud_config_status_reports_ready_without_exposing_key(monkeypatch) -> 
     assert status["org"] == "team-a"
     assert status["blockers"] == []
     assert "va_cloud_secret" not in str(status)
+
+
+def test_cloud_config_status_prefers_checkpoint_env(monkeypatch) -> None:
+    clear_cloud_env(monkeypatch)
+    monkeypatch.setenv("VISUAL_AGENT_CLOUD_ENDPOINT", "https://legacy.visualagent.test")
+    monkeypatch.setenv("CHECKPOINT_CLOUD_ENDPOINT", "https://checkpoint.visualagent.test")
+    monkeypatch.setenv("CHECKPOINT_CLOUD_API_KEY", "checkpoint_secret")
+    monkeypatch.setenv("CHECKPOINT_CLOUD_ORG", "team-checkpoint")
+
+    status = cloud_config_status()
+
+    assert status["available"] is True
+    assert status["endpoint"] == "https://checkpoint.visualagent.test"
+    assert status["api_key_present"] is True
+    assert status["org"] == "team-checkpoint"
+    assert "checkpoint_secret" not in str(status)
 
 
 def test_remote_workflow_request_blocks_when_cloud_config_missing(tmp_path: Path, monkeypatch) -> None:
@@ -738,11 +770,17 @@ def test_http_transport_exhausted_5xx_retries_do_not_record_usage(tmp_path: Path
 def clear_license_env(monkeypatch) -> None:
     for name in (
         "VISUAL_AGENT_LICENSE_TIER",
+        "CHECKPOINT_LICENSE_TIER",
         "VISUAL_AGENT_LICENSE_SEATS",
+        "CHECKPOINT_LICENSE_SEATS",
         "VISUAL_AGENT_LICENSE_EXPIRES_AT",
+        "CHECKPOINT_LICENSE_EXPIRES_AT",
         "VISUAL_AGENT_LICENSE_KEY",
+        "CHECKPOINT_LICENSE_KEY",
         "VISUAL_AGENT_LICENSE_FILE",
+        "CHECKPOINT_LICENSE_FILE",
         "VISUAL_AGENT_HOME",
+        "CHECKPOINT_HOME",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -750,8 +788,11 @@ def clear_license_env(monkeypatch) -> None:
 def clear_cloud_env(monkeypatch) -> None:
     for name in (
         "VISUAL_AGENT_CLOUD_ENDPOINT",
+        "CHECKPOINT_CLOUD_ENDPOINT",
         "VISUAL_AGENT_CLOUD_API_KEY",
+        "CHECKPOINT_CLOUD_API_KEY",
         "VISUAL_AGENT_CLOUD_ORG",
+        "CHECKPOINT_CLOUD_ORG",
     ):
         monkeypatch.delenv(name, raising=False)
 

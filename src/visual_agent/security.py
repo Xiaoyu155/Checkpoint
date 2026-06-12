@@ -62,6 +62,16 @@ PRIVATE_IP_NETWORKS = tuple(
 )
 
 
+def is_loopback_host(host: str) -> bool:
+    value = str(host or "").strip().lower()
+    if value in PRIVATE_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
 def scrub_secrets(value: Any, *, extra_secrets: tuple[str, ...] | list[str] | set[str] = ()) -> Any:
     if isinstance(value, dict):
         cleaned: dict[str, Any] = {}
@@ -112,7 +122,7 @@ def validate_workflow_url(url: str) -> tuple[bool, str | None]:
     host = str(parsed.hostname or "").strip().lower()
     if not host:
         return False, "URL is missing a host."
-    if host in PRIVATE_HOSTS:
+    if is_loopback_host(host):
         return True, None
     try:
         ip = ipaddress.ip_address(host)
@@ -120,6 +130,6 @@ def validate_workflow_url(url: str) -> tuple[bool, str | None]:
         if host.endswith(".localhost") or any(host.endswith(suffix) for suffix in PRIVATE_HOST_SUFFIXES):
             return False, f"Blocked private host: {host}"
         return True, None
-    if any(ip in network for network in PRIVATE_IP_NETWORKS) or ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+    if any(ip in network for network in PRIVATE_IP_NETWORKS) or ip.is_private or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
         return False, f"Blocked private IP address: {host}"
     return True, None

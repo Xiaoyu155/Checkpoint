@@ -66,21 +66,25 @@ powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
 
 The bootstrap script checks Python, creates or reuses `.venv`, installs core dependencies, installs `[web,mcp]` extras, installs Playwright Chromium into `.pw-browsers`, initializes `.agent-workspace`, and writes MCP client config examples.
 
+Checkpoint's preferred CLI command is `checkpoint`. The legacy command `visual-agent` and `python -m visual_agent.cli` remain supported because the Python package is still named `visual-agent`.
+
 ## Quick Start
 
-From a source checkout, create a workspace and run the first verification loop:
+From a source checkout, create a workspace and run a fixed contract workflow:
 
 ```powershell
-.\.venv\Scripts\python.exe -m visual_agent.cli init --root .agent-workspace
-.\.venv\Scripts\python.exe -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify the current change" --run-profile dry-run --format markdown
-.\.venv\Scripts\python.exe -m visual_agent.cli show-status --workspace-root .agent-workspace
+.\.venv\Scripts\checkpoint.exe init --root .agent-workspace
+.\.venv\Scripts\checkpoint.exe workspace-run --root .agent-workspace --workflow local_html_form_workflow --inputs-file demo_login.json --run-profile dry-run --format markdown
+.\.venv\Scripts\checkpoint.exe show-status --workspace-root .agent-workspace
 ```
 
-`verify-impl` can infer a local app URL from `package.json`, `vite.config.*`, `next.config.*`, or `manifest.json`. You can also pass an explicit app URL or fixture:
+That is the recommended production loop: encode product promises in a workflow, then rerun that workflow after each code change.
+
+`verify-impl` is useful for drafting or exploring a workflow from git diff context. In large repositories, prefer `--no-untracked` and pass an explicit app URL or fixture when possible:
 
 ```powershell
-.\.venv\Scripts\python.exe -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify login redirects" --base-url http://127.0.0.1:5173 --run-profile dry-run --format markdown
-.\.venv\Scripts\python.exe -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify login fixture" --base-url fixtures/login_demo.html --run-profile dry-run --format markdown
+.\.venv\Scripts\checkpoint.exe verify-impl --workspace-root .agent-workspace --task-description "Verify login redirects" --base-url http://127.0.0.1:5173 --run-profile dry-run --format markdown --no-untracked
+.\.venv\Scripts\checkpoint.exe verify-impl --workspace-root .agent-workspace --task-description "Verify login fixture" --base-url fixtures/login_demo.html --run-profile dry-run --format markdown --no-untracked
 ```
 
 For real work, use one `.agent-workspace` per project. Multiple Codex/Cursor windows can use Checkpoint at the same time as long as each window points at its own project workspace.
@@ -89,7 +93,7 @@ For fast checks, target the relevant workflow instead of running every visual
 contract:
 
 ```powershell
-.\.venv\Scripts\python.exe -m visual_agent.cli verify --workspace-root .agent-workspace --workflow checkout_verification --wait-lock --format markdown
+.\.venv\Scripts\checkpoint.exe verify --workspace-root .agent-workspace --workflow checkout_verification --wait-lock --format markdown
 ```
 
 Run the supervised browser demo path with real Playwright fill/click actions:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from .env import env_get, env_present
 from .licensing import FeatureGatedError, get_license, monthly_feature_limit, require_feature
 from .security import scrub_secrets
 
@@ -19,10 +19,10 @@ MarketplaceTransport = Callable[[str], dict[str, Any]]
 
 
 def cloud_config_status() -> dict[str, Any]:
-    endpoint = str(os.environ.get("VISUAL_AGENT_CLOUD_ENDPOINT") or "").strip()
-    api_key_present = bool(os.environ.get("VISUAL_AGENT_CLOUD_API_KEY"))
-    org = str(os.environ.get("VISUAL_AGENT_CLOUD_ORG") or "").strip()
-    user_id = str(os.environ.get("VISUAL_AGENT_CLOUD_USER") or "").strip()
+    endpoint = str(env_get("VISUAL_AGENT_CLOUD_ENDPOINT") or "").strip()
+    api_key_present = env_present("VISUAL_AGENT_CLOUD_API_KEY")
+    org = str(env_get("VISUAL_AGENT_CLOUD_ORG") or "").strip()
+    user_id = str(env_get("VISUAL_AGENT_CLOUD_USER") or "").strip()
     blockers: list[str] = []
     if not endpoint:
         blockers.append("missing_endpoint")
@@ -194,10 +194,10 @@ def http_cloud_transport_from_env(
     retry_backoff_seconds: float = 0.0,
     opener: HttpOpener | None = None,
 ) -> CloudTransport | None:
-    endpoint = str(os.environ.get("VISUAL_AGENT_CLOUD_ENDPOINT") or "").strip()
-    api_key = str(os.environ.get("VISUAL_AGENT_CLOUD_API_KEY") or "").strip()
-    org = str(os.environ.get("VISUAL_AGENT_CLOUD_ORG") or "").strip()
-    user_id = str(os.environ.get("VISUAL_AGENT_CLOUD_USER") or "").strip()
+    endpoint = str(env_get("VISUAL_AGENT_CLOUD_ENDPOINT") or "").strip()
+    api_key = str(env_get("VISUAL_AGENT_CLOUD_API_KEY") or "").strip()
+    org = str(env_get("VISUAL_AGENT_CLOUD_ORG") or "").strip()
+    user_id = str(env_get("VISUAL_AGENT_CLOUD_USER") or "").strip()
     if not endpoint or not api_key:
         return None
     return build_http_cloud_transport(
@@ -213,10 +213,10 @@ def http_cloud_transport_from_env(
 
 
 def marketplace_config_status() -> dict[str, Any]:
-    endpoint = str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_ENDPOINT") or "").strip()
-    api_key_present = bool(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_API_KEY"))
-    org = str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_ORG") or "").strip()
-    user_id = str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_USER") or "").strip()
+    endpoint = str(env_get("VISUAL_AGENT_CLOUD_MARKETPLACE_ENDPOINT") or "").strip()
+    api_key_present = env_present("VISUAL_AGENT_CLOUD_MARKETPLACE_API_KEY")
+    org = str(env_get("VISUAL_AGENT_CLOUD_MARKETPLACE_ORG") or "").strip()
+    user_id = str(env_get("VISUAL_AGENT_CLOUD_MARKETPLACE_USER") or "").strip()
     blockers: list[str] = []
     if not endpoint:
         blockers.append("missing_endpoint")
@@ -277,14 +277,14 @@ def http_marketplace_transport_from_env(
     timeout_seconds: float = 30.0,
     opener: HttpOpener | None = None,
 ) -> MarketplaceTransport | None:
-    endpoint = str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_ENDPOINT") or "").strip()
+    endpoint = str(env_get("VISUAL_AGENT_CLOUD_MARKETPLACE_ENDPOINT") or "").strip()
     if not endpoint:
         return None
     return build_http_marketplace_transport(
         endpoint=endpoint,
-        api_key=str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_API_KEY") or "").strip(),
-        org=str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_ORG") or "").strip(),
-        user_id=str(os.environ.get("VISUAL_AGENT_CLOUD_MARKETPLACE_USER") or "").strip(),
+        api_key=str(env_get("VISUAL_AGENT_CLOUD_MARKETPLACE_API_KEY") or "").strip(),
+        org=str(env_get("VISUAL_AGENT_CLOUD_MARKETPLACE_ORG") or "").strip(),
+        user_id=str(env_get("VISUAL_AGENT_CLOUD_MARKETPLACE_USER") or "").strip(),
         timeout_seconds=timeout_seconds,
         opener=opener,
     )

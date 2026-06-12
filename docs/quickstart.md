@@ -8,10 +8,17 @@ failure diagnostics, queues, and reports stored on your machine.
 
 Run the bootstrap script from the project root. It sets up the virtual
 environment, installs dependencies, installs Playwright Chromium, initializes
-`.agent-workspace`, and writes example MCP client configs.
+`.agent-workspace`, writes example MCP client configs, then runs `doctor` and
+an offline demo workflow as an onboarding smoke check.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1
+```
+
+If you only want to rerun the final onboarding check:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 -Step smoke
 ```
 
 To install manually into an existing virtual environment:
@@ -21,29 +28,37 @@ pip install -e .[web,mcp]
 python -m playwright install chromium
 ```
 
+The product is Checkpoint. The preferred CLI command is `checkpoint`; the
+legacy `visual-agent` command and `python -m visual_agent.cli` still work for
+compatibility with existing scripts.
+
 ## First Three Commands
 
-From a fresh checkout, use these commands in order:
+From a fresh checkout, use these commands in order to run a fixed contract
+workflow:
 
 ```powershell
-python -m visual_agent.cli init --root .agent-workspace
-python -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify the current change" --run-profile dry-run --format markdown
-python -m visual_agent.cli show-status --workspace-root .agent-workspace
+checkpoint init --root .agent-workspace
+checkpoint workspace-run --root .agent-workspace --workflow local_html_form_workflow --inputs-file demo_login.json --run-profile dry-run --format markdown
+checkpoint show-status --workspace-root .agent-workspace
 ```
 
-`verify-impl` can infer a local app URL from `package.json`, `vite.config.*`,
-`next.config.*`, or `manifest.json`. You can also pass an explicit app URL or
-fixture:
+This is the recommended loop for real work: write the page or workflow promises
+as assertions, then rerun the same workflow after each code change.
+
+`verify-impl` can draft or explore a workflow from git diff context. In large
+repositories, use `--no-untracked` and pass an explicit app URL or fixture when
+possible:
 
 ```powershell
-python -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify login redirects" --base-url http://127.0.0.1:5173 --run-profile dry-run --format markdown
-python -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify login fixture" --base-url fixtures/login_demo.html --run-profile dry-run --format markdown
+checkpoint verify-impl --workspace-root .agent-workspace --task-description "Verify login redirects" --base-url http://127.0.0.1:5173 --run-profile dry-run --format markdown --no-untracked
+checkpoint verify-impl --workspace-root .agent-workspace --task-description "Verify login fixture" --base-url fixtures/login_demo.html --run-profile dry-run --format markdown --no-untracked
 ```
 
 ## Verify Your Setup
 
 ```powershell
-python -m visual_agent.cli doctor
+checkpoint doctor
 ```
 
 Look for `"dom_browser": true` in the `perception` section. OCR and VLM are
@@ -52,7 +67,7 @@ optional - most workflows work without them.
 ## Run A Dry-Run Demo
 
 ```powershell
-python -m visual_agent.cli workspace-run --root .agent-workspace --workflow local_html_form_workflow --inputs-file demo_login.json
+checkpoint workspace-run --root .agent-workspace --workflow local_html_form_workflow --inputs-file demo_login.json --format markdown
 ```
 
 This opens a local HTML fixture and runs the workflow in dry-run mode. No
@@ -73,8 +88,8 @@ D:\project-c\.agent-workspace
 From each project root:
 
 ```powershell
-python -m visual_agent.cli init --root .agent-workspace
-python -m visual_agent.cli show-status --workspace-root .agent-workspace
+checkpoint init --root .agent-workspace
+checkpoint show-status --workspace-root .agent-workspace
 ```
 
 `show-status` shows the workspace root, project root, and current failure or
@@ -87,7 +102,7 @@ Checkpoint stores the working context in the project workspace, not in the
 chat window. After reopening Codex or starting a new chat, run:
 
 ```powershell
-python -m visual_agent.cli context-snapshot --workspace-root .agent-workspace --format markdown
+checkpoint context-snapshot --workspace-root .agent-workspace --format markdown
 ```
 
 MCP clients should call `get_session_context` first. The snapshot shows recent

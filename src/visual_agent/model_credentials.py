@@ -8,6 +8,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from .env import env_get, provider_api_key_env_names
 
 DEFAULT_MODEL_CREDENTIAL_FILE = "model_api_keys.txt"
 DEFAULT_MODEL_PROVIDER = "openai"
@@ -81,8 +82,8 @@ def inspect_model_credentials(
     source: str | Path | None = None,
     preferred_provider: str | None = None,
 ) -> dict[str, Any]:
-    path = Path(source or os.environ.get("VISUAL_AGENT_MODEL_CREDENTIAL_FILE") or DEFAULT_MODEL_CREDENTIAL_FILE)
-    configured_preferred = preferred_provider or os.environ.get("VISUAL_AGENT_MODEL_PROVIDER")
+    path = Path(source or env_get("VISUAL_AGENT_MODEL_CREDENTIAL_FILE") or DEFAULT_MODEL_CREDENTIAL_FILE)
+    configured_preferred = preferred_provider or env_get("VISUAL_AGENT_MODEL_PROVIDER")
     preferred = normalize_provider(configured_preferred or DEFAULT_MODEL_PROVIDER)
     allow_auto_select = configured_preferred is None
     env_secret = load_provider_secret_from_env(preferred)
@@ -143,7 +144,7 @@ def model_credentials_suggestion(result: dict[str, Any]) -> str:
     if "gemini" in available:
         return "Gemini key detected, use --preferred gemini or choose a Gemini model such as --model gemini-1.5-flash."
     preferred = str(result.get("preferred_provider") or DEFAULT_MODEL_PROVIDER)
-    env_name = f"VISUAL_AGENT_{normalize_provider(preferred).upper()}_API_KEY"
+    env_name, _ = provider_api_key_env_names(normalize_provider(preferred))
     return f"No {preferred} key found. Add it to {result.get('source') or DEFAULT_MODEL_CREDENTIAL_FILE} or set {env_name}."
 
 
@@ -211,7 +212,7 @@ def resolve_model_provider_config(
     endpoint: str | None = None,
     api_key: str | None = None,
 ) -> dict[str, Any]:
-    provider = normalize_provider(preferred_provider or os.environ.get("VISUAL_AGENT_MODEL_PROVIDER") or DEFAULT_MODEL_PROVIDER)
+    provider = normalize_provider(preferred_provider or env_get("VISUAL_AGENT_MODEL_PROVIDER") or DEFAULT_MODEL_PROVIDER)
     credentials = inspect_model_credentials(source=source, preferred_provider=provider)
     selected_provider = credentials.get("selected_provider") or provider
     credential_source = Path(str(credentials.get("source") or source or DEFAULT_MODEL_CREDENTIAL_FILE))
@@ -410,8 +411,10 @@ def load_provider_secret(path: Path, provider: str) -> str | None:
 
 def load_provider_secret_from_env(provider: str) -> str | None:
     normalized = normalize_provider(provider)
+    checkpoint_name, legacy_name = provider_api_key_env_names(normalized)
     names = [
-        f"VISUAL_AGENT_{normalized.upper()}_API_KEY",
+        checkpoint_name,
+        legacy_name,
         f"{normalized.upper()}_API_KEY",
     ]
     if normalized == "openai":

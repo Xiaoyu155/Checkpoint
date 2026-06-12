@@ -3,13 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import base64
 import json
-import os
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Protocol
 
 from PIL import Image
+
+from .env import env_get
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,7 @@ class OmniParserVisionLocator:
 
     @classmethod
     def from_env(cls) -> "OmniParserVisionLocator":
-        endpoint = os.environ.get("VISUAL_AGENT_OMNIPARSER_ENDPOINT", "").strip()
+        endpoint = str(env_get("VISUAL_AGENT_OMNIPARSER_ENDPOINT", "") or "").strip()
         if not endpoint:
             raise RuntimeError(
                 "VISUAL_AGENT_OMNIPARSER_ENDPOINT is not set. Configure an OmniParser-compatible HTTP endpoint "

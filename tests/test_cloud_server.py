@@ -7,8 +7,17 @@ from time import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+import pytest
+
 from visual_agent.cloud import build_http_cloud_transport
-from visual_agent.cloud_server import create_cloud_server
+from visual_agent.cloud_server import (
+    CloudServerConfigError,
+    CloudRequestError,
+    create_cloud_server,
+    resolve_request_run_profile,
+    resolve_request_workspace,
+)
+from visual_agent.workspace import discover_workflows
 from visual_agent.workspace import init_workspace
 
 
@@ -135,6 +144,42 @@ steps:
     assert payload["workflow_id"] == "wf_000123"
     assert run_payload["workflow_source"] == "marketplace"
     assert run_payload["workflow_id"] == "wf_000123"
+
+
+def test_cloud_server_inline_workflow_is_cleaned_up(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    (workspace.fixtures_dir / "ready.html").write_text("<p>Ready</p>", encoding="utf-8")
+    workflow_yaml = """
+schema_version: 1
+name: inline_ready
+version: 1
+steps:
+  - id: observe
+    action: observe_html
+    path: fixtures/ready.html
+  - id: assert_ready
+    action: assert_text
+    text: Ready
+""".strip()
+    server = create_cloud_server(workspace_root=workspace.root, port=0)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        endpoint = f"http://127.0.0.1:{server.server_port}/v1/run"
+        body = json.dumps({"workflow_yaml": workflow_yaml, "workspace": str(workspace.root), "run_profile": "dry-run"}).encode("utf-8")
+        request = Request(endpoint, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        with urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    assert payload["status"] == "success"
+    assert payload["workflow_source"] == "inline"
+    assert not list(workspace.workflows_dir.glob("cloud_request_*.yaml"))
+    assert not list((workspace.workflows_dir / ".cloud_inline").glob("cloud_request_*.yaml"))
+    assert all(".cloud_inline" not in ref.relative_path for ref in discover_workflows(workspace, include_slow=True))
 
 
 def test_cloud_server_report_detail_respects_history_gate(tmp_path, monkeypatch) -> None:
@@ -592,3 +637,52 @@ steps:
     assert payload["status"] == "success"
     assert payload["run_id"]
     assert payload["report_url"].startswith("/v1/run/")
+
+
+def test_resolve_request_workspace_rejects_foreign_path(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    server = create_cloud_server(workspace_root=workspace.root, port=0)
+    try:
+        # Matching path (resolved) is accepted.
+        opened = resolve_request_workspace(server, {"workspace": str(workspace.root)})
+        assert opened.root == server.workspace_root
+        # An arbitrary client path is rejected rather than opened.
+        foreign = tmp_path / "elsewhere"
+        foreign.mkdir()
+        with pytest.raises(CloudRequestError) as excinfo:
+            resolve_request_workspace(server, {"workspace": str(foreign)})
+        assert excinfo.value.reason == "workspace_forbidden"
+    finally:
+        server.server_close()
+
+
+def test_resolve_request_run_profile_clamps_to_server_default(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    server = create_cloud_server(workspace_root=workspace.root, port=0, run_profile="dry-run")
+    try:
+        assert resolve_request_run_profile(server, {"run_profile": "dry-run"}) == "dry-run"
+        # A more privileged profile than the server default is rejected.
+        with pytest.raises(CloudRequestError) as excinfo:
+            resolve_request_run_profile(server, {"run_profile": "approved"})
+        assert excinfo.value.reason == "run_profile_forbidden"
+        # An unknown profile string is rejected instead of flowing into execution.
+        with pytest.raises(CloudRequestError) as unknown:
+            resolve_request_run_profile(server, {"run_profile": "root"})
+        assert unknown.value.reason == "invalid_run_profile"
+    finally:
+        server.server_close()
+
+
+def test_cloud_server_rejects_non_loopback_without_auth(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    with pytest.raises(CloudServerConfigError):
+        create_cloud_server(workspace_root=workspace.root, host="0.0.0.0", port=0)
+
+
+def test_cloud_server_allows_loopback_without_auth(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    server = create_cloud_server(workspace_root=workspace.root, host="127.0.0.1", port=0)
+    try:
+        assert server.server_address[0] == "127.0.0.1"
+    finally:
+        server.server_close()

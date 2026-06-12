@@ -1,12 +1,13 @@
 {
   "name": "visual-agent",
   "displayName": "Checkpoint",
-  "description": "UI verification co-pilot for AI coding assistants. Run workflows, see results, and keep context across coding sessions.",
+  "description": "Checkpoint is a local verification panel for AI coding assistants. Run workflows, inspect results, and keep context across coding sessions.",
   "version": "0.1.0",
   "publisher": "visual-agent",
   "license": "MIT",
   "icon": "icons/visual-agent.png",
   "keywords": [
+    "checkpoint",
     "visual testing",
     "playwright",
     "AI",

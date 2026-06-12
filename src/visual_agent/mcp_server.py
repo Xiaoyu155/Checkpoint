@@ -6,26 +6,54 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .console import build_report_detail, build_workspace_dashboard, dashboard_to_markdown, find_report_json_path, report_detail_to_markdown
-from .gui import write_gui_action_event
+from .console import build_report_detail, report_detail_to_markdown
+from .mcp_audit import audit_mcp_call, workspace_for_audit
+from .mcp_common import (
+    MCP_DETAIL_CONTENT_MAX_CHARS,
+    MCP_DETAIL_RESPONSE_MAX_CHARS,
+    MCP_STRUCTURED_LIST_MAX_CHARS,
+    budget_list_payload,
+    budget_mcp_report_dict,
+    budget_mcp_text,
+    mcp_workspace_root_allowed,
+    preflight_summary,
+    require_str,
+    require_workspace,
+    safe_artifact,
+    safe_workspace_child,
+)
 from .models import to_jsonable
 from .preflight import run_preflight
-from .reports import compact_run_report, list_run_summaries
+from .reports import compact_run_report
+from .run_profile import RUN_PROFILE_CHOICES
 from .security import scrub_secrets
-from .validation import validate_workflow_file
 from .verification_status import enrich_verification_payload, report_artifacts, write_verification_status
 from .workflow import parse_workflow_file
-from .workspace import Workspace, build_workspace_report_index, discover_workflows, find_workflow, load_workspace_inputs, run_workspace_workflow, workspace_report_access_payload
+from .workspace import Workspace, build_workspace_report_index, find_workflow, load_workspace_inputs, run_workspace_workflow
+from .mcp_workspace_read import (
+    get_run_report_payload,
+    get_workspace_dashboard_payload,
+    list_run_artifacts_payload,
+    list_workflows_payload,
+    validate_workflow_payload,
+)
+from .mcp_repair import (
+    auto_repair_failure_payload,
+    get_repair_health_payload,
+    list_repair_history_payload,
+    repair_workflow_payload,
+    rollback_repair_payload,
+)
+from .mcp_benchmarks import build_benchmark_draft_payload, build_benchmark_plan_payload, list_benchmarks_payload
+from .mcp_browser import run_browser_smoke_payload, run_browser_smoke_suite_payload
+from .mcp_generation_format import quality_gate_payload, semantic_summary_payload
+from .mcp_policy import RUN_PROFILE_ORDER, enforce_mcp_run_profile, mcp_config
+from .mcp_response import budget_mcp_payload, mcp_error_payload
+from .mcp_session import get_session_context_payload, get_visual_status_payload, save_task_context_payload
 
 
 APP_NAME = "visual-agent"
 APP_VERSION = "0.1.0"
-RUN_PROFILE_ORDER = {"dry-run": 0, "supervised": 1, "semi-auto": 1, "approved": 2}
-MCP_DETAIL_RESPONSE_MAX_CHARS = 8000
-MCP_DETAIL_CONTENT_MAX_CHARS = 7000
-MCP_RESPONSE_MAX_CHARS = 8000
-MCP_STRUCTURED_LIST_MAX_CHARS = 6000
-
 try:
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
@@ -628,8 +656,8 @@ if server is not None:
 
 async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> list[TextContent]:
     args = arguments or {}
-    workspace = _workspace_for_audit(args)
-    _audit_mcp_call(workspace, name, args, {"status": "started", "phase": "entry"})
+    workspace = workspace_for_audit(args)
+    audit_mcp_call(workspace, name, args, {"status": "started", "phase": "entry"})
     try:
         handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "list_workflows": list_workflows_payload,
@@ -664,60 +692,12 @@ async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> list[
         if name not in handlers:
             raise ValueError(f"Unknown tool: {name}")
         payload = handlers[name](args)
-        _audit_mcp_call(workspace, name, args, payload)
+        audit_mcp_call(workspace, name, args, payload)
         return _ok_json(payload)
     except Exception as exc:
         payload = mcp_error_payload(f"{type(exc).__name__}: {exc}")
-        _audit_mcp_call(workspace, name, args, payload)
+        audit_mcp_call(workspace, name, args, payload)
         return _ok_json(payload)
-
-
-def list_workflows_payload(args: dict[str, Any]) -> dict[str, Any]:
-    workspace = require_workspace(args)
-    include_slow = bool(args.get("include_slow", False))
-    latest_by_workflow = {}
-    for summary in list_run_summaries(workspace.runs_dir, limit=50):
-        latest_by_workflow.setdefault(summary.workflow_name, summary)
-    workflows = []
-    for ref in discover_workflows(workspace, include_slow=include_slow):
-        latest = latest_by_workflow.get(ref.name)
-        workflows.append(
-            {
-                "name": ref.name,
-                "path": ref.relative_path,
-                "tags": list(ref.tags),
-                "visibility": ref.visibility,
-                "author": ref.author,
-                "description": ref.description,
-                "license": ref.license,
-                "last_run_status": latest.status if latest else None,
-                "last_run_id": latest.run_id if latest else None,
-            }
-        )
-    payload = {
-        "schema_version": 1,
-        "workspace": str(workspace.root),
-        "workflow_count": len(workflows),
-        "workflows": workflows,
-    }
-    return budget_list_payload(payload, list_key="workflows", count_key="workflow_count")
-
-
-def validate_workflow_payload(args: dict[str, Any]) -> dict[str, Any]:
-    workspace = require_workspace(args)
-    workflow_name = require_str(args, "workflow_name")
-    ref = find_workflow(workspace, workflow_name)
-    workflow = parse_workflow_file(ref.path)
-    validation = validate_workflow_file(ref.path)
-    preflight = run_preflight(workflow)
-    return {
-        "schema_version": 1,
-        "workflow": ref.name,
-        "path": ref.relative_path,
-        "valid": validation.valid,
-        "validation": to_jsonable(validation),
-        "preflight": preflight_summary(preflight),
-    }
 
 
 def run_workflow_payload(args: dict[str, Any]) -> dict[str, Any]:
@@ -830,108 +810,6 @@ def verify_workflow_payload(args: dict[str, Any]) -> dict[str, Any]:
         "report_hint": f"Use get_run_report with run_id='{result.run_id}' for full details.",
     }
     return scrub_secrets(payload)
-
-
-def get_run_report_payload(args: dict[str, Any]) -> dict[str, Any]:
-    workspace = require_workspace(args)
-    run_id = require_str(args, "run_id")
-    fmt = str(args.get("format") or "markdown")
-    detail = build_report_detail(workspace, run_id)
-    if not detail:
-        raise FileNotFoundError(f"Run report not found: {run_id}")
-    safe_detail = scrub_secrets(detail)
-    if isinstance(safe_detail, dict) and safe_detail.get("status") == "upgrade_required":
-        return safe_detail
-    if fmt == "markdown":
-        content, truncated = budget_mcp_text(report_detail_to_markdown(safe_detail), max_chars=MCP_DETAIL_CONTENT_MAX_CHARS)
-        return {
-            "schema_version": 1,
-            "run_id": run_id,
-            "format": "markdown",
-            "content": content,
-            "truncated": truncated,
-            "within_budget": len(content) <= MCP_DETAIL_CONTENT_MAX_CHARS,
-            "token_estimate": len(content) // 4,
-            "report_hint": f"Use list_run_artifacts with run_id='{run_id}' to locate the full report file.",
-        }
-    if fmt != "json":
-        raise ValueError(f"Unsupported report format: {fmt}")
-    report, truncated = budget_mcp_report_dict(safe_detail)
-    return {
-        "schema_version": 1,
-        "run_id": run_id,
-        "format": "json",
-        "report": report,
-        "truncated": truncated,
-        "within_budget": len(json.dumps(report, ensure_ascii=False, default=str)) <= MCP_DETAIL_RESPONSE_MAX_CHARS,
-        "report_hint": f"Use list_run_artifacts with run_id='{run_id}' to locate the full report file.",
-    }
-
-
-def list_run_artifacts_payload(args: dict[str, Any]) -> dict[str, Any]:
-    workspace = require_workspace(args)
-    run_id = require_str(args, "run_id")
-    try:
-        report_path = find_report_json_path(workspace, run_id)
-    except FileNotFoundError:
-        report_path = None
-    if report_path is not None:
-        access = workspace_report_access_payload(workspace, report_path)
-        if not access["allowed"]:
-            return {
-                "schema_version": 1,
-                "status": "upgrade_required",
-                "run_id": run_id,
-                "history_access": scrub_secrets(access),
-                "message": access.get("message"),
-            }
-    artifacts = []
-    for suffix in (".json", ".md"):
-        path = workspace.reports_dir / f"{run_id}{suffix}"
-        if path.exists():
-            artifacts.append(safe_artifact(workspace, path, "report"))
-    run_dir = safe_workspace_child(workspace, workspace.runs_dir / run_id)
-    if run_dir.exists():
-        for path in sorted(run_dir.rglob("*")):
-            if not path.is_file():
-                continue
-            kind = "screenshot" if path.suffix.lower() in {".png", ".jpg", ".jpeg"} else "artifact"
-            try:
-                artifacts.append(safe_artifact(workspace, path, kind))
-            except ValueError:
-                continue
-    payload = {
-        "schema_version": 1,
-        "run_id": run_id,
-        "artifact_count": len(artifacts),
-        "artifacts": artifacts,
-    }
-    return budget_list_payload(payload, list_key="artifacts", count_key="artifact_count")
-
-
-def get_workspace_dashboard_payload(args: dict[str, Any]) -> dict[str, Any]:
-    workspace = require_workspace(args)
-    fmt = str(args.get("format") or "markdown")
-    limit = int(args.get("limit") or 5)
-    dashboard = scrub_secrets(build_workspace_dashboard(workspace, limit=max(1, min(limit, 25))))
-    if fmt == "markdown":
-        content, truncated = budget_mcp_text(dashboard_to_markdown(dashboard), max_chars=MCP_DETAIL_CONTENT_MAX_CHARS)
-        return {
-            "schema_version": 1,
-            "workspace": str(workspace.root),
-            "format": "markdown",
-            "content": content,
-            "truncated": truncated,
-            "within_budget": len(content) <= MCP_DETAIL_CONTENT_MAX_CHARS,
-        }
-    if fmt != "json":
-        raise ValueError(f"Unsupported dashboard format: {fmt}")
-    return {
-        "schema_version": 1,
-        "workspace": str(workspace.root),
-        "format": "json",
-        "dashboard": dashboard,
-    }
 
 
 def get_latest_failure_payload(args: dict[str, Any]) -> dict[str, Any]:
@@ -1048,228 +926,6 @@ def latest_failed_run_id(workspace: Any) -> str:
     if not entries:
         return ""
     return str(entries[0].get("run_id") or "")
-
-
-def repair_workflow_payload(args: dict[str, Any]) -> dict[str, Any]:
-    from .repair import suggest_workflow_repair
-
-    workspace = require_workspace(args)
-    return suggest_workflow_repair(
-        workspace.root,
-        run_id=str(args.get("run_id") or "") or None,
-        provider=str(args.get("provider") or "none"),
-        model=str(args.get("model") or "") or None,
-        max_chars=int(args.get("max_chars") or 12000),
-        apply=bool(args.get("apply", False)),
-        min_confidence=float(args.get("min_confidence") or 0.75),
-        verify=bool(args.get("verify", False)),
-        verify_run_profile=str(args.get("verify_run_profile") or "dry-run"),
-        inputs_file=str(args.get("inputs_file") or "") or None,
-        rollback_on_fail=bool(args.get("rollback_on_fail", False)),
-        candidate_id=str(args.get("candidate_id") or "") or None,
-    )
-
-
-def auto_repair_failure_payload(args: dict[str, Any]) -> dict[str, Any]:
-    from .repair import auto_repair_failure
-
-    workspace = require_workspace(args)
-    return auto_repair_failure(
-        workspace.root,
-        run_id=str(args.get("run_id") or "") or None,
-        max_chars=int(args.get("max_chars") or 12000),
-        min_confidence=float(args.get("min_confidence") or 0.75),
-        verify_run_profile=str(args.get("verify_run_profile") or "dry-run"),
-        inputs_file=str(args.get("inputs_file") or "") or None,
-        candidate_id=str(args.get("candidate_id") or "") or None,
-        dry_run=bool(args.get("dry_run", False)),
-        force=bool(args.get("force", False)),
-        promote_regression=bool(args.get("promote_regression", False)),
-        overwrite_regression=bool(args.get("overwrite_regression", False)),
-        run_regression=bool(args.get("run_regression", False)),
-        regression_timeout_seconds=float(args.get("regression_timeout_seconds") or 120.0),
-    )
-
-
-def list_repair_history_payload(args: dict[str, Any]) -> dict[str, Any]:
-    from .repair_history import list_repair_history
-
-    workspace = require_workspace(args)
-    payload = list_repair_history(
-        workspace.root,
-        limit=int(args.get("limit") or 20),
-        workflow=str(args.get("workflow") or "") or None,
-        status=str(args.get("status") or "") or None,
-    )
-    return budget_list_payload(payload, list_key="entries", count_key="total_entries")
-
-
-def rollback_repair_payload(args: dict[str, Any]) -> dict[str, Any]:
-    from .repair_history import rollback_repair_history_entry
-
-    workspace = require_workspace(args)
-    return rollback_repair_history_entry(
-        workspace.root,
-        history_id=str(args.get("history_id") or "") or None,
-        workflow=str(args.get("workflow") or "") or None,
-    )
-
-
-def get_repair_health_payload(args: dict[str, Any]) -> dict[str, Any]:
-    from .repair_history import build_repair_health
-
-    workspace = require_workspace(args)
-    return build_repair_health(
-        workspace.root,
-        limit=int(args.get("limit") or 50),
-        workflow=str(args.get("workflow") or "") or None,
-    )
-
-
-def list_benchmarks_payload(args: dict[str, Any]) -> dict[str, Any]:
-    from .benchmarks import list_public_benchmarks
-
-    workspace = require_workspace(args)
-    return {"workspace": str(workspace.root), **list_public_benchmarks(category=str(args.get("category") or "") or None)}
-
-
-def build_benchmark_plan_payload(args: dict[str, Any]) -> dict[str, Any]:
-    from .benchmarks import build_benchmark_plan
-
-    workspace = require_workspace(args)
-    return {
-        "workspace": str(workspace.root),
-        **build_benchmark_plan(
-            category=str(args.get("category") or "") or None,
-            benchmark_id=str(args.get("benchmark_id") or "") or None,
-        ),
-    }
-
-
-def build_benchmark_draft_payload(args: dict[str, Any]) -> dict[str, Any]:
-    from .benchmarks import build_benchmark_workflow_draft
-
-    workspace = require_workspace(args)
-    output = str(args.get("output") or "") or None
-    output_path = (workspace.root / output).resolve() if output else None
-    return {
-        "workspace": str(workspace.root),
-        **build_benchmark_workflow_draft(
-            scenario_id=require_str(args, "scenario_id"),
-            workspace_root=workspace.root,
-            output_path=output_path,
-            dry_run=not bool(args.get("save", False)),
-            overwrite=bool(args.get("overwrite", False)),
-        ),
-    }
-
-
-def run_browser_smoke_payload(args: dict[str, Any]) -> dict[str, Any]:
-    from .browser_smoke import run_browser_smoke
-
-    workspace = require_workspace(args)
-    return {
-        "workspace": str(workspace.root),
-        **run_browser_smoke(
-            url=require_str(args, "url"),
-            output_dir=workspace.root / "browser-smoke-runs",
-            headed=bool(args.get("headed", False)),
-            timeout_ms=int(args.get("timeout_ms") or 10_000),
-            min_text_length=int(args.get("min_text_length") or 1),
-            min_interactive=int(args.get("min_interactive") or 0),
-            expect_text=[str(item) for item in args.get("expect_text", []) if str(item)],
-            expect_url_contains=[str(item) for item in args.get("expect_url_contains", []) if str(item)],
-            fill=[str(item) for item in args.get("fill", []) if str(item)],
-            fill_selector=[str(item) for item in args.get("fill_selector", []) if str(item)],
-            click_text=str(args.get("click_text") or "") or None,
-            click_selector=str(args.get("click_selector") or "") or None,
-            require_change_after_click=bool(args.get("require_change_after_click", False)),
-            wait_for_text_after=[str(item) for item in args.get("wait_for_text_after", []) if str(item)],
-            wait_for_url_contains_after=[str(item) for item in args.get("wait_for_url_contains_after", []) if str(item)],
-            wait_timeout_seconds=float(args.get("wait_timeout_seconds") or 5.0),
-            expect_text_after=[str(item) for item in args.get("expect_text_after", []) if str(item)],
-            expect_url_contains_after=[str(item) for item in args.get("expect_url_contains_after", []) if str(item)],
-            save_workflow=(workspace.root / str(args.get("save_workflow"))).resolve() if str(args.get("save_workflow") or "").strip() else None,
-            overwrite_workflow=bool(args.get("overwrite_workflow", False)),
-        ),
-    }
-
-
-def run_browser_smoke_suite_payload(args: dict[str, Any]) -> dict[str, Any]:
-    from .browser_smoke_suite import run_browser_smoke_suite
-
-    workspace = require_workspace(args)
-    suite_file = (workspace.root / require_str(args, "suite_file")).resolve()
-    return {
-        "workspace": str(workspace.root),
-        **run_browser_smoke_suite(
-            suite_file,
-            output_dir=workspace.root / "browser-smoke-suite-runs",
-            headed=True if bool(args.get("headed", False)) else None,
-        ),
-    }
-
-
-def get_session_context_payload(args: dict[str, Any]) -> dict[str, Any]:
-    from .session import load_agent_session, workspace_session_snapshot_text
-
-    workspace = require_workspace(args)
-    session = load_agent_session(workspace.root)
-    if session is None:
-        snapshot = workspace_session_snapshot_text(workspace.root)
-        return {
-            "schema_version": 1,
-            "workspace": str(workspace.root),
-            "snapshot": snapshot,
-            "token_estimate": len(snapshot) // 4,
-            "within_budget": True,
-        }
-    snapshot = workspace_session_snapshot_text(workspace.root)
-    return {
-        "schema_version": 1,
-        "workspace": str(workspace.root),
-        "snapshot": snapshot,
-        "token_estimate": len(snapshot) // 4,
-        "within_budget": len(snapshot) <= 2000,
-    }
-
-
-def get_visual_status_payload(args: dict[str, Any]) -> dict[str, Any]:
-    from .visual_status import read_status_file, visual_status_to_dict
-
-    workspace = require_workspace(args)
-    status = read_status_file(workspace.project_root)
-    return {
-        "schema_version": 1,
-        "workspace": str(workspace.root),
-        "project_root": str(workspace.project_root),
-        "visual_status": visual_status_to_dict(status),
-    }
-
-
-def save_task_context_payload(args: dict[str, Any]) -> dict[str, Any]:
-    from .session import save_task_context, session_to_snapshot_text
-
-    workspace = require_workspace(args)
-    session = save_task_context(
-        workspace.root,
-        task=require_str(args, "task"),
-        analyzed_files=[str(item) for item in args.get("analyzed_files", []) if str(item)],
-        root_cause=str(args.get("root_cause") or ""),
-        plan=str(args.get("plan") or ""),
-        tried=[str(item) for item in args.get("tried", []) if str(item)],
-    )
-    snapshot = session_to_snapshot_text(session)
-    return {
-        "schema_version": 1,
-        "workspace": str(workspace.root),
-        "status": "saved",
-        "task": session.ai_task_context.task if session.ai_task_context else "",
-        "snapshot": snapshot,
-        "token_estimate": len(snapshot) // 4,
-        "within_budget": len(snapshot) <= 2000,
-        "message": "Task context saved. Resume with context-snapshot --format markdown.",
-    }
 
 
 def run_verification_payload(args: dict[str, Any]) -> dict[str, Any]:
@@ -1735,49 +1391,6 @@ def verification_timeout_payload(
     return enrich_verification_payload(payload, workspace_root=workspace.root)
 
 
-def quality_gate_payload(quality: Any) -> dict[str, Any]:
-    return {
-        "score": quality.total_score,
-        "covers_success_path": quality.covers_success_path,
-        "covers_error_path": quality.covers_error_path,
-        "business_assertions": quality.business_assertion_count,
-        "structural_assertions": quality.structural_assertion_count,
-        "data_display_assertions": quality.data_display_assertion_count,
-        "forbidden_error_assertions": quality.forbidden_error_assertion_count,
-        "text_from_input_references": quality.text_from_input_reference_count,
-        "invalid_text_from_references": list(quality.invalid_text_from_references),
-        "gaps": list(quality.gaps[:3]),
-        "recommendation": quality.recommendation,
-    }
-
-
-def semantic_summary_payload(generation: Any) -> dict[str, Any]:
-    from .context_ingestion import summarize_data_displays
-
-    model = generation.semantic_model
-    display_summary = summarize_data_displays(model)
-    return {
-        "framework": model.framework,
-        "confidence": model.confidence,
-        "generation_method": generation.generation_method,
-        "field_count": len(model.form_fields),
-        "required_field_count": sum(1 for field in model.form_fields if field.required),
-        "sensitive_field_count": sum(1 for field in model.form_fields if field.is_sensitive),
-        "validation_rule_count": sum(len(field.validation_rules) for field in model.form_fields),
-        "submit_action_count": len(model.submit_actions),
-        "success_state_count": len(model.success_states),
-        "error_state_count": len(model.error_states),
-        "data_display_count": len(model.data_displays),
-        "negative_input_case_count": len(generation.negative_input_cases),
-        "fields": [field.name for field in model.form_fields[:8]],
-        "success_states": [state.value for state in model.success_states[:5]],
-        "data_displays": list(model.data_displays[:8]),
-        "matched_data_displays": list(display_summary.matched[:8]),
-        "unmatched_data_displays": list(display_summary.unmatched[:8]),
-        "warnings": list(generation.warnings[:5]),
-    }
-
-
 def failed_step_payload(step: Any) -> dict[str, Any]:
     diagnosis = step.metadata.get("failure_diagnosis") if isinstance(getattr(step, "metadata", None), dict) else None
     expected = ""
@@ -1843,387 +1456,10 @@ def generate_workflow_payload(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def preflight_summary(preflight: Any) -> dict[str, Any]:
-    data = to_jsonable(preflight)
-    missing = data.get("missing_required_capabilities") if isinstance(data.get("missing_required_capabilities"), list) else []
-    unavailable = data.get("unavailable_used_capabilities") if isinstance(data.get("unavailable_used_capabilities"), list) else []
-    warnings = data.get("warnings") if isinstance(data.get("warnings"), list) else []
-    return {
-        "ok": bool(data.get("ok")),
-        "workflow_name": data.get("workflow_name"),
-        "strict": bool(data.get("strict")),
-        "missing_required_count": len(missing),
-        "unavailable_used_count": len(unavailable),
-        "warning_count": len(warnings),
-        "warnings": warnings,
-    }
-
-
-def budget_list_payload(payload: dict[str, Any], *, list_key: str, count_key: str) -> dict[str, Any]:
-    safe_payload = scrub_secrets(payload)
-    if len(json.dumps(safe_payload, ensure_ascii=False, default=str)) <= MCP_STRUCTURED_LIST_MAX_CHARS:
-        return {
-            **safe_payload,
-            "truncated": False,
-            "within_budget": True,
-        }
-
-    items = safe_payload.get(list_key) if isinstance(safe_payload.get(list_key), list) else []
-    compact = {**safe_payload, list_key: []}
-    omitted = len(items)
-    for item in items:
-        candidate_items = [*compact[list_key], item]
-        candidate = {
-            **compact,
-            list_key: candidate_items,
-            "truncated": omitted > 1,
-            "omitted_count": max(0, len(items) - len(candidate_items)),
-            "within_budget": True,
-        }
-        if len(json.dumps(candidate, ensure_ascii=False, default=str)) > MCP_STRUCTURED_LIST_MAX_CHARS:
-            break
-        compact = candidate
-        omitted = len(items) - len(candidate_items)
-
-    return {
-        **compact,
-        "truncated": omitted > 0,
-        "omitted_count": omitted,
-        count_key: safe_payload.get(count_key, len(items)),
-        "response_hint": f"{list_key} was truncated to fit the MCP 2000-token response budget." if omitted > 0 else None,
-        "within_budget": True,
-    }
-
-
-def budget_mcp_text(text: str, *, max_chars: int) -> tuple[str, bool]:
-    safe_text = scrub_secrets(str(text))
-    if len(safe_text) <= max_chars:
-        return safe_text, False
-    suffix = "\n...[truncated, use list_run_artifacts/get_run_report paths for full details]"
-    budget = max(0, max_chars - len(suffix))
-    return safe_text[:budget].rstrip() + suffix, True
-
-
-def budget_mcp_report_dict(report: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    safe_report = scrub_secrets(report)
-    encoded = json.dumps(safe_report, ensure_ascii=False, default=str)
-    if len(encoded) <= MCP_DETAIL_RESPONSE_MAX_CHARS:
-        return safe_report, False
-
-    compact_steps = []
-    for step in safe_report.get("steps", []) if isinstance(safe_report.get("steps"), list) else []:
-        if not isinstance(step, dict):
-            continue
-        compact_steps.append(
-            {
-                "id": step.get("id"),
-                "action": step.get("action"),
-                "status": step.get("status"),
-                "message": str(step.get("message") or "")[:160],
-                "has_failure_diagnosis": step.get("has_failure_diagnosis"),
-            }
-        )
-        if len(compact_steps) >= 10:
-            break
-
-    compact = {
-        "schema_version": safe_report.get("schema_version", 1),
-        "run_id": safe_report.get("run_id"),
-        "workflow_name": safe_report.get("workflow_name"),
-        "status": safe_report.get("status"),
-        "run_profile": safe_report.get("run_profile"),
-        "summary": safe_report.get("summary"),
-        "paths": safe_report.get("paths"),
-        "steps": compact_steps,
-        "failure": safe_report.get("failure"),
-        "truncated": True,
-        "truncation_reason": "MCP report JSON exceeded the 2000-token response budget.",
-    }
-    compact_text = json.dumps(compact, ensure_ascii=False, default=str)
-    if len(compact_text) <= MCP_DETAIL_RESPONSE_MAX_CHARS:
-        return compact, True
-
-    failure = compact.get("failure")
-    if isinstance(failure, dict):
-        compact["failure"] = {
-            "failed_step": failure.get("failed_step"),
-            "expected": str(failure.get("expected") or "")[:200],
-            "actual": str(failure.get("actual") or "")[:200],
-            "recovery_suggestions": [str(item)[:200] for item in (failure.get("recovery_suggestions") or [])[:2]]
-            if isinstance(failure.get("recovery_suggestions"), list)
-            else [],
-        }
-    return compact, True
-
-
-def require_workspace(args: dict[str, Any]) -> Workspace:
-    root = require_str(args, "workspace_root")
-    raw = Path(root)
-    if any(part == ".." for part in raw.parts):
-        raise ValueError("workspace_root must not contain '..'")
-    path = raw.resolve()
-    if not mcp_workspace_root_allowed(path):
-        raise ValueError(f"workspace_root is outside allowed MCP roots: {path}")
-    if not path.exists():
-        raise FileNotFoundError(f"Workspace root not found: {path}")
-    return Workspace(path)
-
-
-def mcp_workspace_root_allowed(path: Path) -> bool:
-    resolved = path.resolve()
-    allowed_roots = [Path.cwd().resolve(), Path.home().resolve()]
-    for root in allowed_roots:
-        try:
-            resolved.relative_to(root)
-            return True
-        except ValueError:
-            continue
-    return False
-
-
-def require_str(args: dict[str, Any], key: str) -> str:
-    value = args.get(key)
-    if value is None or str(value).strip() == "":
-        raise ValueError(f"{key} is required")
-    return str(value)
-
-
-def mcp_config(workspace: Workspace) -> dict[str, Any]:
-    path = workspace.root / "workspace.json"
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    config = payload.get("mcp") if isinstance(payload.get("mcp"), dict) else {}
-    return config
-
-
-def enforce_mcp_run_profile(workspace: Workspace, workflow_name: str, run_profile: str) -> str:
-    config = mcp_config(workspace)
-    max_profile = str(config.get("max_run_profile") or "supervised")
-    if max_profile not in RUN_PROFILE_ORDER:
-        max_profile = "supervised"
-    if run_profile == "approved":
-        approved = {str(item) for item in config.get("approved_workflows", []) if str(item)}
-        if workflow_name not in approved:
-            raise ValueError(f"run_profile='approved' rejected: '{workflow_name}' is not in workspace mcp.approved_workflows")
-    if RUN_PROFILE_ORDER[run_profile] > RUN_PROFILE_ORDER[max_profile]:
-        return max_profile
-    return run_profile
-
-
-def safe_workspace_child(workspace: Workspace, path: Path) -> Path:
-    resolved = path.resolve()
-    root = workspace.root.resolve()
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise ValueError(f"Path escapes workspace: {path}") from exc
-    return resolved
-
-
-def safe_artifact(workspace: Workspace, path: Path, kind: str) -> dict[str, str]:
-    resolved = safe_workspace_child(workspace, path)
-    return {"type": kind, "path": str(resolved), "relative_path": resolved.relative_to(workspace.root.resolve()).as_posix()}
-
-
 def _ok_json(payload: dict[str, Any]) -> list[TextContent]:
     safe_payload = budget_mcp_payload(scrub_secrets(payload))
     text = json.dumps(safe_payload, ensure_ascii=False, indent=2, default=str)
     return [TextContent(type="text", text=text)]
-
-
-def budget_mcp_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
-    if len(text) <= MCP_RESPONSE_MAX_CHARS:
-        return payload
-
-    summary: dict[str, Any] = {}
-    for key in (
-        "schema_version",
-        "workspace",
-        "run_id",
-        "workflow",
-        "workflow_name",
-        "status",
-        "source",
-        "format",
-        "error",
-        "hint",
-        "report_hint",
-        "workflow_count",
-        "artifact_count",
-        "total",
-        "passed",
-        "failed",
-    ):
-        if key in payload:
-            summary[key] = payload[key]
-    repair = payload.get("repair") if isinstance(payload.get("repair"), dict) else None
-    if repair:
-        candidates = repair.get("candidates") if isinstance(repair.get("candidates"), list) else []
-        summary["repair"] = {
-            "classification": repair.get("classification"),
-            "confidence": repair.get("confidence"),
-            "recommended_fix": repair.get("recommended_fix"),
-            "apply_supported": repair.get("apply_supported"),
-            "selected_candidate_id": repair.get("selected_candidate_id"),
-            "candidate_count": len(candidates),
-            "candidates": [
-                {
-                    "id": item.get("id"),
-                    "kind": item.get("kind"),
-                    "status": item.get("status"),
-                    "classification": item.get("classification"),
-                    "confidence": item.get("confidence"),
-                    "apply_supported": item.get("apply_supported"),
-                    "recommended_fix": item.get("recommended_fix"),
-                    "reason": item.get("reason"),
-                }
-                for item in candidates[:5]
-                if isinstance(item, dict)
-            ],
-        }
-    plan = payload.get("workflow_repair_plan") if isinstance(payload.get("workflow_repair_plan"), dict) else None
-    if plan:
-        summary["workflow_repair_plan"] = {
-            "status": plan.get("status"),
-            "applied": plan.get("applied"),
-            "apply_requested": plan.get("apply_requested"),
-            "verify_requested": plan.get("verify_requested"),
-            "rollback_on_fail": plan.get("rollback_on_fail"),
-            "verification": plan.get("verification"),
-            "rollback": plan.get("rollback"),
-        }
-    history = payload.get("history") if isinstance(payload.get("history"), dict) else None
-    if history:
-        summary["history"] = history
-    auto_repair = payload.get("auto_repair") if isinstance(payload.get("auto_repair"), dict) else None
-    if auto_repair:
-        summary["auto_repair"] = auto_repair
-    repair_result = payload.get("repair_result") if isinstance(payload.get("repair_result"), dict) else None
-    if repair_result:
-        repair = repair_result.get("repair") if isinstance(repair_result.get("repair"), dict) else {}
-        plan = repair_result.get("workflow_repair_plan") if isinstance(repair_result.get("workflow_repair_plan"), dict) else {}
-        summary["repair_result"] = {
-            "status": repair_result.get("status"),
-            "source": repair_result.get("source"),
-            "workflow": repair_result.get("workflow"),
-            "run_id": repair_result.get("run_id"),
-            "repair": {
-                "classification": repair.get("classification"),
-                "confidence": repair.get("confidence"),
-                "selected_candidate_id": repair.get("selected_candidate_id"),
-                "candidate_count": len(repair.get("candidates")) if isinstance(repair.get("candidates"), list) else 0,
-                "apply_supported": repair.get("apply_supported"),
-            },
-            "workflow_repair_plan": {
-                "status": plan.get("status"),
-                "applied": plan.get("applied"),
-                "verify_requested": plan.get("verify_requested"),
-                "rollback_on_fail": plan.get("rollback_on_fail"),
-                "verification": plan.get("verification"),
-                "rollback": plan.get("rollback"),
-            },
-        }
-    repair_health = payload.get("repair_health") if isinstance(payload.get("repair_health"), dict) else None
-    if repair_health:
-        summary["repair_health"] = {
-            "risk_level": repair_health.get("risk_level"),
-            "reliability_score": repair_health.get("reliability_score"),
-            "analyzed_entries": repair_health.get("analyzed_entries"),
-            "applied_count": repair_health.get("applied_count"),
-            "verified_count": repair_health.get("verified_count"),
-            "rollback_count": repair_health.get("rollback_count"),
-            "recommendation": repair_health.get("recommendation"),
-        }
-    regression = payload.get("regression") if isinstance(payload.get("regression"), dict) else None
-    if regression:
-        summary["regression"] = {
-            "status": regression.get("status"),
-            "run_id": regression.get("run_id"),
-            "test_path": regression.get("test_path"),
-            "fixture_path": regression.get("fixture_path"),
-            "test_run": regression.get("test_run"),
-            "reason": regression.get("reason"),
-        }
-    preflight_health = payload.get("preflight_repair_health") if isinstance(payload.get("preflight_repair_health"), dict) else None
-    if preflight_health:
-        summary["preflight_repair_health"] = {
-            "risk_level": preflight_health.get("risk_level"),
-            "reliability_score": preflight_health.get("reliability_score"),
-            "analyzed_entries": preflight_health.get("analyzed_entries"),
-            "rollback_count": preflight_health.get("rollback_count"),
-            "failed_verification_count": preflight_health.get("failed_verification_count"),
-            "recommendation": preflight_health.get("recommendation"),
-        }
-    summary.update(
-        {
-            "truncated": True,
-            "within_budget": True,
-            "truncation_reason": "MCP tool response exceeded the 2000-token response budget.",
-            "available_keys": sorted(str(key) for key in payload.keys()),
-        }
-    )
-    summary_text = json.dumps(summary, ensure_ascii=False, indent=2, default=str)
-    if len(summary_text) <= MCP_RESPONSE_MAX_CHARS:
-        return summary
-
-    return {
-        "schema_version": payload.get("schema_version", 1),
-        "truncated": True,
-        "within_budget": True,
-        "truncation_reason": "MCP tool response exceeded the 2000-token response budget.",
-    }
-
-
-def mcp_error_payload(message: str) -> dict[str, Any]:
-    return {
-        "schema_version": 1,
-        "error": message,
-        "hint": "Check workspace_root and workflow name. Use list_workflows to see available workflows.",
-    }
-
-
-def _workspace_for_audit(args: dict[str, Any]) -> Workspace | None:
-    try:
-        return require_workspace(args)
-    except Exception:
-        return None
-
-
-def _audit_mcp_call(workspace: Workspace | None, tool_name: str, args: dict[str, Any], payload: dict[str, Any]) -> None:
-    if workspace is None:
-        return
-    config = mcp_config(workspace)
-    if config.get("audit_all_calls", True) is not True:
-        return
-    status = "error" if "error" in payload else str(payload.get("status") or "success")
-    write_gui_action_event(
-        workspace,
-        {
-            "action": f"mcp:{tool_name}",
-            "workflow": args.get("workflow_name"),
-            "run_profile": args.get("run_profile") or "dry-run",
-            "inputs_file": args.get("inputs_file"),
-            "phase": payload.get("phase") or "exit",
-        },
-        {
-            "action": f"mcp:{tool_name}",
-            "status": status,
-            "message": str(payload.get("error") or payload.get("report_hint") or ""),
-            "phase": payload.get("phase") or "exit",
-            "result": {
-                "run_id": payload.get("run_id"),
-                "workflow": payload.get("workflow"),
-                "artifact_count": payload.get("artifact_count"),
-                "workflow_count": payload.get("workflow_count"),
-                "workspace": payload.get("workspace"),
-            },
-        },
-    )
 
 
 def main() -> None:

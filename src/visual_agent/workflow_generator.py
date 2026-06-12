@@ -291,12 +291,12 @@ def _generate_validated_yaml(description: str, *, model: str, page_type: str | N
                 return {"status": "success", "yaml": yaml_text, "validation": validation, "source": source, "attempts": attempts}
     except ImportError:
         source = "template_fallback"
-    except (TypeError, ValueError, NotImplementedError) as exc:
+    except Exception as exc:
+        # Missing credentials / backend config should degrade to the offline template
+        # (this is the keyless and dry-run path); any other failure is a real error.
         if not _is_auth_configuration_error(exc):
             return {"status": "error", "message": f"workflow generation failed: {type(exc).__name__}: {exc}", "attempts": attempts}
         source = "template_fallback"
-    except Exception as exc:
-        return {"status": "error", "message": f"workflow generation failed: {type(exc).__name__}: {exc}", "attempts": attempts}
 
     yaml_text = _template_workflow(description, page_type=page_type)
     validation = _validate_generated_yaml(yaml_text)
@@ -601,5 +601,16 @@ def unique_output_path(path: Path) -> Path:
 
 def _is_auth_configuration_error(exc: Exception) -> bool:
     text = str(exc).lower()
-    return any(part in text for part in ("api_key", "auth_token", "authentication method", "credentials"))
+    return any(
+        part in text
+        for part in (
+            "api_key",
+            "api key",
+            "auth_token",
+            "authentication method",
+            "credentials",
+            "missing base url",
+            "missing endpoint",
+        )
+    )
 

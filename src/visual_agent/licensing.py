@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from time import time
 from typing import Any, Literal
 
+from .env import env_get, env_present
 
 TierName = Literal["free", "pro", "team", "enterprise"]
 VALID_TIERS: tuple[TierName, ...] = ("free", "pro", "team", "enterprise")
@@ -139,10 +139,10 @@ def report_history_window_days(license_: License | None = None) -> int | None:
 
 
 def default_license_path() -> Path:
-    override = os.environ.get("VISUAL_AGENT_LICENSE_FILE")
+    override = env_get("VISUAL_AGENT_LICENSE_FILE")
     if override:
         return Path(override).expanduser()
-    home = os.environ.get("VISUAL_AGENT_HOME")
+    home = env_get("VISUAL_AGENT_HOME")
     if home:
         return Path(home).expanduser() / "license.json"
     return Path.home() / ".visual-agent" / "license.json"
@@ -163,13 +163,13 @@ def activate_license(key: str, *, tier: TierName = "pro", seats: int = 1, path: 
 
 
 def _license_from_env() -> License | None:
-    tier = _normalize_tier(os.environ.get("VISUAL_AGENT_LICENSE_TIER"))
-    key_present = bool(os.environ.get("VISUAL_AGENT_LICENSE_KEY"))
+    tier = _normalize_tier(env_get("VISUAL_AGENT_LICENSE_TIER"))
+    key_present = env_present("VISUAL_AGENT_LICENSE_KEY")
     if tier:
         return License(
             tier=tier,
-            seats=_positive_int(os.environ.get("VISUAL_AGENT_LICENSE_SEATS"), default=1),
-            expires_at=_optional_float(os.environ.get("VISUAL_AGENT_LICENSE_EXPIRES_AT")),
+            seats=_positive_int(env_get("VISUAL_AGENT_LICENSE_SEATS"), default=1),
+            expires_at=_optional_float(env_get("VISUAL_AGENT_LICENSE_EXPIRES_AT")),
             source="env",
             key_present=key_present,
         )

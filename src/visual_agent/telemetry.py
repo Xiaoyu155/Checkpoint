@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .env import env_get
 from .workflow import Workflow, WorkflowRunResult
 from .visual_status import first_failed_step, root_cause_guess
 
@@ -16,7 +16,7 @@ VA_VERSION = "0.1.0"
 
 
 def enabled() -> bool:
-    return os.environ.get(TELEMETRY_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+    return str(env_get(TELEMETRY_ENV, "") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def record_run(workspace_root: Path, workflow: Workflow, result: WorkflowRunResult, *, project_type: str | None = None) -> Path | None:

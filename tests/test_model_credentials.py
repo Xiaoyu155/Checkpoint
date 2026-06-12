@@ -213,6 +213,22 @@ def test_openai_probe_plan_can_use_environment_key_without_file(tmp_path, monkey
     assert "sk-openai-secret-value-123456" not in text
 
 
+def test_openai_probe_plan_prefers_checkpoint_environment_key(tmp_path, monkeypatch) -> None:
+    missing = tmp_path / "missing-keys.txt"
+    monkeypatch.setenv("VISUAL_AGENT_OPENAI_API_KEY", "sk-legacy-secret-value-123456")
+    monkeypatch.setenv("CHECKPOINT_OPENAI_API_KEY", "sk-checkpoint-secret-value-123456")
+
+    plan = build_model_api_probe_plan(source=missing, preferred_provider="openai")
+    config = resolve_model_provider_config(source=missing, preferred_provider="openai")
+    text = json.dumps(plan, ensure_ascii=False) + json.dumps({key: value for key, value in config.items() if not key.startswith("_")}, ensure_ascii=False)
+
+    assert plan["ready"] is True
+    assert config["_api_key"] == "sk-checkpoint-secret-value-123456"
+    assert "credential_source_missing" not in plan["blockers"]
+    assert "sk-checkpoint-secret-value-123456" not in text
+    assert "sk-legacy-secret-value-123456" not in text
+
+
 def test_run_model_api_probe_openai_uses_bearer_env_key(tmp_path, monkeypatch) -> None:
     missing = tmp_path / "missing-keys.txt"
     monkeypatch.setenv("VISUAL_AGENT_OPENAI_API_KEY", "sk-openai-secret-value-123456")

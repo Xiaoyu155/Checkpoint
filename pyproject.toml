@@ -38,6 +38,7 @@ cloud = [
 ]
 
 [project.scripts]
+checkpoint = "visual_agent.cli:main"
 visual-agent = "visual_agent.cli:main"
 visual-agent-mcp = "visual_agent.mcp_server:main"
 

@@ -103,6 +103,32 @@ def observe_browser(params: dict[str, Any], context: ProviderContext) -> Observa
         )
 
     url = normalize_url(require_param(params, "url"), run_dir=context.run_dir)
+    existing_page = context.resources.get("playwright_page") if context.resources is not None else None
+    if existing_page is not None and not existing_page.is_closed():
+        # Reuse the live browser session: starting a second sync_playwright in the
+        # same thread fails with "Sync API inside the asyncio loop".
+        existing_page.goto(url, wait_until=str(params.get("wait_until") or "domcontentloaded"), timeout=int(params.get("timeout_ms", 10_000)))
+        try:
+            # SPA hash navigation returns before the framework re-renders; wait for
+            # visible content, then give the router a short settle window.
+            existing_page.wait_for_function(
+                "() => !!document.body && document.body.innerText.trim().length > 0",
+                timeout=int(params.get("timeout_ms", 10_000)),
+            )
+        except Exception:
+            pass
+        settle_seconds = float(params.get("wait_after_seconds", 0.3) or 0)
+        if settle_seconds > 0:
+            existing_page.wait_for_timeout(int(settle_seconds * 1000))
+        return browser_page_observation(
+            existing_page,
+            storage_state_loaded=bool(context.resources.get("storage_state") if context.resources else False),
+            run_dir=context.run_dir,
+            label=str(params.get("screenshot_label") or "browser"),
+            network_events=context.resources.get("network_events", []) if context.resources else [],
+            console_events=context.resources.get("console_events", []) if context.resources else [],
+            page_errors=context.resources.get("page_errors", []) if context.resources else [],
+        )
     playwright = sync_playwright().start()
     browser = None
     browser_context = None

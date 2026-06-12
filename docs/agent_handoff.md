@@ -10,7 +10,7 @@ From the Checkpoint checkout:
 cd "D:\longxia agent"
 git pull origin main
 .\.venv\Scripts\python.exe -m pip install -e ".[desktop,web,mcp]"
-.\.venv\Scripts\python.exe -m visual_agent.cli doctor
+.\.venv\Scripts\checkpoint.exe doctor
 ```
 
 If an MCP server or Codex integration is already running, restart that process
@@ -21,20 +21,27 @@ after updating. Old MCP processes keep using the old imported code.
 From the product/project being edited:
 
 ```powershell
-python -m visual_agent.cli init --root .agent-workspace
-python -m visual_agent.cli show-status --workspace-root .agent-workspace
-python -m visual_agent.cli verify-impl --workspace-root .agent-workspace --task-description "Verify the current change" --run-profile dry-run --format markdown
+checkpoint init --root .agent-workspace
+checkpoint show-status --workspace-root .agent-workspace
+checkpoint workspace-run --root .agent-workspace --workflow <workflow_name> --run-profile dry-run --format markdown
 ```
 
 Check that `project_root` is the project directory you are editing. Each project
 gets its own `.agent-workspace`.
+
+Use `verify-impl` as a drafting or exploration path, not as the only release
+gate. In large repositories, add `--no-untracked`:
+
+```powershell
+checkpoint verify-impl --workspace-root .agent-workspace --task-description "Verify the current change" --run-profile dry-run --format markdown --no-untracked
+```
 
 ## Resume Context
 
 At the start of a new chat:
 
 ```powershell
-python -m visual_agent.cli context-snapshot --workspace-root .agent-workspace --format markdown
+checkpoint context-snapshot --workspace-root .agent-workspace --format markdown
 ```
 
 With MCP, call `get_session_context`. If the snapshot shows a failure, call
@@ -45,13 +52,13 @@ With MCP, call `get_session_context`. If the snapshot shows a failure, call
 Run only the workflow relevant to the current change when possible:
 
 ```powershell
-python -m visual_agent.cli verify --workspace-root .agent-workspace --workflow <workflow_name> --wait-lock --format markdown
+checkpoint verify --workspace-root .agent-workspace --workflow <workflow_name> --wait-lock --format markdown
 ```
 
 For a broader gate:
 
 ```powershell
-python -m visual_agent.cli verify --workspace-root .agent-workspace --tags verification --max-workflows 10 --wait-lock --format markdown
+checkpoint verify --workspace-root .agent-workspace --tags verification --max-workflows 10 --wait-lock --format markdown
 ```
 
 ## Visual And OCR Workflows
