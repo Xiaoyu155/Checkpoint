@@ -4,7 +4,7 @@ import json
 import os
 from threading import Thread
 from time import time
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import pytest
@@ -13,12 +13,25 @@ from visual_agent.cloud import build_http_cloud_transport
 from visual_agent.cloud_server import (
     CloudServerConfigError,
     CloudRequestError,
+    cloud_server_auth_failure,
     create_cloud_server,
     resolve_request_run_profile,
     resolve_request_workspace,
 )
 from visual_agent.workspace import discover_workflows
 from visual_agent.workspace import init_workspace
+
+
+def read_http_error_json(request: Request, *, timeout: float = 10, attempts: int = 3) -> tuple[int, dict]:
+    last_error: OSError | URLError | None = None
+    for _ in range(attempts):
+        try:
+            urlopen(request, timeout=timeout)
+        except HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode("utf-8"))
+        except (OSError, URLError) as exc:
+            last_error = exc
+    raise AssertionError(f"Expected HTTPError response, got transient connection error: {last_error!r}")
 
 
 def test_cloud_server_health_endpoint(tmp_path) -> None:
@@ -296,11 +309,7 @@ steps:
         endpoint = f"http://127.0.0.1:{server.server_port}/v1/run"
         body = json.dumps({"workflow_name": "ready", "workspace": str(workspace.root), "run_profile": "dry-run"}).encode("utf-8")
         request = Request(endpoint, data=body, headers={"Content-Type": "application/json"}, method="POST")
-        try:
-            urlopen(request, timeout=10)
-        except HTTPError as exc:
-            unauthorized = json.loads(exc.read().decode("utf-8"))
-            unauthorized_code = exc.code
+        unauthorized_code, unauthorized = read_http_error_json(request)
 
         wrong_org_request = Request(
             endpoint,
@@ -312,11 +321,7 @@ steps:
             },
             method="POST",
         )
-        try:
-            urlopen(wrong_org_request, timeout=10)
-        except HTTPError as exc:
-            forbidden = json.loads(exc.read().decode("utf-8"))
-            forbidden_code = exc.code
+        forbidden_code, forbidden = read_http_error_json(wrong_org_request)
 
         authorized_request = Request(
             endpoint,
@@ -348,6 +353,26 @@ steps:
     assert forbidden["reason"] == "org_forbidden"
     assert payload["status"] == "success"
     assert runs_payload["returned_reports"] == 1
+
+
+def test_cloud_server_auth_failure_returns_structured_reasons() -> None:
+    unauthorized = cloud_server_auth_failure(headers={}, api_key="server-secret", required_org="team-a")
+    forbidden = cloud_server_auth_failure(
+        headers={"authorization": "Bearer server-secret", "x-visual-agent-org": "team-b"},
+        api_key="server-secret",
+        required_org="team-a",
+    )
+    allowed = cloud_server_auth_failure(
+        headers={"authorization": "Bearer server-secret", "x-visual-agent-org": "team-a"},
+        api_key="server-secret",
+        required_org="team-a",
+    )
+
+    assert unauthorized is not None
+    assert unauthorized["status"] == "unauthorized"
+    assert forbidden is not None
+    assert forbidden["reason"] == "org_forbidden"
+    assert allowed is None
 
 
 def test_cloud_server_audit_log_records_redacted_request_events(tmp_path) -> None:
