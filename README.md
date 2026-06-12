@@ -43,7 +43,7 @@ When a page regression happens, Checkpoint returns structured evidence an agent 
   Fix: Check the changed UI copy or update the workflow contract intentionally.
 ```
 
-See [docs/failure-demo.md](docs/failure-demo.md) for the full local demo.
+See [docs/demo-output.md](docs/demo-output.md) for real CLI output and [docs/failure-demo.md](docs/failure-demo.md) for the full local demo.
 
 ## What It Does
 
@@ -282,6 +282,7 @@ Safety defaults:
 - [Long-term vision](docs/long_term_vision.md)
 - [MCP integration](docs/mcp-integration.md)
 - [For coding agents](docs/for-coding-agents.md)
+- [Demo output](docs/demo-output.md)
 - [Failure demo](docs/failure-demo.md)
 - [Agent handoff guide](docs/agent_handoff.md)
 - [Codex usage guide](docs/codex.md)

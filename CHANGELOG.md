@@ -8,7 +8,7 @@ The format is based on Keep a Changelog, and this project uses semantic versioni
 
 ### Added
 
-- Repository-facing support documentation, coding-agent onboarding, and a failure demo for GitHub visitors.
+- Repository-facing support documentation, coding-agent onboarding, real CLI demo output, and a failure demo for GitHub visitors.
 - Context-aware workflow generation from code changes via `generate_workflow_from_context`.
 - Single-call implementation verification via `verify_implementation`, including generation, quality scoring, workflow execution, compact failure diagnosis, status-file updates, quality thresholds, and timeout handling.
 - Git-diff workflow synthesis commands: `generate-from-diff` and `verify-impl`.
