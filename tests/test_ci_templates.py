@@ -38,6 +38,7 @@ def test_install_ci_templates_writes_quality_gate_files(tmp_path) -> None:
         "--tags fast --max-workflows 5 --run-profile dry-run --wait-lock --format json"
     )
     assert "Check workspace risk policy" in workflow
+    assert "python -m playwright install chromium" in workflow
     assert "workspace-risk-policy-check --root .agent-workspace" in workflow
     assert "verify --workspace-root .agent-workspace --tags fast --max-workflows 5 --run-profile dry-run --wait-lock --format json" in workflow
     assert "quality-gate --profile ci --workspace-root .agent-workspace --run --fail-on-risk-policy-error --fail-on-secret-leak --ci --junit-output .runs/quality_gates/junit.xml" in workflow
@@ -49,6 +50,7 @@ def test_install_ci_templates_writes_quality_gate_files(tmp_path) -> None:
     assert "pre_push:" in result.github_config.read_text(encoding="utf-8")
     assert "quality-gate --profile ci --workspace-root .agent-workspace --run --fail-on-risk-policy-error --fail-on-secret-leak --ci --junit-output .runs/quality_gates/junit.xml" in result.pre_push_hook.read_text(encoding="utf-8")
     assert "actions/upload-artifact@v4" in workflow
+    assert "Print quality gate report on failure" in workflow
     assert "visual_agent.cli" in powershell
     assert ".venv\\Scripts\\python.exe" in powershell
     assert "workspace-risk-policy-check" in powershell
@@ -113,9 +115,11 @@ def test_generate_ci_cli_outputs_workflow_yaml(tmp_path, capsys) -> None:
     assert "node-version: \"20\"" in output
     assert "ruff check src tests cloud_api" in output
     assert "python -m pip install -e \".[test,web,mcp,cloud]\"" in output
+    assert "python -m playwright install chromium" in output
     assert "verify --workspace-root .agent-workspace --tags fast --max-workflows 5 --run-profile dry-run --wait-lock --format json" in output
     assert "quality-gate --profile ci --workspace-root .agent-workspace --run --fail-on-risk-policy-error --fail-on-secret-leak --ci --junit-output .runs/quality_gates/junit.xml" in output
     assert "Comment PR failure" in output
+    assert "Print quality gate report on failure" in output
     assert "github-pr-comment --report-root .runs --quality-root .runs/quality_gates --artifact-url" in output
 
 

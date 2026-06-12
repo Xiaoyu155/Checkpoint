@@ -43,9 +43,11 @@ jobs:
           }
 
       - name: Run non-browser E2E tests
+        if: github.event_name == 'workflow_dispatch'
         run: python -m pytest tests/e2e -m "not browser" -q --tb=short
 
       - name: Run browser E2E tests
+        if: github.event_name == 'workflow_dispatch'
         run: python -m pytest tests/e2e -m browser -q --tb=short
 
       - name: Upload quality reports

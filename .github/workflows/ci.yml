@@ -33,6 +33,9 @@ jobs:
       - name: Ruff lint
         run: ruff check src tests cloud_api
 
+      - name: Install Playwright Chromium
+        run: python -m playwright install chromium
+
       - name: Run fast verification workflows
         run: python -m visual_agent.cli verify --workspace-root .agent-workspace --tags fast --max-workflows 5 --run-profile dry-run --wait-lock --format json
 

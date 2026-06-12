@@ -172,6 +172,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[test,web,mcp,cloud]"
 
+      - name: Install Playwright Chromium
+        run: python -m playwright install chromium
+
       - name: Check workspace risk policy
         run: {risk_policy_check_command(workspace_root)}
 
@@ -180,6 +183,15 @@ jobs:
 
       - name: Run CI quality gate
         run: {quality_gate_command(workspace_root)} --fail-on-risk-policy-error --fail-on-secret-leak --ci --junit-output .runs/quality_gates/junit.xml
+
+      - name: Print quality gate report on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $reports = Get-ChildItem {workspace_root}/reports/quality_gates -Filter *.md -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+          if ($reports) {{
+            Get-Content $reports[0].FullName
+          }}
 
       # Optional remote browser execution through a separately hosted Checkpoint cloud-server.
       # Required repository secrets:
@@ -300,11 +312,23 @@ jobs:
       - name: Ruff lint
         run: ruff check src tests cloud_api
 
+      - name: Install Playwright Chromium
+        run: python -m playwright install chromium
+
       - name: Run fast verification workflows
         run: python -m visual_agent.cli verify --workspace-root {workspace_root} --tags fast --max-workflows 5 --run-profile dry-run --wait-lock --format json
 
       - name: Run Checkpoint quality gate
         run: python -m visual_agent.cli quality-gate --profile ci --workspace-root {workspace_root} --run --fail-on-risk-policy-error --fail-on-secret-leak --ci --junit-output .runs/quality_gates/junit.xml
+
+      - name: Print quality gate report on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $reports = Get-ChildItem {workspace_root}/reports/quality_gates -Filter *.md -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+          if ($reports) {{
+            Get-Content $reports[0].FullName
+          }}
 
       - name: Upload quality reports
         id: upload_quality_reports
