@@ -1,8 +1,9 @@
 ﻿# Checkpoint Quickstart
 
-Checkpoint is a local-first automation runtime for AI assistants. It runs
-browser and desktop workflows with permissions, audit trails, screenshots,
-failure diagnostics, queues, and reports stored on your machine.
+Checkpoint is a local-first acceptance layer for AI coding assistants. It runs
+browser and desktop workflows after code changes, with permissions, audit
+trails, screenshots, failure diagnostics, queues, and reports stored on your
+machine.
 
 ## Install
 
@@ -31,6 +32,9 @@ python -m playwright install chromium
 The product is Checkpoint. The preferred CLI command is `checkpoint`; the
 legacy `visual-agent` command and `python -m visual_agent.cli` still work for
 compatibility with existing scripts.
+
+If you are connecting a coding assistant, start with
+[for-coding-agents.md](for-coding-agents.md).
 
 ## First Three Commands
 

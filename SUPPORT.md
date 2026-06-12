@@ -5,6 +5,8 @@ Checkpoint is in developer preview. For the fastest help, include the exact comm
 ## Documentation
 
 - Quick start: [docs/quickstart.md](docs/quickstart.md)
+- Coding agents: [docs/for-coding-agents.md](docs/for-coding-agents.md)
+- Failure demo: [docs/failure-demo.md](docs/failure-demo.md)
 - MCP integration: [docs/mcp-integration.md](docs/mcp-integration.md)
 - Development plan and hardening notes: [docs/remediation_and_roadmap.md](docs/remediation_and_roadmap.md)
 

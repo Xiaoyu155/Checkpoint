@@ -4,11 +4,46 @@
 [![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Local-first verification runtime for AI agents.
+AI coding assistants can write code. Checkpoint verifies whether the product still works.
 
-Checkpoint gives Codex, Claude Code, Cursor, Claude Desktop, and other MCP clients a repeatable local execution layer. Agents can initialize a workspace, run implementation checks, read stable status files, and consume structured failure output without guessing from terminal logs.
+Checkpoint is a local-first verification layer for Codex, Claude Code, Cursor, VS Code, Claude Desktop, and other MCP clients. It gives agents repeatable workflows, safe execution profiles, reports, screenshots, audit trails, and machine-readable failure diagnostics after code changes.
 
-It is not a one-step browser remote control or a visual demo tool. The primary contract is verified local workflow execution with reviewable reports, screenshots, audit trails, permission profiles, and machine-readable failure diagnostics. DOM, UIA, OCR, and visual fallback providers are used as execution details behind that contract.
+**AI writes the change. Checkpoint runs the acceptance check.**
+
+## Why Checkpoint
+
+AI coding assistants are fast, but speed creates a new quality gap: they can finish a patch without proving the UI, workflow, or product promise still works. Checkpoint closes that gap by turning acceptance checks into local, repeatable workflows an agent can run and understand.
+
+Use it when you want an agent to verify:
+
+- Login, forms, redirects, checkout, dashboards, and data displays.
+- Exact UI copy, success states, error states, and no-regression contracts.
+- Browser DOM flows first, then Windows UIA, OCR, or visual fallback when needed.
+- Failure evidence that is useful to the next repair attempt, not just a raw terminal log.
+
+## 60-Second Start
+
+```powershell
+git clone https://github.com/Xiaoyu155/Checkpoint.git
+cd Checkpoint
+powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 -Step all
+.\.venv\Scripts\checkpoint.exe codex-check --workspace-root .agent-workspace --repo-root . --run-profile dry-run --format markdown
+```
+
+For AI coding assistants, copy [docs/for-coding-agents.md](docs/for-coding-agents.md) into the agent context.
+
+## Example Failure Signal
+
+When a page regression happens, Checkpoint returns structured evidence an agent can act on:
+
+```text
+[verify-impl] Result: fail
+[verify-impl] Failed at assert_checkout_button (assert_text)
+  Actual: Text not found in observation: Proceed to Checkout
+  Fix: Check the changed UI copy or update the workflow contract intentionally.
+```
+
+See [docs/failure-demo.md](docs/failure-demo.md) for the full local demo.
 
 ## What It Does
 
@@ -18,6 +53,10 @@ It is not a one-step browser remote control or a visual demo tool. The primary c
 - Stores reports, screenshots, queue state, auth-state metadata, and GUI action history locally.
 - Exposes high-level workflow tools through MCP.
 - Provides CLI, Tkinter GUI, queue worker, regression export, and quality gates.
+
+## What It Is Not
+
+Checkpoint is not a browser toy, screenshot demo, or replacement for unit tests. It is the acceptance layer that runs after code changes and before you trust the result.
 
 ## What Works Out of the Box
 
@@ -130,8 +169,8 @@ Public starter workflows live under [`workflows/examples`](workflows/examples):
 - [`nextjs-demo`](examples/nextjs-demo): Next.js SSR demo with smoke and regression workflows.
 
 For WeChat Mini Program work, see
-[docs/miniprogram_verification.md](docs/miniprogram_verification.md). Visual
-Agent can capture the DevTools simulator region and, with OCR or VLM configured,
+[docs/miniprogram_verification.md](docs/miniprogram_verification.md). Checkpoint
+can capture the DevTools simulator region and, with OCR or VLM configured,
 assert real page text instead of only checking the DevTools shell.
 
 Inspect the workspace:
@@ -242,6 +281,8 @@ Safety defaults:
 - [Workflow schema](docs/workflow-schema.md)
 - [Long-term vision](docs/long_term_vision.md)
 - [MCP integration](docs/mcp-integration.md)
+- [For coding agents](docs/for-coding-agents.md)
+- [Failure demo](docs/failure-demo.md)
 - [Agent handoff guide](docs/agent_handoff.md)
 - [Codex usage guide](docs/codex.md)
 - [MCP Server README](README_MCP.md)
