@@ -33,6 +33,15 @@ jobs:
           python -m visual_agent.cli workspace-risk-policy-check --root .agent-workspace
           python -m visual_agent.cli quality-gate --profile ci --workspace-root .agent-workspace --run --fail-on-secret-leak
 
+      - name: Print quality gate report on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $reports = Get-ChildItem .agent-workspace/reports/quality_gates -Filter *.md -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+          if ($reports) {
+            Get-Content $reports[0].FullName
+          }
+
       - name: Run non-browser E2E tests
         run: python -m pytest tests/e2e -m "not browser" -q --tb=short
 

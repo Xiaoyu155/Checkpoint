@@ -39,6 +39,15 @@ jobs:
       - name: Run Checkpoint quality gate
         run: python -m visual_agent.cli quality-gate --profile ci --workspace-root .agent-workspace --run --fail-on-risk-policy-error --fail-on-secret-leak --ci --junit-output .runs/quality_gates/junit.xml
 
+      - name: Print quality gate report on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $reports = Get-ChildItem .agent-workspace/reports/quality_gates -Filter *.md -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+          if ($reports) {
+            Get-Content $reports[0].FullName
+          }
+
       - name: Upload quality reports
         id: upload_quality_reports
         if: always()

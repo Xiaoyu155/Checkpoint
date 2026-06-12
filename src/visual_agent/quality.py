@@ -52,7 +52,7 @@ def build_quality_gate_plan(
 ) -> tuple[QualityGateStep, ...]:
     python = sys.executable
     steps = [
-        QualityGateStep(name="core_tests", command=(python, "-m", "pytest")),
+        QualityGateStep(name="core_tests", command=(python, "-m", "pytest", "tests", "--ignore=tests/e2e")),
     ]
     if profile == "ci":
         steps.append(
@@ -666,6 +666,21 @@ def quality_gate_to_markdown(result: QualityGateResult) -> str:
         lines.append(" ".join(step.command))
         lines.append("```")
         lines.append("")
+        if step.status == "failed":
+            if step.stdout:
+                lines.append("#### stdout")
+                lines.append("")
+                lines.append("```text")
+                lines.append(redact_secret_text(step.stdout)[-4000:])
+                lines.append("```")
+                lines.append("")
+            if step.stderr:
+                lines.append("#### stderr")
+                lines.append("")
+                lines.append("```text")
+                lines.append(redact_secret_text(step.stderr)[-4000:])
+                lines.append("```")
+                lines.append("")
     lines.extend(["## Risk Summary", ""])
     strict_gate = result.risk_summary.get("strict_policy_gate") if isinstance(result.risk_summary.get("strict_policy_gate"), dict) else {}
     if strict_gate:

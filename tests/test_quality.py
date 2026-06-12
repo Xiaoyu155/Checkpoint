@@ -45,7 +45,8 @@ def test_quality_gate_plan_includes_core_tests() -> None:
     steps = build_quality_gate_plan("local")
 
     assert steps[0].name == "core_tests"
-    assert steps[0].command[-1] == "pytest"
+    assert steps[0].command[2] == "pytest"
+    assert "--ignore=tests/e2e" in steps[0].command
 
 
 def test_release_check_plan_lists_required_commands() -> None:
@@ -462,6 +463,37 @@ def test_quality_gate_to_junit_xml_encodes_failures_and_skips() -> None:
     assert "QualityGateStepFailure" in xml
     assert "api_key=secret" not in xml
     assert "token=secret" not in xml
+
+
+def test_quality_gate_markdown_includes_redacted_failed_step_output() -> None:
+    result = QualityGateResult(
+        run_id="run-1",
+        profile="ci",
+        status="failed",
+        report_path=None,
+        markdown_path=None,
+        steps=(
+            QualityGateStep(
+                name="core_tests",
+                command=("python", "-m", "pytest"),
+                required=True,
+                status="failed",
+                exit_code=1,
+                stdout="failed stdout api_key=secret",
+                stderr="failed stderr token=secret",
+            ),
+        ),
+        risk_summary={"risk_level": "ok", "warning_count": 0},
+    )
+
+    markdown = quality_gate_to_markdown(result)
+
+    assert "#### stdout" in markdown
+    assert "#### stderr" in markdown
+    assert "failed stdout" in markdown
+    assert "failed stderr" in markdown
+    assert "api_key=secret" not in markdown
+    assert "token=secret" not in markdown
 
 
 def test_quality_gate_to_step_summary_includes_junit_path() -> None:
