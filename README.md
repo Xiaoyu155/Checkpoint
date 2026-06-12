@@ -295,6 +295,7 @@ Safety defaults:
 - [Checkpoint for VS Code](docs/vscode.md)
 - [JetBrains plugin spec](docs/jetbrains-plugin-spec.md)
 - [Release checklist](docs/release_checklist.md)
+- [Release announcement draft](docs/release_announcement.md)
 - [CI/CD](docs/ci-cd.md)
 - [Product positioning](docs/product_positioning.md)
 - [Marketplace API spec](docs/marketplace-api.md)
