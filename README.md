@@ -27,7 +27,7 @@ Use it when you want an agent to verify:
 git clone https://github.com/Xiaoyu155/Checkpoint.git
 cd Checkpoint
 powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 -Step all
-.\.venv\Scripts\checkpoint.exe codex-check --workspace-root .agent-workspace --repo-root . --run-profile dry-run --format markdown
+.\.venv\Scripts\checkpoint.exe workspace-run --root .agent-workspace --workflow local_html_form_workflow --inputs-file demo_login.json --run-profile dry-run --format markdown
 ```
 
 For AI coding assistants, copy [docs/for-coding-agents.md](docs/for-coding-agents.md) into the agent context.
