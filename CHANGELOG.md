@@ -6,6 +6,8 @@ The format is based on Keep a Changelog, and this project uses semantic versioni
 
 ## [Unreleased]
 
+## [0.1.1-preview] - 2026-06-18
+
 ### Added
 
 - Repository-facing support documentation, coding-agent onboarding, real CLI demo output, a failure demo, and release announcement drafts for GitHub visitors.

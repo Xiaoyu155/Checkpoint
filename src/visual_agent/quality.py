@@ -848,6 +848,7 @@ def build_release_check_plan(*, workspace_root: str | Path = ".agent-workspace")
         {"id": "doctor", "command": f"{python} -m visual_agent.cli doctor", "required": True},
         {"id": "capabilities", "command": f"{python} -m visual_agent.cli atomic-capabilities", "required": True},
         {"id": "init_workspace", "command": f"{python} -m visual_agent.cli init --root {workspace} --overwrite", "required": True},
+        {"id": "release_smoke", "command": f"{python} -m visual_agent.cli release-smoke --run --workspace-root {workspace} --format markdown", "required": True},
         {"id": "demo_workspace_check", "command": f"{python} -m visual_agent.cli demo-workspace-check --root {workspace} --overwrite", "required": True},
         {"id": "release_trial", "command": f"{python} -m visual_agent.cli release-trial --workspace-root {workspace} --format markdown", "required": True},
         {"id": "demo_run", "command": f"{python} -m visual_agent.cli workspace-run --root {workspace} --workflow local_html_form_workflow --inputs-file demo_login.json", "required": True},
@@ -899,6 +900,234 @@ def release_check_plan_to_markdown(plan: dict[str, Any]) -> str:
     lines.extend(["", "## Docs", ""])
     for path in plan.get("docs", []) if isinstance(plan.get("docs"), list) else []:
         lines.append(f"- `{path}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_release_smoke_plan(
+    *,
+    workspace_root: str | Path = ".agent-workspace",
+    include_vscode: bool = True,
+) -> dict[str, Any]:
+    python = sys.executable
+    workspace = str(workspace_root)
+    checks: list[dict[str, Any]] = [
+        {
+            "id": "quickstart",
+            "command": [python, "-m", "visual_agent.cli", "quickstart"],
+            "cwd": ".",
+            "required": True,
+            "purpose": "Confirm the concise onboarding entrypoint renders.",
+        },
+        {
+            "id": "checkout_l4_demo",
+            "command": [
+                python,
+                "-m",
+                "visual_agent.cli",
+                "verify-now",
+                "--workspace-root",
+                workspace,
+                "--workflow",
+                "checkout_verification",
+                "--live",
+                "--format",
+                "markdown",
+            ],
+            "cwd": ".",
+            "required": True,
+            "purpose": "Confirm the first demo reaches L3+ product acceptance with real interaction.",
+        },
+        {
+            "id": "mcp_smoke",
+            "command": [
+                python,
+                "-m",
+                "visual_agent.cli",
+                "mcp-smoke",
+                "--workspace-root",
+                workspace,
+                "--format",
+                "markdown",
+            ],
+            "cwd": ".",
+            "required": True,
+            "purpose": "Confirm MCP tools can list, validate, run, and inspect a workflow.",
+        },
+        {
+            "id": "brand_scan",
+            "command": [python, "-c", release_smoke_brand_scan_script()],
+            "cwd": ".",
+            "required": True,
+            "purpose": "Reject stale public copy such as old command names, old repository URLs, or screenshot placeholders.",
+        },
+    ]
+    if include_vscode:
+        checks.append(
+            {
+                "id": "vscode_extension_tests",
+                "command": [release_smoke_npm_command(), "test"],
+                "cwd": "vscode-extension",
+                "required": True,
+                "purpose": "Compile the extension and verify parser, CLI bridge, and command wiring.",
+            }
+        )
+    return {
+        "schema_version": 1,
+        "status": "planned",
+        "workspace_root": workspace,
+        "check_count": len(checks),
+        "checks": checks,
+    }
+
+
+def release_smoke_npm_command() -> str:
+    return "npm.cmd" if os.name == "nt" else "npm"
+
+
+def release_smoke_brand_scan_script() -> str:
+    return r'''
+from pathlib import Path
+patterns = (
+    "Screenshot " + "placeholder",
+    "x" + "-agent",
+    "github.com/Xiaoyu155/" + "visual-agent",
+    "Use " + "visual-agent",
+)
+roots = [Path("README.md"), Path("docs"), Path("vscode-extension"), Path("src")]
+skip_parts = {("docs", "archive"), ("vscode-extension", "node_modules")}
+matches = []
+for root in roots:
+    paths = [root] if root.is_file() else root.rglob("*")
+    for path in paths:
+        if not path.is_file():
+            continue
+        parts = path.parts
+        if any(all(item in parts for item in pair) for pair in skip_parts):
+            continue
+        if path.suffix.lower() not in {".md", ".py", ".ts", ".json"}:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for pattern in patterns:
+            if pattern in text:
+                matches.append(f"{path}: {pattern}")
+if matches:
+    print("\n".join(matches))
+    raise SystemExit(1)
+print("brand scan passed")
+'''
+
+
+def run_release_smoke(
+    *,
+    workspace_root: str | Path = ".agent-workspace",
+    include_vscode: bool = True,
+    timeout_seconds: float = 300.0,
+    runner: Any = None,
+) -> dict[str, Any]:
+    plan = build_release_smoke_plan(workspace_root=workspace_root, include_vscode=include_vscode)
+    started = monotonic()
+    checks: list[dict[str, Any]] = []
+    failed = 0
+    command_runner = runner or run_release_smoke_command
+    for check in plan["checks"]:
+        check_started = monotonic()
+        result = command_runner(check["command"], cwd=check.get("cwd") or ".", timeout_seconds=timeout_seconds)
+        elapsed = monotonic() - check_started
+        exit_code = int(result.get("exit_code", 1))
+        status = "success" if exit_code == 0 else "failed"
+        if status == "failed":
+            failed += 1
+        checks.append(
+            {
+                **check,
+                "status": status,
+                "exit_code": exit_code,
+                "elapsed_seconds": round(elapsed, 3),
+                "stdout": truncate_release_smoke_output(str(result.get("stdout") or "")),
+                "stderr": truncate_release_smoke_output(str(result.get("stderr") or "")),
+            }
+        )
+    return {
+        "schema_version": 1,
+        "status": "success" if failed == 0 else "failed",
+        "workspace_root": str(workspace_root),
+        "check_count": len(checks),
+        "failed_count": failed,
+        "elapsed_seconds": round(monotonic() - started, 3),
+        "checks": checks,
+    }
+
+
+def run_release_smoke_command(command: list[str], *, cwd: str | Path = ".", timeout_seconds: float = 300.0) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        return {"exit_code": completed.returncode, "stdout": completed.stdout, "stderr": completed.stderr}
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "exit_code": 124,
+            "stdout": exc.stdout or "",
+            "stderr": f"Timed out after {timeout_seconds:.1f}s",
+        }
+    except OSError as exc:
+        return {"exit_code": 1, "stdout": "", "stderr": str(exc)}
+
+
+def truncate_release_smoke_output(value: str, *, max_chars: int = 4000) -> str:
+    normalized = value.strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 3] + "..."
+
+
+def release_smoke_to_markdown(result: dict[str, Any]) -> str:
+    lines = [
+        "# Release Smoke",
+        "",
+        f"- Status: `{result.get('status')}`",
+        f"- Workspace root: `{result.get('workspace_root')}`",
+        f"- Checks: {result.get('check_count', 0)}",
+        f"- Failed: {result.get('failed_count', 0)}",
+        f"- Elapsed seconds: {result.get('elapsed_seconds', 0)}",
+        "",
+        "| id | status | exit_code | elapsed_seconds | command |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for check in result.get("checks", []) if isinstance(result.get("checks"), list) else []:
+        command = " ".join(str(part) for part in check.get("command", []))
+        lines.append(
+            "| "
+            + " | ".join(
+                markdown_cell(value)
+                for value in (
+                    check.get("id"),
+                    check.get("status"),
+                    check.get("exit_code"),
+                    check.get("elapsed_seconds"),
+                    command,
+                )
+            )
+            + " |"
+        )
+    failed = [check for check in result.get("checks", []) if isinstance(check, dict) and check.get("status") == "failed"]
+    if failed:
+        lines.extend(["", "## Failures", ""])
+        for check in failed:
+            lines.append(f"### {check.get('id')}")
+            if check.get("stdout"):
+                lines.extend(["", "stdout:", "", "```text", str(check.get("stdout")), "```"])
+            if check.get("stderr"):
+                lines.extend(["", "stderr:", "", "```text", str(check.get("stderr")), "```"])
     lines.append("")
     return "\n".join(lines)
 
@@ -1101,8 +1330,8 @@ def build_coding_agent_brief(
         },
     ]
     prompts = [
-        "Use visual-agent to list workflows, run local_html_form_workflow as a dry-run, then summarize the report.",
-        "Use visual-agent to validate every workflow before suggesting changes.",
+        "Use Checkpoint to list workflows, run verify-now, then summarize the report.",
+        "Use Checkpoint to validate every workflow before suggesting changes.",
         "If a workflow fails, use get_run_report and list_run_artifacts before editing code.",
         "Before and after risky changes, call get_workspace_dashboard and summarize any attention items.",
         "When a run fails, call get_latest_failure first, then inspect artifacts if needed.",
@@ -1359,6 +1588,7 @@ def run_release_trial(
         port=0,
         api_key=cloud_api_key,
         required_org=cloud_org,
+        run_profile=run_profile,
     )
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -1514,7 +1744,7 @@ def release_trial_to_markdown(result: dict[str, Any]) -> str:
                 "",
                 "## Cloud Run",
                 "",
-                f"- Status: `{cloud.get('status') or 'failed'}`",
+                f"- Status: `{cloud_run.get('status') or cloud.get('status') or 'failed'}`",
                 f"- Run id: `{cloud_run.get('run_id') or cloud.get('run_id') or ''}`",
                 f"- Workflow source: `{cloud_run.get('workflow_source') or cloud.get('workflow_source') or ''}`",
             ]

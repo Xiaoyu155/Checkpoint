@@ -10,6 +10,7 @@ from visual_agent.quality import (
     build_install_check_plan,
     build_mcp_client_config,
     build_release_check_plan,
+    build_release_smoke_plan,
     coding_agent_brief_to_markdown,
     build_quality_gate_index,
     build_quality_gate_plan,
@@ -25,9 +26,11 @@ from visual_agent.quality import (
     quality_gate_to_junit_xml,
     quality_gate_to_step_summary,
     release_check_plan_to_markdown,
+    release_smoke_to_markdown,
     release_trial_to_markdown,
     run_demo_workspace_check,
     run_mcp_smoke_check,
+    run_release_smoke,
     run_release_trial,
     quality_gate_status,
     quality_gate_to_markdown,
@@ -57,11 +60,57 @@ def test_release_check_plan_lists_required_commands() -> None:
     assert any(check["id"] == "install_check" for check in plan["checks"])
     assert any(check["id"] == "mcp_smoke_cli" for check in plan["checks"])
     assert any(check["id"] == "quality_gate" for check in plan["checks"])
+    assert any(check["id"] == "release_smoke" for check in plan["checks"])
     assert any(check["id"] == "release_trial" for check in plan["checks"])
     assert "demo-workspace-check" in markdown
+    assert "release-smoke" in markdown
     assert "release-trial" in markdown
     assert "pytest tests\\test_mcp_server.py" in markdown
     assert "docs/release_checklist.md" in markdown
+
+
+def test_release_smoke_plan_includes_product_and_extension_gates() -> None:
+    plan = build_release_smoke_plan(workspace_root=".agent-workspace")
+    markdown = release_smoke_to_markdown(plan)
+    ids = {check["id"] for check in plan["checks"]}
+
+    assert {"quickstart", "checkout_l4_demo", "mcp_smoke", "brand_scan", "vscode_extension_tests"} <= ids
+    assert plan["status"] == "planned"
+    assert "verify-now" in markdown
+    assert "npm" in markdown and "test" in markdown
+
+
+def test_release_smoke_run_uses_runner_and_reports_success() -> None:
+    calls: list[tuple[list[str], str]] = []
+
+    def fake_runner(command, *, cwd=".", timeout_seconds=300.0):
+        calls.append((list(command), str(cwd)))
+        return {"exit_code": 0, "stdout": "ok", "stderr": ""}
+
+    result = run_release_smoke(workspace_root=".agent-workspace", runner=fake_runner)
+    markdown = release_smoke_to_markdown(result)
+
+    assert result["status"] == "success"
+    assert result["failed_count"] == 0
+    assert len(calls) == result["check_count"]
+    assert any(command[2:4] == ["visual_agent.cli", "verify-now"] for command, _ in calls)
+    assert any(command[-1] == "test" and command[0].startswith("npm") and cwd == "vscode-extension" for command, cwd in calls)
+    assert "Release Smoke" in markdown
+
+
+def test_release_smoke_can_skip_vscode_and_fail_on_required_step() -> None:
+    def fake_runner(command, *, cwd=".", timeout_seconds=300.0):
+        if "mcp-smoke" in command:
+            return {"exit_code": 1, "stdout": "", "stderr": "mcp failed"}
+        return {"exit_code": 0, "stdout": "ok", "stderr": ""}
+
+    result = run_release_smoke(workspace_root=".agent-workspace", include_vscode=False, runner=fake_runner)
+    ids = {check["id"] for check in result["checks"]}
+
+    assert result["status"] == "failed"
+    assert result["failed_count"] == 1
+    assert "vscode_extension_tests" not in ids
+    assert next(check for check in result["checks"] if check["id"] == "mcp_smoke")["stderr"] == "mcp failed"
 
 
 def test_install_check_plan_lists_dependency_steps() -> None:
@@ -286,10 +335,12 @@ def test_release_trial_runs_demo_mcp_and_cloud_bundle(tmp_path, monkeypatch) -> 
     assert Path(result["release_trial_bundle"]["json"]).exists()
     assert Path(result["release_trial_bundle"]["markdown"]).exists()
     assert "Release Trial" in markdown
+    assert "Status: `success`" in markdown
     assert "Workspace Dashboard" in markdown
     assert "Run History Report" in markdown
     assert "Bundle" in markdown
     assert any(name == "server" for name, _ in calls)
+    assert any(name == "server" and kwargs["run_profile"] == "supervised" for name, kwargs in calls)
     assert any(name == "transport" for name, _ in calls)
 
 

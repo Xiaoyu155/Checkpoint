@@ -70,13 +70,13 @@ Expected result:
 Ask Claude Code:
 
 ```text
-Use visual-agent to list workflows in D:\longxia agent\.agent-workspace.
+Use Checkpoint to list workflows in D:\longxia agent\.agent-workspace.
 ```
 
 Then:
 
 ```text
-Use visual-agent to run local_html_form_workflow as a dry-run with inputs_file demo_login.json.
+Use Checkpoint to run local_html_form_workflow as a dry-run with inputs_file demo_login.json.
 ```
 
 Expected result:

@@ -2,7 +2,7 @@
 
 ## Short Description
 
-Checkpoint adds a local verification panel for AI coding assistants. Run workflows, inspect results, and keep context across coding sessions.
+Checkpoint adds a local verification panel for AI coding assistants. Run product workflows, inspect structured failures, and keep verification context across coding sessions.
 
 ## Tagline
 
@@ -16,11 +16,13 @@ Use Checkpoint to:
 
 - initialize a project workspace without leaving VS Code
 - generate or run workflows for browser, desktop, and implementation checks
-- inspect structured failures, reports, screenshots, and audit trails
+- inspect structured failures, product issue groups, reports, screenshots, and audit trails
 - resume work with compact session context instead of raw logs
 - keep verification runs local, permissioned, and reviewable
 
 Checkpoint is built around local workspace state, not opaque browser control. It stores the important artifacts where your project already lives and exposes them through the extension, CLI, and MCP tools.
+
+Try the repository demo with `scripts/public_demo_case.ps1` to see a checkout workflow pass, catch a deliberate button-copy regression, then pass again after restoration.
 
 ## Key Features
 
@@ -36,8 +38,8 @@ Checkpoint is built around local workspace state, not opaque browser control. It
 
 1. Install the extension.
 2. Run `Checkpoint: Init Workspace`.
-3. Run `x-agent: Verify Implementation` or open an existing workflow.
-4. Inspect the report and failure details in the sidebar.
+3. Run `Checkpoint: Verify Now`, `Checkpoint: Verify Implementation`, or open an existing workflow.
+4. Inspect the report, product issue group, and failure details in the sidebar.
 5. Resume from `get_session_context` or `Checkpoint: Show Last AI Verification`.
 
 ## Screenshot Captions
@@ -45,6 +47,7 @@ Checkpoint is built around local workspace state, not opaque browser control. It
 - Checkpoint activity bar with the workflow list open
 - Quick Actions menu showing Init Workspace and Verify Implementation
 - Sidebar report summary after a verification run
+- Product Issues panel grouping repeated failed assertions
 - Failure details panel with structured diagnosis
 
 ## Release Notes Snippet

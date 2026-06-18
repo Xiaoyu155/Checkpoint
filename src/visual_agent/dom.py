@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .models import Bounds, Observation, ProviderKind
+from .playwright_env import ensure_playwright_browsers_path
 
 
 INTERACTIVE_SELECTOR = ",".join(
@@ -36,6 +37,7 @@ class DomProvider:
     timeout_ms: int = 10_000
 
     def observe_url(self, url: str) -> Observation:
+        ensure_playwright_browsers_path()
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:

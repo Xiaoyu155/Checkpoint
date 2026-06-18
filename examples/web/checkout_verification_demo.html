@@ -24,5 +24,16 @@
     <p>Standard Delivery: 3-5 business days</p>
     <button id="place-order" data-bounds="80,380,320,44">Place Order - Standard Delivery</button>
   </section>
+
+  <section id="confirmation" aria-live="polite" hidden>
+    <h3>Order Confirmed</h3>
+    <p>Order #CP-1001 is ready for fulfillment.</p>
+  </section>
+
+  <script>
+    document.getElementById("place-order").addEventListener("click", function () {
+      document.getElementById("confirmation").hidden = false;
+    });
+  </script>
 </body>
 </html>

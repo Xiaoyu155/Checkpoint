@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Any, Callable
@@ -34,6 +34,9 @@ class ActionDispatcher:
         self.register("refresh_browser", self._refresh_browser)
         self.register("click_text", self._click_text)
         self.register("wait_for_text", self._wait_for_text)
+        self.register("upload_file", self._upload_file)
+        self.register("select_option", self._select_option)
+        self.register("drag", self._drag)
         from .plugins import load_action_plugins
 
         load_action_plugins(self)
@@ -65,8 +68,10 @@ class ActionDispatcher:
         page = context.workflow_context.resources.get("playwright_page")
         selector = selector_from_resolved(resolved)
         if page is not None and selector:
+            locator = browser_locator(page, selector, params)
+            actionability = playwright_actionability_snapshot(locator, action="click")
             if not bool(params.get("dry_run", context.dry_run)):
-                page.locator(selector).click()
+                locator.click()
                 wait_after_browser_action(page, params)
             return ActionResult(
                 action="click",
@@ -77,7 +82,7 @@ class ActionDispatcher:
                 message="playwright click skipped by dry-run"
                 if bool(params.get("dry_run", context.dry_run))
                 else "playwright clicked",
-                metadata={"execution": "playwright", "selector": selector},
+                metadata={"execution": "playwright", "selector": selector, "actionability": actionability},
             )
         return self.actions.click(
             resolved.click_point,
@@ -97,8 +102,10 @@ class ActionDispatcher:
         page = context.workflow_context.resources.get("playwright_page")
         selector = selector_from_resolved(resolved)
         if page is not None and selector:
+            locator = browser_locator(page, selector, params)
+            actionability = playwright_actionability_snapshot(locator, action="type")
             if not bool(params.get("dry_run", context.dry_run)):
-                page.locator(selector).fill(value)
+                locator.fill(value)
                 wait_after_browser_action(page, params)
             return ActionResult(
                 action="type",
@@ -109,7 +116,7 @@ class ActionDispatcher:
                 message="playwright fill skipped by dry-run"
                 if bool(params.get("dry_run", context.dry_run))
                 else "playwright filled",
-                metadata={"execution": "playwright", "selector": selector, **text_metadata(value, sensitive=sensitive)},
+                metadata={"execution": "playwright", "selector": selector, "actionability": actionability, **text_metadata(value, sensitive=sensitive)},
             )
         ensure_desktop_text_input_allowed("type", params, context)
         return self.actions.type_text(
@@ -133,8 +140,10 @@ class ActionDispatcher:
         page = context.workflow_context.resources.get("playwright_page")
         selector = selector_from_resolved(resolved)
         if page is not None and selector:
+            locator = browser_locator(page, selector, params)
+            actionability = playwright_actionability_snapshot(locator, action="paste")
             if not bool(params.get("dry_run", context.dry_run)):
-                page.locator(selector).fill(value)
+                locator.fill(value)
                 wait_after_browser_action(page, params)
             return ActionResult(
                 action="paste",
@@ -145,7 +154,7 @@ class ActionDispatcher:
                 message="playwright fill skipped by dry-run"
                 if bool(params.get("dry_run", context.dry_run))
                 else "playwright filled",
-                metadata={"execution": "playwright", "selector": selector, **text_metadata(value, sensitive=sensitive)},
+                metadata={"execution": "playwright", "selector": selector, "actionability": actionability, **text_metadata(value, sensitive=sensitive)},
             )
         ensure_desktop_text_input_allowed("paste", params, context)
         return self.actions.paste_text(
@@ -218,11 +227,137 @@ class ActionDispatcher:
         evidence = OCRSelectorStrategy().locate(target, observation)
         if evidence is None or evidence.click_point is None:
             raise LookupError(f"click_text could not find OCR text: {target.display_name}")
-        return self.actions.click(
+        result = self.actions.click(
             evidence.click_point,
             target,
             provider=evidence.provider,
             dry_run=bool(params.get("dry_run", context.dry_run)),
+        )
+        return replace(
+            result,
+            metadata={
+                **result.metadata,
+                "execution": "desktop",
+                "selector_evidence": {
+                    "provider": evidence.provider.value,
+                    "confidence": evidence.confidence,
+                    "reason": evidence.reason,
+                    "source": observation.source,
+                    "screenshot_path": str(observation.screenshot_path) if observation.screenshot_path is not None else None,
+                    "engine": observation.metadata.get("engine"),
+                    "engine_available": observation.metadata.get("engine_available"),
+                },
+            },
+        )
+
+    def _upload_file(
+        self,
+        resolved: ResolvedTarget,
+        params: dict[str, Any],
+        context: ActionDispatchContext,
+    ) -> ActionResult:
+        page = context.workflow_context.resources.get("playwright_page")
+        if page is None:
+            raise RuntimeError("upload_file requires a live browser session. Run observe_browser first.")
+        raw_paths = params.get("path") or params.get("paths")
+        if not raw_paths:
+            raise ValueError("upload_file requires 'path' (a file path or list of file paths).")
+        path_list = [raw_paths] if isinstance(raw_paths, (str, Path)) else [str(item) for item in raw_paths]
+        file_paths = [Path(item).resolve() for item in path_list]
+        missing = [str(item) for item in file_paths if not item.is_file()]
+        if missing:
+            raise FileNotFoundError(f"upload_file source file(s) not found: {', '.join(missing)}")
+        selector = str(params.get("selector") or "") or selector_from_resolved(resolved)
+        if not selector:
+            raise ValueError("upload_file requires 'selector' (or a resolvable target) for the file input or chooser trigger.")
+        is_dry_run = bool(params.get("dry_run", context.dry_run))
+        if not is_dry_run:
+            files = [str(item) for item in file_paths]
+            if bool(params.get("via_chooser", False)):
+                # the control opens a native chooser instead of being an <input type=file>
+                with page.expect_file_chooser(timeout=int(params.get("timeout_ms", 10_000))) as chooser_info:
+                    browser_locator(page, selector, params).click()
+                chooser_info.value.set_files(files)
+            else:
+                browser_locator(page, selector, params).set_input_files(files)
+            wait_after_browser_action(page, params)
+        return ActionResult(
+            action="upload_file",
+            status=ActionStatus.DRY_RUN if is_dry_run else ActionStatus.SUCCESS,
+            target=selector,
+            point=None,
+            provider=resolved.evidence.provider,
+            message="upload skipped by dry-run" if is_dry_run else f"uploaded {len(file_paths)} file(s)",
+            metadata={
+                "execution": "playwright",
+                "selector": selector,
+                "files": [{"name": item.name, "size_bytes": item.stat().st_size} for item in file_paths],
+                "via_chooser": bool(params.get("via_chooser", False)),
+            },
+        )
+
+    def _select_option(
+        self,
+        resolved: ResolvedTarget,
+        params: dict[str, Any],
+        context: ActionDispatchContext,
+    ) -> ActionResult:
+        page = context.workflow_context.resources.get("playwright_page")
+        if page is None:
+            raise RuntimeError("select_option requires a live browser session. Run observe_browser first.")
+        selector = str(params.get("selector") or "") or selector_from_resolved(resolved)
+        if not selector:
+            raise ValueError("select_option requires 'selector' (or a resolvable target).")
+        option_args: dict[str, Any] = {}
+        if params.get("value") is not None:
+            option_args["value"] = params["value"]
+        elif params.get("label") is not None:
+            option_args["label"] = params["label"]
+        elif params.get("index") is not None:
+            option_args["index"] = int(params["index"])
+        else:
+            raise ValueError("select_option requires one of: value, label, index.")
+        is_dry_run = bool(params.get("dry_run", context.dry_run))
+        selected: list[str] = []
+        if not is_dry_run:
+            selected = list(browser_locator(page, selector, params).select_option(**option_args) or [])
+            wait_after_browser_action(page, params)
+        option_label = next(iter(option_args.items()))
+        return ActionResult(
+            action="select_option",
+            status=ActionStatus.DRY_RUN if is_dry_run else ActionStatus.SUCCESS,
+            target=selector,
+            point=None,
+            provider=resolved.evidence.provider,
+            message="select skipped by dry-run" if is_dry_run else f"selected {option_label[0]}={option_label[1]}",
+            metadata={"execution": "playwright", "selector": selector, "option": dict([option_label]), "selected_values": selected},
+        )
+
+    def _drag(
+        self,
+        resolved: ResolvedTarget,
+        params: dict[str, Any],
+        context: ActionDispatchContext,
+    ) -> ActionResult:
+        page = context.workflow_context.resources.get("playwright_page")
+        if page is None:
+            raise RuntimeError("drag requires a live browser session. Run observe_browser first.")
+        source = str(params.get("selector") or "") or selector_from_resolved(resolved)
+        destination = str(params.get("to_selector") or "")
+        if not source or not destination:
+            raise ValueError("drag requires 'selector' (source) and 'to_selector' (destination).")
+        is_dry_run = bool(params.get("dry_run", context.dry_run))
+        if not is_dry_run:
+            browser_locator(page, source, params).drag_to(browser_locator(page, destination, params))
+            wait_after_browser_action(page, params)
+        return ActionResult(
+            action="drag",
+            status=ActionStatus.DRY_RUN if is_dry_run else ActionStatus.SUCCESS,
+            target=f"{source} -> {destination}",
+            point=None,
+            provider=resolved.evidence.provider,
+            message="drag skipped by dry-run" if is_dry_run else f"dragged {source} to {destination}",
+            metadata={"execution": "playwright", "selector": source, "to_selector": destination},
         )
 
     def _wait_for_text(
@@ -299,6 +434,35 @@ def ensure_desktop_text_input_allowed(action: str, params: dict[str, Any], conte
         f"Desktop {action} is blocked by default to avoid typing into the wrong window. "
         "Use observe_browser for web UI, or set allow_desktop_input: true for intentional desktop text input."
     )
+
+
+def browser_locator(page: Any, selector: str, params: dict[str, Any]) -> Any:
+    """Locate an element on the page or inside an iframe (frame_selector)."""
+    frame_selector = str(params.get("frame_selector") or "")
+    scope = page.frame_locator(frame_selector) if frame_selector else page
+    return scope.locator(selector)
+
+
+def playwright_actionability_snapshot(locator: Any, *, action: str = "") -> dict[str, Any]:
+    snapshot: dict[str, Any] = {"checked": True}
+    checks = {
+        "count": lambda: locator.count(),
+        "visible": lambda: locator.first.is_visible(),
+        "enabled": lambda: locator.first.is_enabled(),
+        "bounding_box": lambda: locator.first.bounding_box(),
+    }
+    if action in {"type", "paste"}:
+        checks["editable"] = lambda: locator.first.is_editable()
+    for key, getter in checks.items():
+        try:
+            value = getter()
+            if key == "bounding_box" and isinstance(value, dict):
+                snapshot[key] = {name: value.get(name) for name in ("x", "y", "width", "height")}
+            else:
+                snapshot[key] = value
+        except Exception as exc:
+            snapshot[f"{key}_error"] = str(exc)[:200]
+    return snapshot
 
 
 def selector_from_resolved(resolved: ResolvedTarget) -> str | None:

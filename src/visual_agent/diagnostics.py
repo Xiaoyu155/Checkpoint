@@ -27,7 +27,7 @@ def diagnose_failure(
     target = params.get("target")
     expected = expected_label(action, params)
     actual = actual_label(observation, visible_text, context)
-    suggestions = recovery_suggestions(action, params, observation, context)
+    suggestions = recovery_suggestions(action, params, observation, context, error=error)
     selector_summary = failure_selector_summary(params, context)
     dom_excerpt = observation_dom_excerpt(observation)
 
@@ -271,8 +271,14 @@ def recovery_suggestions(
     params: dict[str, Any],
     observation: Observation | None,
     context: WorkflowContext,
+    *,
+    error: Exception | None = None,
 ) -> list[str]:
     suggestions: list[str] = []
+    error_text = str(error or "").lower()
+    if "executable doesn't exist" in error_text or "playwright install" in error_text:
+        suggestions.append("Install or repair Playwright browsers with `python -m playwright install chromium`, then rerun.")
+        return suggestions
     if observation is None:
         suggestions.append("Add or fix an observe_* step before this action.")
     if action in {"click", "type", "paste", "expect_download", "wait_for"} and "target" in params:

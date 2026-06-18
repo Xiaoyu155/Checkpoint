@@ -7,6 +7,8 @@ from time import time
 from typing import Any
 from urllib.parse import urlparse
 
+from .playwright_env import ensure_playwright_browsers_path
+
 
 DEFAULT_AUTH_DIR = ".agent-auth"
 
@@ -139,6 +141,7 @@ def probe_storage_state(
         result["blockers"] = blockers
 
     try:
+        ensure_playwright_browsers_path(state_path.parent)
         sync_playwright = get_sync_playwright()
     except ImportError:
         return {**result, "status": "error", "error": {"type": "ImportError", "message": "Playwright is not installed. Run: pip install -e .[web]"}}

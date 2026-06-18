@@ -13,6 +13,7 @@ ASSERTION_ACTIONS = frozenset({
     "assert_visual_text",
     "assert_text_contract",
     "assert_no_error",
+    "assert_visual_quality",
     "wait_for_text",
 })
 STRUCTURAL_ACTIONS = frozenset({"assert_browser_ready"})

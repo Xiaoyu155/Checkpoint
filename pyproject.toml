@@ -1,13 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "visual-agent"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local-first workflow automation runtime for AI assistants with MCP, audit trails, and safety profiles."
+keywords = [
+    "checkpoint",
+    "ai-agents",
+    "coding-agents",
+    "mcp",
+    "playwright",
+    "acceptance-testing",
+    "workflow-automation",
+    "local-first",
+]
 requires-python = ">=3.10"
 authors = [
     { name = "Checkpoint contributors" },
 ]
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
 dependencies = [
     "mss>=9.0.1",
     "Pillow>=10.0.0",
@@ -49,6 +77,11 @@ visual_agent = "visual_agent.pytest_plugin"
 Homepage = "https://github.com/Xiaoyu155/Checkpoint"
 Repository = "https://github.com/Xiaoyu155/Checkpoint"
 Issues = "https://github.com/Xiaoyu155/Checkpoint/issues"
+Documentation = "https://github.com/Xiaoyu155/Checkpoint/blob/main/docs/quickstart.md"
+Changelog = "https://github.com/Xiaoyu155/Checkpoint/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

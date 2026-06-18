@@ -28,9 +28,11 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
       const action = await vscode.window.showQuickPick(
         [
           { label: "Init Workspace", command: "visualAgent.initWorkspace" },
+          { label: "Verify Now", command: "visualAgent.verifyNow" },
           { label: "Verify Implementation", command: "visualAgent.verifyImplementation" },
           { label: "Run All", command: "visualAgent.runAll" },
           { label: "Show Failure", command: "visualAgent.showLatestFailure" },
+          { label: "Show Product Issues", command: "visualAgent.showProductIssues" },
           { label: "Generate Workflow", command: "visualAgent.generateWorkflow" }
         ],
         { placeHolder: "Checkpoint quick actions" }
@@ -79,6 +81,40 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
       );
       await refresh(treeProvider);
       showCliResult(`Run all workflows (${mode.runProfile})`, result);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("visualAgent.verifyNow", async () => {
+      const mode = await vscode.window.showQuickPick(
+        [
+          {
+            label: "Dry Run",
+            description: "Default project-safe check; skips real clicks and inputs.",
+            live: false
+          },
+          {
+            label: "Live Supervised",
+            description: "Runs real browser interactions for workflows designed for supervised execution.",
+            live: true
+          }
+        ],
+        { placeHolder: "Choose Checkpoint verify-now mode" }
+      );
+      if (!mode) {
+        return;
+      }
+      const args = ["verify-now", "--format", "markdown"];
+      if (mode.live) {
+        args.push("--live");
+      }
+      const result = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: `Checkpoint: verify-now (${mode.label})...` },
+        () => runCli(args)
+      );
+      await refresh(treeProvider);
+      showOutputPanel("visualAgentVerifyNow", "Checkpoint: Verify Now", result.output || "No verify-now output.");
+      showCliResult("Verify now", result);
     })
   );
 
@@ -143,6 +179,17 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
         "Checkpoint: Latest Failure",
         renderLatestFailureMarkdown(result.output || "No latest failure.")
       );
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("visualAgent.showProductIssues", async () => {
+      const result = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: "Checkpoint: grouping product issues..." },
+        () => runCli(["workspace-product-issues", "--root", getWorkspaceRoot(), "--format", "markdown"], { workspaceRoot: false })
+      );
+      showOutputPanel("visualAgentProductIssues", "Checkpoint: Product Issues", result.output || "No product issues.");
+      showCliResult("Show product issues", result);
     })
   );
 
@@ -389,7 +436,7 @@ export function registerCommands(context: vscode.ExtensionContext, treeProvider:
         )
         .then((action) => {
           if (action === "Open GitHub") {
-            void vscode.env.openExternal(vscode.Uri.parse("https://github.com/Xiaoyu155/visual-agent"));
+            void vscode.env.openExternal(vscode.Uri.parse("https://github.com/Xiaoyu155/Checkpoint"));
           }
         });
     })

@@ -1,0 +1,29 @@
+{
+  "engine": "tesseract",
+  "amount_value": "128",
+  "approve_text": "APPROVE",
+  "expected_amount_text": "ENTERED 128",
+  "expected_after_text": "PASSED",
+  "required_before": [
+    "ORDER",
+    "TOTAL",
+    "READY",
+    "AMOUNT",
+    "APPROVE"
+  ],
+  "forbidden_before": [
+    "PASSED",
+    "RECEIPT",
+    "FAILED"
+  ],
+  "required_after": [
+    "PASSED",
+    "RECEIPT",
+    "TOTAL",
+    "128"
+  ],
+  "forbidden_after": [
+    "FAILED"
+  ],
+  "wait_seconds": 0.5
+}

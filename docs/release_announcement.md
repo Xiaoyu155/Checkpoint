@@ -38,6 +38,7 @@ Highlights:
 - MCP tools for coding agents.
 - Structured failure output with failed step, actual observation, report paths, and repair hints.
 - Local reports, screenshots, audit trails, queues, and quality gates.
+- Public checkout demo script showing green -> detected regression -> restored green.
 
 GitHub: https://github.com/Xiaoyu155/Checkpoint
 
@@ -46,7 +47,7 @@ GitHub: https://github.com/Xiaoyu155/Checkpoint
 Title:
 
 ```text
-Checkpoint Developer Preview: Local Acceptance Checks for AI Coding Agents
+Checkpoint v0.1.1-preview: Local Acceptance Checks for AI Coding Agents
 ```
 
 Body:
@@ -70,7 +71,8 @@ This developer preview focuses on one core loop:
 - `dry-run`, `supervised`, and `approved` execution profiles
 - Local reports, screenshots, audit trails, queues, and quality gates
 - AI-readable failure diagnostics
-- Bootstrap onboarding with `doctor` and demo smoke checks
+- Bootstrap onboarding with `doctor`, repo-local Playwright browser discovery, and demo smoke checks
+- Public demo: `scripts/public_demo_case.ps1`
 
 ### Quick Start
 
@@ -78,7 +80,8 @@ This developer preview focuses on one core loop:
 git clone https://github.com/Xiaoyu155/Checkpoint.git
 cd Checkpoint
 powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 -Step all
-.\.venv\Scripts\checkpoint.exe workspace-run --root .agent-workspace --workflow local_html_form_workflow --inputs-file demo_login.json --run-profile dry-run --format markdown
+.\.venv\Scripts\checkpoint.exe verify-now --workspace-root .agent-workspace --workflow checkout_verification --live --format markdown
+powershell -ExecutionPolicy Bypass -File scripts\public_demo_case.ps1
 ```
 
 ### Docs
@@ -87,7 +90,9 @@ powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 -Step all
 - Coding agents: `docs/for-coding-agents.md`
 - Demo output: `docs/demo-output.md`
 - Failure demo: `docs/failure-demo.md`
+- Public demo case: `docs/public_demo_case.md`
 - MCP integration: `docs/mcp-integration.md`
+- Public launch checklist: `docs/public_launch_checklist.md`
 ```
 
 ## Comment Reply

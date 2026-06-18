@@ -20,6 +20,14 @@ Run this checklist before publishing a release, demo, or public branch.
 .\.venv\Scripts\python.exe -m visual_agent.cli atomic-capabilities
 ```
 
+Confirm `doctor` reports `perception.dom_browser: true` and `playwright.ready: true`.
+
+## Product Release Smoke
+
+```powershell
+.\.venv\Scripts\checkpoint.exe release-smoke --run --workspace-root .agent-workspace --format markdown
+```
+
 ## Workspace Demo
 
 ```powershell
@@ -74,6 +82,7 @@ git config core.hooksPath .githooks
 
 - [ ] README quickstart still runs.
 - [ ] `docs/quickstart.md` matches current CLI flags.
+- [ ] `docs/public_launch_checklist.md` matches current publishing steps and GitHub metadata.
 - [ ] `README_MCP.md` lists current MCP tools and safety defaults.
 - [ ] `examples/workflows/README.md` reflects available example groups.
 

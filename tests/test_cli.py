@@ -41,6 +41,55 @@ def test_codex_check_cli_returns_zero_when_all_selected_workflows_pass(tmp_path,
     assert code == 0
     assert payload["selected_workflows"] == ["checkout"]
     assert payload["results"][0]["status"] == "passed"
+    # machine-readable verdict must be present so AI callers cannot misread the result
+    assert payload["verdict"] == "pass"
+    assert payload["passed"] == 1
+    assert payload["inspection_only"] == 0
+
+
+def test_verify_now_cli_runs_default_verification_path(tmp_path, capsys, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    workflow = workspace.workflows_dir / "checkout.yaml"
+    workflow.write_text(
+        """
+schema_version: 1
+name: checkout
+version: 1
+tags:
+  - verification
+steps:
+  - id: observe
+    action: observe_fixture
+    path: missing.json
+""".strip(),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_run_workspace_workflow(*_args, **kwargs):
+        calls.append(kwargs)
+
+        class Result:
+            run_id = "run"
+            steps = (
+                WorkflowStepResult(id="open", action="observe_browser", status=ActionStatus.SUCCESS),
+                WorkflowStepResult(id="submit", action="click", status=ActionStatus.SUCCESS),
+                WorkflowStepResult(id="confirm", action="assert_text", status=ActionStatus.SUCCESS),
+            )
+            acceptance = {"label": "L3", "level": 3, "is_product_acceptance": True}
+
+        return Result()
+
+    monkeypatch.setattr("visual_agent.verify.run_workspace_workflow", fake_run_workspace_workflow)
+
+    code = main(["verify-now", "--workspace-root", str(workspace.root)])
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert "Verification Report" in output
+    assert "Strict product acceptance (L3+ without blockers): 1/1" in output
+    assert calls[0]["run_profile"] == "supervised"
+    assert calls[0]["queue_when_locked"] is True
 
 
 def test_load_inputs_file_accepts_utf8_bom(tmp_path) -> None:
@@ -72,6 +121,25 @@ def test_checkpoint_entrypoint_prints_brand_aligned_version(capsys, monkeypatch)
     assert "checkpoint 0.1.0" in output
     assert "Product: Checkpoint" in output
     assert "Package: visual-agent" in output
+
+
+def test_empty_cli_prints_concise_getting_started(capsys) -> None:
+    code = main([])
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert "Checkpoint verifies product behavior" in output
+    assert "checkpoint verify-now" in output
+    assert "Run checkpoint --help for the full command list." in output
+
+
+def test_quickstart_cli_prints_same_getting_started(capsys) -> None:
+    code = main(["quickstart"])
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert "checkpoint init --root .agent-workspace" in output
+    assert "checkpoint workspace-product-issues" in output
 
 
 def test_codex_check_cli_returns_one_when_any_workflow_fails(tmp_path, capsys, monkeypatch) -> None:

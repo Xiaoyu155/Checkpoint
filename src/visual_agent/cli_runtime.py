@@ -19,6 +19,7 @@ from .preflight import inspect_environment
 
 RUNTIME_COMMANDS = {
     "env-check",
+    "real-acceptance-readiness",
     "auth-state-plan",
     "auth-state-import",
     "auth-state-inspect",
@@ -54,6 +55,19 @@ def handle_runtime_command(args: Any) -> int:
         else:
             print(json.dumps(to_jsonable(environment), ensure_ascii=False, indent=2))
         return 0 if environment.get("ok") else 1
+    if args.command == "real-acceptance-readiness":
+        from .real_acceptance import (
+            build_real_acceptance_readiness,
+            real_acceptance_readiness_to_jsonable,
+            real_acceptance_readiness_to_markdown,
+        )
+
+        payload = build_real_acceptance_readiness(workspace_root=args.workspace_root)
+        if args.format == "markdown":
+            print(real_acceptance_readiness_to_markdown(payload))
+        else:
+            print(json.dumps(real_acceptance_readiness_to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0 if payload.get("ready") else 1
     if args.command == "auth-state-plan":
         result = build_auth_state_import_plan(
             args.source,

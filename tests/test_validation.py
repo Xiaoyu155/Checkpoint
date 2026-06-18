@@ -356,6 +356,23 @@ def test_validate_workflow_rejects_text_actions_without_text() -> None:
     assert any("wait_for_text requires" in issue.message for issue in result.issues)
 
 
+def test_validate_workflow_accepts_text_actions_with_input_refs() -> None:
+    workflow = workflow_from_dict(
+        {
+            "name": "ocr-actions",
+            "steps": [
+                {"id": "buy", "action": "click_text", "text_from": "input.target_text"},
+                {"id": "wait", "action": "wait_for_text", "contains_text_from": "input.expected_text"},
+                {"id": "visual", "action": "assert_visual_text", "text_from": "input.expected_text"},
+            ],
+        }
+    )
+
+    result = validate_workflow(workflow)
+
+    assert result.valid
+
+
 def test_validate_workflow_flags_invalid_wait_condition() -> None:
     workflow = workflow_from_dict(
         {

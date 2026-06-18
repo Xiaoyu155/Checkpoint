@@ -7,9 +7,10 @@ from typing import Any
 
 from PIL import Image
 
+from visual_agent.acceptance import validate_operation_receipt
 from visual_agent.dispatcher import ActionDispatcher
 from visual_agent.locks import RunLock
-from visual_agent.models import ActionResult, ActionStatus, Observation, ProviderKind, to_jsonable
+from visual_agent.models import ActionResult, ActionStatus, Observation, Point, ProviderKind, to_jsonable
 from visual_agent.providers import ProviderRegistry
 from visual_agent.run_profile import normalize_run_profile, policy_for_profile
 from visual_agent.state import StateStore
@@ -165,6 +166,39 @@ def test_close_context_resources_is_silent_on_no_close_method(tmp_path) -> None:
     context = WorkflowContext(run_id="run", run_dir=tmp_path, resources={"playwright_page": object()})
 
     close_context_resources(context)
+
+
+def test_close_context_resources_stops_playwright_trace_before_context_close(tmp_path) -> None:
+    events: list[str] = []
+    trace_path = tmp_path / "traces" / "browser.zip"
+
+    class FakeTracing:
+        def stop(self, *, path):
+            events.append("trace_stop")
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_text("trace", encoding="utf-8")
+
+    class FakeContext:
+        tracing = FakeTracing()
+
+        def close(self):
+            events.append("context_close")
+
+    context = WorkflowContext(
+        run_id="run",
+        run_dir=tmp_path,
+        resources={
+            "playwright_context": FakeContext(),
+            "playwright_trace_started": True,
+            "playwright_trace_path": str(trace_path),
+        },
+    )
+
+    close_context_resources(context)
+
+    assert events == ["trace_stop", "context_close"]
+    assert trace_path.exists()
+    assert context.resources["playwright_trace_stopped"] is True
 
 
 def product_page_observation(params, context) -> Observation:
@@ -716,7 +750,12 @@ def test_workflow_browser_action_auto_observes_after_click(tmp_path) -> None:
             "steps": [
                 {"id": "observe", "action": "observe_browser", "url": "https://example.test/app"},
                 {"id": "ready", "action": "assert_browser_ready", "min_text_length": 1, "min_interactive": 1},
-                {"id": "click", "action": "click", "target": {"text": "Login", "role": "button"}},
+                {
+                    "id": "click",
+                    "action": "click",
+                    "target": {"text": "Login", "role": "button"},
+                    "post_action_assert_text": "Dashboard Ready",
+                },
                 {"id": "assert", "action": "assert_text", "text": "Dashboard Ready"},
             ],
         }
@@ -727,6 +766,19 @@ def test_workflow_browser_action_auto_observes_after_click(tmp_path) -> None:
     assert [step.status for step in result.steps] == [ActionStatus.SUCCESS] * 4
     assert result.steps[2].metadata["browser_post_action_observe"]["status"] == "observed"
     assert result.steps[2].metadata["browser_post_action_observe"]["visible_text_length"] == len("Dashboard Ready")
+    receipt = result.steps[2].metadata["operation_receipt"]
+    assert receipt["engine"] == "playwright"
+    assert receipt["live"] is True
+    assert receipt["selector"] == "#login"
+    assert receipt["observed_after_action"] is True
+    assert receipt["before"]["visible_text_length"] == len("Login")
+    assert receipt["after"]["visible_text_length"] == len("Dashboard Ready")
+    assert receipt["changed"]["visible_text_length"] is True
+    assert receipt["post_action_assertion"] == {
+        "type": "text",
+        "expected": "Dashboard Ready",
+        "status": "matched",
+    }
 
 
 def test_workflow_assert_browser_ready_fails_blank_page(tmp_path) -> None:
@@ -880,6 +932,89 @@ def test_workflow_runtime_click_text_uses_ocr_bounds(tmp_path) -> None:
     assert step.action_result.action == "click"
     assert step.action_result.point.x == 70
     assert step.action_result.point.y == 50
+
+
+def test_workflow_runtime_click_text_records_synthetic_operation_receipt_with_post_observe(tmp_path) -> None:
+    class FakeActions:
+        def click(self, point, target, *, provider, dry_run=False):
+            return ActionResult(
+                action="click",
+                status=ActionStatus.DRY_RUN if dry_run else ActionStatus.SUCCESS,
+                target=target.display_name,
+                point=Point(point.x, point.y),
+                provider=provider,
+                message="fake clicked",
+            )
+
+    dispatcher = ActionDispatcher(actions=FakeActions())
+    workflow = workflow_from_dict(
+        {
+            "name": "click-text-receipt",
+            "steps": [
+                {
+                    "id": "buy",
+                    "action": "click_text",
+                    "text": "购买服务",
+                    "mock_text": "购买服务",
+                    "mock_bounds": {"left": 20, "top": 30, "width": 100, "height": 40},
+                    "post_action_observe": {
+                        "wait_seconds": 0,
+                        "mock_text": "购买成功",
+                        "assert_text": "购买成功",
+                    },
+                },
+            ],
+        }
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, dispatcher=dispatcher).run(workflow, run_profile="supervised")
+
+    step = result.steps[0]
+    receipt = step.metadata["operation_receipt"]
+    assert step.status == ActionStatus.SUCCESS
+    assert receipt["engine"] == "ocr"
+    assert receipt["target"] == "购买服务"
+    assert receipt["evidence"]["engine"] == "mock"
+    assert receipt["actionability"]["mode"] == "screen_point"
+    assert receipt["actionability"]["point"] == {"x": 70, "y": 50}
+    assert receipt["actionability"]["reason"] == "OCR text matched 购买服务"
+    assert receipt["observed_after_action"] is True
+    assert validate_operation_receipt(step).reason == "synthetic_evidence"
+
+
+def test_workflow_runtime_click_text_without_post_observe_records_invalid_receipt(tmp_path) -> None:
+    class FakeActions:
+        def click(self, point, target, *, provider, dry_run=False):
+            return ActionResult(
+                action="click",
+                status=ActionStatus.DRY_RUN if dry_run else ActionStatus.SUCCESS,
+                target=target.display_name,
+                point=Point(point.x, point.y),
+                provider=provider,
+                message="fake clicked",
+            )
+
+    dispatcher = ActionDispatcher(actions=FakeActions())
+    workflow = workflow_from_dict(
+        {
+            "name": "click-text-invalid-receipt",
+            "steps": [
+                {
+                    "id": "buy",
+                    "action": "click_text",
+                    "text": "购买服务",
+                    "mock_text": "购买服务",
+                    "mock_bounds": {"left": 20, "top": 30, "width": 100, "height": 40},
+                },
+            ],
+        }
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path, dispatcher=dispatcher).run(workflow, run_profile="supervised")
+
+    step = result.steps[0]
+    assert "operation_receipt" in step.metadata
+    assert validate_operation_receipt(step).reason == "synthetic_evidence"
 
 
 def test_workflow_runtime_wait_for_text_uses_ocr_bounds(tmp_path) -> None:

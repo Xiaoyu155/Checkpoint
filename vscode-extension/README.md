@@ -26,16 +26,16 @@ Set `visualAgent.pythonPath` when your project uses a virtual environment, for e
 
 Open the Checkpoint activity bar view.
 
-Screenshot placeholder: add `images/quickstart.png` before publishing. It should show the Workflows sidebar with example workflows and the status bar quick action menu.
-
 Use one of these commands:
 
 - `Checkpoint: Init Workspace`
-- `x-agent: Verify Implementation`
+- `Checkpoint: Verify Now`
+- `Checkpoint: Verify Implementation`
 - `Checkpoint: Generate Workflow from Description`
 - `Checkpoint: New Workflow`
 - `Checkpoint: Open Examples`
 - `Checkpoint: Run All Workflows`
+- `Checkpoint: Show Product Issues`
 
 ## Commands
 
@@ -44,10 +44,12 @@ Use one of these commands:
 - `visualAgent.runAll`: run all verification workflows.
 - `visualAgent.runLiveSupervised`: run live supervised workflows.
 - `visualAgent.runAffected`: run affected workflows.
+- `visualAgent.verifyNow`: run Checkpoint's default verification path.
 - `visualAgent.verifyCurrentChange`: generate and run verification for the current git diff.
-- `visualAgent.verifyImplementation`: command palette entry for `x-agent: Verify Implementation`; leave the URL blank to infer it.
+- `visualAgent.verifyImplementation`: command palette entry for `Checkpoint: Verify Implementation`; leave the URL blank to infer it.
 - `visualAgent.showLastVerification`: show the last AI verification status.
 - `visualAgent.showLatestFailure`: show latest failure details.
+- `visualAgent.showProductIssues`: group repeated failed reports into product issues.
 - `visualAgent.autoRepair`: preview or run deterministic workflow repair.
 - `visualAgent.generateWorkflow`: generate workflow YAML from a description.
 - `visualAgent.newWorkflow`: create a template workflow under `workflows/`.

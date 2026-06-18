@@ -2,6 +2,14 @@
 
 This demo shows Checkpoint's core loop: run a product contract, break the UI, get an actionable failure, fix it, and verify again.
 
+For the scripted version, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\public_demo_case.ps1
+```
+
+The script performs the same green -> red -> green flow and restores the demo page automatically.
+
 ## 1. Bootstrap
 
 ```powershell
@@ -13,7 +21,7 @@ The bootstrap path installs dependencies, initializes `.agent-workspace`, runs `
 ## 2. Run The Passing Contract
 
 ```powershell
-checkpoint workspace-run --root .agent-workspace --workflow checkout_verification --run-profile dry-run --format markdown
+checkpoint verify-now --workspace-root .agent-workspace --workflow checkout_verification --live --format markdown
 ```
 
 Expected result: the checkout verification workflow passes.
@@ -41,7 +49,7 @@ Next Step
 ## 4. Run The Contract Again
 
 ```powershell
-checkpoint workspace-run --root .agent-workspace --workflow checkout_verification --run-profile dry-run --format markdown
+checkpoint verify-now --workspace-root .agent-workspace --workflow checkout_verification --live --format markdown
 ```
 
 Checkpoint should report a failing assertion. The important part is not only that it fails, but that it returns evidence a coding agent can use:
@@ -72,7 +80,7 @@ Proceed to Checkout
 Run the workflow again:
 
 ```powershell
-checkpoint workspace-run --root .agent-workspace --workflow checkout_verification --run-profile dry-run --format markdown
+checkpoint verify-now --workspace-root .agent-workspace --workflow checkout_verification --live --format markdown
 ```
 
 Expected result: the workflow returns to green.

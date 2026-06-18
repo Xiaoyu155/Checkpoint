@@ -1,5 +1,10 @@
+﻿schema_version: 1
+min_runtime_version: "0.1.0"
 name: local_html_form_workflow
 version: 1
+visibility: private
+author: ""
+license: ""
 steps:
   - id: observe_html
     action: observe_html
@@ -27,6 +32,7 @@ steps:
         - dom
         - mock
     value_from: input.password
+    sensitive: true
   - id: wait_login_button
     action: wait_for
     condition: target

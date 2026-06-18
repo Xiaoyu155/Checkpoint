@@ -491,6 +491,30 @@ def test_execute_remote_workflow_plan_with_transport_records_success_usage(tmp_p
     assert "va_cloud_secret" not in raw
 
 
+def test_execute_remote_workflow_plan_with_injected_transport_does_not_require_cloud_env(tmp_path: Path, monkeypatch) -> None:
+    clear_cloud_env(monkeypatch)
+    grant_pro_license(monkeypatch)
+    calls: list[dict] = []
+
+    def fake_transport(request: dict) -> dict:
+        calls.append(request)
+        return {"status": "success", "run_id": "local-cloud-run"}
+
+    payload = execute_remote_workflow_plan(
+        "checkout",
+        tmp_path,
+        execute=True,
+        transport=fake_transport,
+    )
+
+    assert payload["request"]["status"] == "ready"
+    assert payload["request"]["cloud_config"]["endpoint"] == "<injected-transport>"
+    assert payload["network_sent"] is True
+    assert payload["result"]["status"] == "success"
+    assert payload["result"]["run_id"] == "local-cloud-run"
+    assert len(calls) == 1
+
+
 def test_http_cloud_transport_posts_json_without_exposing_key(tmp_path: Path) -> None:
     seen: dict[str, object] = {}
 

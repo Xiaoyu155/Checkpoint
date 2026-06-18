@@ -58,7 +58,7 @@ Fully quit and reopen Claude Desktop so it reloads MCP servers.
 Ask Claude Desktop:
 
 ```text
-Use visual-agent to list my workflows.
+Use Checkpoint to list my workflows.
 ```
 
 Expected result:

@@ -46,7 +46,85 @@ def test_run_codex_check_runs_only_affected_non_slow_workflows(tmp_path, monkeyp
     assert calls == ["checkout"]
     assert result.selected_workflows == ["checkout"]
     assert result.skipped_slow_workflows == ["visual_checkout"]
+    # observe-only workflow: it must surface as inspection-only, never as a real pass
+    assert result.passed == 0
+    assert result.inspection_only == 1
+    assert result.failed == 0
+    assert result.verdict == "inspection_only"
+
+
+def test_run_codex_check_passes_only_with_real_interaction(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_check_workflow(workspace, "checkout", affects="src/payment/")
+
+    def fake_run_workspace_workflow(_workspace, name, **_kwargs):
+        class Result:
+            run_id = f"run-{name}"
+            steps = (
+                WorkflowStepResult(id="open", action="observe_ocr", status=ActionStatus.SUCCESS),
+                WorkflowStepResult(
+                    id="submit",
+                    action="click_text",
+                    status=ActionStatus.SUCCESS,
+                    metadata={
+                        "operation_receipt": {
+                            "engine": "playwright",
+                            "live": True,
+                            "observed_after_action": True,
+                            "actionability": {"checked": True, "count": 1, "visible": True, "enabled": True},
+                        }
+                    },
+                ),
+                WorkflowStepResult(id="confirm", action="assert_text", status=ActionStatus.SUCCESS),
+            )
+            acceptance = {"label": "L3", "name": "data_round_trip", "is_product_acceptance": True}
+
+        return Result()
+
+    monkeypatch.setattr("visual_agent.codex_check.run_workspace_workflow", fake_run_workspace_workflow)
+
+    result = run_codex_check(workspace, changed=["src/payment/checkout.py"], run_profile="supervised")
+
     assert result.passed == 1
+    assert result.inspection_only == 0
+    assert result.verdict == "pass"
+    assert result.results[0].real_interaction_count == 1
+    assert result.results[0].invalid_interaction_count == 0
+    assert result.results[0].acceptance_level == "L3"
+    assert result.results[0].is_product_acceptance is True
+
+    text = codex_check_to_markdown(result)
+    assert "[L3 data_round_trip]" in text
+    assert "Strict product acceptance (L3+ without blockers): 1/1 workflow(s)." in text
+
+
+def test_run_codex_check_dry_run_interactions_are_inspection_only(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_check_workflow(workspace, "checkout", affects="src/payment/")
+
+    def fake_run_workspace_workflow(_workspace, name, **_kwargs):
+        class Result:
+            run_id = f"run-{name}"
+            steps = (
+                WorkflowStepResult(id="open", action="observe_ocr", status=ActionStatus.SUCCESS),
+                WorkflowStepResult(id="submit", action="click_text", status=ActionStatus.DRY_RUN),
+            )
+
+        return Result()
+
+    monkeypatch.setattr("visual_agent.codex_check.run_workspace_workflow", fake_run_workspace_workflow)
+
+    result = run_codex_check(workspace, changed=["src/payment/checkout.py"])
+
+    assert result.passed == 0
+    assert result.inspection_only == 1
+    assert result.verdict == "inspection_only"
+    assert result.results[0].skipped_interaction_count == 1
+
+    text = codex_check_to_markdown(result)
+    assert "INSPECT checkout" in text
+    assert "NOT" in text
+    assert "Verdict: INSPECTION ONLY" in text
 
 
 def test_codex_check_to_markdown_reports_failure_details() -> None:

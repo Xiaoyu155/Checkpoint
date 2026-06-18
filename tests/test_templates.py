@@ -8,7 +8,13 @@ def test_list_templates_contains_business_templates() -> None:
     templates = list_templates()
     ids = {template.id for template in templates}
 
-    assert {"login_form", "order_entry", "ecommerce_download", "external_readonly_probe"}.issubset(ids)
+    assert {
+        "login_form",
+        "order_entry",
+        "ecommerce_download",
+        "external_readonly_probe",
+        "desktop_ocr_real_acceptance",
+    }.issubset(ids)
 
 
 def test_get_template_reads_manifest() -> None:
@@ -78,3 +84,39 @@ def test_install_template_and_run_external_readonly_probe(tmp_path) -> None:
 
     assert [step.action for step in run.steps] == ["observe_browser", "assert_text", "wait_for"]
     assert all(step.status == ActionStatus.SUCCESS for step in run.steps)
+
+
+def test_desktop_ocr_real_acceptance_template_installs_actionable_skeleton(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    result = install_template(workspace, "desktop_ocr_real_acceptance")
+    workflow_path = workspace.workflows_dir / "desktop_ocr_real_acceptance.yaml"
+    inputs_path = workspace.inputs_dir / "desktop_ocr_real_acceptance_inputs.json"
+
+    assert workflow_path.exists()
+    assert inputs_path.exists()
+    assert result["copied"]
+
+    import yaml
+
+    payload = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    inputs = load_workspace_inputs(workspace, None, "desktop_ocr_real_acceptance_inputs.json")
+    actions = [step["action"] for step in payload["steps"]]
+    type_amount = next(step for step in payload["steps"] if step["id"] == "type_amount")
+    click = next(step for step in payload["steps"] if step["id"] == "click_approve")
+
+    assert actions == ["observe_ocr", "assert_text_contract", "type", "click_text", "assert_text_contract"]
+    assert inputs["engine"] == "tesseract"
+    assert inputs["amount_value"] == "REPLACE_WITH_VALUE_TO_TYPE"
+    assert inputs["required_before"] == [
+        "REPLACE_WITH_VISIBLE_BUSINESS_TEXT",
+        "REPLACE_WITH_VISIBLE_INPUT_TEXT",
+        "REPLACE_WITH_VISIBLE_CLICK_TEXT",
+    ]
+    assert payload["steps"][1]["required_all_from"] == "input.required_before"
+    assert payload["steps"][1]["forbidden_any_from"] == "input.forbidden_before"
+    assert payload["steps"][4]["required_all_from"] == "input.required_after"
+    assert payload["steps"][4]["forbidden_any_from"] == "input.forbidden_after"
+    assert type_amount["allow_desktop_input"] is True
+    assert type_amount["post_action_observe"]["assert_text_from"] == "input.expected_amount_text"
+    assert click["post_action_observe"]["assert_text_from"] == "input.expected_after_text"
+    assert "real-acceptance" in payload["tags"]

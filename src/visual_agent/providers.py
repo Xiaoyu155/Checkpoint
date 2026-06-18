@@ -10,6 +10,7 @@ from .fixtures import load_observation_fixture
 from .html_provider import HtmlFileProvider
 from .models import Observation, ProviderKind
 from .ocr import observe_ocr as observe_ocr_image
+from .playwright_env import ensure_playwright_browsers_path
 from .uia import UIAutomationProvider
 from .vlm import observe_vision as observe_vision_image
 
@@ -76,11 +77,13 @@ def observe_screen(params: dict[str, Any], context: ProviderContext) -> Observat
 
 
 def observe_dom(params: dict[str, Any], context: ProviderContext) -> Observation:
+    ensure_playwright_browsers_path(context.run_dir, (context.resources or {}).get("workspace_root"))
     url = normalize_url(require_param(params, "url"), run_dir=context.run_dir)
     return DomProvider(headless=not bool(params.get("headed", False))).observe_url(url)
 
 
 def observe_browser(params: dict[str, Any], context: ProviderContext) -> Observation:
+    ensure_playwright_browsers_path(context.run_dir, (context.resources or {}).get("workspace_root"))
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
@@ -142,6 +145,17 @@ def observe_browser(params: dict[str, Any], context: ProviderContext) -> Observa
                 raise FileNotFoundError(f"Storage state file not found: {storage_state_path}")
             context_options["storage_state"] = str(storage_state_path)
         browser_context = browser.new_context(**context_options)
+        trace_path = None
+        if params.get("record_trace", True) is not False:
+            trace_dir = context.run_dir / "traces"
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            trace_path = trace_dir / f"{safe_artifact_label(str(params.get('trace_label') or 'browser'))}.zip"
+            try:
+                browser_context.tracing.start(screenshots=True, snapshots=True, sources=True)
+            except Exception as exc:
+                trace_path = None
+                if context.resources is not None:
+                    context.resources["playwright_trace_error"] = str(exc)[:500]
         page = browser_context.new_page()
         network_events: list[dict[str, Any]] = []
         console_events: list[dict[str, Any]] = []
@@ -169,6 +183,8 @@ def observe_browser(params: dict[str, Any], context: ProviderContext) -> Observa
             context.resources["playwright_browser"] = browser
             context.resources["playwright_context"] = browser_context
             context.resources["playwright_page"] = page
+            context.resources["playwright_trace_path"] = str(trace_path) if trace_path is not None else ""
+            context.resources["playwright_trace_started"] = trace_path is not None
             context.resources["network_events"] = network_events
             context.resources["console_events"] = console_events
             context.resources["page_errors"] = page_errors
@@ -347,7 +363,7 @@ def resolve_context_path(value: Any, run_dir: Path) -> Path:
 
 def response_event(response: Any) -> dict[str, Any]:
     request = response.request
-    return {
+    event = {
         "type": "response",
         "url": response.url,
         "status": response.status,
@@ -355,6 +371,15 @@ def response_event(response: Any) -> dict[str, Any]:
         "method": request.method,
         "resource_type": request.resource_type,
     }
+    # open convention: apps may label AI responses with x-ai-source so the
+    # acceptance officer can tell real model output from degraded fallbacks
+    try:
+        ai_source = response.headers.get("x-ai-source")
+    except Exception:
+        ai_source = None
+    if ai_source:
+        event["ai_source"] = str(ai_source).strip().lower()
+    return event
 
 
 def request_failed_event(request: Any) -> dict[str, Any]:

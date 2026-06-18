@@ -226,6 +226,9 @@ def suggested_fix_for_cause(cause: str, diagnosis: dict[str, Any]) -> str:
     if cause == "assertion_wrong":
         return "Compare the expected assertion with the actual visible UI text and update either the app state or the workflow assertion."
     if cause == "env_error":
+        error = str(diagnosis.get("error") or "").lower()
+        if "executable doesn't exist" in error or "playwright install" in error:
+            return "Install or repair Playwright browsers with `python -m playwright install chromium`, then rerun."
         return "Start the app or fix the test environment, then rerun the workflow."
     return "Inspect the failed step evidence and rerun after the smallest safe change."
 

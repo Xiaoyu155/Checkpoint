@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .quality import load_quality_gate_index, quality_gate_index_to_markdown
+from .reports import acceptance_status_suffix
 from .workspace import (
     Workspace,
     load_workspace_gui_action_history_risk_config,
@@ -273,6 +274,8 @@ def build_report_detail(workspace: Workspace, run_id: str) -> dict[str, Any]:
         "run_profile": payload.get("run_profile"),
         "runtime_version": payload.get("runtime_version"),
         "workflow_schema_version": payload.get("workflow_schema_version"),
+        "acceptance": payload.get("acceptance") if isinstance(payload.get("acceptance"), dict) else None,
+        "run_checks": payload.get("run_checks") if isinstance(payload.get("run_checks"), dict) else None,
         "summary": {
             "total_steps": int(payload.get("total_steps") or len(compact_steps)),
             "succeeded_steps": int(payload.get("succeeded_steps") or 0),
@@ -321,8 +324,12 @@ def report_detail_to_markdown(detail: dict[str, Any]) -> str:
         f"- Dry-run actions: {summary['dry_run_actions']}",
         f"- Failed step: `{summary['failed_step']}`" if summary.get("failed_step") else "- Failed step: none",
         f"- Elapsed seconds: {summary['elapsed_seconds']}",
-        "",
     ]
+    acceptance = detail.get("acceptance") if isinstance(detail.get("acceptance"), dict) else None
+    if acceptance:
+        suffix = acceptance_status_suffix(acceptance)
+        lines.append(f"- Acceptance level: `{acceptance.get('label')}` ({acceptance.get('name')}){suffix}")
+    lines.append("")
     external_sample = detail.get("external_sample") if isinstance(detail.get("external_sample"), dict) else None
     if external_sample:
         lines.extend(

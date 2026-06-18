@@ -32,12 +32,12 @@ client-specific wording and MCP config shape.
 ## Useful Prompts
 
 ```text
-Use visual-agent to list workflows, run local_html_form_workflow as a dry-run,
+Use Checkpoint to list workflows, run `verify-now`,
 then summarize the report.
 ```
 
 ```text
-Use visual-agent to validate every workflow before suggesting changes.
+Use Checkpoint to validate every workflow before suggesting changes.
 ```
 
 ```text
@@ -56,7 +56,7 @@ report.
 ```
 
 ```text
-Use visual-agent to get the workspace dashboard, find the latest failed run,
+Use Checkpoint to get the workspace dashboard, find the latest failed run,
 and explain the failure diagnosis.
 ```
 

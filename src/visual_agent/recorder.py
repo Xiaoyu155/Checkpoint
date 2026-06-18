@@ -8,6 +8,7 @@ from time import sleep, strftime, time
 from typing import Any
 
 from .workflow import RUNTIME_VERSION, SUPPORTED_WORKFLOW_SCHEMA_VERSION, parse_workflow_file
+from .playwright_env import ensure_playwright_browsers_path
 from .preflight import run_preflight
 from .scheduler import submit_queue_task
 from .security import redact_secret_text, scrub_secrets
@@ -150,6 +151,7 @@ def record_browser_session(
         "queue_max_retries": queue_max_retries,
     }
     try:
+        ensure_playwright_browsers_path(workspace.root)
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:

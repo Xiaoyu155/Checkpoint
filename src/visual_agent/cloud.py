@@ -70,6 +70,23 @@ def build_remote_workflow_request(
     }
 
 
+def request_ready_for_injected_transport(request: dict[str, Any]) -> dict[str, Any]:
+    """Mark a request ready when the caller supplied an explicit transport."""
+    updated = dict(request)
+    config = dict(updated.get("cloud_config") or {})
+    config.update(
+        {
+            "available": True,
+            "endpoint": config.get("endpoint") or "<injected-transport>",
+            "api_key_present": True,
+            "blockers": [],
+        }
+    )
+    updated["status"] = "ready"
+    updated["cloud_config"] = config
+    return updated
+
+
 def summarize_remote_inputs(inputs: dict[str, Any] | None) -> dict[str, Any]:
     if not inputs:
         return {"provided": False, "field_count": 0, "fields": []}
@@ -363,6 +380,7 @@ def save_marketplace_workflow(
 def remote_client_from_env(
     *,
     transport: CloudTransport | None = None,
+    allow_injected_transport_without_config: bool = False,
     run_profile: str = "dry-run",
     inputs: dict[str, Any] | None = None,
     inputs_file: str | None = None,
@@ -381,6 +399,8 @@ def remote_client_from_env(
             workflow_source=workflow_source,
             workflow_id=workflow_id,
         )
+        if allow_injected_transport_without_config and transport is not None and request["status"] != "ready":
+            request = request_ready_for_injected_transport(request)
         if request["status"] != "ready":
             return {
                 "status": "blocked",
@@ -439,6 +459,9 @@ def execute_remote_workflow_plan(
         "network_sent": False,
         "request": request,
     }
+    if execute and transport is not None and request["status"] != "ready":
+        request = request_ready_for_injected_transport(request)
+        payload["request"] = request
     if not execute:
         payload["adapter_diagnostic"] = remote_client_from_env(
             run_profile=run_profile,
@@ -452,6 +475,7 @@ def execute_remote_workflow_plan(
 
     client = remote_client_from_env(
         transport=transport,
+        allow_injected_transport_without_config=bool(transport is not None),
         run_profile=run_profile,
         inputs=inputs,
         inputs_file=inputs_file,

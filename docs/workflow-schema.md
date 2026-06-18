@@ -45,10 +45,26 @@ steps:
 - `observe_dom`: inspect structured DOM.
 - `observe_ocr`: inspect screen or image text.
 - `click`, `type`, `paste`, `press_key`: interact with a target.
+- `upload_file`, `select_option`, `drag`: upload files (input or native chooser), pick dropdown options, drag elements. All accept `frame_selector` to act inside an iframe.
 - `wait_for`, `wait_for_text`: wait for text, selector, URL, or response.
 - `assert_browser_ready`: fail blank or non-interactive pages.
 - `assert_text`, `assert_text_contract`, `assert_no_error`: validate UI state.
+- `assert_visual_quality`: zero-config visual audit — unreadable font sizes, horizontal page overflow, broken images, occluded controls, mostly-blank viewports. Blocking issues fail the step; warnings are recorded in the report and the `visual/` artifact. The same audit also runs automatically at the end of every browser run as the `visual_guard` step; opt out per workflow with the `skip-visual-guard` tag.
 - `request_api`, `assert_response`: validate network/API behavior.
+- `assert_ai_response_quality`: heuristics for AI output quality; with `require_real_ai: true` it also rejects degraded/fallback AI paths via the [x-ai-source protocol](ai-source-protocol.md).
+
+## Acceptance Levels
+
+Every run is graded on how much real product behavior it proved. The grade is in `workflow_result.json` under `acceptance` and surfaces in `codex-check`/`verify` output and run reports.
+
+- `L0 opens`: a live observe step succeeded.
+- `L1 content_verified`: expected content was asserted. Fixture-only runs are capped here and flagged `simulated`.
+- `L2 real_interaction`: at least one real (non-dry-run) click/type/submit executed.
+- `L3 data_round_trip`: an assertion verified the interaction outcome afterwards. **This is the minimum level that counts as product acceptance.**
+- `L4 visual_quality`: the visual audit passed with no blocking findings.
+- `L5 cross_platform`: reserved for aggregated evidence across platforms/viewports; a single run cannot earn it.
+
+Runs below L3 are page inspection, not product acceptance, regardless of how many steps passed.
 
 ## Versioning
 

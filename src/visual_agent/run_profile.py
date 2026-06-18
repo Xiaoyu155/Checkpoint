@@ -21,6 +21,9 @@ MUTATING_ACTIONS = {
     "request_api",
     "expect_download",
     "save_storage_state",
+    "upload_file",
+    "select_option",
+    "drag",
 }
 
 

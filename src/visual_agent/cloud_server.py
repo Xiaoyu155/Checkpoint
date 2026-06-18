@@ -16,7 +16,15 @@ from .env import env_get
 from .models import to_jsonable
 from .run_profile import run_profile_privilege
 from .security import is_loopback_host, scrub_secrets
-from .workspace import Workspace, load_workspace_report_index, open_workspace, run_workspace_workflow, workspace_report_access_payload, write_workspace_report_index
+from .workspace import (
+    Workspace,
+    load_workspace_inputs,
+    load_workspace_report_index,
+    open_workspace,
+    run_workspace_workflow,
+    workspace_report_access_payload,
+    write_workspace_report_index,
+)
 from .workflow import parse_workflow_file
 
 
@@ -51,7 +59,7 @@ class CloudRunRequest:
         workflow_id = str(payload.get("workflow_id") or "")
         inputs = payload.get("inputs")
         if not isinstance(inputs, dict) or "provided" in inputs:
-            inputs = {}
+            inputs = load_workspace_inputs(workspace, None, str(payload.get("inputs_file") or "")) if payload.get("inputs_file") else {}
         return cls(
             workspace=workspace,
             run_profile=run_profile,

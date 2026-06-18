@@ -65,11 +65,15 @@ Available actions:
 - press_key: keys
 - click_text: text, label, or contains_text
 - wait_for_text: text or contains_text
+- upload_file: path plus selector (file input) or via_chooser: true
+- select_option: selector plus value, label, or index
+- drag: selector (source) plus to_selector (destination)
 - assert_text: text
 - assert_visual_text: text, optionally region for desktop UI
 - assert_no_error
 - assert_browser_ready
 - assert_product_contract
+- assert_visual_quality: zero-config visual audit (font size, overflow, broken images, occluded controls)
 - request_api
 
 Rules:

@@ -47,6 +47,16 @@ def test_run_verify_runs_tagged_workflows_only(tmp_path) -> None:
     assert report.passed == 1
     assert report.failed == 0
     assert len(markdown) <= 3200
+    # observe+assert only: must be reported as inspection, not product acceptance
+    assert report.inspection_only == 1
+    assert report.verdict == "inspection_only"
+    assert "Inspection Only (NOT product acceptance)" in markdown
+    assert "Code changes look good" not in markdown
+    # fixture-based run: simulated evidence is capped at L1
+    assert report.results[0].acceptance_level == "L1"
+    assert report.results[0].is_product_acceptance is False
+    assert "Strict product acceptance (L3+ without blockers): 0/1" in markdown
+    assert "[L1]" in markdown
 
 
 def test_run_verify_requires_all_requested_tags(tmp_path) -> None:
@@ -194,6 +204,77 @@ def test_run_verify_supervised_profile(tmp_path) -> None:
 
     assert report.total == 1
     assert report.results[0].passed is True
+
+
+def test_run_verify_counts_real_interactions(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_workflow(workspace, "verification")
+
+    def fake_run_workspace_workflow(*_args, **_kwargs):
+        class Result:
+            run_id = "run"
+            steps = (
+                WorkflowStepResult(id="open", action="observe_ocr", status=ActionStatus.SUCCESS),
+                WorkflowStepResult(
+                    id="submit",
+                    action="click_text",
+                    status=ActionStatus.SUCCESS,
+                    metadata={
+                        "operation_receipt": {
+                            "engine": "playwright",
+                            "live": True,
+                            "observed_after_action": True,
+                            "actionability": {"checked": True, "count": 1, "visible": True, "enabled": True},
+                        }
+                    },
+                ),
+                WorkflowStepResult(id="confirm", action="assert_text", status=ActionStatus.SUCCESS),
+            )
+
+        return Result()
+
+    monkeypatch.setattr("visual_agent.verify.run_workspace_workflow", fake_run_workspace_workflow)
+
+    report = run_verify(workspace, run_profile="supervised")
+    markdown = verify_to_markdown(report)
+
+    assert report.passed == 1
+    assert report.inspection_only == 0
+    assert report.verdict == "pass"
+    assert report.results[0].real_interaction_count == 1
+    assert report.results[0].invalid_interaction_count == 0
+    assert "Passed (real interaction)" in markdown
+    assert "real user interaction. Code changes look good" in report.suggested_prompt
+
+
+def test_run_verify_aggregates_cross_platform_l5(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_workflow(workspace, "checkout_mobile", extra_tags=("family:checkout", "platform:mobile"))
+    write_workflow(workspace, "checkout_desktop", extra_tags=("family:checkout", "platform:desktop"))
+
+    def fake_run_workspace_workflow(*_args, **_kwargs):
+        class Result:
+            run_id = "run"
+            steps = (
+                WorkflowStepResult(id="open", action="observe_browser", status=ActionStatus.SUCCESS),
+                WorkflowStepResult(id="submit", action="click", status=ActionStatus.SUCCESS),
+                WorkflowStepResult(id="verify", action="assert_text", status=ActionStatus.SUCCESS),
+            )
+            acceptance = {"label": "L4", "level": 4, "is_product_acceptance": True}
+
+        return Result()
+
+    monkeypatch.setattr("visual_agent.verify.run_workspace_workflow", fake_run_workspace_workflow)
+
+    report = run_verify(workspace)
+    markdown = verify_to_markdown(report)
+
+    assert len(report.cross_platform) == 1
+    family = report.cross_platform[0]
+    assert family["family"] == "checkout"
+    assert family["achieved"] is True
+    assert "### Cross-Platform (L5)" in markdown
+    assert "checkout: L5 achieved" in markdown
 
 
 def test_run_verify_passes_wait_lock_options(tmp_path, monkeypatch) -> None:

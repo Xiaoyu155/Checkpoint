@@ -11,6 +11,7 @@ import pytest
 
 from visual_agent.cloud import build_http_cloud_transport
 from visual_agent.cloud_server import (
+    CloudRunRequest,
     CloudServerConfigError,
     CloudRequestError,
     cloud_server_auth_failure,
@@ -696,6 +697,27 @@ def test_resolve_request_run_profile_clamps_to_server_default(tmp_path) -> None:
         assert unknown.value.reason == "invalid_run_profile"
     finally:
         server.server_close()
+
+
+def test_cloud_run_request_loads_inputs_file_when_payload_has_summary(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace")
+    server = create_cloud_server(workspace_root=workspace.root, port=0, run_profile="supervised")
+    try:
+        request = CloudRunRequest.from_payload(
+            server,
+            {
+                "workspace": str(workspace.root),
+                "workflow_name": "browser_form_workflow",
+                "run_profile": "supervised",
+                "inputs": {"provided": False, "field_count": 0, "fields": []},
+                "inputs_file": "demo_login.json",
+            },
+        )
+    finally:
+        server.server_close()
+
+    assert request.inputs["username"] == "demo_user"
+    assert request.inputs["password"] == "demo_password"
 
 
 def test_cloud_server_rejects_non_loopback_without_auth(tmp_path) -> None:

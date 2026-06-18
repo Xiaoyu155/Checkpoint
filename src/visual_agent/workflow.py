@@ -37,6 +37,17 @@ from .product_state import (
     observation_to_state,
     product_contract_failure_message,
 )
+from .acceptance import grade_run
+from .product_guard import PRODUCT_GUARD_OPT_OUT_TAG, PRODUCT_GUARD_STEP_ID, evaluate_product_guard
+from .visual_rules import (
+    VISUAL_GUARD_OPT_OUT_TAG,
+    VISUAL_GUARD_STEP_ID,
+    VisualAuditReport,
+    VisualRuleConfig,
+    collect_visual_snapshot,
+    evaluate_visual_snapshot,
+    run_visual_audit,
+)
 from .run_profile import MUTATING_ACTIONS, RunProfileName, ensure_step_allowed, normalize_run_profile, step_should_dry_run
 from .selector import SelectorResolver
 from .security import redact_secret_text
@@ -98,6 +109,8 @@ class WorkflowRunResult:
     run_profile: str = "dry-run"
     run_lock: dict[str, object] | None = None
     run_queue: dict[str, object] | None = None
+    run_checks: dict[str, object] | None = None
+    acceptance: dict[str, object] | None = None
 
 
 class WorkflowRuntime:
@@ -267,6 +280,7 @@ class WorkflowRuntime:
 
             step_lookup = {step.id: index for index, step in enumerate(workflow.steps)}
             step_index = 0
+            hard_failure = False
             if from_step is not None:
                 if from_step not in step_lookup:
                     raise ValueError(f"from_step not found in workflow: {from_step}")
@@ -327,6 +341,7 @@ class WorkflowRuntime:
                             failed_step=step.id,
                         )
                     )
+                    hard_failure = True
                     break
                 completed_steps.append(step.id)
                 completed_lookup.add(step.id)
@@ -342,6 +357,79 @@ class WorkflowRuntime:
                     step_index = step_lookup[jump_to]
                     continue
                 step_index += 1
+
+            run_checks: dict[str, Any] = {}
+            if hard_failure:
+                run_checks["product_guard"] = {"status": "skipped", "reason": "step_failure"}
+            elif PRODUCT_GUARD_OPT_OUT_TAG in workflow.tags:
+                run_checks["product_guard"] = {"status": "skipped", "reason": "opt_out_tag"}
+            if not hard_failure and PRODUCT_GUARD_OPT_OUT_TAG not in workflow.tags:
+                guard = evaluate_product_guard(context.resources)
+                run_checks["product_guard"] = {
+                    "status": "passed" if guard.passed else "failed",
+                    "violation_count": guard.violation_count,
+                }
+                if not guard.passed:
+                    guard_step = redact_workflow_step_result(
+                        WorkflowStepResult(
+                            id=PRODUCT_GUARD_STEP_ID,
+                            action="product_guard",
+                            status=ActionStatus.FAILED,
+                            message=guard.summary(),
+                            metadata={"product_guard": guard.to_metadata()},
+                        ),
+                        sensitive_values,
+                    )
+                    results.append(guard_step)
+                    self._write_step_result(run_dir, guard_step)
+                    state_store.save(
+                        WorkflowState(
+                            run_id=run_id,
+                            workflow_name=workflow.name,
+                            completed_steps=tuple(completed_steps),
+                            failed_step=guard_step.id,
+                        )
+                    )
+
+            visual_passed: bool | None = None
+            if hard_failure:
+                run_checks["visual_guard"] = {"status": "skipped", "reason": "step_failure"}
+            elif VISUAL_GUARD_OPT_OUT_TAG in workflow.tags:
+                run_checks["visual_guard"] = {"status": "skipped", "reason": "opt_out_tag"}
+            if not hard_failure and VISUAL_GUARD_OPT_OUT_TAG not in workflow.tags:
+                visual_report = run_visual_audit(context.resources)
+                if visual_report is None:
+                    run_checks["visual_guard"] = {"status": "skipped", "reason": "no_live_page"}
+                else:
+                    visual_passed = visual_report.passed
+                    run_checks["visual_guard"] = {
+                        "status": "passed" if visual_report.passed else "failed",
+                        "error_count": visual_report.error_count,
+                        "warning_count": visual_report.warning_count,
+                    }
+                if visual_report is not None and visual_report.findings:
+                    artifact_path = write_visual_audit_artifact(run_dir, VISUAL_GUARD_STEP_ID, visual_report)
+                    visual_step = redact_workflow_step_result(
+                        WorkflowStepResult(
+                            id=VISUAL_GUARD_STEP_ID,
+                            action="visual_guard",
+                            status=ActionStatus.SUCCESS if visual_report.passed else ActionStatus.FAILED,
+                            message=visual_report.summary(),
+                            metadata={"visual_audit": visual_report.to_metadata(), "artifact_path": str(artifact_path)},
+                        ),
+                        sensitive_values,
+                    )
+                    results.append(visual_step)
+                    self._write_step_result(run_dir, visual_step)
+                    if not visual_report.passed:
+                        state_store.save(
+                            WorkflowState(
+                                run_id=run_id,
+                                workflow_name=workflow.name,
+                                completed_steps=tuple(completed_steps),
+                                failed_step=visual_step.id,
+                            )
+                        )
 
             if soft_assert_errors:
                 summary_step = WorkflowStepResult(
@@ -371,6 +459,8 @@ class WorkflowRuntime:
                 run_profile=profile,
                 run_lock=lock_to_dict(lock_info) if lock_info is not None else None,
                 run_queue=queue_to_dict(queue_info) if queue_info is not None else None,
+                run_checks=run_checks or None,
+                acceptance=grade_run(results, visual_passed=visual_passed).to_dict(),
             )
             (run_dir / "workflow_result.json").write_text(
                 json.dumps(to_jsonable(run_result), ensure_ascii=False, indent=2),
@@ -647,12 +737,14 @@ class WorkflowRuntime:
             context.actions[step.id] = action_result
             context.invalidate_observation_cache()
             metadata: dict[str, Any] = {}
+            before_observation = context.latest_observation_or_none
             browser_observation = run_browser_post_action_observe(
                 context,
                 step_id=step.id,
                 enabled=action_result.status == ActionStatus.SUCCESS
                 and action_result.metadata.get("execution") == "playwright"
                 and bool(params.get("browser_post_action_observe", True)),
+                assert_text=str(params.get("post_action_assert_text") or params.get("assert_text") or ""),
             )
             if browser_observation is not None:
                 metadata["browser_post_action_observe"] = browser_observation
@@ -664,6 +756,18 @@ class WorkflowRuntime:
             )
             if post_action_observe is not None:
                 metadata["post_action_observe"] = post_action_observe
+            operation_receipt = operation_receipt_for_action(
+                context,
+                action=action,
+                resolved=resolved,
+                action_result=action_result,
+                before_observation=before_observation,
+                browser_post_action_observe=browser_observation,
+                post_action_observe=post_action_observe,
+                live=not step_dry_run,
+            )
+            if operation_receipt is not None:
+                metadata["operation_receipt"] = operation_receipt
             return WorkflowStepResult(
                 id=step.id,
                 action=action,
@@ -759,7 +863,11 @@ class WorkflowRuntime:
 
         if action == "assert_ai_response_quality":
             observation = context.observations.get(str(params.get("observation", ""))) or context.latest_observation_or_none
-            result = evaluate_ai_response_quality(params, observation=observation)
+            result = evaluate_ai_response_quality(
+                params,
+                observation=observation,
+                network_events=context.resources.get("network_events", []),
+            )
             if not result.passed:
                 return self._assertion_failed(step, action, ai_quality_failure_message(result), soft=bool(params.get("soft_assert")), metadata={"ai_response_quality": result})
             return WorkflowStepResult(
@@ -809,6 +917,9 @@ class WorkflowRuntime:
 
         if action == "assert_no_layout_overlap":
             return self._assert_no_layout_overlap(step, context)
+
+        if action == "assert_visual_quality":
+            return self._assert_visual_quality(step, context)
 
         if action == "save_storage_state":
             return self._save_storage_state(step, context, dry_run=step_dry_run)
@@ -1398,6 +1509,33 @@ class WorkflowRuntime:
             )
         return WorkflowStepResult(id=step.id, action=step.action, status=ActionStatus.SUCCESS, message="no layout overlap detected", metadata={"overlaps": []})
 
+    def _assert_visual_quality(self, step: WorkflowStep, context: WorkflowContext) -> WorkflowStepResult:
+        page = context.resources.get("playwright_page")
+        if page is None:
+            raise RuntimeError("assert_visual_quality requires a live browser session. Run observe_browser first.")
+        config = VisualRuleConfig.from_params(step.params)
+        snapshot = collect_visual_snapshot(page)
+        if snapshot is None:
+            raise RuntimeError("assert_visual_quality could not collect a visual snapshot from the current page.")
+        report = evaluate_visual_snapshot(snapshot, config)
+        artifact_path = write_visual_audit_artifact(context.run_dir, step.id, report)
+        metadata = {"visual_audit": report.to_metadata(), "artifact_path": str(artifact_path)}
+        if not report.passed:
+            return self._assertion_failed(
+                step,
+                step.action,
+                report.summary(),
+                soft=bool(step.params.get("soft_assert")),
+                metadata=metadata,
+            )
+        return WorkflowStepResult(
+            id=step.id,
+            action=step.action,
+            status=ActionStatus.SUCCESS,
+            message=report.summary(),
+            metadata=metadata,
+        )
+
     def _assertion_failed(self, step: WorkflowStep, action: str, message: str, *, soft: bool, metadata: dict[str, Any] | None = None) -> WorkflowStepResult:
         payload = {"soft_assert": soft}
         if metadata:
@@ -1823,7 +1961,19 @@ def is_retry_safe_action(action: str) -> bool:
         "assert_ai_response_quality",
         "assert_response",
         "assert_file_exists",
+        "assert_visual_quality",
     }
+
+
+def write_visual_audit_artifact(run_dir: Path, label: str, report: VisualAuditReport) -> Path:
+    visual_dir = run_dir / "visual"
+    visual_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = visual_dir / f"{sanitize_filename(label)}.json"
+    artifact_path.write_text(
+        json.dumps(report.to_metadata(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return artifact_path
 
 
 def api_request_body(params: dict[str, Any]) -> bytes | None:
@@ -1849,6 +1999,7 @@ def run_browser_post_action_observe(
     *,
     step_id: str,
     enabled: bool,
+    assert_text: str = "",
 ) -> dict[str, Any] | None:
     if not enabled:
         return None
@@ -1867,15 +2018,188 @@ def run_browser_post_action_observe(
     )
     observation_id = f"{step_id}.browser_after"
     context.observations[observation_id] = observation
-    return {
+    payload = {
         "status": "observed",
         "observation": observation_id,
         "source": observation.source,
         "screenshot_path": str(observation.screenshot_path) if observation.screenshot_path is not None else None,
+        "url": observation.metadata.get("url") or observation.source,
         "visible_text_length": observation.metadata.get("visible_text_length"),
         "interactive_count": observation.metadata.get("interactive_count"),
+        "network_event_count": observation.metadata.get("network_event_count"),
         "failed_request_count": observation.metadata.get("failed_request_count"),
     }
+    if assert_text.strip():
+        payload["assert_text"] = assert_text.strip()
+        payload["assertion"] = "matched" if observation_contains_text(observation, assert_text) else "missing"
+    return payload
+
+
+def operation_receipt_for_action(
+    context: WorkflowContext,
+    *,
+    action: str,
+    resolved: ResolvedTarget,
+    action_result: ActionResult,
+    before_observation: Observation | None,
+    browser_post_action_observe: dict[str, Any] | None,
+    post_action_observe: dict[str, Any] | None,
+    live: bool,
+) -> dict[str, Any] | None:
+    if action_result.metadata.get("execution") == "playwright":
+        return browser_operation_receipt(
+            context,
+            action=action,
+            resolved=resolved,
+            action_result=action_result,
+            before_observation=before_observation,
+            post_action_observe=browser_post_action_observe,
+            live=live,
+        )
+    return desktop_operation_receipt(
+        action=action,
+        resolved=resolved,
+        action_result=action_result,
+        post_action_observe=post_action_observe,
+        live=live,
+    )
+
+
+def browser_operation_receipt(
+    context: WorkflowContext,
+    *,
+    action: str,
+    resolved: ResolvedTarget,
+    action_result: ActionResult,
+    before_observation: Observation | None,
+    post_action_observe: dict[str, Any] | None,
+    live: bool,
+) -> dict[str, Any] | None:
+    before = before_observation
+    before_metadata = before.metadata if before is not None else {}
+    after = post_action_observe or {}
+    before_url = str(before_metadata.get("url") or before.source if before is not None else "")
+    after_url = str(after.get("url") or after.get("source") or before_url)
+    before_text_length = int(before_metadata.get("visible_text_length") or 0)
+    after_text_length = int(after.get("visible_text_length") or before_text_length)
+    before_network_count = len(context.resources.get("network_events", []) or [])
+    after_network_count = int(after.get("network_event_count") or before_network_count)
+    receipt = {
+        "schema_version": 1,
+        "engine": "playwright",
+        "action": action,
+        "live": bool(live and action_result.status == ActionStatus.SUCCESS),
+        "selector": action_result.metadata.get("selector") or selector_from_resolved(resolved) or "",
+        "target": resolved.target.display_name,
+        "status": action_result.status.value,
+        "actionability": action_result.metadata.get("actionability") if isinstance(action_result.metadata.get("actionability"), dict) else None,
+        "before": {
+            "url": before_url,
+            "visible_text_length": before_text_length,
+            "interactive_count": int(before_metadata.get("interactive_count") or 0),
+        },
+        "after": {
+            "url": after_url,
+            "visible_text_length": after_text_length,
+            "interactive_count": int(after.get("interactive_count") or before_metadata.get("interactive_count") or 0),
+            "failed_request_count": int(after.get("failed_request_count") or 0),
+        },
+        "observed_after_action": bool(post_action_observe and post_action_observe.get("status") == "observed"),
+        "changed": {
+            "url": after_url != before_url,
+            "visible_text_length": after_text_length != before_text_length,
+            "network_event_count": after_network_count != before_network_count,
+        },
+    }
+    screenshot = after.get("screenshot_path")
+    if screenshot:
+        receipt["after"]["screenshot_path"] = screenshot
+    assertion = post_action_assertion_from_metadata(after)
+    if assertion:
+        receipt["post_action_assertion"] = assertion
+    return receipt
+
+
+def desktop_operation_receipt(
+    *,
+    action: str,
+    resolved: ResolvedTarget,
+    action_result: ActionResult,
+    post_action_observe: dict[str, Any] | None,
+    live: bool,
+) -> dict[str, Any] | None:
+    if action_result.status not in {ActionStatus.SUCCESS, ActionStatus.DRY_RUN}:
+        return None
+    after = post_action_observe or {}
+    evidence = action_result.metadata.get("selector_evidence")
+    selector_evidence = evidence if isinstance(evidence, dict) else {}
+    receipt: dict[str, Any] = {
+        "schema_version": 1,
+        "engine": str(action_result.provider.value if action_result.provider is not None else resolved.evidence.provider.value),
+        "action": action,
+        "live": bool(live and action_result.status == ActionStatus.SUCCESS),
+        "target": action_result.target or resolved.target.display_name,
+        "status": action_result.status.value,
+        "actionability": desktop_actionability_snapshot(resolved, action_result, selector_evidence=selector_evidence),
+        "observed_after_action": bool(post_action_observe and post_action_observe.get("status") == "observed"),
+        "after": {
+            "source": after.get("source"),
+            "screenshot_path": after.get("screenshot_path"),
+            "text_count": int(after.get("text_count") or 0),
+            "engine": after.get("engine"),
+            "engine_available": after.get("engine_available"),
+        },
+    }
+    if selector_evidence:
+        receipt["evidence"] = dict(selector_evidence)
+    if action_result.point is not None:
+        receipt["point"] = {"x": action_result.point.x, "y": action_result.point.y}
+    assertion = post_action_assertion_from_metadata(after)
+    if assertion:
+        receipt["post_action_assertion"] = assertion
+    return receipt
+
+
+def post_action_assertion_from_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    assert_text = str(metadata.get("assert_text") or "").strip()
+    assertion = str(metadata.get("assertion") or "").strip()
+    if not assert_text and not assertion:
+        return {}
+    return {
+        "type": "text",
+        "expected": assert_text,
+        "status": assertion or "unknown",
+    }
+
+
+def desktop_actionability_snapshot(
+    resolved: ResolvedTarget,
+    action_result: ActionResult,
+    *,
+    selector_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    point = action_result.point or resolved.evidence.click_point
+    bounds = resolved.evidence.bounds
+    evidence = selector_evidence or {}
+    snapshot: dict[str, Any] = {
+        "checked": True,
+        "mode": "screen_point",
+        "count": 1,
+        "visible": point is not None,
+        "enabled": True,
+        "confidence": evidence.get("confidence", resolved.evidence.confidence),
+        "reason": evidence.get("reason", resolved.evidence.reason),
+    }
+    if point is not None:
+        snapshot["point"] = {"x": point.x, "y": point.y}
+    if bounds is not None:
+        snapshot["bounding_box"] = {
+            "x": bounds.left,
+            "y": bounds.top,
+            "width": bounds.width,
+            "height": bounds.height,
+        }
+    return snapshot
 
 
 def run_post_action_observe(
@@ -1929,7 +2253,7 @@ def run_post_action_observe(
     return metadata
 
 
-SELF_CONTAINED_ACTIONS = {"press_key", "refresh_browser", "click_text", "wait_for_text"}
+SELF_CONTAINED_ACTIONS = {"press_key", "refresh_browser", "click_text", "wait_for_text", "upload_file", "select_option", "drag"}
 VISUAL_LOCK_ACTIONS = {"observe_screen", "observe_ocr", "observe_vision", "observe_uia", "click_text", "wait_for_text"}
 
 
@@ -2558,6 +2882,9 @@ def normalize_extension(value: str) -> str:
 
 
 def close_context_resources(context: WorkflowContext) -> None:
+    trace_error = stop_playwright_trace(context)
+    if trace_error:
+        context.resources["playwright_trace_error"] = trace_error
     for key in ("playwright_page", "playwright_context", "playwright_browser", "playwright"):
         resource = context.resources.get(key)
         if resource is None:
@@ -2569,3 +2896,20 @@ def close_context_resources(context: WorkflowContext) -> None:
             closer()
         except Exception:
             pass
+
+
+def stop_playwright_trace(context: WorkflowContext) -> str:
+    if not context.resources.get("playwright_trace_started"):
+        return ""
+    browser_context = context.resources.get("playwright_context")
+    trace_path = str(context.resources.get("playwright_trace_path") or "")
+    tracing = getattr(browser_context, "tracing", None)
+    stopper = getattr(tracing, "stop", None)
+    if browser_context is None or stopper is None or not trace_path:
+        return "trace resources unavailable"
+    try:
+        stopper(path=trace_path)
+        context.resources["playwright_trace_stopped"] = True
+        return ""
+    except Exception as exc:
+        return str(exc)[:500]

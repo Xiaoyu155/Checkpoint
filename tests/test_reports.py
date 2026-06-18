@@ -3,6 +3,7 @@ from pathlib import Path
 
 from visual_agent.models import ActionStatus, Observation, ProviderKind, to_jsonable
 from visual_agent.reports import (
+    acceptance_status_suffix,
     compact_run_report,
     list_run_summaries,
     load_run_report,
@@ -93,6 +94,20 @@ def test_run_report_surfaces_selector_resolution_metadata(tmp_path) -> None:
     assert click_step["selector_resolution"]["confidence_level"] == "high"
     assert "Selector: level `high`" in markdown
     assert "fallback path `dom`" in markdown
+    assert "Valid operation receipts" in markdown
+
+
+def test_acceptance_status_suffix_distinguishes_strict_blockers() -> None:
+    suffix = acceptance_status_suffix(
+        {
+            "level": 4,
+            "label": "L4",
+            "is_product_acceptance": False,
+            "product_acceptance_blockers": ["missing_negative_contract_assertion"],
+        }
+    )
+
+    assert suffix == " — strict product acceptance blocked"
 
 
 def test_compact_run_report_strips_verbose_observation_elements_and_keeps_failure_diagnosis(tmp_path) -> None:

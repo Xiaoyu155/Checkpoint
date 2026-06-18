@@ -691,7 +691,10 @@ async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> list[
         }
         if name not in handlers:
             raise ValueError(f"Unknown tool: {name}")
-        payload = handlers[name](args)
+        if name in {"run_workflow", "verify_workflow", "run_verification", "verify_implementation"}:
+            payload = await asyncio.to_thread(handlers[name], args)
+        else:
+            payload = handlers[name](args)
         audit_mcp_call(workspace, name, args, payload)
         return _ok_json(payload)
     except Exception as exc:
@@ -961,7 +964,9 @@ def run_verification_payload(args: dict[str, Any]) -> dict[str, Any]:
         "content": content,
         "total": report.total,
         "passed": report.passed,
+        "inspection_only": report.inspection_only,
         "failed": report.failed,
+        "verdict": report.verdict,
         "token_estimate": len(content) // 4,
         "within_budget": len(content) <= 3200,
     }
@@ -1477,4 +1482,3 @@ async def _run() -> None:
 
 if __name__ == "__main__":
     main()
-

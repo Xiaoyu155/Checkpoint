@@ -9,8 +9,8 @@ tags:
   - verification
 steps:
   - id: observe_page
-    action: observe_html
-    path: examples/web/checkout_verification_demo.html
+    action: observe_browser
+    url: examples/web/checkout_verification_demo.html
   - id: assert_title
     action: assert_text
     text: "Checkout Demo"
@@ -29,3 +29,28 @@ steps:
   - id: assert_shipping
     action: assert_text
     text: "Standard Delivery"
+  - id: place_order
+    action: click
+    post_action_assert_text: "Order Confirmed"
+    target:
+      text: "Place Order"
+      role: button
+      preferred: [dom, mock]
+  - id: observe_order_result
+    action: observe_browser
+    reuse_page: true
+  - id: assert_order_contract
+    action: assert_text_contract
+    required_all:
+      - "Order Confirmed"
+      - "Order #CP-1001"
+    forbidden_any:
+      - "Payment Failed"
+      - "Order Failed"
+      - "Checkout Error"
+      - "Next Step"
+  - id: assert_order_confirmed
+    action: assert_text
+    text: "Order Confirmed"
+  - id: assert_no_error
+    action: assert_no_error

@@ -1,11 +1,19 @@
 {
   "name": ".agent-workspace",
   "version": 1,
+  "project_root": "D:\\longxia agent",
   "dirs": [
     "workflows",
     "inputs",
     "fixtures",
     "runs",
-    "reports"
-  ]
+    "reports",
+    "regression_tests",
+    "queue"
+  ],
+  "mcp": {
+    "approved_workflows": [],
+    "audit_all_calls": true,
+    "max_run_profile": "supervised"
+  }
 }

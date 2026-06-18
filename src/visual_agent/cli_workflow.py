@@ -87,7 +87,7 @@ def add_workflow_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
             "Examples:\n"
             "  checkpoint verify-impl --task-description \"Verify login redirects\" --base-url http://127.0.0.1:5173 --run-profile dry-run --no-untracked\n"
             "  checkpoint verify-impl --task-description \"Verify profile form\" --base-url fixtures/profile.html --run-profile dry-run --no-untracked\n"
-            "  checkpoint workspace-run --root .agent-workspace --workflow checkout_verification --run-profile dry-run --format markdown\n"
+            "  checkpoint verify-now --live --workflow checkout_verification --format markdown\n"
             "\n"
             "Use verify-impl to draft or explore a workflow from git diff context. For stable contract regression, run a hand-written workflow with workspace-run or verify --workflow.\n"
         ),

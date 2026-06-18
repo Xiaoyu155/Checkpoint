@@ -615,6 +615,30 @@ def test_mcp_run_workflow_defaults_to_dry_run_and_audits(tmp_path) -> None:
     assert "mcp:run_workflow" in audit.read_text(encoding="utf-8")
 
 
+def test_mcp_run_workflow_handler_runs_outside_asyncio_loop(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace")
+
+    def fake_run_workflow_payload(_args):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return {"status": "success", "threaded": True}
+        return {"status": "failed", "threaded": False}
+
+    monkeypatch.setattr("visual_agent.mcp_server.run_workflow_payload", fake_run_workflow_payload)
+
+    result = asyncio.run(
+        call_tool(
+            "run_workflow",
+            {"workspace_root": str(workspace.root), "workflow_name": "local_html_form_workflow"},
+        )
+    )
+    payload = content_payload(result)
+
+    assert payload["status"] == "success"
+    assert payload["threaded"] is True
+
+
 def test_mcp_run_workflow_defaults_to_compact_report_and_supports_verbose(tmp_path) -> None:
     workspace = init_workspace(tmp_path / "workspace")
     args = {"workspace_root": str(workspace.root), "workflow_name": "local_html_form_workflow", "inputs_file": "demo_login.json"}

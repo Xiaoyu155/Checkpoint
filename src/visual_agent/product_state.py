@@ -69,6 +69,44 @@ class AIResponseQualityResult:
     text_length: int
     context_references: tuple[str, ...]
     question_references: tuple[str, ...]
+    ai_source: str = "unknown"
+
+
+# Open convention (x-ai-source response header). Order is worst-first: one
+# fallback response taints the whole run's AI path.
+AI_SOURCE_REAL = "real"
+AI_SOURCE_DEGRADED = "degraded"
+AI_SOURCE_FALLBACK = "fallback"
+AI_SOURCE_UNKNOWN = "unknown"
+_AI_SOURCE_SEVERITY = (AI_SOURCE_FALLBACK, AI_SOURCE_DEGRADED, AI_SOURCE_REAL)
+
+
+def classify_ai_source(network_events: list[dict[str, Any]] | None, *, url_contains: str = "") -> dict[str, Any]:
+    """Classify the AI path of a run from x-ai-source response headers.
+
+    Returns the worst source seen (fallback > degraded > real) plus the
+    labeled events. ``unknown`` means the app does not implement the
+    convention — callers must not treat unknown as real.
+    """
+    labeled = [
+        event
+        for event in (network_events or [])
+        if isinstance(event, dict)
+        and event.get("ai_source")
+        and (not url_contains or url_contains in str(event.get("url") or ""))
+    ]
+    sources = {str(event.get("ai_source")) for event in labeled}
+    worst = next((name for name in _AI_SOURCE_SEVERITY if name in sources), None)
+    if worst is None and sources:
+        worst = sorted(sources)[0]  # unrecognized labels surface as-is
+    return {
+        "source": worst or AI_SOURCE_UNKNOWN,
+        "labeled_event_count": len(labeled),
+        "events": [
+            {"url": str(event.get("url") or ""), "ai_source": str(event.get("ai_source") or "")}
+            for event in labeled[:10]
+        ],
+    }
 
 
 def observation_to_state(observation: Observation, *, max_text_items: int = 80) -> dict[str, Any]:
@@ -254,7 +292,11 @@ def browser_readiness_failure_message(result: BrowserReadinessResult) -> str:
     return "browser readiness failed (" + "; ".join(result.issues) + ")"
 
 
-def evaluate_ai_response_quality(params: dict[str, Any], observation: Observation | None = None) -> AIResponseQualityResult:
+def evaluate_ai_response_quality(
+    params: dict[str, Any],
+    observation: Observation | None = None,
+    network_events: list[dict[str, Any]] | None = None,
+) -> AIResponseQualityResult:
     text = str(params.get("text") or params.get("response") or "").strip()
     if not text and observation is not None:
         text = "\n".join(observation_to_state(observation)["visible_text"])
@@ -280,12 +322,26 @@ def evaluate_ai_response_quality(params: dict[str, Any], observation: Observatio
         issues.append("response does not reference previous context")
     if bool(params.get("require_specific_advice", False)) and not contains_any(normalized, ("建议", "步骤", "可以", "应该", "需要", "first", "step", "recommend")):
         issues.append("response lacks specific advice")
+
+    classification = classify_ai_source(network_events, url_contains=str(params.get("ai_url_contains") or ""))
+    ai_source = str(classification["source"])
+    if bool(params.get("require_real_ai", False)):
+        if ai_source in (AI_SOURCE_DEGRADED, AI_SOURCE_FALLBACK):
+            issues.append(
+                f"AI path is '{ai_source}', not the real model — a degraded response must not be reported as a commercial-path pass"
+            )
+        elif ai_source == AI_SOURCE_UNKNOWN:
+            issues.append(
+                "require_real_ai is set but no response carried the x-ai-source header; "
+                "the app must implement the convention before real-AI verification can pass"
+            )
     return AIResponseQualityResult(
         passed=not issues,
         issues=tuple(issues),
         text_length=len(text),
         context_references=tuple(context_refs),
         question_references=tuple(question_refs),
+        ai_source=ai_source,
     )
 
 

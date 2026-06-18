@@ -23,10 +23,12 @@ from .quality import (
     quality_gate_to_dict,
     quality_gate_to_junit_xml,
     release_check_plan_to_markdown,
+    release_smoke_to_markdown,
     release_trial_to_markdown,
     run_demo_workspace_check,
     run_mcp_smoke_check,
     run_quality_gate,
+    run_release_smoke,
     run_release_trial,
     write_quality_gate_step_summary,
 )
@@ -38,6 +40,7 @@ QUALITY_COMMANDS = {
     "quality-gate-reports",
     "quality-gate-index",
     "release-check",
+    "release-smoke",
     "release-trial",
     "install-check",
     "mcp-client-config",
@@ -95,6 +98,13 @@ def add_quality_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
     release_check = subparsers.add_parser("release-check", help="Print the release readiness check plan.")
     release_check.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root to use in generated commands.")
     release_check.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    release_smoke = subparsers.add_parser("release-smoke", help="Run or print the product release smoke gate.")
+    release_smoke.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root to use for smoke checks.")
+    release_smoke.add_argument("--run", action="store_true", help="Execute the smoke gate. Default only prints the plan.")
+    release_smoke.add_argument("--skip-vscode", action="store_true", help="Skip VS Code extension npm tests.")
+    release_smoke.add_argument("--timeout-seconds", type=float, default=300.0, help="Timeout per command. Default: 300.")
+    release_smoke.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     release_trial = subparsers.add_parser("release-trial", help="Run the real trial validation bundle on a workspace.")
     release_trial.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root to initialize and validate.")
@@ -191,6 +201,25 @@ def handle_quality_command(args: Any, *, release_trial_runner: Any = None) -> in
         else:
             print(json.dumps(to_jsonable(plan), ensure_ascii=False, indent=2))
         return 0
+    if args.command == "release-smoke":
+        if args.run:
+            result = run_release_smoke(
+                workspace_root=args.workspace_root,
+                include_vscode=not args.skip_vscode,
+                timeout_seconds=args.timeout_seconds,
+            )
+        else:
+            from .quality import build_release_smoke_plan
+
+            result = build_release_smoke_plan(
+                workspace_root=args.workspace_root,
+                include_vscode=not args.skip_vscode,
+            )
+        if args.format == "markdown":
+            print(release_smoke_to_markdown(result))
+        else:
+            print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
+        return 0 if result.get("status") in {"planned", "success"} else 1
     if args.command == "release-trial":
         runner = release_trial_runner or run_release_trial
         result = runner(

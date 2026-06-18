@@ -65,8 +65,9 @@ checkpoint verify-impl --workspace-root .agent-workspace --task-description "Ver
 checkpoint doctor
 ```
 
-Look for `"dom_browser": true` in the `perception` section. OCR and VLM are
-optional - most workflows work without them.
+Look for `"dom_browser": true` in the `perception` section and `"ready": true`
+in the `playwright` section. OCR and VLM are optional - most workflows work
+without them.
 
 ## Run A Dry-Run Demo
 

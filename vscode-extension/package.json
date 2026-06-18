@@ -2,20 +2,27 @@
   "name": "visual-agent",
   "displayName": "Checkpoint",
   "description": "Checkpoint is a local verification panel for AI coding assistants. Run workflows, inspect results, and keep context across coding sessions.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "visual-agent",
   "license": "MIT",
   "icon": "icons/visual-agent.png",
   "keywords": [
     "checkpoint",
+    "coding agents",
+    "acceptance testing",
+    "MCP",
+    "local-first",
     "visual testing",
     "playwright",
-    "AI",
     "workflow"
   ],
+  "homepage": "https://github.com/Xiaoyu155/Checkpoint",
+  "bugs": {
+    "url": "https://github.com/Xiaoyu155/Checkpoint/issues"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Xiaoyu155/visual-agent.git",
+    "url": "https://github.com/Xiaoyu155/Checkpoint.git",
     "directory": "vscode-extension"
   },
   "engines": {
@@ -69,12 +76,16 @@
         "title": "Checkpoint: Run Affected Workflows"
       },
       {
+        "command": "visualAgent.verifyNow",
+        "title": "Checkpoint: Verify Now"
+      },
+      {
         "command": "visualAgent.verifyCurrentChange",
         "title": "Checkpoint: Verify Current Change"
       },
       {
         "command": "visualAgent.verifyImplementation",
-        "title": "x-agent: Verify Implementation"
+        "title": "Checkpoint: Verify Implementation"
       },
       {
         "command": "visualAgent.showLastVerification",
@@ -83,6 +94,10 @@
       {
         "command": "visualAgent.showLatestFailure",
         "title": "Checkpoint: Show Latest Failure"
+      },
+      {
+        "command": "visualAgent.showProductIssues",
+        "title": "Checkpoint: Show Product Issues"
       },
       {
         "command": "visualAgent.autoRepair",
@@ -134,7 +149,7 @@
           {
             "id": "visualAgentVerify",
             "title": "Verify an implementation",
-            "description": "Run `x-agent: Verify Implementation` from the Command Palette. Leave the URL blank to let Checkpoint infer it.",
+            "description": "Run `Checkpoint: Verify Implementation` from the Command Palette. Leave the URL blank to let Checkpoint infer it.",
             "completionEvents": [
               "onCommand:visualAgent.verifyImplementation",
               "onCommand:visualAgent.verifyCurrentChange"
@@ -200,24 +215,34 @@
           "group": "navigation@1"
         },
         {
-          "command": "visualAgent.autoRepair",
+          "command": "visualAgent.verifyNow",
           "when": "view == visualAgentWorkflows",
           "group": "navigation@2"
         },
         {
-          "command": "visualAgent.runLiveSupervised",
+          "command": "visualAgent.autoRepair",
           "when": "view == visualAgentWorkflows",
           "group": "navigation@3"
         },
         {
-          "command": "visualAgent.browserSmoke",
+          "command": "visualAgent.runLiveSupervised",
           "when": "view == visualAgentWorkflows",
           "group": "navigation@4"
         },
         {
-          "command": "visualAgent.refresh",
+          "command": "visualAgent.browserSmoke",
           "when": "view == visualAgentWorkflows",
           "group": "navigation@5"
+        },
+        {
+          "command": "visualAgent.showProductIssues",
+          "when": "view == visualAgentWorkflows",
+          "group": "navigation@6"
+        },
+        {
+          "command": "visualAgent.refresh",
+          "when": "view == visualAgentWorkflows",
+          "group": "navigation@7"
         }
       ],
       "view/item/context": [
@@ -236,7 +261,7 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
-    "test": "npm run compile && node test/agentStatus.test.js && node test/integration/bridge.test.js",
+    "test": "npm run compile && node test/agentStatus.test.js && node test/integration/bridge.test.js && node test/commands.test.js",
     "watch": "tsc -watch -p ./",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package"
@@ -248,4 +273,3 @@
     "typescript": "^5.0.0"
   }
 }
-

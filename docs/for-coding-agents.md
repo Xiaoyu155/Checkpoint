@@ -33,7 +33,7 @@ Use one `.agent-workspace` per project.
 Run the project's normal tests first. Then run Checkpoint:
 
 ```powershell
-checkpoint codex-check --workspace-root .agent-workspace --repo-root . --run-profile dry-run --format markdown
+checkpoint verify-now --workspace-root .agent-workspace --format markdown
 ```
 
 If the change touches a page, form, redirect, dashboard, data display, or user workflow, run:
@@ -73,6 +73,12 @@ When Checkpoint fails, inspect these fields first:
 - `report_path`: full evidence trail.
 
 Fix the product code when the workflow describes an intended user promise. Update the workflow only when the product requirement intentionally changed.
+
+For repeated failures, ask Checkpoint for the product-level grouping before reading individual reports:
+
+```powershell
+checkpoint workspace-product-issues --root .agent-workspace --format markdown
+```
 
 ## Safety Rules
 

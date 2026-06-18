@@ -58,7 +58,7 @@ Reload the Cursor window or restart Cursor so it reads the MCP configuration.
 In Cursor chat, ask:
 
 ```text
-Use visual-agent to validate local_html_form_workflow.
+Use Checkpoint to validate local_html_form_workflow.
 ```
 
 Then ask:

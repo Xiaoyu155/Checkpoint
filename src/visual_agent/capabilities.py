@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from .dispatcher import ActionDispatcher
+from .playwright_env import PLAYWRIGHT_INSTALL_HINT, playwright_runtime_ready
 from .providers import default_provider_registry
 
 
@@ -79,14 +80,17 @@ def provider_capabilities() -> tuple[Capability, ...]:
         "observe_uia": "uiautomation",
     }
     install_hint_by_dependency = {
-        "playwright": "pip install -e .[web] && python -m playwright install chromium",
+        "playwright": PLAYWRIGHT_INSTALL_HINT,
         "uiautomation": "pip install -e .[desktop]",
     }
 
     result = []
     for action in registry.actions:
         dependency = dependency_by_action.get(action)
-        available = module_available(dependency) if dependency else True
+        if dependency == "playwright":
+            available = module_available(dependency) and playwright_runtime_ready()
+        else:
+            available = module_available(dependency) if dependency else True
         result.append(
             Capability(
                 name=action,
@@ -285,6 +289,75 @@ def workflow_atomic_capabilities() -> tuple[Capability, ...]:
             description="Assert that page state and captured network events contain no visible error or failed request.",
             input_schema={"type": "object", "fields": {"observation": "string?"}},
             output_schema={"type": "object", "fields": {"no_error": "NoErrorStateResult"}},
+            dry_run_supported=False,
+            risk_level="low",
+            planner_visible=True,
+        ),
+        Capability(
+            name="upload_file",
+            kind="action",
+            available=True,
+            description="Upload file(s) via an <input type=file> selector, or via_chooser for controls that open a native file chooser. Supports frame_selector for iframes.",
+            input_schema={
+                "type": "object",
+                "fields": {"path": "string|array", "selector": "string?", "via_chooser": "boolean?", "frame_selector": "string?"},
+            },
+            output_schema={"type": "object", "fields": {"files": "array"}},
+            dry_run_supported=True,
+            risk_level="medium",
+            planner_visible=True,
+        ),
+        Capability(
+            name="select_option",
+            kind="action",
+            available=True,
+            description="Select a dropdown option by value, label, or index. Supports frame_selector for iframes.",
+            input_schema={
+                "type": "object",
+                "fields": {"selector": "string?", "value": "string?", "label": "string?", "index": "integer?", "frame_selector": "string?"},
+            },
+            output_schema={"type": "object", "fields": {"selected_values": "array"}},
+            dry_run_supported=True,
+            risk_level="low",
+            planner_visible=True,
+        ),
+        Capability(
+            name="drag",
+            kind="action",
+            available=True,
+            description="Drag a source element onto a destination element using real mouse events. Supports frame_selector for iframes.",
+            input_schema={
+                "type": "object",
+                "fields": {"selector": "string", "to_selector": "string", "frame_selector": "string?"},
+            },
+            output_schema={"type": "object", "fields": {}},
+            dry_run_supported=True,
+            risk_level="medium",
+            planner_visible=True,
+        ),
+        Capability(
+            name="assert_visual_quality",
+            kind="assertion",
+            available=True,
+            description=(
+                "Audit the live page for visual acceptance: unreadable font sizes, horizontal overflow, "
+                "broken images, occluded controls, and mostly-blank viewports. Blocking issues fail the step; "
+                "warnings are recorded in the report and the visual artifact."
+            ),
+            input_schema={
+                "type": "object",
+                "fields": {
+                    "min_font_px": "number?",
+                    "min_font_px_blocking": "number?",
+                    "overflow_tolerance_px": "number?",
+                    "min_content_coverage": "number?",
+                    "max_findings_per_rule": "integer?",
+                    "strict": "boolean?",
+                    "skip_rules": "array?",
+                    "soft_assert": "boolean?",
+                },
+            },
+            output_schema={"type": "object", "fields": {"visual_audit": "VisualAuditReport"}},
             dry_run_supported=False,
             risk_level="low",
             planner_visible=True,
@@ -519,6 +592,7 @@ def command_capabilities() -> tuple[Capability, ...]:
         "run-workflow": "Run an audited workflow.",
         "preflight-workflow": "Run validation and capability checks without executing.",
         "env-check": "Run environment checks for port and build freshness.",
+        "real-acceptance-readiness": "Check live browser, desktop OCR, and UIA readiness for real acceptance.",
         "generate-fixture": "Generate a reusable fixture template.",
         "generate-integrations": "Generate editor integration files for Cursor, Copilot, Windsurf, and JetBrains.",
         "export-to-playwright": "Export a workflow YAML file to a Playwright Test spec.",
@@ -720,7 +794,7 @@ def dependency_capabilities() -> tuple[Capability, ...]:
         "pyautogui": ("Mouse and keyboard automation dependency.", True, None),
         "pyperclip": ("Clipboard dependency.", True, None),
         "yaml": ("YAML workflow parser.", True, "pip install PyYAML"),
-        "playwright": ("Live browser DOM automation dependency.", False, "pip install -e .[web]"),
+        "playwright": ("Live browser DOM automation dependency.", False, PLAYWRIGHT_INSTALL_HINT),
         "uiautomation": ("Windows UI Automation dependency.", False, "pip install -e .[desktop]"),
         "pytesseract": ("Optional OCR Python wrapper; also requires the Tesseract binary.", False, "pip install pytesseract"),
         "screen_ocr": ("Optional Windows native OCR with text coordinates.", False, screen_ocr_status["install_hint"]),
@@ -734,6 +808,8 @@ def dependency_capabilities() -> tuple[Capability, ...]:
             available = bool(tesseract_status["available"])
         elif name == "screen_ocr":
             available = bool(screen_ocr_status["available"])
+        elif name == "playwright":
+            available = module_available(name) and playwright_runtime_ready()
         else:
             available = module_available(name)
         capabilities.append(

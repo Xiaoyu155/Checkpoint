@@ -30,6 +30,9 @@ SUPPORTED_ACTIONS = {
     "click_visual",
     "wait_for_text",
     "request_api",
+    "upload_file",
+    "select_option",
+    "drag",
     "assert_text",
     "assert_text_contract",
     "assert_no_error",
@@ -44,6 +47,7 @@ SUPPORTED_ACTIONS = {
     "assert_count",
     "assert_attribute",
     "assert_no_layout_overlap",
+    "assert_visual_quality",
     "assert_visual_text",
     "set_variable",
     "if_text_exists",
@@ -72,6 +76,8 @@ REQUIRED_PARAMS = {
     "run_workflow": ("workflow",),
     "request_api": ("url",),
     "wait_for": ("condition",),
+    "upload_file": ("path",),
+    "drag": ("selector", "to_selector"),
 }
 
 ASSERTION_ACTIONS = {
@@ -88,6 +94,7 @@ ASSERTION_ACTIONS = {
     "assert_count",
     "assert_attribute",
     "assert_no_layout_overlap",
+    "assert_visual_quality",
     "assert_visual_text",
 }
 HIGH_RISK_ACTIONS = {"save_storage_state"}
@@ -102,6 +109,9 @@ MUTATING_ACTIONS = {
     "request_api",
     "expect_download",
     "save_storage_state",
+    "upload_file",
+    "select_option",
+    "drag",
 }
 SENSITIVE_NAME_HINTS = ("password", "passwd", "pwd", "token", "secret", "key", "cookie", "id_card", "ssn")
 PROHIBITED_COMMAND_FIELDS = {"shell", "command", "script", "cmd", "bash", "powershell", "exec", "execute", "subprocess", "system"}
@@ -297,13 +307,13 @@ def validate_press_key(step_id: str, action: str, params: dict[str, Any], issues
 
 
 def validate_text_action(step_id: str, action: str, params: dict[str, Any], issues: list[ValidationIssue]) -> None:
-    if action == "click_text" and not any(key in params for key in ("text", "label", "contains_text")):
+    if action == "click_text" and not any(key in params for key in ("text", "label", "contains_text", "text_from", "label_from", "contains_text_from")):
         issues.append(ValidationIssue("error", step_id, "click_text requires text, label, or contains_text."))
     if action == "click_visual" and not any(key in params for key in ("description", "text", "label")):
         issues.append(ValidationIssue("error", step_id, "click_visual requires description, text, or label."))
-    if action == "wait_for_text" and not any(key in params for key in ("text", "contains_text")):
+    if action == "wait_for_text" and not any(key in params for key in ("text", "contains_text", "text_from", "contains_text_from")):
         issues.append(ValidationIssue("error", step_id, "wait_for_text requires text or contains_text."))
-    if action == "assert_visual_text" and "text" not in params:
+    if action == "assert_visual_text" and not any(key in params for key in ("text", "text_from")):
         issues.append(ValidationIssue("error", step_id, "assert_visual_text requires text."))
 
 

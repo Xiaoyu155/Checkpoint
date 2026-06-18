@@ -64,6 +64,8 @@ class RunReport:
     steps: tuple[StepReport, ...]
     run_lock: dict[str, Any] | None = None
     run_queue: dict[str, Any] | None = None
+    run_checks: dict[str, Any] | None = None
+    acceptance: dict[str, Any] | None = None
 
 
 def load_run_summary(run_dir: str | Path) -> RunSummary:
@@ -122,13 +124,14 @@ def load_run_report(run_dir: str | Path) -> RunReport:
             failed_step=None,
             dry_run_actions=0,
             elapsed_seconds=0.0,
-            artifacts={
-                "run_dir": str(path),
-                "workflow_result": str(path / "workflow_result.json"),
-                "state": str(path / "state.json") if (path / "state.json").exists() else None,
-                "step_files": [str(item) for item in sorted(path.glob("*.json")) if item.name != "workflow_result.json"],
-                "screenshots": [str(item) for item in sorted(path.glob("*.png"))],
-            },
+        artifacts={
+            "run_dir": str(path),
+            "workflow_result": str(path / "workflow_result.json"),
+            "state": str(path / "state.json") if (path / "state.json").exists() else None,
+            "step_files": [str(item) for item in sorted(path.glob("*.json")) if item.name != "workflow_result.json"],
+            "screenshots": [str(item) for item in sorted(path.glob("*.png"))],
+            "traces": [str(item) for item in sorted(path.rglob("*.zip"))],
+        },
             downloads=tuple(discover_downloads(path)),
             steps=(),
             run_lock=raw_payload.get("run_lock") if isinstance(raw_payload.get("run_lock"), dict) else None,
@@ -144,6 +147,7 @@ def load_run_report(run_dir: str | Path) -> RunReport:
         "state": str(path / "state.json") if (path / "state.json").exists() else None,
         "step_files": [str(item) for item in sorted(path.glob("*.json")) if item.name != "workflow_result.json"],
         "screenshots": [str(item) for item in sorted(path.glob("*.png"))],
+        "traces": [str(item) for item in sorted(path.rglob("*.zip"))],
     }
     return RunReport(
         schema_version=1,
@@ -164,6 +168,8 @@ def load_run_report(run_dir: str | Path) -> RunReport:
         steps=steps,
         run_lock=payload.get("run_lock") if isinstance(payload.get("run_lock"), dict) else None,
         run_queue=payload.get("run_queue") if isinstance(payload.get("run_queue"), dict) else None,
+        run_checks=payload.get("run_checks") if isinstance(payload.get("run_checks"), dict) else None,
+        acceptance=payload.get("acceptance") if isinstance(payload.get("acceptance"), dict) else None,
     )
 
 
@@ -309,6 +315,8 @@ def run_report_to_dict(report: RunReport) -> dict[str, Any]:
         "downloads": list(report.downloads),
         "run_lock": report.run_lock,
         "run_queue": report.run_queue,
+        "run_checks": report.run_checks,
+        "acceptance": report.acceptance,
         "steps": [
             {
                 "id": step.id,
@@ -389,6 +397,34 @@ def run_report_to_markdown(report: RunReport) -> str:
         f"- Failed step: `{report.failed_step}`" if report.failed_step else "- Failed step: none",
         f"- Elapsed seconds: {report.elapsed_seconds}",
     ]
+    if report.acceptance:
+        acceptance = report.acceptance
+        suffix = acceptance_status_suffix(acceptance)
+        lines.append(f"- Acceptance level: `{acceptance.get('label')}` ({acceptance.get('name')}){suffix}")
+        if acceptance.get("valid_operation_receipts") is not None:
+            lines.append(f"- Valid operation receipts: {acceptance.get('valid_operation_receipts')}")
+        if acceptance.get("invalid_operation_receipts"):
+            lines.append(f"- Invalid operation receipts: {acceptance.get('invalid_operation_receipts')}")
+            failures = acceptance.get("operation_receipt_failures")
+            if isinstance(failures, list) and failures:
+                first_failure = failures[0] if isinstance(failures[0], dict) else {}
+                lines.append(
+                    "- First invalid receipt: "
+                    f"`{first_failure.get('step_id')}` "
+                    f"reason `{first_failure.get('reason')}`"
+                )
+        blockers = acceptance.get("product_acceptance_blockers")
+        if isinstance(blockers, list) and blockers:
+            lines.append("- Product acceptance blockers:")
+            for blocker in blockers[:8]:
+                lines.append(f"  - `{blocker}`")
+        if acceptance.get("missing_for_next_level"):
+            lines.append(f"- Next level needs: {acceptance.get('missing_for_next_level')}")
+    if report.run_checks:
+        for check_name in ("product_guard", "visual_guard"):
+            check = report.run_checks.get(check_name)
+            if isinstance(check, dict):
+                lines.append(f"- {check_name}: `{check.get('status')}`")
     if report.run_queue:
         lines.append(f"- Queue waited seconds: {report.run_queue.get('waited_seconds')}")
         lines.append(f"- Queue attempts: {report.run_queue.get('attempts')}")
@@ -468,6 +504,18 @@ def run_report_to_markdown(report: RunReport) -> str:
         for item in report.downloads:
             lines.append(f"- `{item['filename']}` ({item['size_bytes']} bytes): `{item['path']}`")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def acceptance_status_suffix(acceptance: dict[str, Any]) -> str:
+    if acceptance.get("is_product_acceptance"):
+        return ""
+    level = int(acceptance.get("level") or 0)
+    blockers = acceptance.get("product_acceptance_blockers")
+    if level >= 3 and isinstance(blockers, list) and blockers:
+        return " — strict product acceptance blocked"
+    if acceptance.get("simulated"):
+        return " — simulated evidence only"
+    return " — below product acceptance (L3+)"
 
 
 def build_run_history_report(workspace_root: str | Path = ".agent-workspace", *, limit: int = 20) -> dict[str, Any]:
@@ -1128,4 +1176,3 @@ def step_observation_summary(step: dict[str, Any]) -> dict[str, Any] | None:
         "engine": metadata.get("engine"),
         "engine_available": metadata.get("engine_available"),
     }
-

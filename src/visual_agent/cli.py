@@ -47,6 +47,7 @@ from .gui import (
     open_workspace_window,
 )
 from .models import to_jsonable
+from .playwright_env import PLAYWRIGHT_INSTALL_HINT, playwright_runtime_status
 from .quality import run_release_trial
 from .recorder import record_browser_session
 from .reports import (
@@ -103,6 +104,27 @@ def build_version_message(cli_name: str = DEFAULT_CLI_NAME) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def build_welcome_message(cli_name: str = "checkpoint") -> str:
+    return "\n".join(
+        [
+            "Checkpoint verifies product behavior after AI code changes.",
+            "",
+            "Start here:",
+            f"  {cli_name} init --root .agent-workspace",
+            f"  {cli_name} verify-now --workspace-root .agent-workspace --format markdown",
+            "",
+            "For the local checkout demo with real browser interaction:",
+            f"  {cli_name} verify-now --workspace-root .agent-workspace --workflow checkout_verification --live --format markdown",
+            "",
+            "When something fails:",
+            f"  {cli_name} workspace-product-issues --root .agent-workspace --format markdown",
+            f"  {cli_name} summarize-latest-failure --workspace-root .agent-workspace --format markdown",
+            "",
+            f"Run {cli_name} --help for the full command list.",
+        ]
+    )
 
 
 def add_init_workspace_arguments(parser: argparse.ArgumentParser) -> None:
@@ -444,6 +466,9 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     subparsers.add_parser("atomic-capabilities", help="List planner-visible atomic capabilities.")
     doctor = subparsers.add_parser("doctor", help="Check missing capabilities.")
     doctor.add_argument("--strict", action="store_true", help="Treat missing optional capabilities as failures.")
+    real_readiness = subparsers.add_parser("real-acceptance-readiness", help="Check whether this machine can run live real-acceptance workflows.")
+    real_readiness.add_argument("--workspace-root", default=".agent-workspace")
+    real_readiness.add_argument("--format", choices=["json", "markdown"], default="json")
 
     add_quality_parsers(subparsers)
 
@@ -613,6 +638,8 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     benchmark_draft.add_argument("--overwrite", action="store_true", help="Overwrite existing workflow draft.")
     benchmark_draft.add_argument("--format", choices=["json", "markdown", "yaml"], default="markdown", help="Output format. Default: markdown.")
 
+    subparsers.add_parser("quickstart", help="Print the shortest Checkpoint getting-started path.")
+
     verify = subparsers.add_parser("verify", help="Run verification-tagged workspace workflows.")
     verify.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
     verify.add_argument("--tags", default="verification", help="Comma-separated workflow tags to run. Default: verification.")
@@ -624,6 +651,17 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     verify.add_argument("--include-slow", action="store_true", help="Include workflows tagged 'slow'. Default: skipped.")
     verify.add_argument("--for", dest="target_agent", default="codex", help="Target coding agent label.")
     verify.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    verify_now = subparsers.add_parser("verify-now", help="Run the default Checkpoint verification path.")
+    verify_now.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
+    verify_now.add_argument("--tags", default="verification", help="Comma-separated workflow tags to run. Default: verification.")
+    verify_now.add_argument("--workflow", action="append", default=[], help="Workflow name or workspace-relative path to verify. Can be used multiple times.")
+    verify_now.add_argument("--max-workflows", type=int, default=5, help="Maximum matching workflows to run. Default: 5.")
+    verify_now.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="supervised", help="Execution profile. Default: supervised.")
+    verify_now.add_argument("--live", action="store_true", help="Shortcut for --run-profile supervised when verifying local demo or supervised-safe workflows.")
+    verify_now.add_argument("--lock-wait-seconds", type=float, default=30.0, help="Maximum seconds to wait for workflow locks. Default: 30.")
+    verify_now.add_argument("--include-slow", action="store_true", help="Include workflows tagged 'slow'. Default: skipped.")
+    verify_now.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     add_workflow_parsers(subparsers)
 
@@ -973,7 +1011,11 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     return parser
 
 
-def _build_perception_status(manifest: Any, vlm_summary: dict[str, Any]) -> dict[str, Any]:
+def _build_perception_status(
+    manifest: Any,
+    vlm_summary: dict[str, Any],
+    playwright_status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Summarise which perception providers are actually usable right now."""
     available_names = {
         str(getattr(c, "name", ""))
@@ -993,9 +1035,10 @@ def _build_perception_status(manifest: Any, vlm_summary: dict[str, Any]) -> dict
 
     warnings: list[str] = []
     if not dom_ok:
-        warnings.append(
-            "Browser/DOM provider unavailable. Run: pip install -e .[web] && python -m playwright install chromium"
-        )
+        detail = ""
+        if isinstance(playwright_status, dict) and playwright_status.get("error"):
+            detail = f" ({playwright_status.get('error')})"
+        warnings.append(f"Browser/DOM provider unavailable{detail}. Run: {PLAYWRIGHT_INSTALL_HINT}")
     if not vlm_ok:
         warnings.append(
             "No VLM (visual fallback) is configured. "
@@ -1056,6 +1099,9 @@ def main(argv: list[str] | None = None) -> int:
     prog = current_cli_name() if argv is None else DEFAULT_CLI_NAME
     if argv is None:
         argv = sys.argv[1:]
+    if not argv:
+        print(build_welcome_message("checkpoint"))
+        return 0
     if "--version" in argv:
         print(build_version_message(prog))
         return 0
@@ -1145,13 +1191,15 @@ def main(argv: list[str] | None = None) -> int:
         blocking = missing if args.strict else [capability for capability in missing if capability.required]
         recommendations = doctor_recommendations(missing, strict=args.strict)
         vlm_summary = vlm_doctor_summary()
-        perception = _build_perception_status(manifest, vlm_summary)
+        playwright_status = playwright_runtime_status()
+        perception = _build_perception_status(manifest, vlm_summary, playwright_status)
         payload = {
             "ok": not blocking,
             "available_count": manifest.available_count,
             "missing_count": manifest.missing_count,
             "blocking_missing_count": len(blocking),
             "perception": perception,
+            "playwright": playwright_status,
             "missing": missing,
             "recommendations": recommendations,
             "vlm": {
@@ -1386,6 +1434,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
         return 0 if payload.get("status") == "success" else 1
+    if args.command == "quickstart":
+        print(build_welcome_message("checkpoint"))
+        return 0
     if args.command in VERIFICATION_COMMANDS:
         from .cli_verification import handle_verification_command
 

@@ -46,6 +46,7 @@ def test_browser_form_supervised_fills_real_chromium_page(tmp_path: Path) -> Non
     assert not [step for step in payload["steps"] if step["status"] == "failed"]
     assert next(step for step in payload["steps"] if step["id"] == "fill_username")["status"] == "success"
     assert next(step for step in payload["steps"] if step["id"] == "click_login")["message"] == "playwright clicked"
+    assert list(Path(payload["run_dir"]).glob("traces/*.zip"))
 
 
 def test_browser_form_dry_run_does_not_perform_clicks(tmp_path: Path) -> None:
