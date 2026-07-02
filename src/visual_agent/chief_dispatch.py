@@ -75,6 +75,7 @@ def dispatch_chief_plan(
     auto_repair_once: bool = False,
     model_policy: dict[str, Any] | None = None,
     test_command: str | None = None,
+    merge: bool = False,
     command_runner: CommandRunner | None = None,
     codex_runner: Any = None,
     failure_evidence_builder: Any = None,
@@ -295,7 +296,23 @@ def dispatch_chief_plan(
         # It must never surface as verified (principle: dry-run cannot pose as
         # real acceptance).
         status = "inspection_only"
-    return {
+
+    # Close the loop: merge the worker's isolated branch back only when the
+    # change is genuinely verified. Verification is the sole gate — never merge
+    # anything that did not pass, and abort on any conflict rather than force it.
+    merge_result: dict[str, Any] | None = None
+    if merge:
+        if status == "verified":
+            merge_result = merge_worktree_branch(
+                repo_root=repo_root,
+                worktree=worktree,
+                branch=branch,
+                message=f"{plan.get('objective') or 'DevPacer change'} [plan {plan_id}]",
+            )
+        else:
+            merge_result = {"status": "skipped", "reason": f"not merged: status is {status}, not verified."}
+
+    payload = {
         **preview,
         "status": status,
         "dry_run": False,
@@ -304,6 +321,9 @@ def dispatch_chief_plan(
         "verification_attempts": verification_attempts,
         "latest_verification": latest_verification,
     }
+    if merge_result is not None:
+        payload["merge"] = merge_result
+    return payload
 
 
 def _select_track(plan: dict[str, Any], *, track_id: str | None) -> dict[str, Any] | None:
@@ -741,6 +761,53 @@ def run_process_capture(argv: list[str], cwd: Path, timeout_seconds: float, log_
             "stdout_tail": stdout[-2000:],
             "stderr_tail": (stderr or f"Timed out after {timeout_seconds:.0f}s")[-2000:],
         }
+
+
+def merge_worktree_branch(*, repo_root: Path, worktree: Path, branch: str, message: str) -> dict[str, Any]:
+    """Merge a verified worker branch back into the main repo's current branch.
+
+    Rigorous by design: commit the worker's edits on its branch, refuse to merge
+    into a dirty or detached target, and on any conflict abort immediately (never
+    leave the repo in a conflicted state, never force). The caller must only call
+    this after verification passed.
+    """
+    def g(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, check=False)
+
+    # 1) Commit the worker's (uncommitted) edits onto its own branch.
+    g(worktree, "add", "-A")
+    wt_status = g(worktree, "status", "--porcelain")
+    if wt_status.stdout.strip():
+        commit = g(
+            worktree,
+            "-c", "user.email=devpacer@local", "-c", "user.name=DevPacer",
+            "commit", "-m", f"DevPacer verified change: {message}",
+        )
+        if commit.returncode != 0:
+            return {"status": "failed", "reason": "could not commit worker changes: " + (commit.stderr or commit.stdout).strip()[:300]}
+
+    # Nothing new on the branch => nothing to merge.
+    ahead = g(repo_root, "rev-list", "--count", f"HEAD..{branch}")
+    if ahead.returncode == 0 and ahead.stdout.strip() == "0":
+        return {"status": "nothing_to_merge", "branch": branch}
+
+    # 2) Target must be a real branch and clean (ignoring Checkpoint artifacts).
+    current = g(repo_root, "rev-parse", "--abbrev-ref", "HEAD")
+    target = current.stdout.strip()
+    if current.returncode != 0 or not target or target == "HEAD":
+        return {"status": "blocked", "reason": "main repo is in detached HEAD; not merging."}
+    dirty = g(repo_root, "status", "--porcelain")
+    dirty_lines = [line for line in dirty.stdout.splitlines() if line.strip() and ".agent-workspace" not in line and ".visual-agent-status.md" not in line]
+    if dirty_lines:
+        return {"status": "blocked", "reason": "target branch has uncommitted changes; not merging.", "dirty": dirty_lines[:10]}
+
+    # 3) Merge (no fast-forward). On conflict, abort — never leave a mess.
+    merge = g(repo_root, "merge", "--no-ff", "-m", f"DevPacer merge {branch}: {message}", branch)
+    if merge.returncode != 0:
+        g(repo_root, "merge", "--abort")
+        return {"status": "conflict", "branch": branch, "target": target, "reason": (merge.stderr or merge.stdout).strip()[:400]}
+    head = g(repo_root, "rev-parse", "HEAD")
+    return {"status": "merged", "branch": branch, "target": target, "commit": head.stdout.strip()}
 
 
 def create_worktree(*, repo_root: Path, worktree: Path, branch: str) -> dict[str, Any]:

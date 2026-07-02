@@ -307,6 +307,53 @@ def test_build_worker_command_defaults_to_strong_when_no_policy(tmp_path) -> Non
     assert "gpt-5-codex-mini" not in repair["argv"]
 
 
+def test_chief_dispatch_does_not_merge_when_not_verified(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+
+    merge_calls = []
+    monkeypatch.setattr("visual_agent.chief_dispatch.merge_worktree_branch", lambda **kwargs: merge_calls.append(kwargs) or {"status": "merged"})
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
+        log_path.write_text("done", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root, plan_id=plan_id, execute=True, dry_run=False,
+        command_runner=fake_runner, codex_runner=failing_codex_result, merge=True,
+    )
+
+    # Verification failed -> must NOT merge, and say so.
+    assert payload["status"] == "verification_failed"
+    assert merge_calls == []
+    assert payload["merge"]["status"] == "skipped"
+    assert "not verified" in payload["merge"]["reason"]
+
+
+def test_chief_dispatch_merges_when_verified(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    monkeypatch.setattr("visual_agent.chief_dispatch.merge_worktree_branch", lambda **kwargs: {"status": "merged", "target": "main"})
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
+        log_path.write_text("done", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root, plan_id=plan_id, execute=True, dry_run=False,
+        command_runner=fake_runner, codex_runner=passing_codex_result, merge=True,
+    )
+
+    assert payload["status"] == "verified"
+    assert payload["merge"]["status"] == "merged"
+
+
 def test_chief_dispatch_dry_run_previews_worktree_and_commands(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
 

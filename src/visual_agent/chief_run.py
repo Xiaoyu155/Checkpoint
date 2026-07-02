@@ -54,6 +54,7 @@ def run_chief_mission(
     allow_dirty: bool = False,
     allow_coverage_gap: bool = False,
     test_command: str | None = None,
+    merge: bool = False,
     dispatch_runner: DispatchRunner | None = None,
 ) -> dict[str, Any]:
     started = monotonic()
@@ -286,6 +287,7 @@ def run_chief_mission(
         auto_repair_once=auto_repair_once,
         model_policy=budget.get("model_policy") if isinstance(budget, dict) else None,
         test_command=test_command,
+        merge=merge,
     )
     _record_dispatch_attempts(workspace_path, mission["mission_id"], dispatch, start_round=_next_round_number(workspace_path, mission["mission_id"]))
     stop_reason = _stop_reason_from_dispatch(dispatch, budget)
