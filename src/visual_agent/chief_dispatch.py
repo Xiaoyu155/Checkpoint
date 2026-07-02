@@ -632,8 +632,10 @@ def _extract_worker_usage(agent: str, log_path: Path, stdout_tail: str) -> dict[
         return None
     payload: dict[str, Any] | None = None
     candidates = [text]
-    if "{" in text:
-        candidates.append(text[text.rfind("{") :])
+    # Claude Code prints one JSON result object; a trailing stderr warning can be
+    # appended, so also try the span from the first "{" to the last "}".
+    if "{" in text and "}" in text:
+        candidates.append(text[text.find("{") : text.rfind("}") + 1])
     for candidate in candidates:
         try:
             obj = json.loads(candidate)

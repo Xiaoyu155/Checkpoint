@@ -148,6 +148,23 @@ def test_extract_worker_usage_parses_claude_code_cost(tmp_path) -> None:
     assert usage["session_id"] == "abc123"
 
 
+def test_extract_worker_usage_tolerates_trailing_stderr(tmp_path) -> None:
+    from visual_agent.chief_dispatch import _extract_worker_usage
+
+    log = tmp_path / "worker.log"
+    # Real case: the JSON result, then a stderr warning appended after it.
+    log.write_text(
+        json.dumps({"type": "result", "total_cost_usd": 0.269438, "usage": {"output_tokens": 1576, "input_tokens": 28812}})
+        + "\n\n⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY ...",
+        encoding="utf-8",
+    )
+
+    usage = _extract_worker_usage("claude-code", log, "")
+
+    assert usage["cost_usd"] == 0.269438
+    assert usage["output_tokens"] == 1576
+
+
 def test_extract_worker_usage_none_for_codex(tmp_path) -> None:
     from visual_agent.chief_dispatch import _extract_worker_usage
 
