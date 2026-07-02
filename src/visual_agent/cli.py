@@ -723,11 +723,12 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     mission = subparsers.add_parser("mission", help="High-level DevPacer mission workflow.")
     mission.add_argument(
         "action",
-        choices=["start", "resume", "status", "list", "show", "queue", "worker", "memory"],
+        choices=["start", "resume", "status", "list", "show", "queue", "worker", "memory", "import"],
         help="Mission workflow action.",
     )
     mission.add_argument("--goal", default=None, help="User objective for mission start.")
     mission.add_argument("--plan", default=None, help="Saved chief plan id to run instead of building a new plan.")
+    mission.add_argument("--file", default=None, help="Development plan file for mission import.")
     mission.add_argument("--mission", default=None, help="Mission id for resume/status/show/queue.")
     mission.add_argument("--mission-id", default=None, help="Optional mission id when starting a new mission.")
     mission.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing missions.")
@@ -741,6 +742,8 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     mission.add_argument("--max-worker-minutes", type=int, default=45, help="Worker process budget per attempt. Default: 45.")
     mission.add_argument("--execute", action="store_true", help="Actually launch the Codex worker adapter.")
     mission.add_argument("--background", action="store_true", help="Run the mission in a background process.")
+    mission.add_argument("--create", action="store_true", help="Import action: create preview missions from extracted drafts.")
+    mission.add_argument("--queue", action="store_true", help="Import action: submit created preview missions to the mission queue.")
     mission.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
     mission.add_argument("--include-slow", action="store_true", help="Include slow verification workflows.")
     mission.add_argument("--max-workflows", type=int, default=10, help="Maximum workflows to verify. Default: 10.")
@@ -754,7 +757,7 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     mission.add_argument("--poll-seconds", type=float, default=5.0, help="Worker action: polling delay. Default: 5.")
     mission.add_argument("--max-items", type=int, default=None, help="Worker action: maximum queued missions to process.")
     mission.add_argument("--max-seconds", type=float, default=None, help="Worker action: wall-clock cap.")
-    mission.add_argument("--limit", type=int, default=8, help="Memory action: maximum memory entries. Default: 8.")
+    mission.add_argument("--limit", type=int, default=8, help="Memory/import action: maximum entries. Default: 8.")
     mission.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     chief_status = subparsers.add_parser("chief-status", help="Show the current status of a saved DevPacer mission.")
@@ -2009,6 +2012,47 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(project_memory_to_markdown(payload))
             return 0
+        if action == "import":
+            from .mission_plan_import import import_development_plan, mission_plan_import_to_markdown, payload_to_json
+
+            if not args.file:
+                print("mission import requires --file <development_plan.md>.")
+                return 1
+            if args.execute or args.background:
+                print("mission import never executes Codex directly. Use --create/--queue, then run mission worker explicitly.")
+                return 1
+            try:
+                payload = import_development_plan(
+                    source_file=args.file,
+                    workspace_root=args.workspace_root,
+                    repo_root=args.repo_root,
+                    base=args.base,
+                    create=bool(args.create or args.queue),
+                    queue=bool(args.queue),
+                    limit=args.limit,
+                    agents=tuple(args.agent or ()),
+                    answers=tuple(args.answer or ()),
+                    interview=args.interview,
+                    max_rounds=args.max_rounds,
+                    max_wall_minutes=args.max_wall_minutes,
+                    max_worker_minutes=args.max_worker_minutes,
+                    run_profile=args.run_profile,
+                    include_slow=args.include_slow,
+                    max_workflows=args.max_workflows,
+                    timeout_seconds=args.timeout_seconds,
+                    allow_dirty=args.allow_dirty,
+                    allow_coverage_gap=args.allow_coverage_gap,
+                    priority=args.priority,
+                    force=args.force,
+                )
+            except OSError as exc:
+                print(format_cli_error(exc, command="mission import"))
+                return 1
+            if args.format == "json":
+                print(payload_to_json(payload))
+            else:
+                print(mission_plan_import_to_markdown(payload))
+            return 0 if str(payload.get("status") or "") != "empty" else 1
     if args.command == "chief-status":
         from .chief_run import chief_run_to_markdown, mission_status_payload, payload_to_json
 

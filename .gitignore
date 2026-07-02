@@ -20,6 +20,7 @@ model_api_keys.txt
 .agent-workspace/chief_plans/
 .agent-workspace/missions/
 .agent-workspace/mission_queue/
+.agent-workspace/mission_imports/
 .agent-workspace/demo_repos/
 .agent-workspace/workflows/external_samples/
 .agent-workspace/workflows/.cloud_inline/

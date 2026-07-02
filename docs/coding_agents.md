@@ -60,6 +60,8 @@ Use the high-level mission facade for everyday operation:
 
 ```powershell
 checkpoint mission start --goal "Fix checkout total display" --workspace-root .agent-workspace --repo-root .
+checkpoint mission import --file docs/dev_plan.md --workspace-root .agent-workspace --repo-root .
+checkpoint mission import --file docs/dev_plan.md --workspace-root .agent-workspace --repo-root . --create --queue
 checkpoint mission status --mission <mission_id> --workspace-root .agent-workspace
 checkpoint mission list --workspace-root .agent-workspace
 checkpoint mission queue --mission <mission_id> --workspace-root .agent-workspace
@@ -68,6 +70,12 @@ checkpoint mission memory --goal "Fix checkout total" --workspace-root .agent-wo
 ```
 
 `mission start` is preview-only unless `--execute` or `--background` is passed.
+`mission import` is also non-executing: by default it parses a markdown
+development plan into mission drafts and saves an import record under
+`<workspace>/mission_imports/<import_id>/import.json`. Add `--create` to create
+preview missions for extracted drafts, and add `--queue` to submit those preview
+missions to the local queue. It still does not run Codex directly; a worker must
+be started explicitly.
 The lower-level `chief-*` commands remain available for debugging and audit.
 
 `chief-run` is the first bounded autonomous loop. It creates a DevPacer mission,

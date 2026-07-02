@@ -7,7 +7,7 @@ from typing import Any, Iterable
 from .context_ingestion import CodeChange
 
 
-def changed_files(*, base: str = "HEAD", cwd: Path | None = None) -> list[str]:
+def changed_files(*, base: str = "HEAD", cwd: Path | None = None, include_untracked: bool = True) -> list[str]:
     root = cwd or Path.cwd()
     files: set[str] = set()
     for command in (
@@ -25,6 +25,8 @@ def changed_files(*, base: str = "HEAD", cwd: Path | None = None) -> list[str]:
         except (FileNotFoundError, subprocess.CalledProcessError):
             return []
         files.update(normalize_changed_file(line) for line in result.stdout.splitlines() if line.strip())
+    if include_untracked:
+        files.update(git_untracked_files(cwd=root))
     return sorted(item for item in files if item)
 
 

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from visual_agent.git_diff import affected_workflows, collect_code_changes, workflow_affects_changed_path
+from visual_agent.git_diff import affected_workflows, changed_files, collect_code_changes, workflow_affects_changed_path
 
 
 @dataclass(frozen=True)
@@ -73,6 +73,21 @@ def test_collect_code_changes_includes_untracked_files(tmp_path: Path) -> None:
     assert changes[0].file_path == "new.html"
     assert changes[0].change_type == "added"
     assert changes[0].before is None
+
+
+def test_changed_files_includes_untracked_files_by_default(tmp_path: Path) -> None:
+    init_git_repo(tmp_path)
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("old\n", encoding="utf-8")
+    git(tmp_path, "add", "tracked.txt")
+    git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
+    tracked.write_text("new\n", encoding="utf-8")
+    (tmp_path / "new_module.py").write_text("print('new')\n", encoding="utf-8")
+
+    changed = changed_files(cwd=tmp_path)
+
+    assert changed == ["new_module.py", "tracked.txt"]
+    assert changed_files(cwd=tmp_path, include_untracked=False) == ["tracked.txt"]
 
 
 def init_git_repo(path: Path) -> None:

@@ -14,7 +14,7 @@
 
 | # | 能力 | 现状 | 差距 |
 |---|---|---|---|
-| 1 | 需求中介：接住用户的开发计划，转成可执行任务 | ✅ 已有：chief-plan 清晰度门、interview/answer、领域化验收标准、计划落盘；`checkpoint mission start/status/list/queue/worker/memory` 已提供高层入口 | 仍缺"从一份开发计划文档批量生成 missions"的能力 |
+| 1 | 需求中介：接住用户的开发计划，转成可执行任务 | ✅ 已有：chief-plan 清晰度门、interview/answer、领域化验收标准、计划落盘；`checkpoint mission start/status/list/queue/worker/memory/import` 已提供高层入口；`mission import --file` 可从 Markdown 开发计划生成 mission drafts，并可显式 `--create --queue` | 计划导入 v1 仍是启发式拆分；缺任务依赖、优先级推断、批量预算预估 |
 | 2 | 驱动 Codex 开发 | ✅ 已有：chief-dispatch/chief-run，worktree 隔离，Codex-only adapter，preview→execute 安全门 | **真实 token 场景未做最终验收**（deterministic demo 已证明框架） |
 | 3 | 合理利用各种模型 | 🚧 部分：能力档案（codex/claude-code/gemini YAML）+ recommend_worker_config（strong/fast 按任务选型）；budget.json 已有 model_policy 槽位（implementation/repair/classification/visual_review） | model_policy 还没有被执行路径真正消费——现在派发始终用同一模型；"简单修复用 fast 模型"未落地 |
 | 4 | 合理规划额度 | 🚧 部分：budget.json（max_rounds/wall_minutes/worker_minutes/repair_rounds），budget_exhausted 停机 | 无 token/费用统计；无"这个任务预计花多少、值不值"的预估；无跨 mission 的额度台账 |
@@ -70,17 +70,18 @@ Gemini 可以把验收从"通过"升级为"通过但有 2 个视觉风险需人�
    - repair brief 注入更细的"过往上下文"块。
    - 跨 mission 失败签名比对：同一签名第二次出现直接升级给人（死循环防护从单 mission 扩展到项目级）。
    - 归纳有效修复模式和常改文件区。
-5. **入口收敛 — 已落地第一刀**：`checkpoint mission start/status/list/show/queue/worker/memory` 作为高层 facade；内部仍复用 `chief-run`、`chief-status`、`chief-queue`、`chief-memory`，没有第二套执行引擎。下一步是把文档继续改成用户工作流叙事，并支持从开发计划文档批量生成 missions。
+5. **入口收敛 — 已落地第二刀**：`checkpoint mission start/status/list/show/queue/worker/memory/import` 作为高层 facade；内部仍复用 `chief-run`、`chief-status`、`chief-queue`、`chief-memory`，没有第二套执行引擎。`mission import --file` 已支持从 Markdown 开发计划生成 mission drafts，显式 `--create` 创建 preview missions，显式 `--queue` 入队；默认不执行 Codex。
+6. **计划导入 v2**：给导入的任务推断依赖、优先级和预算；同一计划下的 missions 建立 parent import id，报告可按计划维度汇总。
 
-**M1 完成标准**：负责人给一句开发计划 → 一条命令 → 走完派发+验收 → 回来看 final report；第二个 mission 能自动引用第一个的记忆。
+**M1 完成标准**：负责人给一句开发计划或一个 Markdown 计划文件 → 一条命令生成 mission drafts/preview → 审核后入队运行 → 回来看 final report；第二个 mission 能自动引用第一个的记忆。
 
 ### M2：首批用户可用
 
-6. **model_policy 真正生效（能力 #3）**：repair 轮用 fast 模型、implementation 用 strong 模型，按能力档案映射到具体 model id；省额度直接可量化。
-7. **额度台账（能力 #4）**：per-mission 和 per-repo 的 wall time / rounds / worker minutes 累计报表；`codex exec` 输出若含 token 信息则一并记录。
-8. **Gemini visual_review 接入**（按第二节设计，flag 默认关）。
-9. **queue cancel/retry + mission/queue 的 workflow coverage**（审计遗留项）。
-10. **进程中纠偏 v1（能力 #7 增强）**：worker 结束后、验收前，做 diff 规模与触碰范围检查（改了 plan 未涉及的目录 → 警告并入报告）。
+7. **model_policy 真正生效（能力 #3）**：repair 轮用 fast 模型、implementation 用 strong 模型，按能力档案映射到具体 model id；省额度直接可量化。
+8. **额度台账（能力 #4）**：per-mission 和 per-repo 的 wall time / rounds / worker minutes 累计报表；`codex exec` 输出若含 token 信息则一并记录。
+9. **Gemini visual_review 接入**（按第二节设计，flag 默认关）。
+10. **queue cancel/retry + mission/queue/import 的 workflow coverage**（审计遗留项）。
+11. **进程中纠偏 v1（能力 #7 增强）**：worker 结束后、验收前，做 diff 规模与触碰范围检查（改了 plan 未涉及的目录 → 警告并入报告）。
 
 **M2 完成标准**：一个非负责人的真实用户，用自己的 repo 跑通一个 mission，且账单/时间可解释。
 

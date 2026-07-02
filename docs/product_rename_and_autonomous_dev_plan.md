@@ -357,10 +357,14 @@ Current status:
   executes the existing `chief-run --resume <id> --execute` path.
 - `checkpoint chief-worker --watch` is the simple local daemon form. It is not a
   distributed scheduler; it is a safe unattended local worker.
-- `checkpoint mission start/status/list/show/queue/worker/memory` is the
+- `checkpoint mission start/status/list/show/queue/worker/memory/import` is the
   high-level user-facing facade. It keeps the same execution paths underneath
   (`chief-run --resume <id> --execute` for work), but gives users one command
   family instead of several `chief-*` commands.
+- `checkpoint mission import --file <plan.md>` parses a Markdown development
+  plan into mission drafts and saves an auditable import record. Add `--create`
+  to create preview missions, and `--queue` to submit those preview missions to
+  the existing queue. Import never executes Codex directly.
 
 Done when a mission can run unattended inside strict budget and approval policy.
 
