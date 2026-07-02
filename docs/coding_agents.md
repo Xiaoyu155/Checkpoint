@@ -56,6 +56,20 @@ Extra flags:
 
 ## DevPacer Mission Run
 
+Use the high-level mission facade for everyday operation:
+
+```powershell
+checkpoint mission start --goal "Fix checkout total display" --workspace-root .agent-workspace --repo-root .
+checkpoint mission status --mission <mission_id> --workspace-root .agent-workspace
+checkpoint mission list --workspace-root .agent-workspace
+checkpoint mission queue --mission <mission_id> --workspace-root .agent-workspace
+checkpoint mission worker --workspace-root .agent-workspace --watch --poll-seconds 10
+checkpoint mission memory --goal "Fix checkout total" --workspace-root .agent-workspace
+```
+
+`mission start` is preview-only unless `--execute` or `--background` is passed.
+The lower-level `chief-*` commands remain available for debugging and audit.
+
 `chief-run` is the first bounded autonomous loop. It creates a DevPacer mission,
 saves `mission.json`, `budget.json`, `rounds.jsonl`, and `final_report.md`, then
 uses Checkpoint as the verification engine.

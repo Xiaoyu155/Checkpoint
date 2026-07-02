@@ -14,7 +14,7 @@
 
 | # | 能力 | 现状 | 差距 |
 |---|---|---|---|
-| 1 | 需求中介：接住用户的开发计划，转成可执行任务 | ✅ 已有：chief-plan 清晰度门、interview/answer、领域化验收标准、计划落盘 | 入口分散在多个命令；缺 `mission start` 单入口和"从一份开发计划文档批量生成 missions"的能力 |
+| 1 | 需求中介：接住用户的开发计划，转成可执行任务 | ✅ 已有：chief-plan 清晰度门、interview/answer、领域化验收标准、计划落盘；`checkpoint mission start/status/list/queue/worker/memory` 已提供高层入口 | 仍缺"从一份开发计划文档批量生成 missions"的能力 |
 | 2 | 驱动 Codex 开发 | ✅ 已有：chief-dispatch/chief-run，worktree 隔离，Codex-only adapter，preview→execute 安全门 | **真实 token 场景未做最终验收**（deterministic demo 已证明框架） |
 | 3 | 合理利用各种模型 | 🚧 部分：能力档案（codex/claude-code/gemini YAML）+ recommend_worker_config（strong/fast 按任务选型）；budget.json 已有 model_policy 槽位（implementation/repair/classification/visual_review） | model_policy 还没有被执行路径真正消费——现在派发始终用同一模型；"简单修复用 fast 模型"未落地 |
 | 4 | 合理规划额度 | 🚧 部分：budget.json（max_rounds/wall_minutes/worker_minutes/repair_rounds），budget_exhausted 停机 | 无 token/费用统计；无"这个任务预计花多少、值不值"的预估；无跨 mission 的额度台账 |
@@ -70,7 +70,7 @@ Gemini 可以把验收从"通过"升级为"通过但有 2 个视觉风险需人�
    - repair brief 注入更细的"过往上下文"块。
    - 跨 mission 失败签名比对：同一签名第二次出现直接升级给人（死循环防护从单 mission 扩展到项目级）。
    - 归纳有效修复模式和常改文件区。
-5. **入口收敛**：`checkpoint mission start --goal "..."`（内部串 plan→preview→确认→execute）、`mission status`、`mission list`。文档改成用户工作流叙事。
+5. **入口收敛 — 已落地第一刀**：`checkpoint mission start/status/list/show/queue/worker/memory` 作为高层 facade；内部仍复用 `chief-run`、`chief-status`、`chief-queue`、`chief-memory`，没有第二套执行引擎。下一步是把文档继续改成用户工作流叙事，并支持从开发计划文档批量生成 missions。
 
 **M1 完成标准**：负责人给一句开发计划 → 一条命令 → 走完派发+验收 → 回来看 final report；第二个 mission 能自动引用第一个的记忆。
 
