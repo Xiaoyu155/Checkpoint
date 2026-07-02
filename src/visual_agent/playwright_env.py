@@ -25,7 +25,19 @@ def ensure_playwright_browsers_path(*anchors: str | Path | None) -> Path | None:
     """
     configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
     if configured:
-        return Path(configured).expanduser()
+        configured_path = Path(configured).expanduser()
+        if playwright_chromium_executable(configured_path) is not None:
+            return configured_path
+        # A configured path without Chromium (a partial or stale `.pw-browsers`)
+        # must not shadow a working cache. Prefer a valid local cache; otherwise
+        # clear the variable so Playwright falls back to its own default
+        # resolution (e.g. the system ms-playwright cache).
+        local_path = find_local_playwright_browsers_path(*anchors)
+        if local_path is not None:
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(local_path)
+            return local_path
+        os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+        return None
     local_path = find_local_playwright_browsers_path(*anchors)
     if local_path is not None:
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(local_path)
@@ -69,9 +81,31 @@ def find_local_playwright_browsers_path(*anchors: str | Path | None) -> Path | N
 def is_playwright_browsers_dir(path: Path) -> bool:
     if not path.exists() or not path.is_dir():
         return False
-    if (path / ".links").exists():
-        return True
-    return any(path.glob("chromium*")) or any(path.glob("ffmpeg-*"))
+    return playwright_chromium_executable(path) is not None
+
+
+def playwright_chromium_executable(path: Path) -> Path | None:
+    """Return a Chromium executable inside a Playwright browser cache.
+
+    A partial Playwright cache can contain ``.links``, ffmpeg, or winldd without
+    Chromium. Selecting that cache via PLAYWRIGHT_BROWSERS_PATH hides the user's
+    default Playwright cache and makes browser checks fail. Treat the local
+    cache as usable only when Chromium itself is present.
+    """
+    if not path.exists() or not path.is_dir():
+        return None
+    candidates = [
+        "chrome-win64/chrome.exe",
+        "chrome-win/chrome.exe",
+        "chrome-linux/chrome",
+        "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+    ]
+    for directory in path.glob("chromium-*"):
+        for relative in candidates:
+            executable = directory / relative
+            if executable.exists() and executable.is_file():
+                return executable
+    return None
 
 
 def playwright_runtime_status(*anchors: str | Path | None) -> dict[str, Any]:
