@@ -130,6 +130,50 @@ def _codex_track() -> dict:
     return {"id": "track_1_codex", "agent": "codex", "model": "gpt-5-codex"}
 
 
+def test_build_worker_command_claude_code_is_headless(tmp_path) -> None:
+    plan = {"objective": "fix", "acceptance_criteria": [], "selected_workflows": [], "changed_files": []}
+    track = {"id": "track_1_claude_code", "agent": "claude-code", "model": "opus"}
+
+    cmd = build_worker_command(plan=plan, track=track, worktree=Path(tmp_path), verification_command="checkpoint codex-check")
+    argv = cmd["argv"]
+
+    assert argv[0] == "claude"
+    assert "-p" in argv
+    assert "--model" in argv and "opus" in argv
+    # Headless-safe permission mode so the worker does not hang on prompts.
+    assert "--permission-mode" in argv and "acceptEdits" in argv
+
+
+def test_chief_dispatch_executes_claude_code_worker(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("claude-code",))
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    # Only `claude` is on PATH, not `codex` — proves the single-point dependency is broken.
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: "claude" if name == "claude" else None)
+
+    executed = {}
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path):
+        executed["argv"] = argv
+        log_path.write_text("worker done", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        codex_runner=passing_codex_result,
+    )
+
+    assert payload["status"] == "verified"
+    assert executed["argv"][0] == "claude" and "-p" in executed["argv"]
+    records = load_worker_records(workspace.root, plan_id)
+    assert records and records[0]["status"] == "completed"
+
+
 def test_coverage_changed_files_excludes_checkpoint_artifacts(tmp_path, monkeypatch) -> None:
     from visual_agent import chief_dispatch
 

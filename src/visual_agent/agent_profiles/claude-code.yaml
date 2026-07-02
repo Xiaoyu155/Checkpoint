@@ -12,10 +12,14 @@ summary: >-
 
 headless:
   command: claude -p "<prompt>"
+  # Flags that make an unattended worker run safely without hanging on prompts.
+  permission_flag: "--permission-mode acceptEdits"
+  extra_flags: "--output-format json"
   why: >-
     Print mode runs one task non-interactively and can emit JSON
     (`--output-format json`) so an orchestrator can capture the result and
-    detect completion.
+    detect completion. acceptEdits auto-applies file edits (still gating other
+    actions) so the worker does not block waiting for permission.
 
 model_flag: "--model <sonnet|opus|haiku|id>"
 models:

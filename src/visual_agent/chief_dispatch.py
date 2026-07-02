@@ -25,6 +25,11 @@ from .workspace import open_workspace
 _ARTIFACT_BASENAMES = {".visual-agent-status.md"}
 _ARTIFACT_DIR_PREFIXES = (".pw-browsers/",)
 
+# Coding agents that have a real executable worker adapter (headless run + output
+# capture). Codex remains the default; Claude Code breaks the single-point
+# dependency so a Codex outage does not stop all delivery.
+EXECUTABLE_CODING_AGENTS = {"codex", "claude-code"}
+
 
 def _coverage_changed_files(*, repo_root: Path, workspace_root: Path) -> list[str]:
     raw = changed_files(base="HEAD", cwd=repo_root)
@@ -171,10 +176,13 @@ def dispatch_chief_plan(
             "dirty_files": dirty[:20],
         }
 
-    executable = shutil.which("codex")
+    worker_agent = canonical_agent_name(str(selected_track.get("agent") or "codex"))
+    worker_profile = load_agent_profile(worker_agent) or {}
+    exe_name = str(worker_profile.get("executable") or worker_agent)
+    executable = shutil.which(exe_name)
     if not executable and command_runner is None:
-        return {**preview, "status": "blocked", "reason": "Codex executable was not found on PATH."}
-    worker_command["argv"][0] = executable or "codex"
+        return {**preview, "status": "blocked", "reason": f"{exe_name} executable was not found on PATH."}
+    worker_command["argv"][0] = executable or exe_name
 
     setup = create_worktree(repo_root=repo_root, worktree=worktree, branch=branch)
     if setup.get("status") != "created":
@@ -306,8 +314,8 @@ def _dispatch_block_reason(
     agent = canonical_agent_name(str(track.get("agent") or ""))
     if str(track.get("track_kind") or "implementation") == "inspection":
         return "Selected track is an inspection lane, not a coding worker."
-    if execute and agent != "codex":
-        return "Only the Codex worker adapter is executable in this phase."
+    if execute and agent not in EXECUTABLE_CODING_AGENTS:
+        return f"Agent '{agent}' has no executable worker adapter (supported: {', '.join(sorted(EXECUTABLE_CODING_AGENTS))})."
     return ""
 
 
@@ -345,13 +353,18 @@ def build_worker_command(
     model_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     agent = canonical_agent_name(str(track.get("agent") or "codex"))
-    if agent != "codex":
-        prompt = prompt_override or build_worker_prompt(plan=plan, track=track, worktree=worktree, verification_command=verification_command)
-        return {"argv": [agent, prompt], "display": format_argv([agent, prompt])}
-    profile = load_agent_profile("codex") or {}
+    profile = load_agent_profile(agent) or {}
     task_kind = _task_kind_for_phase(phase, model_policy)
-    config = recommend_worker_config(profile, task_kind=task_kind)
+    config = recommend_worker_config(profile, task_kind=task_kind) if profile else {}
     prompt = prompt_override or build_worker_prompt(plan=plan, track=track, worktree=worktree, verification_command=verification_command)
+    if agent != "codex":
+        # Profile-driven headless command (e.g. Claude Code: `claude -p ...`).
+        # Any agent with a headless profile becomes an executable worker.
+        headless = profile.get("headless") if isinstance(profile.get("headless"), dict) else {}
+        if headless.get("command"):
+            argv = _build_headless_argv(headless=headless, config=config, track=track, phase=phase, prompt=prompt)
+            return {"argv": argv, "display": format_argv(argv)}
+        return {"argv": [agent, prompt], "display": format_argv([agent, prompt])}
     argv = ["codex", "exec"]
     # The implementation phase honors any model already chosen for the track; other
     # phases (e.g. repair) follow the model_policy tier so a cheaper model can be
@@ -368,6 +381,26 @@ def build_worker_command(
             argv.extend(shlex.split(flag, posix=False))
     argv.append(prompt)
     return {"argv": argv, "display": format_argv(argv)}
+
+
+def _build_headless_argv(*, headless: dict[str, Any], config: dict[str, Any], track: dict[str, Any], phase: str, prompt: str) -> list[str]:
+    base_template = str(headless.get("command") or "").strip()
+    base = base_template.replace('"<prompt>"', "").replace("<prompt>", "").strip()
+    argv = shlex.split(base, posix=False) if base else []
+    if phase == "implementation":
+        model = str(track.get("model") or config.get("model") or "")
+    else:
+        model = str(config.get("model") or track.get("model") or "")
+    if model:
+        argv.extend(["--model", model])
+    # Headless-safe execution flags (permission mode, output format) come from the
+    # profile so a worker runs unattended without hanging on interactive prompts.
+    for key in ("permission_flag", "extra_flags"):
+        flag = str(headless.get(key) or "").strip()
+        if flag:
+            argv.extend(shlex.split(flag, posix=False))
+    argv.append(prompt)
+    return argv
 
 
 def build_worker_prompt(
@@ -391,8 +424,15 @@ def build_worker_prompt(
     if criteria:
         lines.append("Acceptance criteria:")
         lines.extend(f"- {item}" for item in criteria)
+    changed = plan.get("changed_files") if isinstance(plan.get("changed_files"), list) else []
+    scoped = [str(item) for item in changed if not str(item).startswith(".agent-workspace")][:12]
+    if scoped:
+        lines.append("Touch only the files this task requires; the changed files in scope are:")
+        lines.extend(f"- {item}" for item in scoped)
     lines.extend(
         [
+            "Work efficiently to conserve model budget: read only the files you need for this objective;"
+            " do not scan or grep the whole repository, and do not refactor unrelated code.",
             "Before claiming done, run this verification command and inspect the evidence if it fails:",
             verification_command,
         ]
