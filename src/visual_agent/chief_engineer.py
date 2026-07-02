@@ -1,0 +1,668 @@
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from .agent_capabilities import load_agent_profile, recommend_worker_config
+from .codex_check import codex_coverage_summary
+from .git_diff import affected_workflows, changed_files
+from .models import to_jsonable
+from .workspace import WorkflowRef, discover_workflows, open_workspace
+
+
+DEFAULT_AGENT_ORDER = ("codex",)
+ORCHESTRATION_PATTERNS = (
+    {
+        "name": "worktree_isolation",
+        "why": "Run competing coding agents in isolated branches before merging a winner.",
+    },
+    {
+        "name": "cli_agent_adapter",
+        "why": "Treat CLI agents as adapters behind one plan, but default to one coding worker and keep inspection lanes read-only.",
+    },
+    {
+        "name": "acceptance_gate",
+        "why": "Do not let a worker claim success without product workflow evidence.",
+    },
+    {
+        "name": "failure_feedback_loop",
+        "why": "Route failed verification evidence back to the implementation worker before handoff.",
+    },
+)
+
+
+@dataclass(frozen=True)
+class ChiefPlan:
+    schema_version: int
+    status: str
+    objective: str
+    workspace_root: str
+    repo_root: str
+    changed_files: list[str]
+    selected_workflows: list[str]
+    skipped_slow_workflows: list[str]
+    coverage: dict[str, Any] = field(default_factory=dict)
+    acceptance_criteria: list[str] = field(default_factory=list)
+    worker_tracks: list[dict[str, Any]] = field(default_factory=list)
+    verification_commands: list[str] = field(default_factory=list)
+    next_actions: list[str] = field(default_factory=list)
+    risks: list[dict[str, str]] = field(default_factory=list)
+    handoff_prompt: str = ""
+    clarity: dict[str, Any] = field(default_factory=dict)
+    clarifying_questions: list[str] = field(default_factory=list)
+    plan_id: str = ""
+    patterns_reused: tuple[dict[str, str], ...] = ORCHESTRATION_PATTERNS
+
+
+def build_chief_plan(
+    *,
+    goal: str,
+    workspace_root: str | Path = ".agent-workspace",
+    repo_root: str | Path = ".",
+    base: str = "HEAD",
+    agents: tuple[str, ...] = DEFAULT_AGENT_ORDER,
+    include_slow: bool = False,
+    max_workflows: int = 5,
+    run_profile: str = "dry-run",
+    interview: bool = False,
+    answers: tuple[str, ...] = (),
+) -> ChiefPlan:
+    objective = str(goal).strip()
+    if not objective:
+        raise ValueError("chief-plan requires a non-empty goal.")
+
+    workspace_path = Path(workspace_root).expanduser().resolve()
+    repo_path = Path(repo_root).expanduser().resolve()
+    verification_agents = tuple(dict.fromkeys(agent.strip() for agent in agents if agent.strip())) or DEFAULT_AGENT_ORDER
+    answer_list = [str(item).strip() for item in answers if str(item).strip()]
+    clarity = assess_goal_clarity(objective, answers=answer_list)
+
+    if not workspace_path.exists():
+        init_command = f"checkpoint init --root {_quote_cli(workspace_path)}"
+        return ChiefPlan(
+            schema_version=1,
+            status="blocked",
+            objective=objective,
+            workspace_root=str(workspace_path),
+            repo_root=str(repo_path),
+            changed_files=[],
+            selected_workflows=[],
+            skipped_slow_workflows=[],
+            acceptance_criteria=_acceptance_criteria(objective, coverage_status="missing_workspace"),
+            worker_tracks=[],
+            verification_commands=[init_command],
+            next_actions=[
+                "Initialize a Checkpoint workspace before dispatching coding agents.",
+                f"Run: {init_command}",
+            ],
+            risks=[
+                {
+                    "level": "blocking",
+                    "area": "workspace",
+                    "message": "Workspace root does not exist, so no product workflows can be selected.",
+                }
+            ],
+            handoff_prompt=_handoff_prompt(objective, [], [init_command], status="blocked"),
+            clarity=clarity,
+            clarifying_questions=list(clarity["questions"]) if clarity["questions"] else [],
+        )
+
+    # Requirements gate: refuse to dispatch a goal with no verifiable definition
+    # of done. Withholding dispatch here is the point — it saves a wasted agent
+    # run and forces the objective to be sharpened first.
+    if not clarity["ok"]:
+        return ChiefPlan(
+            schema_version=1,
+            status="needs_clarification",
+            objective=objective,
+            workspace_root=str(workspace_path),
+            repo_root=str(repo_path),
+            changed_files=[],
+            selected_workflows=[],
+            skipped_slow_workflows=[],
+            coverage={},
+            acceptance_criteria=_acceptance_criteria(objective, coverage_status=""),
+            worker_tracks=[],
+            verification_commands=[],
+            next_actions=["Answer the clarifying questions, then rerun chief-plan (optionally with --answer)."]
+            + list(clarity["questions"]),
+            risks=[
+                {
+                    "level": "blocking",
+                    "area": "requirements",
+                    "message": "The objective lacks a verifiable definition of done, so dispatch is withheld to avoid wasting a coding-agent run.",
+                }
+            ],
+            handoff_prompt="",
+            clarity=clarity,
+            clarifying_questions=list(clarity["questions"]),
+        )
+
+    workspace = open_workspace(workspace_path)
+    all_refs = list(discover_workflows(workspace, include_slow=True))
+    verification_refs = [ref for ref in all_refs if "verification" in set(ref.tags)]
+    skipped_slow = [ref.name for ref in verification_refs if "slow" in set(ref.tags) and not include_slow]
+    runnable_refs = [ref for ref in verification_refs if include_slow or "slow" not in set(ref.tags)]
+    changed = changed_files(base=base, cwd=repo_path)
+    selected_refs = affected_workflows(runnable_refs, changed=changed)[: max(0, int(max_workflows))]
+    coverage = codex_coverage_summary(changed, runnable_refs)
+    coverage_status = str(coverage.get("status") or "")
+    selected_names = [ref.name for ref in selected_refs]
+    commands = _verification_commands(
+        workspace_path=workspace_path,
+        repo_path=repo_path,
+        base=base,
+        selected_refs=selected_refs,
+        run_profile=run_profile,
+        include_slow=include_slow,
+    )
+    status = _plan_status(
+        changed=changed,
+        runnable_refs=runnable_refs,
+        selected_refs=selected_refs,
+        coverage_status=coverage_status,
+    )
+    return ChiefPlan(
+        schema_version=1,
+        status=status,
+        objective=objective,
+        workspace_root=str(workspace_path),
+        repo_root=str(repo_path),
+        changed_files=changed,
+        selected_workflows=selected_names,
+        skipped_slow_workflows=skipped_slow,
+        coverage=coverage,
+        acceptance_criteria=_acceptance_criteria(objective, coverage_status=coverage_status, answers=answer_list),
+        worker_tracks=_worker_tracks(
+            objective=objective,
+            agents=verification_agents,
+            workspace_path=workspace_path,
+            repo_path=repo_path,
+            verification_commands=commands,
+        ),
+        verification_commands=commands,
+        next_actions=_next_actions(status=status, coverage=coverage, selected_refs=selected_refs, commands=commands),
+        risks=_risks(changed=changed, runnable_refs=runnable_refs, selected_refs=selected_refs, coverage=coverage),
+        clarity=clarity,
+        clarifying_questions=list(clarity["questions"]) if (interview and clarity["questions"]) else [],
+        handoff_prompt=_handoff_prompt(objective, selected_names, commands, status=status),
+    )
+
+
+def chief_plan_to_dict(plan: ChiefPlan) -> dict[str, Any]:
+    return to_jsonable(plan)
+
+
+def chief_plan_to_markdown(plan: ChiefPlan) -> str:
+    lines = [
+        "## Chief Engineer Plan",
+        "",
+        f"Status: `{plan.status}`",
+        f"Objective: {plan.objective}",
+        f"Workspace: `{plan.workspace_root}`",
+        f"Repo: `{plan.repo_root}`",
+        "",
+        "### Context",
+        "",
+    ]
+    if plan.changed_files:
+        lines.append("Changed files:")
+        for path in plan.changed_files[:10]:
+            lines.append(f"- `{path}`")
+        if len(plan.changed_files) > 10:
+            lines.append(f"- ... {len(plan.changed_files) - 10} more")
+    else:
+        lines.append("Changed files: none detected from git diff.")
+    lines.extend(
+        [
+            f"Coverage: `{plan.coverage.get('status', 'unknown')}`" if plan.coverage else "Coverage: unavailable",
+            f"Selected workflows: {', '.join(plan.selected_workflows) if plan.selected_workflows else 'none'}",
+        ]
+    )
+    if plan.skipped_slow_workflows:
+        lines.append("Skipped slow workflows: " + ", ".join(plan.skipped_slow_workflows))
+    lines.extend(["", "### Acceptance Criteria", ""])
+    lines.extend(f"- {item}" for item in plan.acceptance_criteria)
+    if plan.clarifying_questions:
+        lines.extend(["", "### Clarifying Questions", ""])
+        lines.extend(f"- {question}" for question in plan.clarifying_questions)
+    lines.extend(["", "### Worker Tracks", ""])
+    if plan.worker_tracks:
+        for track in plan.worker_tracks:
+            lines.append(f"- `{track['id']}` using `{track['agent']}`: {track['role']}")
+            if track.get("model"):
+                sandbox = (track.get("sandbox") or {}).get("name") or ""
+                approval = (track.get("approval") or {}).get("name") or ""
+                posture = ", ".join(part for part in (f"model {track['model']}", f"sandbox {sandbox}" if sandbox else "", f"approval {approval}" if approval else "") if part)
+                lines.append(f"  Recommended: {posture}")
+            command = track.get("command") or track.get("command_template") or ""
+            lines.append(f"  Command: `{command}`")
+            if track.get("parallelism_hint"):
+                lines.append(f"  Parallel: {track['parallelism_hint']}")
+    else:
+        if plan.status == "needs_clarification":
+            lines.append("- Withheld: clarify the objective above before dispatching a worker.")
+        else:
+            lines.append("- No worker tracks until the blocking setup issue is fixed.")
+    lines.extend(["", "### Verification Commands", ""])
+    for command in plan.verification_commands:
+        lines.append(f"```powershell\n{command}\n```")
+    lines.extend(["", "### Risks", ""])
+    if plan.risks:
+        for risk in plan.risks:
+            lines.append(f"- `{risk['level']}` {risk['area']}: {risk['message']}")
+    else:
+        lines.append("- No blocking risk detected in the plan.")
+    lines.extend(["", "### Next Actions", ""])
+    lines.extend(f"- {item}" for item in plan.next_actions)
+    lines.extend(["", "### Worker Handoff Prompt", "", "```text", plan.handoff_prompt.strip(), "```"])
+    return "\n".join(lines)
+
+
+def _plan_status(
+    *,
+    changed: list[str],
+    runnable_refs: list[WorkflowRef],
+    selected_refs: list[WorkflowRef],
+    coverage_status: str,
+) -> str:
+    if not runnable_refs:
+        return "needs_workflow"
+    if coverage_status in {"uncovered", "fallback_only"}:
+        return "needs_workflow_coverage"
+    if changed and not selected_refs:
+        return "needs_workflow_coverage"
+    return "ready"
+
+
+# Keyword -> domain-specific acceptance criteria. A better chief engineer infers
+# what "done" means for the product area instead of only asserting "tests pass".
+DOMAIN_CRITERIA: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (
+        ("checkout", "cart", "order", "payment", "purchase", "结算", "下单", "购物车", "支付"),
+        (
+            "Order total, currency, and line items display correctly.",
+            "A successful order shows an explicit confirmation state (not a silent success).",
+            "Payment or checkout errors are surfaced clearly, not swallowed.",
+        ),
+    ),
+    (
+        ("login", "logout", "auth", "signup", "sign-in", "password", "登录", "注册", "认证", "密码"),
+        (
+            "Valid credentials reach the authenticated state.",
+            "Invalid credentials show a clear error, not a blank screen or crash.",
+        ),
+    ),
+    (
+        ("dashboard", "chart", "report", "table", "list", "metric", "仪表盘", "图表", "报表", "列表"),
+        (
+            "Data renders with no undefined, NaN, or stray placeholder where real data exists.",
+            "The empty state is intentional and readable when there is no data.",
+        ),
+    ),
+    (
+        ("form", "input", "validation", "submit", "field", "表单", "校验", "提交", "输入"),
+        (
+            "Valid input submits and persists; the success state is visible.",
+            "Invalid input is rejected with a specific, visible validation message.",
+        ),
+    ),
+    (
+        ("total", "price", "amount", "discount", "currency", "金额", "价格", "折扣", "总价"),
+        (
+            "Computed totals are numerically correct, including edge cases (zero, discount, rounding).",
+            "Currency and formatting are consistent across the flow.",
+        ),
+    ),
+)
+
+
+def _domain_criteria(objective: str) -> list[str]:
+    lower = objective.lower()
+    seen: list[str] = []
+    for keywords, criteria in DOMAIN_CRITERIA:
+        if any(keyword in lower for keyword in keywords):
+            for item in criteria:
+                if item not in seen:
+                    seen.append(item)
+    return seen
+
+
+def _acceptance_criteria(objective: str, *, coverage_status: str, answers: list[str] | None = None) -> list[str]:
+    criteria = [
+        f"The implementation satisfies the user objective: {objective}",
+        "Project tests and build checks pass before product acceptance is claimed.",
+        "Checkpoint verification returns no failed workflows.",
+        "Any inspection-only result is treated as partial evidence, not final acceptance.",
+    ]
+    criteria.extend(_domain_criteria(objective))
+    for answer in answers or []:
+        criteria.append(f"Clarified requirement: {answer}")
+    if coverage_status in {"uncovered", "fallback_only", "missing_workspace"}:
+        criteria.append("Workflow coverage gaps are resolved before claiming the task is done.")
+    return criteria
+
+
+# Terms that signal vagueness without a concrete, checkable outcome.
+_VAGUE_TERMS = {
+    "better", "nicer", "improve", "improved", "improvement", "fix", "fixes", "cleanup",
+    "clean", "optimize", "optimise", "tweak", "polish", "stuff", "things", "somehow",
+    "etc", "update", "handle", "refactor", "enhance", "modernize",
+    "优化", "改进", "完善", "修改", "调整", "美化", "更好", "处理一下", "弄一下", "搞一下",
+}
+# Concrete product surfaces / nouns that make a goal actionable.
+_DOMAIN_ANCHORS = {kw for keywords, _ in DOMAIN_CRITERIA for kw in keywords} | {
+    "button", "modal", "dialog", "redirect", "api", "endpoint", "search", "filter",
+    "upload", "download", "toast", "navbar", "menu", "settings", "profile", "empty",
+    "state", "error", "banner", "tab", "route", "page", "screen", "component",
+    "按钮", "弹窗", "页面", "接口", "跳转", "搜索", "筛选", "上传", "下载", "空状态",
+}
+
+
+def assess_goal_clarity(objective: str, *, answers: list[str] | None = None) -> dict[str, Any]:
+    """Judge whether an objective has a verifiable definition of done.
+
+    Conservative on purpose: it only blocks genuinely uninformative goals
+    ("fix it", "make it better"), so real objectives flow through. When answers
+    are supplied they count as clarification and satisfy the gate.
+    """
+    text = objective.strip()
+    lower = text.lower()
+    tokens = [tok for tok in re.split(r"[\s,.;:!?，。；：！？、]+", text) if tok]
+    meaningful = [tok for tok in tokens if len(tok) >= 3 or re.search(r"[一-鿿]", tok)]
+    has_number = any(ch.isdigit() for ch in text)
+    has_quote = any(q in text for q in "\"'“”「」『』`")
+    has_pathish = "/" in text or any("." in tok and len(tok) > 3 for tok in tokens)
+    domain_hit = any(anchor in lower for anchor in _DOMAIN_ANCHORS)
+    vague_hit = any(term in lower for term in _VAGUE_TERMS)
+    answered = bool(answers)
+
+    concrete_signal = has_number or has_quote or has_pathish or domain_hit
+    # "ok" unless the goal is short and purely vague with no concrete anchor.
+    ok = answered or concrete_signal or (len(meaningful) >= 4 and not (vague_hit and len(meaningful) < 5))
+
+    questions: list[str] = []
+    if not concrete_signal:
+        questions.append(
+            "What observable result means this is done? Name the exact text, number, or state to check."
+        )
+    if not domain_hit and not has_pathish:
+        questions.append("Which page, screen, or file does this change touch?")
+    questions.append("Is there anything that must not change or break?")
+
+    return {
+        "ok": bool(ok),
+        "objective": text,
+        "signals": {
+            "has_number": has_number,
+            "has_quote": has_quote,
+            "has_pathish": has_pathish,
+            "domain_hit": domain_hit,
+            "vague_hit": vague_hit,
+            "answered": answered,
+            "meaningful_words": len(meaningful),
+        },
+        "questions": questions,
+    }
+
+
+def _worker_tracks(
+    *,
+    objective: str,
+    agents: tuple[str, ...],
+    workspace_path: Path,
+    repo_path: Path,
+    verification_commands: list[str],
+) -> list[dict[str, Any]]:
+    tracks: list[dict[str, Any]] = []
+    for index, agent in enumerate(agents, start=1):
+        profile = load_agent_profile(agent)
+        primary_role = str((profile or {}).get("primary_role") or "")
+        is_inspector = primary_role == "multimodal_inspection"
+        if is_inspector:
+            role = "multimodal inspection reviewer"
+            task_kind = "inspection"
+            prompt = _inspection_prompt(objective, verification_commands)
+        else:
+            role = "implementation worker" if index == 1 else "review and alternative implementation worker"
+            task_kind = "implementation"
+            prompt = _single_line_prompt(objective, verification_commands)
+        model = ""
+        sandbox: dict[str, str] = {}
+        approval: dict[str, str] = {}
+        parallelism_hint = ""
+        if profile:
+            config = recommend_worker_config(profile, task_kind=task_kind)
+            model = str(config.get("model") or "")
+            sandbox = config.get("sandbox") or {}
+            approval = config.get("approval") or {}
+            parallelism_hint = str(config.get("parallelism_hint") or "")
+            command = _agent_command(profile, prompt=prompt, config=config)
+        else:
+            command = _agent_command_template(agent, prompt)
+        tracks.append(
+            {
+                "id": f"track_{index}_{_safe_token(agent)}",
+                "agent": agent,
+                "role": role,
+                "track_kind": "inspection" if is_inspector else "implementation",
+                "workspace_strategy": "read-only evidence lane" if is_inspector else "git worktree per agent before merging",
+                "repo_root": str(repo_path),
+                "checkpoint_workspace": str(workspace_path),
+                "model": model,
+                "sandbox": sandbox,
+                "approval": approval,
+                "parallelism_hint": parallelism_hint,
+                "command": command,
+                "command_template": _agent_command_template(agent, prompt),
+            }
+        )
+    return tracks
+
+
+def _agent_command(profile: dict[str, Any], *, prompt: str, config: dict[str, Any]) -> str:
+    headless = profile.get("headless") if isinstance(profile.get("headless"), dict) else {}
+    base_template = str(headless.get("command") or "").strip()
+    flags = _dedupe_flags(
+        [
+            str(config.get("model_flag") or "").strip(),
+            str((config.get("sandbox") or {}).get("flag") or "").strip(),
+            str((config.get("approval") or {}).get("flag") or "").strip(),
+        ]
+    )
+    if base_template and re.search(r"(^|\s)-p\s+\"?<prompt>\"?", base_template):
+        base = re.sub(r"\s+-p\s+\"?<prompt>\"?", "", base_template).strip()
+        parts = [base, *flags, "-p", _quote_cli(prompt)]
+    elif base_template:
+        base = re.sub(r'"?<prompt>"?', "", base_template).strip()
+        parts = [base, *flags, _quote_cli(prompt)]
+    else:
+        parts = [str(profile.get("executable") or "").strip(), *flags, _quote_cli(prompt)]
+    return " ".join(part for part in parts if part)
+
+
+def _dedupe_flags(flags: list[str]) -> list[str]:
+    # Some agents (Claude Code) express sandbox and approval through the same
+    # option (--permission-mode); keep only the first use of each option name.
+    seen: set[str] = set()
+    result: list[str] = []
+    for flag in flags:
+        if not flag:
+            continue
+        option = flag.split()[0]
+        if option in seen:
+            continue
+        seen.add(option)
+        result.append(flag)
+    return result
+
+
+def _agent_command_template(agent: str, prompt: str) -> str:
+    normalized = agent.strip().lower()
+    quoted = _quote_cli(prompt)
+    if normalized in {"codex", "openai-codex"}:
+        return f"codex {quoted}"
+    if normalized in {"claude", "claude-code"}:
+        return f"claude {quoted}"
+    if normalized in {"gemini", "gemini-cli"}:
+        return f"gemini {quoted}"
+    if normalized in {"opencode", "open-code"}:
+        return f"opencode {quoted}"
+    return f"{agent} {quoted}"
+
+
+def _verification_commands(
+    *,
+    workspace_path: Path,
+    repo_path: Path,
+    base: str,
+    selected_refs: list[WorkflowRef],
+    run_profile: str,
+    include_slow: bool,
+) -> list[str]:
+    root = _quote_cli(workspace_path)
+    repo = _quote_cli(repo_path)
+    slow = " --include-slow" if include_slow else ""
+    commands = [
+        (
+            "checkpoint codex-check"
+            f" --workspace-root {root}"
+            f" --repo-root {repo}"
+            f" --base {_quote_cli(base)}"
+            f" --run-profile {run_profile}"
+            f"{slow}"
+            " --format markdown"
+        )
+    ]
+    if selected_refs:
+        workflow_args = " ".join(f"--workflow {_quote_cli(ref.name)}" for ref in selected_refs)
+        commands.append(
+            (
+                "checkpoint verify-now"
+                f" --workspace-root {root}"
+                f" {workflow_args}"
+                f" --run-profile {run_profile}"
+                f"{slow}"
+                " --format markdown"
+            )
+        )
+    else:
+        commands.append(f"checkpoint verify-now --workspace-root {root} --run-profile {run_profile}{slow} --format markdown")
+    return commands
+
+
+def _next_actions(
+    *,
+    status: str,
+    coverage: dict[str, Any],
+    selected_refs: list[WorkflowRef],
+    commands: list[str],
+) -> list[str]:
+    if status == "needs_workflow":
+        return [
+            "Record or generate at least one verification workflow for the product area.",
+            "Run the generated workflow once before dispatching coding agents.",
+        ]
+    if status == "needs_workflow_coverage":
+        actions = [str(coverage.get("next_action") or "Add precise workflow coverage for changed files.")]
+        if coverage.get("suggested_new_workflows"):
+            actions.append("Create the suggested workflow draft, then rerun chief-plan.")
+        if coverage.get("suggested_affects"):
+            actions.append("Add the suggested affects paths to the fallback workflow, then rerun chief-plan.")
+        return actions
+    actions = ["Dispatch the implementation worker with the handoff prompt."]
+    if len(selected_refs) > 1:
+        actions.append("Use one git worktree per worker track if running agents in parallel.")
+    actions.append(f"After changes, run: {commands[0]}")
+    return actions
+
+
+def _risks(
+    *,
+    changed: list[str],
+    runnable_refs: list[WorkflowRef],
+    selected_refs: list[WorkflowRef],
+    coverage: dict[str, Any],
+) -> list[dict[str, str]]:
+    risks: list[dict[str, str]] = []
+    if not runnable_refs:
+        risks.append(
+            {
+                "level": "high",
+                "area": "verification",
+                "message": "No verification-tagged workflows are available for product acceptance.",
+            }
+        )
+    if coverage.get("status") in {"uncovered", "fallback_only"}:
+        risks.append(
+            {
+                "level": "high",
+                "area": "coverage",
+                "message": str(coverage.get("next_action") or "Changed files are not precisely covered by workflows."),
+            }
+        )
+    if changed and not selected_refs:
+        risks.append(
+            {
+                "level": "medium",
+                "area": "routing",
+                "message": "Git changed files exist, but no workflow was selected for them.",
+            }
+        )
+    if not changed:
+        risks.append(
+            {
+                "level": "medium",
+                "area": "scope",
+                "message": "No git changes were detected; the chief plan cannot route by changed files yet.",
+            }
+        )
+    return risks
+
+
+def _handoff_prompt(objective: str, workflows: list[str], commands: list[str], *, status: str) -> str:
+    workflow_text = ", ".join(workflows) if workflows else "no selected workflow yet"
+    command_text = "\n".join(f"- {command}" for command in commands)
+    return "\n".join(
+        [
+            f"Objective: {objective}",
+            f"Chief plan status: {status}",
+            f"Selected Checkpoint workflows: {workflow_text}",
+            "Work only inside the repository. Keep changes scoped to the objective.",
+            "Before claiming done, run the verification command and read the failure evidence if it fails.",
+            "Verification commands:",
+            command_text,
+        ]
+    )
+
+
+def _single_line_prompt(objective: str, commands: list[str]) -> str:
+    command = commands[0] if commands else "checkpoint verify-now --workspace-root .agent-workspace --format markdown"
+    return f"{objective} After editing, run this verification command: {command}. Summarize evidence before claiming done."
+
+
+def _inspection_prompt(objective: str, commands: list[str]) -> str:
+    command = commands[0] if commands else "checkpoint verify-now --workspace-root .agent-workspace --format markdown"
+    return (
+        f"{objective} Inspect Checkpoint evidence, screenshots, and acceptance criteria as a "
+        f"read-only multimodal reviewer. Do not edit code. If more evidence is needed, suggest "
+        f"running: {command}. Summarize visual risks and missing acceptance evidence."
+    )
+
+
+def _safe_token(value: str) -> str:
+    token = "".join(char.lower() if char.isalnum() else "_" for char in value.strip())
+    while "__" in token:
+        token = token.replace("__", "_")
+    return token.strip("_") or "agent"
+
+
+def _quote_cli(value: str | Path) -> str:
+    text = str(value)
+    if not text:
+        return '""'
+    if any(char.isspace() for char in text) or any(char in text for char in '"`&()[]{}'):
+        return '"' + text.replace('"', '\\"') + '"'
+    return text

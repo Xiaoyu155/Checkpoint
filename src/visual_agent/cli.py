@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import platform
 import json
 import os
@@ -13,6 +14,7 @@ from threading import Event, Thread
 
 from . import __version__
 from .capabilities import build_atomic_capability_manifest, build_capability_manifest
+from .chief_engineer import build_chief_plan, chief_plan_to_dict, chief_plan_to_markdown
 from .ci_templates import ci_template_install_to_dict, install_ci_templates
 from .ci_templates import ci_workflow_template
 from .cli_cloud import CLOUD_COMMANDS
@@ -640,6 +642,124 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
 
     subparsers.add_parser("quickstart", help="Print the shortest Checkpoint getting-started path.")
 
+    chief_plan = subparsers.add_parser("chief-plan", help="Build a chief-engineer task plan for AI coding agents.")
+    chief_plan.add_argument("--goal", required=True, help="User objective to turn into an executable engineering plan.")
+    chief_plan.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing Checkpoint workflows.")
+    chief_plan.add_argument("--repo-root", default=".", help="Git repository root. Default: current directory.")
+    chief_plan.add_argument("--base", default="HEAD", help="Git base ref for diff routing. Default: HEAD.")
+    chief_plan.add_argument("--agent", action="append", default=[], help="Worker agent label, for example codex or claude-code. Can be repeated.")
+    chief_plan.add_argument("--max-workflows", type=int, default=5, help="Maximum affected workflows to include. Default: 5.")
+    chief_plan.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
+    chief_plan.add_argument("--include-slow", action="store_true", help="Include workflows tagged 'slow'. Default: skipped.")
+    chief_plan.add_argument("--interview", action="store_true", help="Surface clarifying questions to sharpen the objective before dispatch.")
+    chief_plan.add_argument("--answer", action="append", default=[], help="Answer to a clarifying question. Repeat to add several; counts as clarification.")
+    chief_plan.add_argument("--save", action="store_true", help="Persist the plan under <workspace>/chief_plans/<plan_id>/plan.json.")
+    chief_plan.add_argument("--output", default=None, help="Optional file path to write the plan.")
+    chief_plan.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    chief_plans = subparsers.add_parser("chief-plans", help="List or show saved chief-engineer plans.")
+    chief_plans.add_argument("action", choices=["list", "show"], help="list saved plans, or show one by id.")
+    chief_plans.add_argument("plan_id", nargs="?", default=None, help="Plan id (required for show).")
+    chief_plans.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing chief_plans.")
+    chief_plans.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    chief_dispatch = subparsers.add_parser("chief-dispatch", help="Preview or execute one saved chief-engineer worker dispatch.")
+    chief_dispatch.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing chief_plans.")
+    chief_dispatch.add_argument("--plan", required=True, help="Saved chief plan id.")
+    chief_dispatch.add_argument("--track-id", default=None, help="Optional worker track id. Default: first Codex implementation track.")
+    chief_dispatch.add_argument("--dry-run", action="store_true", help="Preview only. This is also the default unless --execute is passed.")
+    chief_dispatch.add_argument("--execute", action="store_true", help="Actually create a worktree and run the Codex worker adapter.")
+    chief_dispatch.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
+    chief_dispatch.add_argument("--include-slow", action="store_true", help="Include slow verification workflows after worker exit.")
+    chief_dispatch.add_argument("--max-workflows", type=int, default=10, help="Maximum workflows to verify after worker exit. Default: 10.")
+    chief_dispatch.add_argument("--timeout-seconds", type=float, default=1800.0, help="Worker timeout. Default: 1800.")
+    chief_dispatch.add_argument("--allow-dirty", action="store_true", help="Allow executing from a dirty repository. Default: blocked.")
+    chief_dispatch.add_argument("--allow-coverage-gap", action="store_true", help="Allow dispatch when plan status is needs_workflow_coverage.")
+    chief_dispatch.add_argument("--auto-repair-once", action="store_true", help="If verification fails, send one repair prompt to the same Codex worktree.")
+    chief_dispatch.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    chief_run = subparsers.add_parser("chief-run", help="Run a bounded DevPacer mission around planning, dispatch, verification, and repair.")
+    chief_run.add_argument("--goal", default=None, help="User objective. Required unless --plan is supplied.")
+    chief_run.add_argument("--plan", default=None, help="Saved chief plan id to run instead of building a new plan.")
+    chief_run.add_argument("--mission-id", default=None, help="Optional mission id. Default: timestamp plus objective hash.")
+    chief_run.add_argument("--resume", default=None, help="Resume a saved mission id instead of creating a new mission.")
+    chief_run.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing Checkpoint workflows.")
+    chief_run.add_argument("--repo-root", default=".", help="Git repository root. Default: current directory.")
+    chief_run.add_argument("--base", default="HEAD", help="Git base ref for diff routing. Default: HEAD.")
+    chief_run.add_argument("--agent", action="append", default=[], help="Worker/inspection agent label, for example codex or gemini. Can be repeated.")
+    chief_run.add_argument("--answer", action="append", default=[], help="Answer to a clarifying question. Repeat to add several.")
+    chief_run.add_argument("--interview", action="store_true", help="Surface clarifying questions when the goal is vague.")
+    chief_run.add_argument("--max-rounds", type=int, default=2, help="Maximum worker/verification rounds. Default: 2 (initial plus one repair).")
+    chief_run.add_argument("--max-wall-minutes", type=int, default=60, help="Mission wall-clock budget. Default: 60.")
+    chief_run.add_argument("--max-worker-minutes", type=int, default=45, help="Worker process budget per attempt. Default: 45.")
+    chief_run.add_argument("--dry-run", action="store_true", help="Preview only. This is also the default unless --execute is passed.")
+    chief_run.add_argument("--execute", action="store_true", help="Actually launch the Codex worker adapter under the mission budget.")
+    chief_run.add_argument("--background", action="store_true", help="Start/resume the mission in a background process and return immediately.")
+    chief_run.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
+    chief_run.add_argument("--include-slow", action="store_true", help="Include slow verification workflows.")
+    chief_run.add_argument("--max-workflows", type=int, default=10, help="Maximum workflows to verify after worker exit. Default: 10.")
+    chief_run.add_argument("--timeout-seconds", type=float, default=1800.0, help="Worker timeout cap. Default: 1800.")
+    chief_run.add_argument("--allow-dirty", action="store_true", help="Allow executing from a dirty repository. Default: blocked.")
+    chief_run.add_argument("--allow-coverage-gap", action="store_true", help="Allow running even when plan coverage is weak.")
+    chief_run.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    chief_run_demo = subparsers.add_parser("chief-run-demo", help="Run a deterministic DevPacer checkout mission in an isolated demo git repo.")
+    chief_run_demo.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root used to store demo repos. Default: .agent-workspace.")
+    chief_run_demo.add_argument("--demo-root", default=None, help="Optional directory where the isolated demo repo is created.")
+    chief_run_demo.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    chief_missions = subparsers.add_parser("chief-missions", help="List or show saved DevPacer missions.")
+    chief_missions.add_argument("action", choices=["list", "show"], help="list saved missions, or show one by id.")
+    chief_missions.add_argument("mission_id", nargs="?", default=None, help="Mission id (required for show).")
+    chief_missions.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing missions.")
+    chief_missions.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    chief_status = subparsers.add_parser("chief-status", help="Show the current status of a saved DevPacer mission.")
+    chief_status.add_argument("--mission", required=True, help="Mission id to inspect.")
+    chief_status.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing missions.")
+    chief_status.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    chief_queue = subparsers.add_parser("chief-queue", help="Submit and inspect queued DevPacer missions.")
+    chief_queue.add_argument("action", choices=["submit", "list", "show"], help="submit a mission, list queue items, or show one item.")
+    chief_queue.add_argument("--mission", default=None, help="Mission id to submit.")
+    chief_queue.add_argument("--queue-id", default=None, help="Queue item id for show.")
+    chief_queue.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing missions and mission_queue.")
+    chief_queue.add_argument("--priority", type=int, default=0, help="Higher priority runs first. Default: 0.")
+    chief_queue.add_argument("--status", default=None, help="Optional status filter for list.")
+    chief_queue.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
+    chief_queue.add_argument("--include-slow", action="store_true", help="Include slow verification workflows when the worker runs this mission.")
+    chief_queue.add_argument("--max-workflows", type=int, default=10, help="Maximum workflows to verify. Default: 10.")
+    chief_queue.add_argument("--timeout-seconds", type=float, default=1800.0, help="Worker timeout cap. Default: 1800.")
+    chief_queue.add_argument("--allow-dirty", action="store_true", help="Allow the mission worker to execute from a dirty repository.")
+    chief_queue.add_argument("--allow-coverage-gap", action="store_true", help="Allow executing a mission whose plan coverage is weak.")
+    chief_queue.add_argument("--force", action="store_true", help="Submit a mission even if its current status is not normally runnable.")
+    chief_queue.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    chief_worker = subparsers.add_parser("chief-worker", help="Run queued DevPacer missions.")
+    chief_worker.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing mission_queue.")
+    chief_worker.add_argument("--run-once", action="store_true", help="Claim at most one pending mission and exit. This is the default.")
+    chief_worker.add_argument("--watch", action="store_true", help="Keep polling for queued missions until stopped or limits are reached.")
+    chief_worker.add_argument("--poll-seconds", type=float, default=5.0, help="Polling delay in watch mode. Default: 5.")
+    chief_worker.add_argument("--max-items", type=int, default=None, help="Optional maximum queued missions to process.")
+    chief_worker.add_argument("--max-seconds", type=float, default=None, help="Optional worker wall-clock cap.")
+    chief_worker.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    chief_background_worker = subparsers.add_parser("chief-background-worker", help=argparse.SUPPRESS)
+    chief_background_worker.add_argument("--mission", required=True, help=argparse.SUPPRESS)
+    chief_background_worker.add_argument("--workspace-root", default=".agent-workspace", help=argparse.SUPPRESS)
+    chief_background_worker.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run", help=argparse.SUPPRESS)
+    chief_background_worker.add_argument("--include-slow", action="store_true", help=argparse.SUPPRESS)
+    chief_background_worker.add_argument("--max-workflows", type=int, default=10, help=argparse.SUPPRESS)
+    chief_background_worker.add_argument("--timeout-seconds", type=float, default=1800.0, help=argparse.SUPPRESS)
+    chief_background_worker.add_argument("--allow-dirty", action="store_true", help=argparse.SUPPRESS)
+    chief_background_worker.add_argument("--allow-coverage-gap", action="store_true", help=argparse.SUPPRESS)
+    chief_background_worker.add_argument("--format", choices=["json", "markdown"], default="markdown", help=argparse.SUPPRESS)
+
+    agents = subparsers.add_parser("agents", help="Inspect coding-agent capability profiles (Codex, Claude Code).")
+    agents.add_argument("action", choices=["doctor", "show", "list"], help="doctor probes installed agents; show prints one profile; list names profiles.")
+    agents.add_argument("agent", nargs="?", default=None, help="Agent name for show (codex or claude-code).")
+    agents.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
     verify = subparsers.add_parser("verify", help="Run verification-tagged workspace workflows.")
     verify.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
     verify.add_argument("--tags", default="verification", help="Comma-separated workflow tags to run. Default: verification.")
@@ -673,6 +793,7 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     codex_check.add_argument("--max-workflows", type=int, default=10, help="Maximum workflows to run. Default: 10.")
     codex_check.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
     codex_check.add_argument("--include-slow", action="store_true", help="Include workflows tagged 'slow'. Default: skipped.")
+    codex_check.add_argument("--strict", action="store_true", help="Exit non-zero on a coverage gap (uncovered or fallback-only changes), not just on failures.")
     codex_check.add_argument("--from-step", default=None, help="Start each selected workflow from the named step id.")
     codex_check.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
@@ -1436,6 +1557,355 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if payload.get("status") == "success" else 1
     if args.command == "quickstart":
         print(build_welcome_message("checkpoint"))
+        return 0
+    if args.command == "chief-plan":
+        plan = build_chief_plan(
+            goal=args.goal,
+            workspace_root=args.workspace_root,
+            repo_root=args.repo_root,
+            base=args.base,
+            agents=tuple(args.agent or ()),
+            include_slow=args.include_slow,
+            max_workflows=args.max_workflows,
+            run_profile=args.run_profile,
+            interview=getattr(args, "interview", False),
+            answers=tuple(getattr(args, "answer", []) or ()),
+        )
+        plan_dict = chief_plan_to_dict(plan)
+        if getattr(args, "save", False):
+            from .chief_plans_store import save_plan
+
+            saved = save_plan(plan_dict, workspace_root=args.workspace_root)
+            plan_dict["plan_id"] = saved["plan_id"]
+            plan_dict["saved_path"] = saved["path"]
+        if args.format == "json":
+            rendered = json.dumps(plan_dict, ensure_ascii=False, indent=2)
+        else:
+            rendered = chief_plan_to_markdown(plan)
+            if plan_dict.get("saved_path"):
+                rendered += f"\n\nSaved plan: `{plan_dict['plan_id']}` -> {plan_dict['saved_path']}"
+        if args.output:
+            output_path = Path(args.output).expanduser().resolve()
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(rendered + "\n", encoding="utf-8")
+        print(rendered)
+        return 0 if plan.status not in {"blocked", "needs_clarification"} else 1
+    if args.command == "chief-plans":
+        from .chief_plans_store import list_plans, list_plans_to_markdown, load_plan
+
+        if args.action == "list":
+            summaries = list_plans(args.workspace_root)
+            if args.format == "json":
+                print(json.dumps(summaries, ensure_ascii=False, indent=2))
+            else:
+                print(list_plans_to_markdown(summaries))
+            return 0
+        plan_id = getattr(args, "plan_id", None)
+        if not plan_id:
+            print("chief-plans show requires a plan id. Run `chief-plans list` to find one.")
+            return 1
+        payload = load_plan(args.workspace_root, plan_id)
+        if payload is None:
+            print(f"No saved plan found with id: {plan_id}")
+            return 1
+        if args.format == "json":
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            from .chief_engineer import ChiefPlan, chief_plan_to_markdown as _plan_md
+
+            known = {f.name for f in dataclasses.fields(ChiefPlan)}
+            plan = ChiefPlan(**{k: v for k, v in payload.items() if k in known})
+            print(_plan_md(plan))
+        return 0
+    if args.command == "chief-dispatch":
+        from .chief_dispatch import chief_dispatch_to_markdown, dispatch_chief_plan, payload_to_json
+
+        payload = dispatch_chief_plan(
+            workspace_root=args.workspace_root,
+            plan_id=args.plan,
+            execute=bool(args.execute),
+            dry_run=bool(args.dry_run or not args.execute),
+            track_id=args.track_id,
+            run_profile=args.run_profile,
+            include_slow=args.include_slow,
+            max_workflows=args.max_workflows,
+            timeout_seconds=args.timeout_seconds,
+            allow_dirty=args.allow_dirty,
+            allow_coverage_gap=args.allow_coverage_gap,
+            auto_repair_once=args.auto_repair_once,
+        )
+        if args.format == "json":
+            print(payload_to_json(payload))
+        else:
+            print(chief_dispatch_to_markdown(payload))
+        status = str(payload.get("status") or "")
+        if status in {"blocked", "worker_failed", "verification_failed"}:
+            return 1
+        return 0
+    if args.command == "chief-run":
+        from .chief_run import chief_run_to_markdown, payload_to_json, run_chief_mission
+
+        if args.background:
+            from .chief_background import start_background_chief_run
+
+            if args.resume:
+                mission_id = args.resume
+                preview = None
+            else:
+                preview = run_chief_mission(
+                    goal=args.goal,
+                    workspace_root=args.workspace_root,
+                    repo_root=args.repo_root,
+                    base=args.base,
+                    plan_id=args.plan,
+                    mission_id=args.mission_id,
+                    agents=tuple(args.agent or ()),
+                    answers=tuple(args.answer or ()),
+                    interview=args.interview,
+                    max_rounds=args.max_rounds,
+                    max_wall_minutes=args.max_wall_minutes,
+                    max_worker_minutes=args.max_worker_minutes,
+                    execute=False,
+                    dry_run=True,
+                    run_profile=args.run_profile,
+                    include_slow=args.include_slow,
+                    max_workflows=args.max_workflows,
+                    timeout_seconds=args.timeout_seconds,
+                    allow_dirty=args.allow_dirty,
+                    allow_coverage_gap=args.allow_coverage_gap,
+                )
+                if str(preview.get("status") or "") != "preview":
+                    if args.format == "json":
+                        print(payload_to_json(preview))
+                    else:
+                        print(chief_run_to_markdown(preview))
+                    return 1
+                mission_id = str((preview.get("mission") or {}).get("mission_id") or "")
+            payload = start_background_chief_run(
+                workspace_root=args.workspace_root,
+                mission_id=mission_id,
+                run_profile=args.run_profile,
+                include_slow=args.include_slow,
+                max_workflows=args.max_workflows,
+                timeout_seconds=args.timeout_seconds,
+                allow_dirty=args.allow_dirty,
+                allow_coverage_gap=args.allow_coverage_gap,
+            )
+            if preview is not None:
+                payload["preview"] = preview
+        else:
+            payload = run_chief_mission(
+                goal=args.goal,
+                workspace_root=args.workspace_root,
+                repo_root=args.repo_root,
+                base=args.base,
+                plan_id=args.plan,
+                mission_id=args.mission_id,
+                resume_mission_id=args.resume,
+                agents=tuple(args.agent or ()),
+                answers=tuple(args.answer or ()),
+                interview=args.interview,
+                max_rounds=args.max_rounds,
+                max_wall_minutes=args.max_wall_minutes,
+                max_worker_minutes=args.max_worker_minutes,
+                execute=bool(args.execute),
+                dry_run=bool(args.dry_run or not args.execute),
+                run_profile=args.run_profile,
+                include_slow=args.include_slow,
+                max_workflows=args.max_workflows,
+                timeout_seconds=args.timeout_seconds,
+                allow_dirty=args.allow_dirty,
+                allow_coverage_gap=args.allow_coverage_gap,
+            )
+        if args.format == "json":
+            print(payload_to_json(payload))
+        else:
+            print(chief_run_to_markdown(payload))
+        return 0 if str(payload.get("status") or "") in {"preview", "verified", "background_started"} else 1
+    if args.command == "chief-run-demo":
+        from .chief_run_demo import chief_demo_to_markdown, payload_to_json, run_chief_demo
+
+        payload = run_chief_demo(
+            workspace_root=args.workspace_root,
+            demo_root=args.demo_root,
+        )
+        if args.format == "json":
+            print(payload_to_json(payload))
+        else:
+            print(chief_demo_to_markdown(payload))
+        return 0 if str(payload.get("status") or "") == "verified" else 1
+    if args.command == "chief-missions":
+        from .chief_run import chief_run_to_markdown
+        from .missions import list_missions, list_missions_to_markdown, load_mission, load_rounds
+
+        if args.action == "list":
+            summaries = list_missions(args.workspace_root)
+            if args.format == "json":
+                print(json.dumps(summaries, ensure_ascii=False, indent=2))
+            else:
+                print(list_missions_to_markdown(summaries))
+            return 0
+        mission_id = getattr(args, "mission_id", None)
+        if not mission_id:
+            print("chief-missions show requires a mission id. Run `chief-missions list` to find one.")
+            return 1
+        mission = load_mission(args.workspace_root, mission_id)
+        if mission is None:
+            print(f"No saved mission found with id: {mission_id}")
+            return 1
+        payload = {
+            "schema_version": 1,
+            "product": mission.get("product", "DevPacer"),
+            "verification_engine": mission.get("verification_engine", "Checkpoint"),
+            "status": mission.get("status", ""),
+            "stop_reason": mission.get("stop_reason", ""),
+            "message": "",
+            "mission": mission,
+            "plan": {},
+            "rounds": load_rounds(args.workspace_root, mission_id),
+        }
+        if args.format == "json":
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        else:
+            print(chief_run_to_markdown(payload))
+        return 0
+    if args.command == "chief-status":
+        from .chief_run import chief_run_to_markdown, mission_status_payload, payload_to_json
+
+        payload = mission_status_payload(workspace_root=args.workspace_root, mission_id=args.mission)
+        if args.format == "json":
+            print(payload_to_json(payload))
+        else:
+            print(chief_run_to_markdown(payload))
+        return 0 if str(payload.get("status") or "") != "blocked" else 1
+    if args.command == "chief-queue":
+        from .chief_queue import (
+            list_mission_queue_items,
+            load_mission_queue_item,
+            mission_queue_item_to_dict,
+            mission_queue_submit_to_markdown,
+            mission_queue_to_markdown,
+            payload_to_json,
+            submit_mission_queue_item,
+        )
+
+        if args.action == "submit":
+            if not args.mission:
+                print("chief-queue submit requires --mission <mission_id>.")
+                return 1
+            try:
+                item = submit_mission_queue_item(
+                    workspace_root=args.workspace_root,
+                    mission_id=args.mission,
+                    priority=args.priority,
+                    run_profile=args.run_profile,
+                    include_slow=args.include_slow,
+                    max_workflows=args.max_workflows,
+                    timeout_seconds=args.timeout_seconds,
+                    allow_dirty=args.allow_dirty,
+                    allow_coverage_gap=args.allow_coverage_gap,
+                    force=args.force,
+                )
+            except (FileNotFoundError, RuntimeError, ValueError) as exc:
+                print(format_cli_error(exc, command="chief-queue submit"))
+                return 1
+            if args.format == "json":
+                print(payload_to_json(mission_queue_item_to_dict(item)))
+            else:
+                print(mission_queue_submit_to_markdown(item))
+            return 0
+        if args.action == "list":
+            payload = list_mission_queue_items(args.workspace_root, status=args.status)
+            if args.format == "json":
+                print(payload_to_json(payload))
+            else:
+                print(mission_queue_to_markdown(payload))
+            return 0
+        queue_id = getattr(args, "queue_id", None)
+        if not queue_id:
+            print("chief-queue show requires --queue-id <queue_id>.")
+            return 1
+        item = load_mission_queue_item(args.workspace_root, queue_id)
+        if item is None:
+            print(f"No queued mission found with id: {queue_id}")
+            return 1
+        if args.format == "json":
+            print(payload_to_json(mission_queue_item_to_dict(item)))
+        else:
+            print(mission_queue_to_markdown({"entries": [mission_queue_item_to_dict(item)]}))
+        return 0
+    if args.command == "chief-worker":
+        from .chief_queue import mission_queue_worker_to_markdown, payload_to_json, run_mission_queue_worker
+
+        run_once = bool(args.run_once or not args.watch)
+        payload = run_mission_queue_worker(
+            workspace_root=args.workspace_root,
+            run_once=run_once,
+            watch=bool(args.watch),
+            poll_seconds=args.poll_seconds,
+            max_items=args.max_items,
+            max_seconds=args.max_seconds,
+        )
+        if args.format == "json":
+            print(payload_to_json(payload))
+        else:
+            print(mission_queue_worker_to_markdown(payload))
+        return 0 if str(payload.get("status") or "") in {"run_once_completed", "idle", "max_items_reached", "max_seconds_reached"} else 1
+    if args.command == "chief-background-worker":
+        from .chief_background import run_background_worker
+        from .chief_run import chief_run_to_markdown, payload_to_json
+
+        payload = run_background_worker(
+            workspace_root=args.workspace_root,
+            mission_id=args.mission,
+            run_profile=args.run_profile,
+            include_slow=args.include_slow,
+            max_workflows=args.max_workflows,
+            timeout_seconds=args.timeout_seconds,
+            allow_dirty=args.allow_dirty,
+            allow_coverage_gap=args.allow_coverage_gap,
+        )
+        if args.format == "json":
+            print(payload_to_json(payload))
+        else:
+            print(chief_run_to_markdown(payload))
+        return 0 if str(payload.get("status") or "") == "verified" else 1
+    if args.command == "agents":
+        from .agent_capabilities import (
+            agent_profile_to_markdown,
+            agents_doctor,
+            agents_doctor_to_markdown,
+            list_agent_profiles,
+            load_agent_profile,
+        )
+
+        if args.action == "list":
+            profiles = list_agent_profiles()
+            names = [{"agent": p.get("agent"), "display_name": p.get("display_name")} for p in profiles]
+            if args.format == "json":
+                print(json.dumps(names, ensure_ascii=False, indent=2))
+            else:
+                for entry in names:
+                    print(f"- {entry['agent']}: {entry['display_name']}")
+            return 0
+        if args.action == "show":
+            if not args.agent:
+                print("agents show requires an agent name (codex or claude-code).")
+                return 1
+            profile = load_agent_profile(args.agent)
+            if profile is None:
+                print(f"No capability profile for agent: {args.agent}")
+                return 1
+            if args.format == "json":
+                print(json.dumps(profile, ensure_ascii=False, indent=2))
+            else:
+                print(agent_profile_to_markdown(profile))
+            return 0
+        report = agents_doctor(agents=(args.agent,) if args.agent else ())
+        if args.format == "json":
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+        else:
+            print(agents_doctor_to_markdown(report))
         return 0
     if args.command in VERIFICATION_COMMANDS:
         from .cli_verification import handle_verification_command

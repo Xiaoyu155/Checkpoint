@@ -1,0 +1,87 @@
+schema_version: 1
+agent: codex
+display_name: OpenAI Codex CLI
+executable: codex
+version_command: codex --version
+verified_on: "2026-07-02"
+source: https://developers.openai.com/codex/cli
+summary: >-
+  Codex is OpenAI's terminal coding agent. It runs interactively or headless,
+  isolates file changes behind sandbox modes, and can run several tasks in
+  parallel (locally via git worktrees or in Codex Cloud).
+
+headless:
+  command: codex exec "<prompt>"
+  why: >-
+    Run one task non-interactively so an orchestrator can launch it, capture
+    output, and detect completion instead of driving a chat UI by hand.
+
+model_flag: "--model <id>"
+models:
+  - id: gpt-5-codex
+    role: default
+    use_for: [complex-refactor, architecture, multi-file-change]
+  - id: gpt-5-codex-mini
+    role: fast
+    use_for: [small-edit, mechanical-change, batch]
+models_note: >-
+  Model ids move fast. Run `codex --help` / check the source link to confirm
+  the current ids, then update this file. Selection logic keys off `role`.
+
+sandbox_modes:
+  - name: read-only
+    flag: "--sandbox read-only"
+    when: inspection or planning only, no writes
+    risk: none
+  - name: workspace-write
+    flag: "--sandbox workspace-write"
+    when: default for implementing a change inside the repo
+    risk: low
+  - name: danger-full-access
+    flag: "--sandbox danger-full-access"
+    when: only when the task genuinely needs network or system access
+    risk: high
+
+approval_modes:
+  - name: on-request
+    flag: "--ask-for-approval on-request"
+    when: agent asks before risky steps (safest interactive default)
+  - name: on-failure
+    flag: "--ask-for-approval on-failure"
+    when: agent runs freely, asks only when a command fails
+  - name: never
+    flag: "--ask-for-approval never"
+    when: fully unattended; pair with a restrictive sandbox
+  - name: full-auto
+    flag: "--full-auto"
+    when: trusted batch work (workspace-write + on-failure in one flag)
+  - name: bypass
+    flag: "--dangerously-bypass-approvals-and-sandbox"
+    when: never for untrusted work; disables both gates
+    risk: high
+
+parallelism:
+  - name: local_worktrees
+    how: >-
+      Launch one codex instance per git worktree to run competing or parallel
+      implementation tracks without them colliding in one working tree.
+  - name: cloud_tasks
+    how: >-
+      Codex Cloud can run multiple tasks in parallel from your prompts and
+      report diffs back for review.
+
+context_files: [AGENTS.md]
+integrations:
+  - id: mcp
+    how: >-
+      Codex speaks MCP; connect Checkpoint's MCP server so the agent can run
+      real product verification instead of guessing.
+  - id: resume
+    how: "`codex resume` continues a prior session with its context."
+
+capabilities_often_missed:
+  - Non-interactive `codex exec` for scripting and orchestration.
+  - Per-run sandbox and approval flags instead of one global permission setting.
+  - Running several instances in parallel git worktrees for competing solutions.
+  - MCP tool servers (such as Checkpoint) for real verification evidence.
+  - Codex Cloud parallel tasks for fan-out work.

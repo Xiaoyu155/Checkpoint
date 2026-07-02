@@ -17,6 +17,10 @@ model_api_keys.txt
 .agent-workspace/telemetry.jsonl
 .agent-workspace/workflow_index.json
 .agent-workspace/repair_history.jsonl
+.agent-workspace/chief_plans/
+.agent-workspace/missions/
+.agent-workspace/mission_queue/
+.agent-workspace/demo_repos/
 .agent-workspace/workflows/external_samples/
 .agent-workspace/workflows/.cloud_inline/
 .agent-workspace/workflows/browser_form_workflow.yaml
@@ -46,6 +50,7 @@ reports/
 workflow_index.json
 .pytest_cache/
 .pytest_cache_local/
+dist/
 *.egg-info/
 *.lock
 *.log

@@ -83,6 +83,9 @@ Changelog = "https://github.com/Xiaoyu155/Checkpoint/blob/main/CHANGELOG.md"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+visual_agent = ["agent_profiles/*.yaml"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
