@@ -130,6 +130,31 @@ def _codex_track() -> dict:
     return {"id": "track_1_codex", "agent": "codex", "model": "gpt-5-codex"}
 
 
+def test_coverage_changed_files_excludes_checkpoint_artifacts(tmp_path, monkeypatch) -> None:
+    from visual_agent import chief_dispatch
+
+    repo = tmp_path
+    workspace = repo / ".agent-workspace"
+    workspace.mkdir()
+    # Raw diff includes real code plus Checkpoint's own run artifacts (which the
+    # verification itself writes into the repo on an earlier round).
+    monkeypatch.setattr(
+        chief_dispatch,
+        "changed_files",
+        lambda **_kwargs: [
+            "examples/web/checkout_verification_demo.html",
+            ".agent-workspace/runs/20260101-abc/report.json",
+            ".agent-workspace/run_history.jsonl",
+            ".visual-agent-status.md",
+            ".pw-browsers/chromium-1223/x",
+        ],
+    )
+
+    kept = chief_dispatch._coverage_changed_files(repo_root=repo, workspace_root=workspace)
+
+    assert kept == ["examples/web/checkout_verification_demo.html"]
+
+
 def test_build_worker_command_repair_phase_follows_model_policy(tmp_path) -> None:
     plan = {"objective": "fix", "acceptance_criteria": [], "selected_workflows": []}
     # model_policy asks repair to use a cheaper (fast) model.

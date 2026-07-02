@@ -13,8 +13,40 @@ from typing import Any, Callable
 from .agent_capabilities import canonical_agent_name, load_agent_profile, recommend_worker_config
 from .chief_plans_store import append_worker_record, load_plan, plan_dir, save_verification
 from .codex_check import codex_check_to_markdown, run_codex_check
+from .git_diff import changed_files
 from .models import to_jsonable
 from .workspace import open_workspace
+
+
+# Checkpoint writes its own run artifacts (workspace outputs, status file, browser
+# cache) into the repo it verifies. Those are tool outputs, not code under test,
+# and must never be counted as changed files — otherwise a second verification
+# round sees them as uncovered changes and reports a phantom coverage gap.
+_ARTIFACT_BASENAMES = {".visual-agent-status.md"}
+_ARTIFACT_DIR_PREFIXES = (".pw-browsers/",)
+
+
+def _coverage_changed_files(*, repo_root: Path, workspace_root: Path) -> list[str]:
+    raw = changed_files(base="HEAD", cwd=repo_root)
+    workspace_prefix = ""
+    try:
+        workspace_prefix = workspace_root.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        workspace_prefix = ""
+    kept: list[str] = []
+    for path in raw:
+        normalized = str(path).replace("\\", "/").strip()
+        if not normalized:
+            continue
+        basename = normalized.rsplit("/", 1)[-1]
+        if basename in _ARTIFACT_BASENAMES:
+            continue
+        if workspace_prefix and (normalized == workspace_prefix or normalized.startswith(workspace_prefix + "/")):
+            continue
+        if any(normalized == prefix.rstrip("/") or normalized.startswith(prefix) for prefix in _ARTIFACT_DIR_PREFIXES):
+            continue
+        kept.append(normalized)
+    return kept
 
 
 CommandRunner = Callable[[list[str], Path, float, Path], dict[str, Any]]
@@ -403,6 +435,7 @@ def run_dispatch_verification(
     verification_workspace_path = (verification_workspace_root or workspace_root).expanduser().resolve()
     workspace = open_workspace(verification_workspace_path)
     runner = codex_runner or run_codex_check
+    changed = _coverage_changed_files(repo_root=Path(repo_root), workspace_root=verification_workspace_path)
     result = runner(
         workspace,
         base="HEAD",
@@ -410,6 +443,7 @@ def run_dispatch_verification(
         include_slow=include_slow,
         max_workflows=max_workflows,
         run_profile=run_profile,
+        changed=changed,
     )
     payload = to_jsonable(result)
     payload.update(
