@@ -170,6 +170,42 @@ def test_build_worker_command_claude_code_is_headless(tmp_path) -> None:
     assert "--permission-mode" in argv and "acceptEdits" in argv
 
 
+def test_chief_dispatch_cheap_tier_routes_to_external_backend(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("claude-code",))
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: "claude" if name == "claude" else None)
+    # Force a backend so the test does not depend on local credential files.
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.resolve_backend_for_tier",
+        lambda tier: {"name": "mimo", "model": "mimo-v2.5-pro", "cost_is_savings": True,
+                      "env": {"ANTHROPIC_BASE_URL": "https://mimo.example/anthropic", "ANTHROPIC_API_KEY": "tp-secret"}}
+        if tier else None,
+    )
+
+    captured = {}
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
+        captured["argv"] = argv
+        captured["env"] = env
+        log_path.write_text("done", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root, plan_id=plan_id, execute=True, dry_run=False,
+        command_runner=fake_runner, codex_runner=passing_codex_result,
+    )
+
+    assert payload["status"] == "verified"
+    # The worker ran with the MiMo backend env and the overridden model.
+    assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://mimo.example/anthropic"
+    assert "mimo-v2.5-pro" in captured["argv"]
+    assert payload["worker"]["backend"]["name"] == "mimo"
+    # The secret token must not appear in the preview.
+    assert "tp-secret" not in str(payload["worker"]["backend"])
+
+
 def test_chief_dispatch_executes_claude_code_worker(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("claude-code",))
     monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})

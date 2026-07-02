@@ -10,6 +10,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
 
+from .agent_backends import redact_backend, resolve_backend_for_tier
 from .agent_capabilities import canonical_agent_name, load_agent_profile, recommend_worker_config
 from .chief_plans_store import append_worker_record, load_plan, plan_dir, save_verification
 from .codex_check import codex_check_to_markdown, run_codex_check
@@ -199,16 +200,31 @@ def dispatch_chief_plan(
     logs_dir = plan_dir(workspace_path, plan_id) / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     runner = command_runner or run_process_capture
+
+    # Route a cheap-tier task to an external backend (e.g. MiMo) when configured:
+    # burns that provider's credits, not the Claude subscription. Repair escalates
+    # the tier, so it falls back to the subscription automatically.
+    worker_agent_norm = canonical_agent_name(str(selected_track.get("agent") or ""))
+    worker_backend = resolve_backend_for_tier(str(selected_track.get("tier") or "")) if worker_agent_norm == "claude-code" else None
+    initial_argv = list(worker_command["argv"])
+    initial_env: dict[str, str] | None = None
+    if worker_backend:
+        initial_argv = _override_model_flag(initial_argv, worker_backend["model"])
+        initial_env = worker_backend["env"]
+        preview["worker"]["backend"] = redact_backend(worker_backend)
+
     worker_record = _run_worker_attempt(
         workspace_root=workspace_path,
         plan_id=plan_id,
         attempt="initial",
         track=selected_track,
-        argv=worker_command["argv"],
+        argv=initial_argv,
         cwd=worktree,
         timeout_seconds=timeout_seconds,
         log_path=logs_dir / f"{track_token}-initial.log",
         runner=runner,
+        env=initial_env,
+        backend=worker_backend,
     )
 
     verification_attempts: list[dict[str, Any]] = []
@@ -384,6 +400,15 @@ def build_worker_command(
     return {"argv": argv, "display": format_argv(argv)}
 
 
+def _override_model_flag(argv: list[str], model: str) -> list[str]:
+    argv = list(argv)
+    for i, token in enumerate(argv):
+        if token == "--model" and i + 1 < len(argv):
+            argv[i + 1] = model
+            return argv
+    return argv
+
+
 def _build_headless_argv(*, headless: dict[str, Any], config: dict[str, Any], track: dict[str, Any], phase: str, prompt: str) -> list[str]:
     base_template = str(headless.get("command") or "").strip()
     base = base_template.replace('"<prompt>"', "").replace("<prompt>", "").strip()
@@ -550,9 +575,15 @@ def _run_worker_attempt(
     timeout_seconds: float,
     log_path: Path,
     runner: CommandRunner,
+    env: dict[str, str] | None = None,
+    backend: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     started = monotonic()
-    result = runner(argv, cwd, timeout_seconds, log_path)
+    try:
+        result = runner(argv, cwd, timeout_seconds, log_path, env=env)
+    except TypeError:
+        # A custom/legacy runner may not accept env; fall back without it.
+        result = runner(argv, cwd, timeout_seconds, log_path)
     record = {
         "schema_version": 1,
         "plan_id": plan_id,
@@ -570,7 +601,15 @@ def _run_worker_attempt(
     }
     usage = _extract_worker_usage(str(track.get("agent") or ""), log_path, str(result.get("stdout_tail") or ""))
     if usage:
+        # On a cheap external backend, the CLI-reported cost is priced at Claude
+        # rates but the real spend is the backend's credits, so it counts as
+        # savings, not spend.
+        if backend and backend.get("cost_is_savings"):
+            usage["cost_is_savings"] = True
+            usage["backend"] = backend.get("name")
         record["usage"] = usage
+    if backend:
+        record["backend"] = {"name": backend.get("name"), "model": backend.get("model")}
     append_worker_record(workspace_root, plan_id, record)
     return record
 
@@ -618,8 +657,11 @@ def _extract_worker_usage(agent: str, log_path: Path, stdout_tail: str) -> dict[
     return {key: value for key, value in ledger.items() if value is not None}
 
 
-def run_process_capture(argv: list[str], cwd: Path, timeout_seconds: float, log_path: Path) -> dict[str, Any]:
+def run_process_capture(argv: list[str], cwd: Path, timeout_seconds: float, log_path: Path, env: dict[str, str] | None = None) -> dict[str, Any]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    run_env = None
+    if env:
+        run_env = {**os.environ, **{str(k): str(v) for k, v in env.items()}}
     try:
         completed = subprocess.run(
             argv,
@@ -628,6 +670,7 @@ def run_process_capture(argv: list[str], cwd: Path, timeout_seconds: float, log_
             text=True,
             timeout=timeout_seconds,
             check=False,
+            env=run_env,
         )
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""

@@ -182,8 +182,8 @@ def create_checkout_demo_repo(demo_root: Path) -> dict[str, Any]:
     }
 
 
-def demo_checkout_worker(argv: list[str], cwd: Path, timeout_seconds: float, log_path: Path) -> dict[str, Any]:
-    del argv, timeout_seconds
+def demo_checkout_worker(argv: list[str], cwd: Path, timeout_seconds: float, log_path: Path, env: dict[str, str] | None = None) -> dict[str, Any]:
+    del argv, timeout_seconds, env
     log_path.parent.mkdir(parents=True, exist_ok=True)
     html_path = cwd / "examples" / "web" / "checkout_verification_demo.html"
     if "auto-repair" in log_path.name:
