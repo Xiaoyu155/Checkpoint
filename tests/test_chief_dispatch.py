@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from visual_agent.chief_dispatch import dispatch_chief_plan, run_dispatch_verification, workspace_record_dirty_prefixes
+from pathlib import Path
+
+from visual_agent.chief_dispatch import build_worker_command, dispatch_chief_plan, run_dispatch_verification, workspace_record_dirty_prefixes
 from visual_agent.chief_engineer import build_chief_plan, chief_plan_to_dict
 from visual_agent.chief_plans_store import load_verification, load_worker_records, save_plan
 from visual_agent.codex_check import CodexCheckResult, CodexWorkflowCheck
@@ -122,6 +124,39 @@ def test_chief_dispatch_inspection_only_verdict_is_not_verified(tmp_path, monkey
     # Inspection-only proves rendering, not product behavior; it must never be
     # reported as verified.
     assert payload["status"] == "inspection_only"
+
+
+def _codex_track() -> dict:
+    return {"id": "track_1_codex", "agent": "codex", "model": "gpt-5-codex"}
+
+
+def test_build_worker_command_repair_phase_follows_model_policy(tmp_path) -> None:
+    plan = {"objective": "fix", "acceptance_criteria": [], "selected_workflows": []}
+    # model_policy asks repair to use a cheaper (fast) model.
+    policy = {"implementation": "strong", "repair": "fast"}
+
+    impl = build_worker_command(
+        plan=plan, track=_codex_track(), worktree=Path(tmp_path), verification_command="checkpoint codex-check",
+        phase="implementation", model_policy=policy,
+    )
+    repair = build_worker_command(
+        plan=plan, track=_codex_track(), worktree=Path(tmp_path), verification_command="checkpoint codex-check",
+        phase="repair", model_policy=policy, prompt_override="repair it",
+    )
+
+    assert "gpt-5-codex" in impl["argv"]
+    assert "gpt-5-codex-mini" in repair["argv"]  # fast tier resolved to the fast-role model
+
+
+def test_build_worker_command_defaults_to_strong_when_no_policy(tmp_path) -> None:
+    plan = {"objective": "fix", "acceptance_criteria": [], "selected_workflows": []}
+    repair = build_worker_command(
+        plan=plan, track=_codex_track(), worktree=Path(tmp_path), verification_command="c",
+        phase="repair", model_policy=None, prompt_override="x",
+    )
+    # No policy -> repair defaults to the strong implementation model (no surprise downgrade).
+    assert "gpt-5-codex" in repair["argv"]
+    assert "gpt-5-codex-mini" not in repair["argv"]
 
 
 def test_chief_dispatch_dry_run_previews_worktree_and_commands(tmp_path, monkeypatch) -> None:

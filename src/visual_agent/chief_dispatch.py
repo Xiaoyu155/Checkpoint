@@ -34,6 +34,7 @@ def dispatch_chief_plan(
     allow_dirty: bool = False,
     allow_coverage_gap: bool = False,
     auto_repair_once: bool = False,
+    model_policy: dict[str, Any] | None = None,
     command_runner: CommandRunner | None = None,
     codex_runner: Any = None,
     failure_evidence_builder: Any = None,
@@ -73,6 +74,8 @@ def dispatch_chief_plan(
         track=selected_track,
         worktree=worktree,
         verification_command=verification_command,
+        phase="implementation",
+        model_policy=model_policy,
     )
     preview = {
         "schema_version": 1,
@@ -192,6 +195,8 @@ def dispatch_chief_plan(
                 worktree=worktree,
                 verification_command=verification_command,
                 prompt_override=repair_prompt + "\n\nAfter repairing, run: " + verification_command,
+                phase="repair",
+                model_policy=model_policy,
             )
             repair_command["argv"][0] = executable
             repair_worker_record = _run_worker_attempt(
@@ -286,6 +291,17 @@ def _dispatch_warnings(plan: dict[str, Any], track: dict[str, Any]) -> list[str]
     return warnings
 
 
+# Map a model_policy tier to a capability-profile task_kind (which resolves to a
+# concrete model id via the agent profile's model roles).
+_POLICY_TIER_TASK_KIND = {"strong": "implementation", "fast": "fast", "multimodal": "implementation"}
+
+
+def _task_kind_for_phase(phase: str, model_policy: dict[str, Any] | None) -> str:
+    policy = model_policy if isinstance(model_policy, dict) else {}
+    tier = str(policy.get(phase) or ("strong" if phase != "classification" else "fast")).strip().lower()
+    return _POLICY_TIER_TASK_KIND.get(tier, "implementation")
+
+
 def build_worker_command(
     *,
     plan: dict[str, Any],
@@ -293,16 +309,25 @@ def build_worker_command(
     worktree: Path,
     verification_command: str,
     prompt_override: str | None = None,
+    phase: str = "implementation",
+    model_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     agent = canonical_agent_name(str(track.get("agent") or "codex"))
     if agent != "codex":
         prompt = prompt_override or build_worker_prompt(plan=plan, track=track, worktree=worktree, verification_command=verification_command)
         return {"argv": [agent, prompt], "display": format_argv([agent, prompt])}
     profile = load_agent_profile("codex") or {}
-    config = recommend_worker_config(profile, task_kind="implementation")
+    task_kind = _task_kind_for_phase(phase, model_policy)
+    config = recommend_worker_config(profile, task_kind=task_kind)
     prompt = prompt_override or build_worker_prompt(plan=plan, track=track, worktree=worktree, verification_command=verification_command)
     argv = ["codex", "exec"]
-    model = str(track.get("model") or config.get("model") or "")
+    # The implementation phase honors any model already chosen for the track; other
+    # phases (e.g. repair) follow the model_policy tier so a cheaper model can be
+    # used when the policy asks for it.
+    if phase == "implementation":
+        model = str(track.get("model") or config.get("model") or "")
+    else:
+        model = str(config.get("model") or track.get("model") or "")
     if model:
         argv.extend(["--model", model])
     for source in (track.get("sandbox"), track.get("approval")):

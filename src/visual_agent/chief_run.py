@@ -220,6 +220,7 @@ def run_chief_mission(
         allow_dirty=allow_dirty,
         allow_coverage_gap=allow_coverage_gap,
         auto_repair_once=False,
+        model_policy=budget.get("model_policy") if isinstance(budget, dict) else None,
     )
     append_round(
         workspace_path,
@@ -281,6 +282,7 @@ def run_chief_mission(
         allow_dirty=allow_dirty,
         allow_coverage_gap=allow_coverage_gap,
         auto_repair_once=auto_repair_once,
+        model_policy=budget.get("model_policy") if isinstance(budget, dict) else None,
     )
     _record_dispatch_attempts(workspace_path, mission["mission_id"], dispatch, start_round=_next_round_number(workspace_path, mission["mission_id"]))
     stop_reason = _stop_reason_from_dispatch(dispatch, budget)
