@@ -16,9 +16,51 @@ from pathlib import Path
 from typing import Any
 
 from .agent_capabilities import agents_doctor
-from .chief_plans_store import list_plans
+from .chief_plans_store import list_plans, load_plan, load_worker_records
 from .chief_queue import list_mission_queue_items
 from .missions import list_missions, load_mission
+
+
+# Rough public per-Mtoken USD prices, only for an *estimated* savings figure so
+# the user can see the benefit. Not billing; real spend comes from worker records.
+_TIER_PRICE_PER_MTOK = {"cheap": 1.0, "standard": 4.0, "strong": 30.0}
+
+
+def _build_value(root: Path, missions: list[dict[str, Any]], plans: list[dict[str, Any]]) -> dict[str, Any]:
+    verified = sum(1 for m in missions if str(m.get("status") or "") == "verified")
+    tier_counts = {"cheap": 0, "standard": 0, "strong": 0}
+    spent_usd = 0.0
+    input_tokens = 0
+    output_tokens = 0
+    real_runs = 0
+    for summary in plans:
+        plan_id = summary.get("plan_id")
+        if not plan_id:
+            continue
+        payload = load_plan(root, plan_id) or {}
+        for track in payload.get("worker_tracks") or []:
+            tier = str((track or {}).get("tier") or "")
+            if tier in tier_counts:
+                tier_counts[tier] += 1
+        for record in load_worker_records(root, plan_id) or []:
+            usage = record.get("usage") if isinstance(record.get("usage"), dict) else {}
+            if usage.get("cost_usd") is not None:
+                spent_usd += float(usage.get("cost_usd") or 0.0)
+                real_runs += 1
+            input_tokens += int(usage.get("input_tokens") or 0)
+            output_tokens += int(usage.get("output_tokens") or 0)
+    # Estimated savings: tokens actually spent, priced at each tier vs all-strong.
+    routed_tasks = tier_counts["cheap"] + tier_counts["standard"]
+    return {
+        "missions_total": len(missions),
+        "verified": verified,
+        "tier_counts": tier_counts,
+        "downgraded_tasks": routed_tasks,
+        "spent_usd": round(spent_usd, 4),
+        "real_worker_runs": real_runs,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
 
 
 def _read_status(workspace_root: Path) -> dict[str, Any]:
@@ -59,6 +101,7 @@ def build_dashboard_data(workspace_root: str | Path) -> dict[str, Any]:
         "engine": "Checkpoint",
         "workspace_root": str(root),
         "status": _read_status(root),
+        "value": _build_value(root, missions, plans),
         "agents": agents,
         "missions": missions,
         "mission_counts": counts,
@@ -105,6 +148,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .pill.warn{background:rgba(210,153,34,.15);color:var(--warn)} .pill.mut{background:rgba(138,144,160,.15);color:var(--mut)}
   .wrap { padding:24px; max-width:1200px; margin:0 auto; }
   .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:16px; }
+  .hero { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:16px; margin-bottom:16px; }
+  .card.big { background:linear-gradient(160deg,#1c2230,#161a21); }
+  .card.big .stat { font-size:42px; }
+  .stat.ok{color:var(--ok)} .stat.acc{color:var(--acc)}
+  .bar { display:flex; height:8px; border-radius:6px; overflow:hidden; margin-top:8px; background:var(--line); }
+  .bar i { display:block; height:100%; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
   .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.5px; color:var(--mut); margin:0 0 12px; }
   .stat { font-size:28px; font-weight:700; }
@@ -133,6 +182,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <span class="sub" id="ws"></span>
 </header>
 <div class="wrap">
+  <section class="hero">
+    <div class="card big"><h2>已验收交付</h2><div id="vVerified" class="stat ok">0</div><div class="meta">通过 Checkpoint 产品验收的任务（不是"AI 说完成了"）</div></div>
+    <div class="card big"><h2>省钱大脑路由</h2><div id="vDowngraded" class="stat acc">0</div><div class="meta" id="vTiers">把机械/普通任务派给便宜模型，而不是无脑用最贵的</div></div>
+    <div class="card big"><h2>真实花费</h2><div id="vSpent" class="stat">$0</div><div class="meta" id="vSpentMeta">每次跑完记真实成本；估算省下 <b id="vSaved">$0</b></div></div>
+  </section>
   <div class="grid">
     <div class="card"><h2>验收状态</h2><div id="status" class="stat">—</div><div class="meta" id="statusPath"></div></div>
     <div class="card"><h2>任务（missions）</h2><div id="missionTotal" class="stat">0</div><div class="meta" id="missionBreak"></div></div>
@@ -165,6 +219,21 @@ const esc = s => (s||'').replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;
 async function load(){
   const d = await (await fetch('/api/data')).json();
   document.getElementById('ws').textContent = d.workspace_root;
+  const v = d.value || {};
+  document.getElementById('vVerified').textContent = v.verified || 0;
+  document.getElementById('vDowngraded').textContent = v.downgraded_tasks || 0;
+  const tc = v.tier_counts || {};
+  document.getElementById('vTiers').innerHTML =
+    `便宜 <b>${tc.cheap||0}</b> · 中档 <b>${tc.standard||0}</b> · 强 <b>${tc.strong||0}</b>`;
+  document.getElementById('vSpent').textContent = '$' + (v.spent_usd||0).toFixed(2);
+  // Estimated savings: what the same output tokens would cost if every task used
+  // the strong tier, minus the tiered price. Honest, rough, clearly labeled.
+  const price={cheap:1,standard:4,strong:30}, tok=((v.input_tokens||0)+(v.output_tokens||0))/1e6;
+  const total=(tc.cheap||0)+(tc.standard||0)+(tc.strong||0)||1;
+  const blended=((tc.cheap||0)*price.cheap+(tc.standard||0)*price.standard+(tc.strong||0)*price.strong)/total;
+  const saved=Math.max(0, tok*(price.strong-blended));
+  document.getElementById('vSaved').textContent = '$'+saved.toFixed(2);
+  if(!v.real_worker_runs){ document.getElementById('vSpentMeta').innerHTML='真跑一个任务后这里显示真实成本与省下的钱'; }
   const st = d.status.state || 'none';
   const sp = document.getElementById('statusPill'); sp.textContent = st; sp.className = 'pill '+pill(st);
   document.getElementById('status').textContent = st;

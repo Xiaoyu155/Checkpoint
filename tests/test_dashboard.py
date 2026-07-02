@@ -15,6 +15,10 @@ def test_dashboard_data_on_empty_workspace(tmp_path) -> None:
     assert data["engine"] == "Checkpoint"
     assert data["missions"] == []
     assert data["plans"] == []
+    # Value panel is always present so the user can see benefit accrue.
+    assert data["value"]["verified"] == 0
+    assert data["value"]["tier_counts"] == {"cheap": 0, "standard": 0, "strong": 0}
+    assert data["value"]["spent_usd"] == 0.0
     # agents doctor always reports the known profiles (installed or not).
     assert {a["agent"] for a in data["agents"]} >= {"codex", "claude-code"}
 
