@@ -53,6 +53,7 @@ def run_chief_mission(
     timeout_seconds: float = 1800.0,
     allow_dirty: bool = False,
     allow_coverage_gap: bool = False,
+    test_command: str | None = None,
     dispatch_runner: DispatchRunner | None = None,
 ) -> dict[str, Any]:
     started = monotonic()
@@ -186,7 +187,7 @@ def run_chief_mission(
             message="Mission stopped before dispatch because the plan is not actionable.",
             started=started,
         )
-    if plan_status == "needs_workflow_coverage" and not allow_coverage_gap:
+    if plan_status == "needs_workflow_coverage" and not allow_coverage_gap and not test_command:
         append_round(
             workspace_path,
             mission["mission_id"],
@@ -221,6 +222,7 @@ def run_chief_mission(
         allow_coverage_gap=allow_coverage_gap,
         auto_repair_once=False,
         model_policy=budget.get("model_policy") if isinstance(budget, dict) else None,
+        test_command=test_command,
     )
     append_round(
         workspace_path,
@@ -283,6 +285,7 @@ def run_chief_mission(
         allow_coverage_gap=allow_coverage_gap,
         auto_repair_once=auto_repair_once,
         model_policy=budget.get("model_policy") if isinstance(budget, dict) else None,
+        test_command=test_command,
     )
     _record_dispatch_attempts(workspace_path, mission["mission_id"], dispatch, start_round=_next_round_number(workspace_path, mission["mission_id"]))
     stop_reason = _stop_reason_from_dispatch(dispatch, budget)

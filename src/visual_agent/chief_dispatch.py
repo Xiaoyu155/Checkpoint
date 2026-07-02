@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from .agent_backends import redact_backend, resolve_backend_for_tier
 from .agent_capabilities import canonical_agent_name, load_agent_profile, recommend_worker_config
+from .command_verification import command_repair_brief, run_command_verification
 from .chief_plans_store import append_worker_record, load_plan, plan_dir, save_verification
 from .codex_check import codex_check_to_markdown, run_codex_check
 from .git_diff import changed_files
@@ -73,6 +74,7 @@ def dispatch_chief_plan(
     allow_coverage_gap: bool = False,
     auto_repair_once: bool = False,
     model_policy: dict[str, Any] | None = None,
+    test_command: str | None = None,
     command_runner: CommandRunner | None = None,
     codex_runner: Any = None,
     failure_evidence_builder: Any = None,
@@ -238,6 +240,7 @@ def dispatch_chief_plan(
         max_workflows=max_workflows,
         codex_runner=codex_runner,
         failure_evidence_builder=failure_evidence_builder,
+        test_command=test_command,
     )
     verification_attempts.append(verification)
 
@@ -277,6 +280,7 @@ def dispatch_chief_plan(
                     max_workflows=max_workflows,
                     codex_runner=codex_runner,
                     failure_evidence_builder=failure_evidence_builder,
+                    test_command=test_command,
                 )
             )
 
@@ -497,8 +501,39 @@ def run_dispatch_verification(
     max_workflows: int,
     codex_runner: Any = None,
     failure_evidence_builder: Any = None,
+    test_command: str | None = None,
 ) -> dict[str, Any]:
     verification_workspace_path = (verification_workspace_root or workspace_root).expanduser().resolve()
+    now = datetime.now(timezone.utc).isoformat()
+
+    # 1) Command gate first: the project's own test/build command. This works on
+    # any project without authored workflows, and a failure here short-circuits
+    # (no point verifying the UI if the tests are red).
+    command_result = None
+    if test_command:
+        command_result = run_command_verification(command=test_command, repo_root=Path(repo_root))
+        if command_result.get("verdict") == "fail":
+            payload = {
+                "plan_id": plan_id,
+                "repo_root": str(repo_root),
+                "workspace_root": str(verification_workspace_path),
+                "records_workspace_root": str(workspace_root),
+                "run_profile": run_profile,
+                "passed": 0,
+                "inspection_only": 0,
+                "failed": 1,
+                "total": 1,
+                "verdict": "fail",
+                "command_verification": command_result,
+                "markdown": f"Test command failed: `{test_command}` (exit {command_result.get('exit_code')}).",
+                "repair_brief": command_repair_brief(command_result),
+                "recorded_at": now,
+            }
+            saved = save_verification(workspace_root, plan_id, payload)
+            payload["saved_path"] = saved["path"]
+            return payload
+
+    # 2) Workflow verification (product UI), when workflows exist.
     workspace = open_workspace(verification_workspace_path)
     runner = codex_runner or run_codex_check
     changed = _coverage_changed_files(repo_root=Path(repo_root), workspace_root=verification_workspace_path)
@@ -511,6 +546,11 @@ def run_dispatch_verification(
         run_profile=run_profile,
         changed=changed,
     )
+    verdict = result.verdict
+    # If the command gate passed and there are no product workflows to run, the
+    # test command IS the acceptance evidence -> pass.
+    if command_result and command_result.get("verdict") == "pass" and verdict in {"no_workflows", "coverage_gap", "no_changed_files"}:
+        verdict = "pass"
     payload = to_jsonable(result)
     payload.update(
         {
@@ -523,12 +563,14 @@ def run_dispatch_verification(
             "inspection_only": result.inspection_only,
             "failed": result.failed,
             "total": result.total,
-            "verdict": result.verdict,
+            "verdict": verdict,
             "markdown": codex_check_to_markdown(result),
-            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "recorded_at": now,
         }
     )
-    if result.verdict == "fail":
+    if command_result:
+        payload["command_verification"] = command_result
+    if verdict == "fail":
         payload["repair_brief"] = build_repair_brief(
             workspace_root=verification_workspace_path,
             failure_evidence_builder=failure_evidence_builder,

@@ -675,6 +675,7 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     chief_dispatch.add_argument("--timeout-seconds", type=float, default=1800.0, help="Worker timeout. Default: 1800.")
     chief_dispatch.add_argument("--allow-dirty", action="store_true", help="Allow executing from a dirty repository. Default: blocked.")
     chief_dispatch.add_argument("--allow-coverage-gap", action="store_true", help="Allow dispatch when plan status is needs_workflow_coverage.")
+    chief_dispatch.add_argument("--test-command", default=None, help="Run this test/build command as the acceptance gate (works on any project, no workflow needed), e.g. 'pytest -q' or 'npm test'.")
     chief_dispatch.add_argument("--auto-repair-once", action="store_true", help="If verification fails, send one repair prompt to the same Codex worktree.")
     chief_dispatch.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
@@ -701,6 +702,7 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     chief_run.add_argument("--timeout-seconds", type=float, default=1800.0, help="Worker timeout cap. Default: 1800.")
     chief_run.add_argument("--allow-dirty", action="store_true", help="Allow executing from a dirty repository. Default: blocked.")
     chief_run.add_argument("--allow-coverage-gap", action="store_true", help="Allow running even when plan coverage is weak.")
+    chief_run.add_argument("--test-command", default=None, help="Run this test/build command as the acceptance gate (works on any project, no workflow needed), e.g. 'pytest -q' or 'npm test'.")
     chief_run.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     chief_run_demo = subparsers.add_parser("chief-run-demo", help="Run a deterministic DevPacer checkout mission in an isolated demo git repo.")
@@ -750,6 +752,7 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     mission.add_argument("--timeout-seconds", type=float, default=1800.0, help="Worker timeout cap. Default: 1800.")
     mission.add_argument("--allow-dirty", action="store_true", help="Allow executing from a dirty repository.")
     mission.add_argument("--allow-coverage-gap", action="store_true", help="Allow running even when plan coverage is weak.")
+    mission.add_argument("--test-command", default=None, help="Run this test/build command as the acceptance gate (works on any project, no workflow needed), e.g. 'pytest -q' or 'npm test'.")
     mission.add_argument("--priority", type=int, default=0, help="Queue priority for mission queue. Default: 0.")
     mission.add_argument("--force", action="store_true", help="Force queueing a non-runnable mission after review.")
     mission.add_argument("--run-once", action="store_true", help="Worker action: process one queued mission and exit.")
@@ -1673,6 +1676,7 @@ def main(argv: list[str] | None = None) -> int:
         from .chief_dispatch import chief_dispatch_to_markdown, dispatch_chief_plan, payload_to_json
 
         payload = dispatch_chief_plan(
+            test_command=getattr(args, "test_command", None),
             workspace_root=args.workspace_root,
             plan_id=args.plan,
             execute=bool(args.execute),
@@ -1705,6 +1709,7 @@ def main(argv: list[str] | None = None) -> int:
                 preview = None
             else:
                 preview = run_chief_mission(
+                    test_command=getattr(args, "test_command", None),
                     goal=args.goal,
                     workspace_root=args.workspace_root,
                     repo_root=args.repo_root,
@@ -1747,6 +1752,7 @@ def main(argv: list[str] | None = None) -> int:
                 payload["preview"] = preview
         else:
             payload = run_chief_mission(
+                test_command=getattr(args, "test_command", None),
                 goal=args.goal,
                 workspace_root=args.workspace_root,
                 repo_root=args.repo_root,
@@ -1850,6 +1856,7 @@ def main(argv: list[str] | None = None) -> int:
                     preview = None
                 else:
                     preview = run_chief_mission(
+                        test_command=getattr(args, "test_command", None),
                         goal=args.goal,
                         workspace_root=args.workspace_root,
                         repo_root=args.repo_root,
@@ -1892,6 +1899,7 @@ def main(argv: list[str] | None = None) -> int:
                     payload["preview"] = preview
             else:
                 payload = run_chief_mission(
+                    test_command=getattr(args, "test_command", None),
                     goal=args.goal,
                     workspace_root=args.workspace_root,
                     repo_root=args.repo_root,
