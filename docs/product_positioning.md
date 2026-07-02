@@ -1,51 +1,103 @@
-﻿# Product Positioning
+# Product Positioning
 
 ## One-Line Positioning
 
-Checkpoint is a local-first automation execution layer for AI assistants, giving Claude Code, Codex, Cursor, and other MCP clients a safe way to run browser and desktop workflows with audit trails, structured failure output, and repeatable verification loops.
+DevPacer is a local-first AI development operator that turns user intent into a
+bounded engineering mission, allocates coding-agent resources, runs verified
+development loops, and stops only with evidence or a human decision request.
+
+Checkpoint remains the local verification engine inside DevPacer.
+
+## Brand Architecture
+
+- Public product: `DevPacer`
+- Verification engine: `Checkpoint`
+- Current CLI: `checkpoint`
+- Future CLI alias: `devpacer`
+- Product unit: `mission`
+- Verification unit: `workflow`
+
+This avoids a risky big-bang rename. The product message is:
+
+> DevPacer operates the development loop. Checkpoint proves what happened.
 
 ## What It Is
 
-AI assistants decide what should happen. Checkpoint executes the workflow locally, records what happened, enforces permissions, and produces reports that can be reviewed, queued, rerun, or promoted into regression tests.
+Official coding-agent vendors keep making Codex, Claude Code, Gemini CLI,
+Cursor, and similar tools stronger. They are not responsible for teaching every
+user how to spend models, permissions, context, and verification economically.
+
+That gap is the product.
+
+DevPacer accepts a user outcome, sharpens it into a verifiable mission, chooses
+agent/model/permission settings, dispatches a worker under budget, verifies the
+result with Checkpoint, repairs bounded failures, and records why it stopped.
 
 ## Core Principles
 
-- Local-first: workflows, screenshots, inputs, auth-state metadata, queue state, and reports stay on the user machine by default.
-- Structured-first: DOM and Windows UIA are preferred before OCR or VLM fallback.
-- Contract-first: `structured_failure`, `get_failure_details`, `verify_workflow`, and `context-snapshot` give agents stable machine-readable state instead of ad hoc logs.
-- Auditable: each run can write JSON/Markdown reports, screenshots, failure diagnosis, selector evidence, GUI action events, and quality-gate history.
-- Permissioned: dry-run, supervised, and approved profiles keep generated automation from silently performing real actions.
-- Workflow-centric: YAML workflows are versionable, reviewable, reusable, and queueable.
+- Verified delivery is the product. More agents are not the product.
+- A vague request must be clarified before tokens are spent.
+- Budget, model tier, and stop conditions are product state, not prompt vibes.
+- Codex is the first executable implementation worker.
+- Gemini is a read-only multimodal inspection lane for screenshots, visual
+  evidence, and world-model review; it is not a default coding worker.
+- Checkpoint workflows remain local-first, auditable, permissioned, and
+  repeatable.
+- Every autonomous loop must leave durable records: `mission.json`,
+  `budget.json`, `rounds.jsonl`, and `final_report.md`.
+
+## What Checkpoint Does
+
+Checkpoint is the verification and local automation engine:
+
+- browser and Windows desktop workflow execution;
+- DOM / UIA / OCR / VLM evidence collection;
+- YAML workflow persistence;
+- dry-run / supervised / approved permission profiles;
+- structured failures, screenshots, reports, and repair evidence packs;
+- `codex-check` gates for coding-agent changes.
+
+Checkpoint should stay narrow and trustworthy. DevPacer builds the development
+operator loop on top of it.
+
+## First Product Use Cases
+
+- Refuse to dispatch an unclear request and ask the minimum blocking questions.
+- Build a saved chief plan with acceptance criteria and agent-readable worker
+  prompts.
+- Run `chief-run` to create a mission, preview the worktree/worker command, and
+  stop safely if coverage or permissions are weak.
+- Execute one Codex worker under budget, then run Checkpoint verification.
+- Generate a repair brief and allow one bounded repair round.
+- Show mission status later without requiring the user to keep watching a
+  terminal.
 
 ## Differentiation
 
-Browser-only MCP servers are useful for interactive browsing. Checkpoint targets durable local automation:
+DevPacer is not another multi-agent dashboard. Its differentiator is controlled
+delivery:
 
-- Browser plus Windows desktop automation.
-- Workflow persistence rather than one-off tool calls.
-- Safety profiles and target existence checks.
-- Queue, worker, retry, migration, and report history.
-- Failure diagnosis with screenshots, DOM excerpts, selector summaries, OCR/VLM evidence, and rerun suggestions.
-- Known framework noise can be classified explicitly, so repeated demo issues such as Next.js hydration mismatch do not get mislabeled as generic regressions.
-- Secret scanning for recording output and workspace artifacts.
+- it translates user language into coding-agent language;
+- it decides when not to spend tokens;
+- it chooses model and permission posture from versioned capability profiles;
+- it verifies with product evidence, not agent self-reporting;
+- it stops on repeated failure, coverage gaps, scope drift, or permission needs.
 
 ## Primary User
 
-Developers and operators who want AI assistants to run repeatable local workflows without sending sensitive browser or desktop state to a cloud automation service.
+Developers and operators who want AI coding tools to reduce development time
+without learning every model, CLI flag, permission mode, worktree pattern, and
+verification workflow themselves.
 
-## First Use Cases
-
-- Run a local dry-run browser workflow and inspect the report.
-- Record a browser flow and convert sensitive values into input templates.
-- Queue approved dry-run workflows for repeated execution.
-- Check external sample readiness before using real accounts.
-- Expose workflows to MCP clients while keeping audit data local.
-- Separate known framework noise from real workflow regressions in reports and MCP payloads.
+The user should not babysit the terminal. DevPacer should run until the mission
+is verified or a real decision is needed.
 
 ## Non-Goals
 
 - It is not a hosted RPA SaaS.
-- It is not a replacement for Playwright or UI Automation.
-- It is not an autonomous agent that bypasses user approval.
-- It is not intended to hide or skip audit trails.
-
+- It is not a replacement for Codex, Claude Code, Gemini, Cursor, Playwright, or
+  UI Automation.
+- It is not a tool for bypassing approval, audit trails, or workflow evidence.
+- It is not a default multi-agent coding competition system.
+- It should not auto-merge code without a policy and human-approved release
+  path.
