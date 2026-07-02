@@ -96,18 +96,78 @@ function Install-Extras {
     }
 }
 
+function Clear-PlaywrightLocks {
+    # A stale __dirlock (left by an interrupted install) makes every later
+    # `playwright install` exit 0 with no output and download nothing. Clearing
+    # it is the single most important fix for "install silently does nothing".
+    $lockRoots = @($BrowserPath, (Join-Path $env:LOCALAPPDATA "ms-playwright"))
+    foreach ($root in $lockRoots) {
+        $lock = Join-Path $root "__dirlock"
+        if (Test-Path $lock) {
+            Write-Host "Clearing stale Playwright lock: $lock"
+            Remove-Item -Recurse -Force $lock -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-PlaywrightLaunch {
+    & $VenvPython -c "from playwright.sync_api import sync_playwright as s; p=s().start(); b=p.chromium.launch(headless=True); b.close(); p.stop()" 2>$null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Invoke-PlaywrightInstall {
+    param([string]$DownloadHost)
+    if ($DownloadHost) {
+        $env:PLAYWRIGHT_DOWNLOAD_HOST = $DownloadHost
+        Write-Host "Installing Playwright browsers via download host: $DownloadHost"
+    } else {
+        Remove-Item Env:PLAYWRIGHT_DOWNLOAD_HOST -ErrorAction SilentlyContinue
+        Write-Host "Installing Playwright browsers via the default host."
+    }
+    Clear-PlaywrightLocks
+    # Headless verification needs chromium-headless-shell, which an older install
+    # can miss; request it explicitly alongside chromium.
+    & $VenvPython -m playwright install chromium chromium-headless-shell
+}
+
 function Install-Browsers {
     if (-not (Test-Path $VenvPython)) {
         Ensure-Venv
     }
     $env:PLAYWRIGHT_BROWSERS_PATH = $BrowserPath
+    $mirrorHost = "https://cdn.npmmirror.com/binaries/playwright"
     Push-Location $RepoRoot
     try {
-        & $VenvPython -m playwright install chromium
-        if ($LASTEXITCODE -ne 0) {
-            throw "playwright install chromium failed."
+        # 1) Default host first (complete, but can be slow in mainland China).
+        Invoke-PlaywrightInstall -DownloadHost $null
+        if (-not (Test-PlaywrightLaunch)) {
+            Write-Warning "Default Playwright download failed or is incomplete; retrying via the China mirror."
+            # 2) China mirror fallback (faster in CN; may lack the newest build).
+            Invoke-PlaywrightInstall -DownloadHost $mirrorHost
         }
-        Write-Host "PLAYWRIGHT_BROWSERS_PATH=$BrowserPath"
+        Remove-Item Env:PLAYWRIGHT_DOWNLOAD_HOST -ErrorAction SilentlyContinue
+        if (-not (Test-PlaywrightLaunch)) {
+            throw @"
+Playwright Chromium could not be installed or launched.
+
+Common causes: a stale lock, or a slow/blocked download (frequent in mainland China).
+Fix manually, then re-run:  bootstrap.ps1 -Step browsers
+
+  1) Remove any stale lock:
+       Remove-Item -Recurse -Force "$BrowserPath\__dirlock" -ErrorAction SilentlyContinue
+       Remove-Item -Recurse -Force "$env:LOCALAPPDATA\ms-playwright\__dirlock" -ErrorAction SilentlyContinue
+  2) Try the China mirror (fast in CN):
+       `$env:PLAYWRIGHT_DOWNLOAD_HOST = "$mirrorHost"
+       `$env:PLAYWRIGHT_BROWSERS_PATH = "$BrowserPath"
+       & "$VenvPython" -m playwright install chromium chromium-headless-shell
+  3) If the mirror lacks a build, use the default host (slower, ~100MB, be patient):
+       Remove-Item Env:PLAYWRIGHT_DOWNLOAD_HOST -ErrorAction SilentlyContinue
+       & "$VenvPython" -m playwright install chromium chromium-headless-shell
+  4) Verify:
+       & "$VenvPython" -c "from playwright.sync_api import sync_playwright as s; p=s().start(); b=p.chromium.launch(); b.close(); p.stop(); print('OK')"
+"@
+        }
+        Write-Host "Playwright Chromium ready. PLAYWRIGHT_BROWSERS_PATH=$BrowserPath"
     } finally {
         Pop-Location
     }
