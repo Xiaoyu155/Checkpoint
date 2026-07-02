@@ -88,7 +88,11 @@ def handle_verification_command(args: Any, *, codex_runner: Any = None) -> int:
                 }
             )
             print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return 0 if result.failed == 0 else 1
+        if result.failed:
+            return 1
+        if getattr(args, "strict", False) and result.verdict == "coverage_gap":
+            return 1
+        return 0
     if args.command == "connect":
         result = connect_platform(
             args.platform,

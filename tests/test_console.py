@@ -471,6 +471,8 @@ def test_report_detail_markdown_is_human_readable(tmp_path) -> None:
     assert "## Failure Diagnosis" in markdown
     assert "`assert_missing`" in markdown
     assert "## Artifacts" in markdown
+    assert "Agent verdict:" in markdown
+    assert "`failed`" in markdown
 
 
 def test_report_detail_cli_outputs_markdown(tmp_path, capsys) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from visual_agent.acceptance import (
     PRODUCT_ACCEPTANCE_MIN_LEVEL,
     aggregate_cross_platform,
+    agent_verdict,
     grade_run,
     validate_operation_receipt,
 )
@@ -467,3 +468,32 @@ def test_to_dict_is_machine_readable() -> None:
     assert payload["operation_receipt_failures"] == []
     assert payload["scale"]["L5"] == "cross_platform"
     assert payload["missing_for_next_level"]
+
+
+def test_agent_verdict_allows_strict_product_acceptance() -> None:
+    acceptance = grade_run(
+        [
+            step("observe", "observe_browser"),
+            contract_step("assert_before", forbidden_any=["Error"]),
+            step("click", "click", receipt=True),
+            contract_step("verify_after"),
+        ]
+    ).to_dict()
+
+    verdict = agent_verdict(acceptance, run_status="success")
+
+    assert verdict["verdict"] == "verified"
+    assert verdict["can_claim_product_done"] is True
+    assert verdict["reasons"] == []
+
+
+def test_agent_verdict_blocks_green_inspection_runs() -> None:
+    acceptance = grade_run([step("observe", "observe_browser")]).to_dict()
+
+    verdict = agent_verdict(acceptance, run_status="success", dry_run_actions=1)
+
+    assert verdict["verdict"] == "needs_product_acceptance"
+    assert verdict["can_claim_product_done"] is False
+    assert "below_product_acceptance" in verdict["reasons"]
+    assert "dry_run_actions_present" in verdict["reasons"]
+    assert verdict["next_actions"]

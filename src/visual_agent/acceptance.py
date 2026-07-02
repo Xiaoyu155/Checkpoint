@@ -18,6 +18,19 @@ INSPECTION_ONLY_WARNING = (
     "(click/type/submit) before claiming product acceptance."
 )
 
+AGENT_VERDICT_ACTIONS: dict[str, str] = {
+    "run_failed": "Read the failure diagnosis and artifacts, fix the product or workflow, then rerun the same workflow.",
+    "missing_acceptance": "Rerun with a current runtime that records acceptance metadata.",
+    "dry_run_actions_present": "Rerun with a non-dry-run profile after human approval for real interaction.",
+    "below_product_acceptance": "Add real interaction plus post-action outcome assertions before claiming the product works.",
+    "simulated_evidence": "Replace fixture or mock observations with a live browser, OCR, screen, or UIA observation.",
+    "invalid_operation_receipts_present": "Fix the action target or runtime receipt so each successful interaction has live, unique, visible, enabled evidence.",
+    "missing_post_interaction_contract_assertion": "Add assert_text_contract or assert_product_contract after the interaction to verify the outcome.",
+    "missing_negative_contract_assertion": "Add a forbidden_any/no-error contract so success does not hide visible error states.",
+    "missing_after_action_evidence_artifact": "Capture post-action evidence such as URL, source, or screenshot.",
+    "missing_post_action_assertion": "Attach a post-action assertion to every real interaction receipt.",
+}
+
 
 @dataclass(frozen=True)
 class InteractionProfile:
@@ -206,6 +219,68 @@ class AcceptanceGrade:
             "missing_for_next_level": self.missing,
             "scale": {f"L{key}": value for key, value in ACCEPTANCE_LEVEL_NAMES.items()},
         }
+
+
+def agent_verdict(
+    acceptance: dict[str, Any] | None,
+    *,
+    run_status: str = "",
+    dry_run_actions: int = 0,
+) -> dict[str, Any]:
+    """Translate acceptance metadata into a coding-agent decision.
+
+    A workflow can execute successfully while still proving only page inspection.
+    This verdict is intentionally stricter and tells agents whether they may
+    claim the product behavior was verified.
+    """
+    reasons: list[str] = []
+    missing_actions: list[str] = []
+    status = str(run_status or "").strip().lower()
+    if status in {"failed", "error"}:
+        reasons.append("run_failed")
+    if not isinstance(acceptance, dict):
+        reasons.append("missing_acceptance")
+    else:
+        try:
+            level = int(acceptance.get("level", -1))
+        except (TypeError, ValueError):
+            level = -1
+        if int(dry_run_actions or 0) > 0:
+            reasons.append("dry_run_actions_present")
+        if bool(acceptance.get("simulated")):
+            reasons.append("simulated_evidence")
+        if level < PRODUCT_ACCEPTANCE_MIN_LEVEL:
+            reasons.append("below_product_acceptance")
+        blockers = acceptance.get("product_acceptance_blockers")
+        if isinstance(blockers, list):
+            reasons.extend(str(blocker) for blocker in blockers if blocker)
+        missing = str(acceptance.get("missing_for_next_level") or "").strip()
+        if missing and level < PRODUCT_ACCEPTANCE_MIN_LEVEL:
+            missing_actions.append(missing)
+    next_actions: list[str] = []
+    for reason in reasons:
+        action = AGENT_VERDICT_ACTIONS.get(reason)
+        if action and action not in next_actions:
+            next_actions.append(action)
+    for action in missing_actions:
+        if action and action not in next_actions:
+            next_actions.append(action)
+    unique_reasons = list(dict.fromkeys(reasons))
+    can_claim = not unique_reasons and isinstance(acceptance, dict) and bool(acceptance.get("is_product_acceptance"))
+    if can_claim:
+        verdict = "verified"
+        next_actions = ["Read the report and cite the achieved acceptance level before claiming completion."]
+    elif "run_failed" in unique_reasons:
+        verdict = "failed"
+    else:
+        verdict = "needs_product_acceptance"
+    return {
+        "schema_version": 1,
+        "verdict": verdict,
+        "can_claim_product_done": can_claim,
+        "reasons": unique_reasons,
+        "next_actions": next_actions,
+    }
 
 
 CROSS_PLATFORM_MIN_LEVEL = 4

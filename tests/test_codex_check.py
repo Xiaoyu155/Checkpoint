@@ -23,6 +23,21 @@ def write_check_workflow(workspace, name: str, *, affects: str, slow: bool = Fal
     )
 
 
+def write_fallback_workflow(workspace, name: str) -> None:
+    workspace.workflows_dir.joinpath(f"{name}.yaml").write_text(
+        "schema_version: 1\n"
+        f"name: {name}\n"
+        "version: 1\n"
+        "tags:\n"
+        "  - verification\n"
+        "steps:\n"
+        "  - id: observe\n"
+        "    action: observe_ocr\n"
+        "    mock_text: ready\n",
+        encoding="utf-8",
+    )
+
+
 def test_run_codex_check_runs_only_affected_non_slow_workflows(tmp_path, monkeypatch) -> None:
     workspace = init_workspace(tmp_path / "workspace", with_demo=False)
     write_check_workflow(workspace, "checkout", affects="src/payment/")
@@ -46,11 +61,79 @@ def test_run_codex_check_runs_only_affected_non_slow_workflows(tmp_path, monkeyp
     assert calls == ["checkout"]
     assert result.selected_workflows == ["checkout"]
     assert result.skipped_slow_workflows == ["visual_checkout"]
+    assert result.coverage["status"] == "covered"
+    assert result.coverage["precise_covered_files"] == ["src/payment/checkout.py"]
     # observe-only workflow: it must surface as inspection-only, never as a real pass
     assert result.passed == 0
     assert result.inspection_only == 1
     assert result.failed == 0
     assert result.verdict == "inspection_only"
+
+
+def test_run_codex_check_reports_fallback_only_coverage_gap(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_fallback_workflow(workspace, "broad_smoke")
+    calls = []
+
+    def fake_run_workspace_workflow(_workspace, name, **_kwargs):
+        calls.append(name)
+
+        class Result:
+            run_id = f"run-{name}"
+            steps = (WorkflowStepResult(id="observe", action="observe_ocr", status=ActionStatus.SUCCESS),)
+
+        return Result()
+
+    monkeypatch.setattr("visual_agent.codex_check.run_workspace_workflow", fake_run_workspace_workflow)
+
+    result = run_codex_check(workspace, changed=["src/payment/checkout.py"])
+    text = codex_check_to_markdown(result)
+
+    assert calls == ["broad_smoke"]
+    assert result.coverage["status"] == "fallback_only"
+    assert result.coverage["fallback_only_files"] == ["src/payment/checkout.py"]
+    assert result.coverage["suggested_affects"] == [
+        {
+            "workflow": "broad_smoke",
+            "path": "workflows/broad_smoke.yaml",
+            "add_affects": ["src/payment/"],
+            "reason": "fallback workflow has no affects paths but was selected for this diff",
+        }
+    ]
+    assert result.verdict == "coverage_gap"
+    assert "Verdict: COVERAGE GAP" in text
+    assert "Suggested affects: broad_smoke -> src/payment/" in text
+
+
+def test_run_codex_check_reports_uncovered_changed_files(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_check_workflow(workspace, "profile", affects="src/profile/")
+    calls = []
+
+    def fake_run_workspace_workflow(_workspace, name, **_kwargs):
+        calls.append(name)
+        raise AssertionError("should not run")
+
+    monkeypatch.setattr("visual_agent.codex_check.run_workspace_workflow", fake_run_workspace_workflow)
+
+    result = run_codex_check(workspace, changed=["src/payment/checkout.py"])
+    text = codex_check_to_markdown(result)
+
+    assert calls == []
+    assert result.selected_workflows == []
+    assert result.coverage["status"] == "uncovered"
+    assert result.coverage["uncovered_files"] == ["src/payment/checkout.py"]
+    assert result.coverage["suggested_new_workflows"] == [
+        {
+            "changed_file": "src/payment/checkout.py",
+            "suggested_name": "src_payment_verification",
+            "affects": ["src/payment/"],
+            "reason": "no workflow precisely covers this changed file",
+        }
+    ]
+    assert result.verdict == "coverage_gap"
+    assert "Uncovered files: src/payment/checkout.py" in text
+    assert "Suggested new workflow: src_payment_verification affects src/payment/" in text
 
 
 def test_run_codex_check_passes_only_with_real_interaction(tmp_path, monkeypatch) -> None:
@@ -125,6 +208,58 @@ def test_run_codex_check_dry_run_interactions_are_inspection_only(tmp_path, monk
     assert "INSPECT checkout" in text
     assert "NOT" in text
     assert "Verdict: INSPECTION ONLY" in text
+
+
+def test_run_codex_check_dry_run_failure_after_skipped_interaction_is_inconclusive(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_check_workflow(workspace, "checkout", affects="src/payment/")
+
+    def fake_run_workspace_workflow(_workspace, name, **_kwargs):
+        class Result:
+            run_id = f"run-{name}"
+            steps = (
+                WorkflowStepResult(id="open", action="observe_ocr", status=ActionStatus.SUCCESS),
+                WorkflowStepResult(id="place_order", action="click_text", status=ActionStatus.DRY_RUN),
+                WorkflowStepResult(id="assert_confirmed", action="assert_text_contract", status=ActionStatus.FAILED),
+            )
+
+        return Result()
+
+    monkeypatch.setattr("visual_agent.codex_check.run_workspace_workflow", fake_run_workspace_workflow)
+
+    result = run_codex_check(workspace, changed=["src/payment/checkout.py"])
+
+    # The assertion failed only because dry-run skipped the interaction it depends on,
+    # so it is inconclusive rather than a real regression.
+    assert result.failed == 0
+    assert result.inspection_only == 1
+    assert result.results[0].failed_step == "assert_confirmed"
+    assert "supervised" in (result.results[0].hint or "")
+
+
+def test_run_codex_check_dry_run_failure_before_interaction_stays_failed(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_check_workflow(workspace, "checkout", affects="src/payment/")
+
+    def fake_run_workspace_workflow(_workspace, name, **_kwargs):
+        class Result:
+            run_id = f"run-{name}"
+            steps = (
+                WorkflowStepResult(id="open", action="observe_ocr", status=ActionStatus.SUCCESS),
+                # Static regression before any interaction: a real failure, not a dry-run artifact.
+                WorkflowStepResult(id="assert_price", action="assert_text", status=ActionStatus.FAILED),
+                WorkflowStepResult(id="place_order", action="click_text", status=ActionStatus.DRY_RUN),
+            )
+
+        return Result()
+
+    monkeypatch.setattr("visual_agent.codex_check.run_workspace_workflow", fake_run_workspace_workflow)
+
+    result = run_codex_check(workspace, changed=["src/payment/checkout.py"])
+
+    assert result.failed == 1
+    assert result.verdict == "fail"
+    assert result.results[0].failed_step == "assert_price"
 
 
 def test_codex_check_to_markdown_reports_failure_details() -> None:

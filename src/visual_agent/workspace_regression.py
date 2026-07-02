@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -161,9 +162,11 @@ def run_workspace_regression_tests(
     ]
     started = time()
     try:
+        env = regression_subprocess_env()
         completed = subprocess.run(
             command,
             cwd=workspace.root,
+            env=env,
             text=True,
             capture_output=True,
             timeout=timeout_seconds,
@@ -209,6 +212,14 @@ def run_workspace_regression_tests(
         passed_tests=summary.get("passed"),
         failed_tests=summary.get("failed"),
     )
+
+
+def regression_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    src_root = Path(__file__).resolve().parents[1]
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(src_root) if not existing else str(src_root) + os.pathsep + existing
+    return env
 
 
 def parse_pytest_summary(output: str) -> dict[str, int | None]:

@@ -271,15 +271,17 @@ class ActionDispatcher:
         if not selector:
             raise ValueError("upload_file requires 'selector' (or a resolvable target) for the file input or chooser trigger.")
         is_dry_run = bool(params.get("dry_run", context.dry_run))
+        locator = browser_locator(page, selector, params)
+        actionability = playwright_actionability_snapshot(locator, action="upload_file")
         if not is_dry_run:
             files = [str(item) for item in file_paths]
             if bool(params.get("via_chooser", False)):
                 # the control opens a native chooser instead of being an <input type=file>
                 with page.expect_file_chooser(timeout=int(params.get("timeout_ms", 10_000))) as chooser_info:
-                    browser_locator(page, selector, params).click()
+                    locator.click()
                 chooser_info.value.set_files(files)
             else:
-                browser_locator(page, selector, params).set_input_files(files)
+                locator.set_input_files(files)
             wait_after_browser_action(page, params)
         return ActionResult(
             action="upload_file",
@@ -291,6 +293,7 @@ class ActionDispatcher:
             metadata={
                 "execution": "playwright",
                 "selector": selector,
+                "actionability": actionability,
                 "files": [{"name": item.name, "size_bytes": item.stat().st_size} for item in file_paths],
                 "via_chooser": bool(params.get("via_chooser", False)),
             },
@@ -318,9 +321,11 @@ class ActionDispatcher:
         else:
             raise ValueError("select_option requires one of: value, label, index.")
         is_dry_run = bool(params.get("dry_run", context.dry_run))
+        locator = browser_locator(page, selector, params)
+        actionability = playwright_actionability_snapshot(locator, action="select_option")
         selected: list[str] = []
         if not is_dry_run:
-            selected = list(browser_locator(page, selector, params).select_option(**option_args) or [])
+            selected = list(locator.select_option(**option_args) or [])
             wait_after_browser_action(page, params)
         option_label = next(iter(option_args.items()))
         return ActionResult(
@@ -330,7 +335,13 @@ class ActionDispatcher:
             point=None,
             provider=resolved.evidence.provider,
             message="select skipped by dry-run" if is_dry_run else f"selected {option_label[0]}={option_label[1]}",
-            metadata={"execution": "playwright", "selector": selector, "option": dict([option_label]), "selected_values": selected},
+            metadata={
+                "execution": "playwright",
+                "selector": selector,
+                "actionability": actionability,
+                "option": dict([option_label]),
+                "selected_values": selected,
+            },
         )
 
     def _drag(
@@ -347,8 +358,12 @@ class ActionDispatcher:
         if not source or not destination:
             raise ValueError("drag requires 'selector' (source) and 'to_selector' (destination).")
         is_dry_run = bool(params.get("dry_run", context.dry_run))
+        source_locator = browser_locator(page, source, params)
+        destination_locator = browser_locator(page, destination, params)
+        actionability = playwright_actionability_snapshot(source_locator, action="drag")
+        destination_actionability = playwright_actionability_snapshot(destination_locator, action="drop_target")
         if not is_dry_run:
-            browser_locator(page, source, params).drag_to(browser_locator(page, destination, params))
+            source_locator.drag_to(destination_locator)
             wait_after_browser_action(page, params)
         return ActionResult(
             action="drag",
@@ -357,7 +372,13 @@ class ActionDispatcher:
             point=None,
             provider=resolved.evidence.provider,
             message="drag skipped by dry-run" if is_dry_run else f"dragged {source} to {destination}",
-            metadata={"execution": "playwright", "selector": source, "to_selector": destination},
+            metadata={
+                "execution": "playwright",
+                "selector": source,
+                "to_selector": destination,
+                "actionability": actionability,
+                "destination_actionability": destination_actionability,
+            },
         )
 
     def _wait_for_text(

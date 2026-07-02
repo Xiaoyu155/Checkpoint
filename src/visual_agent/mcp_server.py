@@ -31,10 +31,13 @@ from .verification_status import enrich_verification_payload, report_artifacts, 
 from .workflow import parse_workflow_file as parse_workflow_file
 from .workspace import Workspace, build_workspace_report_index, find_workflow as find_workflow, load_workspace_inputs, run_workspace_workflow
 from .mcp_workspace_read import (
+    apply_coverage_repair_payload,
+    draft_coverage_repair_payload,
     get_run_report_payload,
     get_workspace_dashboard_payload,
     list_run_artifacts_payload,
     list_workflows_payload,
+    plan_coverage_repair_payload,
     validate_workflow_payload,
 )
 from .mcp_repair import (
@@ -81,7 +84,7 @@ def mcp_tools() -> list[Tool]:
     return [
         Tool(
             name="list_workflows",
-            description="List available workspace workflows and latest run status.",
+            description="List available workspace workflows, quality/readiness, latest run status, and optional diff-aware recommendations.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -90,6 +93,130 @@ def mcp_tools() -> list[Tool]:
                         "type": "boolean",
                         "default": False,
                         "description": "Include workflows tagged 'slow'. Default: skipped.",
+                    },
+                    "changed_files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional changed file paths. When provided, returns recommended workflows for this diff.",
+                    },
+                    "repo_root": {
+                        "type": "string",
+                        "description": "Optional git repo root. If provided without changed_files, Checkpoint reads git diff.",
+                    },
+                    "base": {
+                        "type": "string",
+                        "default": "HEAD",
+                        "description": "Git base ref used with repo_root. Default: HEAD.",
+                    },
+                },
+                "required": ["workspace_root"],
+            },
+        ),
+        Tool(
+            name="plan_coverage_repair",
+            description="Return a compact diff coverage repair plan with suggested affects and missing workflow drafts for coding agents.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_root": {"type": "string"},
+                    "changed_files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional changed file paths. Preferred for deterministic coverage planning.",
+                    },
+                    "repo_root": {
+                        "type": "string",
+                        "description": "Optional git repo root. If provided without changed_files, Checkpoint reads git diff.",
+                    },
+                    "base": {
+                        "type": "string",
+                        "default": "HEAD",
+                        "description": "Git base ref used with repo_root. Default: HEAD.",
+                    },
+                    "include_slow": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Include workflows tagged 'slow'. Default: skipped.",
+                    },
+                },
+                "required": ["workspace_root"],
+            },
+        ),
+        Tool(
+            name="draft_coverage_repair",
+            description="Draft unified diffs for coverage repair suggestions without applying changes.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_root": {"type": "string"},
+                    "changed_files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional changed file paths. Preferred for deterministic coverage repair drafts.",
+                    },
+                    "repo_root": {
+                        "type": "string",
+                        "description": "Optional git repo root. If provided without changed_files, Checkpoint reads git diff.",
+                    },
+                    "base": {
+                        "type": "string",
+                        "default": "HEAD",
+                        "description": "Git base ref used with repo_root. Default: HEAD.",
+                    },
+                    "include_slow": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Include workflows tagged 'slow'. Default: skipped.",
+                    },
+                    "max_items": {
+                        "type": "integer",
+                        "default": 5,
+                        "description": "Maximum patch drafts to return. Default: 5.",
+                    },
+                },
+                "required": ["workspace_root"],
+            },
+        ),
+        Tool(
+            name="apply_coverage_repair",
+            description="Apply reviewed coverage repair suggestions. Defaults to dry-run unless apply=true.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace_root": {"type": "string"},
+                    "changed_files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional changed file paths. Preferred for deterministic coverage repair.",
+                    },
+                    "repo_root": {
+                        "type": "string",
+                        "description": "Optional git repo root. If provided without changed_files, Checkpoint reads git diff.",
+                    },
+                    "base": {
+                        "type": "string",
+                        "default": "HEAD",
+                        "description": "Git base ref used with repo_root. Default: HEAD.",
+                    },
+                    "include_slow": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Include workflows tagged 'slow'. Default: skipped.",
+                    },
+                    "max_items": {
+                        "type": "integer",
+                        "default": 5,
+                        "description": "Maximum repairs to apply. Default: 5.",
+                    },
+                    "apply": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Must be true to write files. Default false returns a dry-run draft.",
+                    },
+                    "overwrite": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Allow overwriting drafted new workflow files if they already exist.",
                     },
                 },
                 "required": ["workspace_root"],
@@ -661,6 +788,9 @@ async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> list[
     try:
         handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "list_workflows": list_workflows_payload,
+            "plan_coverage_repair": plan_coverage_repair_payload,
+            "draft_coverage_repair": draft_coverage_repair_payload,
+            "apply_coverage_repair": apply_coverage_repair_payload,
             "validate_workflow": validate_workflow_payload,
             "run_workflow": run_workflow_payload,
             "verify_workflow": verify_workflow_payload,

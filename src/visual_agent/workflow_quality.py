@@ -120,6 +120,8 @@ def score_workflow_quality(workflow_yaml: str, model: UISemanticModel | None = N
 
 
 def _step_covers_success(step: dict[str, Any]) -> bool:
+    if step.get("action") == "assert_text_contract":
+        return any(step.get(key) for key in ("required_all", "required_any", "text", "text_from"))
     if step.get("action") not in {"wait_for", "assert_text", "assert_visual_text"}:
         return False
     return any(step.get(key) for key in ("text", "text_from", "url_contains", "url_contains_from"))

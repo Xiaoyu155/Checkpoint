@@ -153,10 +153,11 @@ def test_upload_capability_reaches_l3(tmp_path: Path) -> None:
         "    action: upload_file\n"
         "    selector: \"#file\"\n"
         f"    path: \"{str(sample).replace(chr(92), '/')}\"\n"
+        "    post_action_assert_text: \"已上传: 头像.png\"\n"
         "  - id: verify\n"
-        "    action: assert_text\n"
-        "    contains_text: \"已上传\"\n"
-        "    text: \"已上传: 头像.png\"\n"
+        "    action: assert_text_contract\n"
+        "    required_all: [\"已上传: 头像.png\"]\n"
+        "    forbidden_any: [\"错误\", \"失败\"]\n"
     )
     payload = run_workflow(tmp_path, write_workflow(tmp_path, html, "上传页", extra))
 
@@ -180,9 +181,11 @@ def test_select_option_capability(tmp_path: Path) -> None:
         "    action: select_option\n"
         "    selector: \"#city\"\n"
         "    label: \"上海\"\n"
+        "    post_action_assert_text: \"已选择: 上海\"\n"
         "  - id: verify\n"
-        "    action: assert_text\n"
-        "    text: \"已选择: 上海\"\n"
+        "    action: assert_text_contract\n"
+        "    required_all: [\"已选择: 上海\"]\n"
+        "    forbidden_any: [\"错误\", \"失败\"]\n"
     )
     payload = run_workflow(tmp_path, write_workflow(tmp_path, html, "下拉页", extra))
 
@@ -215,9 +218,11 @@ document.addEventListener('mouseup', function (e) {
         "    action: drag\n"
         "    selector: \"#card\"\n"
         "    to_selector: \"#dropzone\"\n"
+        "    post_action_assert_text: \"已放置完成\"\n"
         "  - id: verify\n"
-        "    action: assert_text\n"
-        "    text: \"已放置完成\"\n"
+        "    action: assert_text_contract\n"
+        "    required_all: [\"已放置完成\"]\n"
+        "    forbidden_any: [\"错误\", \"失败\"]\n"
     )
     payload = run_workflow(tmp_path, write_workflow(tmp_path, html, "拖拽页", extra))
 
@@ -317,9 +322,11 @@ def test_iframe_capability(tmp_path: Path) -> None:
         "    frame_selector: \"#form-frame\"\n"
         "    label: \"专业版\"\n"
         "    wait_after_seconds: 0.5\n"
+        "    post_action_assert_text: \"已订阅: 专业版\"\n"
         "  - id: verify\n"
-        "    action: assert_text\n"
-        "    text: \"已订阅: 专业版\"\n"
+        "    action: assert_text_contract\n"
+        "    required_all: [\"已订阅: 专业版\"]\n"
+        "    forbidden_any: [\"错误\", \"失败\"]\n"
     )
     payload = run_workflow(tmp_path, write_workflow(tmp_path, outer, "主页面", extra))
 

@@ -1,0 +1,141 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: alipay_miniprogram_browser_acceptance
+version: 1
+visibility: private
+author: codex
+license: ""
+tags:
+  - verification
+  - alipay-miniapp
+  - browser
+  - real-io
+  - slow
+description: Browser acceptance for the Alipay elder social-security miniapp harness. Requires a live local server at 127.0.0.1:8798, so it is tagged slow and excluded from the default fast gate.
+steps:
+  - id: observe_harness
+    action: observe_browser
+    url: http://127.0.0.1:8798/harness.html
+  - id: assert_browser_ready
+    action: assert_browser_ready
+  - id: assert_home_contract
+    action: assert_text_contract
+    required_all:
+      - 老年民生服务台
+      - 帮我判断
+      - 养老金估算
+      - 服务单
+      - 知识库
+    forbidden_any:
+      - undefined
+      - blank page
+      - Cannot GET
+      - 页面不存在
+  - id: choose_preset_question
+    action: click
+    target:
+      text: 灵活就业15年
+      role: button
+      preferred: [dom, mock]
+    post_action_assert_text: 开始判断
+  - id: submit_diagnosis
+    action: click
+    target:
+      test_id: diagnose-submit
+      role: button
+      preferred: [dom, mock]
+    post_action_assert_text: 15年
+  - id: observe_diagnosis_result
+    action: observe_browser
+    reuse_page: true
+  - id: assert_diagnosis_contract
+    action: assert_text_contract
+    required_all:
+      - 15年
+      - 个人账户
+      - 查看服务单
+    forbidden_any:
+      - 诊断失败
+      - undefined
+      - TypeError
+      - ReferenceError
+  - id: open_cases
+    action: click
+    target:
+      test_id: open-cases
+      role: button
+      preferred: [dom, mock]
+    post_action_assert_text: 复制给子女
+  - id: assert_case_created
+    action: assert_text_contract
+    required_all:
+      - 灵活就业交满15年
+      - 复制给子女
+    forbidden_any:
+      - 暂无服务单
+      - undefined
+  - id: open_estimate_tab
+    action: click
+    target:
+      text: 养老金估算
+      role: button
+      preferred: [dom, mock]
+    post_action_assert_text: 开始估算
+  - id: submit_estimate
+    action: click
+    target:
+      test_id: estimate-submit
+      role: button
+      preferred: [dom, mock]
+    post_action_assert_text: 养老金估算
+  - id: assert_estimate_response
+    action: assert_response
+    url_contains: /api/estimate
+    method: POST
+    status: 200
+    timeout_seconds: 10
+  - id: observe_estimate_result
+    action: observe_browser
+    reuse_page: true
+  - id: assert_estimate_contract
+    action: assert_text_contract
+    required_all:
+      - 预计每月可领
+      - 元
+      - 复制结果
+    forbidden_any:
+      - 估算失败
+      - NaN
+      - undefined
+  - id: open_knowledge_tab
+    action: click
+    target:
+      text: 知识库
+      role: button
+      preferred: [dom, mock]
+    post_action_assert_text: 检查知识库
+  - id: submit_knowledge_check
+    action: click
+    target:
+      test_id: knowledge-submit
+      role: button
+      preferred: [dom, mock]
+    post_action_assert_text: 检查知识库
+  - id: wait_knowledge_result
+    action: wait_for
+    condition: text
+    text: 未发现 undefined
+    timeout_seconds: 10
+  - id: assert_knowledge_contract
+    action: assert_text_contract
+    required_all:
+      - 知识库检查
+      - 省份
+      - 未发现 undefined
+    forbidden_any:
+      - 知识库检查失败
+      - undefined 字段错误
+      - TypeError
+      - ReferenceError
+  - id: assert_no_error
+    action: assert_no_error

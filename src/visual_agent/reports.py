@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .acceptance import agent_verdict
 from .visual_status import read_run_history
 from .versioning import UnsupportedSchemaVersionError, migrate_report_payload
 
@@ -297,6 +298,11 @@ def run_summary_to_dict(summary: RunSummary) -> dict[str, Any]:
 
 
 def run_report_to_dict(report: RunReport) -> dict[str, Any]:
+    verdict = agent_verdict(
+        report.acceptance,
+        run_status=report.status,
+        dry_run_actions=report.dry_run_actions,
+    )
     return {
         "schema_version": report.schema_version,
         "run_id": report.run_id,
@@ -317,6 +323,7 @@ def run_report_to_dict(report: RunReport) -> dict[str, Any]:
         "run_queue": report.run_queue,
         "run_checks": report.run_checks,
         "acceptance": report.acceptance,
+        "agent_verdict": verdict,
         "steps": [
             {
                 "id": step.id,
@@ -370,6 +377,9 @@ def compact_run_report(result: Any) -> dict[str, Any]:
             entry["screenshot"] = str(screenshot_path)
         steps.append(entry)
     status = "failed" if failed else "success"
+    dry_run_actions = sum(1 for step in steps if step.get("status") == "dry_run")
+    acceptance = getattr(result, "acceptance", None)
+    acceptance_payload = acceptance if isinstance(acceptance, dict) else None
     return {
         "schema_version": 1,
         "run_id": str(getattr(result, "run_id", "") or ""),
@@ -379,6 +389,12 @@ def compact_run_report(result: Any) -> dict[str, Any]:
         "step_count": len(steps),
         "failed_step": failed.get("id") if failed else None,
         "run_dir": str(getattr(result, "run_dir", "") or ""),
+        "acceptance": acceptance_payload,
+        "agent_verdict": agent_verdict(
+            acceptance_payload,
+            run_status=status,
+            dry_run_actions=dry_run_actions,
+        ),
         "steps": steps,
     }
 
@@ -420,6 +436,12 @@ def run_report_to_markdown(report: RunReport) -> str:
                 lines.append(f"  - `{blocker}`")
         if acceptance.get("missing_for_next_level"):
             lines.append(f"- Next level needs: {acceptance.get('missing_for_next_level')}")
+    verdict = agent_verdict(
+        report.acceptance,
+        run_status=report.status,
+        dry_run_actions=report.dry_run_actions,
+    )
+    lines.extend(agent_verdict_markdown_lines(verdict))
     if report.run_checks:
         for check_name in ("product_guard", "visual_guard"):
             check = report.run_checks.get(check_name)
@@ -516,6 +538,21 @@ def acceptance_status_suffix(acceptance: dict[str, Any]) -> str:
     if acceptance.get("simulated"):
         return " — simulated evidence only"
     return " — below product acceptance (L3+)"
+
+
+def agent_verdict_markdown_lines(verdict: dict[str, Any]) -> list[str]:
+    lines = [
+        "- Agent verdict: "
+        f"`{verdict.get('verdict')}`"
+        f" (can_claim_product_done={bool(verdict.get('can_claim_product_done'))})"
+    ]
+    reasons = verdict.get("reasons")
+    if isinstance(reasons, list) and reasons:
+        lines.append("- Agent blocking reasons: " + ", ".join(f"`{reason}`" for reason in reasons[:8]))
+    next_actions = verdict.get("next_actions")
+    if isinstance(next_actions, list) and next_actions:
+        lines.append("- Agent next action: " + str(next_actions[0]))
+    return lines
 
 
 def build_run_history_report(workspace_root: str | Path = ".agent-workspace", *, limit: int = 20) -> dict[str, Any]:

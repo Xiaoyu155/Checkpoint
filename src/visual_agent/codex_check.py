@@ -5,7 +5,8 @@ from pathlib import Path
 from time import monotonic
 
 from .acceptance import INSPECTION_ONLY_WARNING, profile_interactions
-from .git_diff import affected_workflows, changed_files
+from .git_diff import affected_workflows, changed_files, workflow_affects_changed_path
+from .mcp_workspace_read import suggested_affects_pattern, suggested_workflow_name
 from .models import ActionStatus
 from .workspace import Workspace, WorkflowRef, discover_workflows, run_workspace_workflow
 
@@ -36,6 +37,7 @@ class CodexCheckResult:
     changed_files: list[str]
     selected_workflows: list[str]
     skipped_slow_workflows: list[str]
+    coverage: dict[str, object] = field(default_factory=dict)
     results: list[CodexWorkflowCheck] = field(default_factory=list)
 
     @property
@@ -58,6 +60,8 @@ class CodexCheckResult:
     def verdict(self) -> str:
         if self.failed:
             return "fail"
+        if self.coverage.get("status") in {"uncovered", "fallback_only"}:
+            return "coverage_gap"
         if not self.results:
             return "no_workflows"
         if self.inspection_only:
@@ -84,6 +88,7 @@ def run_codex_check(
     runnable = [ref for ref in tagged_refs if include_slow or "slow" not in ref.tags]
     selected = affected_workflows(runnable, changed=changed_paths)
     selected = selected[: max(0, int(max_workflows))]
+    coverage = codex_coverage_summary(changed_paths, runnable)
     results = [
         run_one_codex_workflow(workspace, ref, run_profile=run_profile, from_step=from_step)
         for ref in selected
@@ -92,6 +97,7 @@ def run_codex_check(
         changed_files=changed_paths,
         selected_workflows=[ref.name for ref in selected],
         skipped_slow_workflows=skipped_slow,
+        coverage=coverage,
         results=results,
     )
 
@@ -101,6 +107,77 @@ def workflow_has_tags(ref: WorkflowRef, tags: tuple[str, ...]) -> bool:
     if not requested:
         return True
     return requested.issubset(set(ref.tags))
+
+
+def codex_coverage_summary(changed_paths: list[str], workflows: list[WorkflowRef]) -> dict[str, object]:
+    changed = [str(item).replace("\\", "/").strip() for item in changed_paths if str(item).strip()]
+    primary_refs = [ref for ref in workflows if ref.affects]
+    fallback_refs = [ref for ref in workflows if not ref.affects]
+    precise: list[str] = []
+    for path in changed:
+        if any(workflow_ref_covers_path(ref, path) for ref in primary_refs):
+            precise.append(path)
+    fallback_only = [path for path in changed if path not in precise and fallback_refs]
+    uncovered = [path for path in changed if path not in precise and path not in fallback_only]
+    primary_workflows = [
+        ref.name
+        for ref in primary_refs
+        if any(workflow_ref_covers_path(ref, path) for path in changed)
+    ]
+    if not changed:
+        status = "no_changed_files"
+        next_action = "No changed files were detected; run a broad smoke or pass changed files explicitly."
+    elif uncovered:
+        status = "uncovered"
+        next_action = "Generate or record workflows for uncovered_files before claiming verification."
+    elif fallback_only:
+        status = "fallback_only"
+        next_action = "Fallback workflows were selected because no precise affects match exists; add affects paths or generate targeted workflows."
+    else:
+        status = "covered"
+        next_action = "Run selected workflows and inspect agent_verdict in each report."
+    return {
+        "status": status,
+        "precise_covered_files": precise,
+        "fallback_only_files": fallback_only,
+        "uncovered_files": uncovered,
+        "primary_workflows": primary_workflows,
+        "fallback_workflows": [ref.name for ref in fallback_refs],
+        "suggested_affects": codex_suggested_affects(fallback_only, fallback_refs),
+        "suggested_new_workflows": codex_suggested_new_workflows(uncovered),
+        "next_action": next_action,
+    }
+
+
+def workflow_ref_covers_path(ref: WorkflowRef, changed_path: str) -> bool:
+    return any(workflow_affects_changed_path(str(pattern), [changed_path]) for pattern in ref.affects)
+
+
+def codex_suggested_affects(changed_files: list[str], fallback_refs: list[WorkflowRef]) -> list[dict[str, object]]:
+    if not changed_files or not fallback_refs:
+        return []
+    patterns = sorted({suggested_affects_pattern(path) for path in changed_files})
+    return [
+        {
+            "workflow": ref.name,
+            "path": ref.relative_path,
+            "add_affects": patterns,
+            "reason": "fallback workflow has no affects paths but was selected for this diff",
+        }
+        for ref in fallback_refs[:5]
+    ]
+
+
+def codex_suggested_new_workflows(changed_files: list[str]) -> list[dict[str, object]]:
+    return [
+        {
+            "changed_file": path,
+            "suggested_name": suggested_workflow_name(path),
+            "affects": [suggested_affects_pattern(path)],
+            "reason": "no workflow precisely covers this changed file",
+        }
+        for path in changed_files
+    ]
 
 
 def run_one_codex_workflow(workspace: Workspace, ref: WorkflowRef, *, run_profile: str, from_step: str | None = None) -> CodexWorkflowCheck:
@@ -129,6 +206,37 @@ def run_one_codex_workflow(workspace: Workspace, ref: WorkflowRef, *, run_profil
     failed_step = next((step for step in result.steps if step.status == ActionStatus.FAILED), None)
     interactions = profile_interactions(result.steps)
     acceptance = result.acceptance if isinstance(getattr(result, "acceptance", None), dict) else {}
+    if failed_step is not None and run_profile == "dry-run":
+        steps = list(result.steps)
+        failed_index = next(i for i, step in enumerate(steps) if step is failed_step)
+        first_skip_index = next(
+            (i for i, step in enumerate(steps) if step.status == ActionStatus.DRY_RUN),
+            None,
+        )
+        # Dry-run skips real interactions, so a failure that occurs after a skipped
+        # interaction is inconclusive (it asserts state the skipped step would have
+        # produced), not a real regression. A failure before the first skip is a
+        # genuine static/inspection regression and stays failed.
+        if first_skip_index is not None and failed_index > first_skip_index:
+            return CodexWorkflowCheck(
+                name=ref.name,
+                status="inspection_only",
+                step_count=len(result.steps),
+                elapsed_seconds=round(monotonic() - started, 6),
+                run_id=result.run_id,
+                failed_step=failed_step.id,
+                message=(
+                    "Inconclusive in dry-run: this step asserts state that follows a "
+                    "skipped interaction."
+                ),
+                hint="Rerun with --run-profile supervised (or verify-now --live) to verify post-interaction acceptance.",
+                real_interaction_count=interactions.real_interaction_count,
+                skipped_interaction_count=interactions.skipped_interaction_count,
+                invalid_interaction_count=interactions.invalid_interaction_count,
+                acceptance_level=str(acceptance.get("label") or ""),
+                acceptance_name=str(acceptance.get("name") or ""),
+                is_product_acceptance=bool(acceptance.get("is_product_acceptance", False)),
+            )
     if failed_step is None:
         return CodexWorkflowCheck(
             name=ref.name,
@@ -177,6 +285,28 @@ def codex_check_to_markdown(result: CodexCheckResult) -> str:
         lines.append("[codex-check] No git changes detected. Running matching workflows.")
     if result.skipped_slow_workflows:
         lines.append("[codex-check] Skipping slow workflows: " + ", ".join(result.skipped_slow_workflows))
+    if result.coverage:
+        lines.append(f"[codex-check] Coverage: {result.coverage.get('status')}")
+        if result.coverage.get("uncovered_files"):
+            lines.append("[codex-check] Uncovered files: " + ", ".join(str(item) for item in result.coverage.get("uncovered_files", [])))
+        if result.coverage.get("fallback_only_files"):
+            lines.append("[codex-check] Fallback-only files: " + ", ".join(str(item) for item in result.coverage.get("fallback_only_files", [])))
+        if result.coverage.get("next_action"):
+            lines.append(f"[codex-check] Coverage next action: {result.coverage.get('next_action')}")
+        suggested_affects = result.coverage.get("suggested_affects")
+        if isinstance(suggested_affects, list) and suggested_affects:
+            first = suggested_affects[0] if isinstance(suggested_affects[0], dict) else {}
+            lines.append(
+                "[codex-check] Suggested affects: "
+                f"{first.get('workflow')} -> {', '.join(str(item) for item in first.get('add_affects', []))}"
+            )
+        suggested_new = result.coverage.get("suggested_new_workflows")
+        if isinstance(suggested_new, list) and suggested_new:
+            first = suggested_new[0] if isinstance(suggested_new[0], dict) else {}
+            lines.append(
+                "[codex-check] Suggested new workflow: "
+                f"{first.get('suggested_name')} affects {', '.join(str(item) for item in first.get('affects', []))}"
+            )
     if result.selected_workflows:
         lines.append("[codex-check] Affected workflows: " + ", ".join(result.selected_workflows))
         lines.append(f"[codex-check] Running {len(result.selected_workflows)} workflow(s)...")
@@ -220,6 +350,8 @@ def codex_check_to_markdown(result: CodexCheckResult) -> str:
         )
         if result.verdict == "fail":
             lines.append("[codex-check] Verdict: FAIL — fix the failures above before claiming verification.")
+        elif result.verdict == "coverage_gap":
+            lines.append("[codex-check] Verdict: COVERAGE GAP — add precise workflow coverage before claiming verification.")
         elif result.verdict == "inspection_only":
             if result.passed:
                 lines.append(
@@ -231,4 +363,6 @@ def codex_check_to_markdown(result: CodexCheckResult) -> str:
                 lines.append(f"[codex-check] Verdict: INSPECTION ONLY — {INSPECTION_ONLY_WARNING}")
         else:
             lines.append("[codex-check] Verdict: PASS — real user interaction was executed and verified.")
+    elif result.verdict == "coverage_gap":
+        lines.append("[codex-check] Verdict: COVERAGE GAP — no precise workflow coverage for this diff.")
     return "\n".join(lines)

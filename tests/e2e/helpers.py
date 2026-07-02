@@ -13,15 +13,25 @@ ROOT = Path(__file__).resolve().parents[2]
 PYTHON = Path(sys.executable)
 
 
+def _subprocess_env(env: dict[str, str] | None = None) -> dict[str, str]:
+    merged = os.environ.copy()
+    src_path = str(ROOT / "src")
+    existing = merged.get("PYTHONPATH", "")
+    merged["PYTHONPATH"] = src_path if not existing else src_path + os.pathsep + existing
+    if env:
+        merged.update(env)
+        existing = merged.get("PYTHONPATH", "")
+        merged["PYTHONPATH"] = src_path if not existing else src_path + os.pathsep + existing
+    return merged
+
+
 def run_cli(
     *args: str,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
     timeout: float = 120.0,
 ) -> subprocess.CompletedProcess[str]:
-    merged_env = os.environ.copy()
-    if env:
-        merged_env.update(env)
+    merged_env = _subprocess_env(env)
     return subprocess.run(
         [str(PYTHON), "-m", "visual_agent.cli", *args],
         cwd=str(cwd or ROOT),
@@ -43,6 +53,7 @@ def playwright_available() -> bool:
     result = subprocess.run(
         [str(PYTHON), "-c", "from playwright.sync_api import sync_playwright"],
         cwd=str(ROOT),
+        env=_subprocess_env(),
         capture_output=True,
         text=True,
         check=False,
@@ -53,7 +64,7 @@ def playwright_available() -> bool:
 @lru_cache(maxsize=1)
 def playwright_chromium_available() -> bool:
     browsers = ROOT / ".pw-browsers"
-    merged_env = os.environ.copy()
+    merged_env = _subprocess_env()
     if browsers.exists():
         merged_env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers)
     script = (

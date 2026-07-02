@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from .quality import load_quality_gate_index, quality_gate_index_to_markdown
-from .reports import acceptance_status_suffix
+from .acceptance import agent_verdict
+from .reports import acceptance_status_suffix, agent_verdict_markdown_lines
 from .workspace import (
     Workspace,
     load_workspace_gui_action_history_risk_config,
@@ -275,6 +276,11 @@ def build_report_detail(workspace: Workspace, run_id: str) -> dict[str, Any]:
         "runtime_version": payload.get("runtime_version"),
         "workflow_schema_version": payload.get("workflow_schema_version"),
         "acceptance": payload.get("acceptance") if isinstance(payload.get("acceptance"), dict) else None,
+        "agent_verdict": agent_verdict(
+            payload.get("acceptance") if isinstance(payload.get("acceptance"), dict) else None,
+            run_status=str(payload.get("status") or "unknown"),
+            dry_run_actions=int(payload.get("dry_run_actions") or 0),
+        ),
         "run_checks": payload.get("run_checks") if isinstance(payload.get("run_checks"), dict) else None,
         "summary": {
             "total_steps": int(payload.get("total_steps") or len(compact_steps)),
@@ -329,6 +335,9 @@ def report_detail_to_markdown(detail: dict[str, Any]) -> str:
     if acceptance:
         suffix = acceptance_status_suffix(acceptance)
         lines.append(f"- Acceptance level: `{acceptance.get('label')}` ({acceptance.get('name')}){suffix}")
+    verdict = detail.get("agent_verdict") if isinstance(detail.get("agent_verdict"), dict) else None
+    if verdict:
+        lines.extend(agent_verdict_markdown_lines(verdict))
     lines.append("")
     external_sample = detail.get("external_sample") if isinstance(detail.get("external_sample"), dict) else None
     if external_sample:

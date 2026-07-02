@@ -34,11 +34,30 @@ def content_payload(result):
     return json.loads(result[0].text)
 
 
+def write_workflow(workspace, name: str, *, affects=(), tags=(), steps=()) -> Path:
+    import yaml
+
+    path = workspace.workflows_dir / f"{name}.yaml"
+    payload = {
+        "schema_version": 1,
+        "name": name,
+        "version": 1,
+        "affects": list(affects),
+        "tags": list(tags),
+        "steps": list(steps),
+    }
+    path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return path
+
+
 def test_mcp_tools_include_expected_names() -> None:
     names = {tool.name for tool in mcp_tools()}
 
     assert names == {
         "list_workflows",
+        "plan_coverage_repair",
+        "draft_coverage_repair",
+        "apply_coverage_repair",
         "validate_workflow",
         "run_workflow",
         "verify_workflow",
@@ -548,7 +567,348 @@ def test_mcp_list_workflows_returns_workspace_workflows(tmp_path) -> None:
 
     assert result["workflow_count"] >= 1
     assert any(item["name"] == "local_html_form_workflow" for item in result["workflows"])
-    assert next(item for item in result["workflows"] if item["name"] == "local_html_form_workflow")["visibility"] == "private"
+    workflow = next(item for item in result["workflows"] if item["name"] == "local_html_form_workflow")
+    assert workflow["visibility"] == "private"
+    assert workflow["quality"]["score"] >= 0
+    assert workflow["agent_readiness"]["status"] in {
+        "acceptance_candidate",
+        "inspection_only",
+        "needs_assertions",
+        "weak",
+    }
+    assert workflow["agent_readiness"]["next_action"]
+
+
+def test_mcp_list_workflows_marks_strong_acceptance_candidate(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    (workspace.workflows_dir / "strong.yaml").write_text(
+        "schema_version: 1\n"
+        "name: strong\n"
+        "version: 1\n"
+        "steps:\n"
+        "  - id: observe\n"
+        "    action: observe_browser\n"
+        "    url: http://localhost:3000\n"
+        "  - id: assert_ready\n"
+        "    action: assert_text_contract\n"
+        "    required_all: [Ready]\n"
+        "    forbidden_any: [Error]\n"
+        "  - id: click_save\n"
+        "    action: click\n"
+        "    target:\n"
+        "      text: Save\n"
+        "      role: button\n"
+        "  - id: assert_saved\n"
+        "    action: assert_text_contract\n"
+        "    required_all: [Saved]\n"
+        "    forbidden_any: [Error]\n",
+        encoding="utf-8",
+    )
+
+    result = list_workflows_payload({"workspace_root": str(workspace.root)})
+    workflow = result["workflows"][0]
+
+    assert workflow["name"] == "strong"
+    assert workflow["quality"]["has_interaction"] is True
+    assert workflow["quality"]["has_strict_contract"] is True
+    assert workflow["agent_readiness"]["status"] == "acceptance_candidate"
+    assert workflow["agent_readiness"]["acceptance_candidate"] is True
+
+
+def test_mcp_list_workflows_recommends_by_changed_files(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_workflow(
+        workspace,
+        "checkout",
+        affects=("src/payment/",),
+        tags=("verification",),
+        steps=[
+            {"id": "observe", "action": "observe_browser", "url": "http://localhost:3000"},
+            {"id": "assert_ready", "action": "assert_text_contract", "required_all": ["Ready"], "forbidden_any": ["Error"]},
+            {"id": "click_save", "action": "click", "target": {"text": "Save", "role": "button"}},
+            {"id": "assert_saved", "action": "assert_text_contract", "required_all": ["Saved"], "forbidden_any": ["Error"]},
+        ],
+    )
+    write_workflow(
+        workspace,
+        "profile",
+        affects=("src/profile/",),
+        tags=("verification",),
+        steps=[{"id": "observe", "action": "observe_browser", "url": "http://localhost:3000/profile"}],
+    )
+
+    result = list_workflows_payload(
+        {
+            "workspace_root": str(workspace.root),
+            "changed_files": ["src/payment/checkout.py"],
+        }
+    )
+
+    assert result["recommendations"]["enabled"] is True
+    assert result["recommendations"]["recommended_workflows"] == ["checkout"]
+    assert result["recommendations"]["primary_recommended_workflows"] == ["checkout"]
+    assert result["recommendations"]["fallback_no_affects_workflows"] == []
+    assert result["recommendations"]["acceptance_candidate_workflows"] == ["checkout"]
+    assert result["recommendations"]["coverage"]["status"] == "covered"
+    assert result["recommendations"]["coverage"]["precise_covered_files"] == ["src/payment/checkout.py"]
+    assert result["recommendations"]["coverage"]["uncovered_files"] == []
+    checkout = next(item for item in result["workflows"] if item["name"] == "checkout")
+    profile = next(item for item in result["workflows"] if item["name"] == "profile")
+    assert checkout["diff_recommendation"]["recommended"] is True
+    assert checkout["diff_recommendation"]["matched_patterns"] == ["src/payment/"]
+    assert profile["diff_recommendation"]["recommended"] is False
+
+
+def test_mcp_list_workflows_reports_no_diff_match(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_workflow(
+        workspace,
+        "profile",
+        affects=("src/profile/",),
+        tags=("verification",),
+        steps=[{"id": "observe", "action": "observe_browser", "url": "http://localhost:3000/profile"}],
+    )
+
+    result = list_workflows_payload(
+        {
+            "workspace_root": str(workspace.root),
+            "changed_files": ["src/payment/checkout.py"],
+        }
+    )
+
+    assert result["recommendations"]["recommended_workflows"] == []
+    assert result["recommendations"]["primary_recommended_workflows"] == []
+    assert result["recommendations"]["fallback_no_affects_workflows"] == []
+    assert result["recommendations"]["coverage"]["status"] == "uncovered"
+    assert result["recommendations"]["coverage"]["uncovered_files"] == ["src/payment/checkout.py"]
+    assert result["recommendations"]["coverage"]["suggested_new_workflows"] == [
+        {
+            "changed_file": "src/payment/checkout.py",
+            "suggested_name": "src_payment_verification",
+            "affects": ["src/payment/"],
+            "reason": "no workflow precisely covers this changed file",
+        }
+    ]
+    assert "generate or record" in result["recommendations"]["next_action"]
+
+
+def test_mcp_list_workflows_separates_no_affects_fallbacks(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_workflow(
+        workspace,
+        "fallback",
+        tags=("verification",),
+        steps=[{"id": "observe", "action": "observe_browser", "url": "http://localhost:3000"}],
+    )
+
+    result = list_workflows_payload(
+        {
+            "workspace_root": str(workspace.root),
+            "changed_files": ["src/payment/checkout.py"],
+        }
+    )
+
+    assert result["recommendations"]["recommended_workflows"] == ["fallback"]
+    assert result["recommendations"]["primary_recommended_workflows"] == []
+    assert result["recommendations"]["fallback_no_affects_workflows"] == ["fallback"]
+    assert result["recommendations"]["coverage"]["status"] == "fallback_only"
+    assert result["recommendations"]["coverage"]["fallback_only_files"] == ["src/payment/checkout.py"]
+    assert result["recommendations"]["coverage"]["uncovered_files"] == []
+    assert result["recommendations"]["coverage"]["suggested_affects"][0]["workflow"] == "fallback"
+    assert result["recommendations"]["coverage"]["suggested_affects"][0]["add_affects"] == ["src/payment/"]
+
+
+def test_mcp_coverage_suggests_directory_affects_for_root_level_files(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_workflow(
+        workspace,
+        "fallback",
+        tags=("verification",),
+        steps=[{"id": "observe", "action": "observe_browser", "url": "http://localhost:3000"}],
+    )
+
+    result = list_workflows_payload({"workspace_root": str(workspace.root), "changed_files": ["tests/test_cli.py"]})
+
+    assert result["recommendations"]["coverage"]["suggested_affects"][0]["add_affects"] == ["tests/"]
+
+
+def test_mcp_plan_coverage_repair_returns_compact_agent_plan(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_workflow(
+        workspace,
+        "fallback",
+        tags=("verification",),
+        steps=[{"id": "observe", "action": "observe_browser", "url": "http://localhost:3000"}],
+    )
+
+    payload = content_payload(
+        asyncio.run(
+            call_tool(
+                "plan_coverage_repair",
+                {
+                    "workspace_root": str(workspace.root),
+                    "changed_files": ["src/payment/checkout.py"],
+                },
+            )
+        )
+    )
+
+    assert payload["status"] == "fallback_only"
+    assert payload["ready_to_verify"] is False
+    assert payload["fallback_only_files"] == ["src/payment/checkout.py"]
+    assert payload["suggested_affects"][0]["workflow"] == "fallback"
+    assert payload["suggested_affects"][0]["add_affects"] == ["src/payment/"]
+    assert "Apply suggested_affects" in payload["agent_instruction"]
+
+
+def test_mcp_draft_coverage_repair_drafts_affects_patch(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_workflow(
+        workspace,
+        "fallback",
+        tags=("verification",),
+        steps=[{"id": "observe", "action": "observe_browser", "url": "http://localhost:3000"}],
+    )
+
+    payload = content_payload(
+        asyncio.run(
+            call_tool(
+                "draft_coverage_repair",
+                {
+                    "workspace_root": str(workspace.root),
+                    "changed_files": ["src/payment/checkout.py"],
+                },
+            )
+        )
+    )
+
+    assert payload["status"] == "fallback_only"
+    assert payload["patch_count"] == 1
+    assert payload["patches"][0]["kind"] == "add_affects"
+    assert payload["patches"][0]["applied"] is False
+    assert "+affects:" in payload["patches"][0]["diff"]
+    assert "+- src/payment/" in payload["patches"][0]["diff"] or "+  - src/payment/" in payload["patches"][0]["diff"]
+
+
+def test_mcp_draft_coverage_repair_drafts_new_workflow(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_workflow(
+        workspace,
+        "profile",
+        affects=("src/profile/",),
+        tags=("verification",),
+        steps=[{"id": "observe", "action": "observe_browser", "url": "http://localhost:3000/profile"}],
+    )
+
+    payload = content_payload(
+        asyncio.run(
+            call_tool(
+                "draft_coverage_repair",
+                {
+                    "workspace_root": str(workspace.root),
+                    "changed_files": ["src/payment/checkout.py"],
+                },
+            )
+        )
+    )
+
+    assert payload["status"] == "uncovered"
+    assert payload["patch_count"] == 1
+    assert payload["patches"][0]["kind"] == "new_workflow"
+    assert payload["patches"][0]["path"] == "workflows/src_payment_verification.yaml"
+    assert "--- /dev/null" in payload["patches"][0]["diff"]
+    assert "+name: src_payment_verification" in payload["patches"][0]["diff"]
+
+
+def test_mcp_apply_coverage_repair_defaults_to_dry_run(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    path = write_workflow(
+        workspace,
+        "fallback",
+        tags=("verification",),
+        steps=[{"id": "observe", "action": "observe_browser", "url": "http://localhost:3000"}],
+    )
+
+    payload = content_payload(
+        asyncio.run(
+            call_tool(
+                "apply_coverage_repair",
+                {
+                    "workspace_root": str(workspace.root),
+                    "changed_files": ["src/payment/checkout.py"],
+                },
+            )
+        )
+    )
+
+    assert payload["status"] == "dry_run"
+    assert payload["apply"] is False
+    assert "src/payment/" not in path.read_text(encoding="utf-8")
+
+
+def test_mcp_apply_coverage_repair_applies_affects_patch(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    path = write_workflow(
+        workspace,
+        "fallback",
+        tags=("verification",),
+        steps=[{"id": "observe", "action": "observe_browser", "url": "http://localhost:3000"}],
+    )
+
+    payload = content_payload(
+        asyncio.run(
+            call_tool(
+                "apply_coverage_repair",
+                {
+                    "workspace_root": str(workspace.root),
+                    "changed_files": ["src/payment/checkout.py"],
+                    "apply": True,
+                },
+            )
+        )
+    )
+
+    assert payload["status"] == "applied"
+    assert payload["applied_count"] == 1
+    assert payload["coverage_fixed"] is True
+    assert payload["post_apply_plan"]["status"] == "covered"
+    assert payload["post_apply_plan"]["primary_recommended_workflows"] == ["fallback"]
+    text = path.read_text(encoding="utf-8")
+    assert "affects:" in text
+    assert "src/payment/" in text
+
+
+def test_mcp_apply_coverage_repair_creates_new_workflow_for_uncovered_path(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_workflow(
+        workspace,
+        "profile",
+        affects=("src/profile/",),
+        tags=("verification",),
+        steps=[{"id": "observe", "action": "observe_browser", "url": "http://localhost:3000/profile"}],
+    )
+
+    payload = content_payload(
+        asyncio.run(
+            call_tool(
+                "apply_coverage_repair",
+                {
+                    "workspace_root": str(workspace.root),
+                    "changed_files": ["src/payment/checkout.py"],
+                    "apply": True,
+                },
+            )
+        )
+    )
+
+    target = workspace.workflows_dir / "src_payment_verification.yaml"
+    assert payload["status"] == "applied"
+    assert payload["applied"][0]["kind"] == "new_workflow"
+    assert payload["coverage_fixed"] is True
+    assert payload["post_apply_plan"]["status"] == "covered"
+    assert payload["post_apply_plan"]["primary_recommended_workflows"] == ["src_payment_verification"]
+    assert target.exists()
+    assert "src/payment/" in target.read_text(encoding="utf-8")
 
 
 def test_mcp_list_workflows_truncates_large_response(tmp_path) -> None:

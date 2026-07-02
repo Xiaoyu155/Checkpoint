@@ -6,7 +6,8 @@ tags:
   - desktop
   - ocr
   - real-acceptance
-description: Live desktop OCR acceptance skeleton. Put the target application in front before running supervised.
+  - slow
+description: Live desktop OCR acceptance skeleton. Put the target application in front before running supervised. Requires a live app and the `engine` input, so it is tagged slow and excluded from the default fast gate.
 steps:
   - id: observe_before
     action: observe_ocr

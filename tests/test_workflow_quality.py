@@ -35,6 +35,30 @@ def test_score_workflow_quality_counts_forbidden_error_contract() -> None:
     assert "no error path covered" not in score.gaps
 
 
+def test_score_workflow_quality_counts_text_contract_required_sections_as_success_path() -> None:
+    yaml_text = """
+    schema_version: 1
+    min_runtime_version: "0.1.0"
+    name: contract_success
+    version: 1
+    steps:
+      - id: observe_initial
+        action: observe_browser
+        url: http://localhost:3000
+      - id: assert_ready
+        action: assert_text_contract
+        required_all:
+          - Ready
+        forbidden_any:
+          - Error
+    """
+
+    score = score_workflow_quality(yaml_text)
+
+    assert score.covers_success_path is True
+    assert score.covers_error_path is True
+
+
 def test_score_workflow_quality_counts_text_from_as_data_display() -> None:
     yaml_text = """
     schema_version: 1

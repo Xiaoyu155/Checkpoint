@@ -172,6 +172,22 @@ class FakeInteractiveLocator:
     def click(self):
         self.page.text = "Saved OK"
 
+    @property
+    def first(self):
+        return self
+
+    def count(self):
+        return 1
+
+    def is_visible(self):
+        return True
+
+    def is_enabled(self):
+        return True
+
+    def bounding_box(self):
+        return {"x": 10, "y": 10, "width": 100, "height": 32}
+
 
 class FakeInteractivePage:
     url = "https://example.test/app"
@@ -231,9 +247,24 @@ def test_full_loop_with_clean_visuals_reaches_l4(tmp_path) -> None:
             "name": "full-loop",
             "steps": [
                 {"id": "observe", "action": "observe_browser", "url": "https://example.test/app"},
-                {"id": "check", "action": "assert_text", "text": "Demo Ready"},
-                {"id": "submit", "action": "click", "target": {"text": "Submit", "role": "button"}},
-                {"id": "verify", "action": "assert_text", "text": "Saved OK"},
+                {
+                    "id": "check",
+                    "action": "assert_text_contract",
+                    "required_all": ["Demo Ready"],
+                    "forbidden_any": ["Payment Failed"],
+                },
+                {
+                    "id": "submit",
+                    "action": "click",
+                    "target": {"text": "Submit", "role": "button"},
+                    "post_action_assert_text": "Saved OK",
+                },
+                {
+                    "id": "verify",
+                    "action": "assert_text_contract",
+                    "required_all": ["Saved OK"],
+                    "forbidden_any": ["Payment Failed"],
+                },
             ],
         }
     )
@@ -263,9 +294,24 @@ def test_blocking_visual_findings_keep_grade_at_l3(tmp_path) -> None:
             "name": "full-loop-bad-visuals",
             "steps": [
                 {"id": "observe", "action": "observe_browser", "url": "https://example.test/app"},
-                {"id": "check", "action": "assert_text", "text": "Demo Ready"},
-                {"id": "submit", "action": "click", "target": {"text": "Submit", "role": "button"}},
-                {"id": "verify", "action": "assert_text", "text": "Saved OK"},
+                {
+                    "id": "check",
+                    "action": "assert_text_contract",
+                    "required_all": ["Demo Ready"],
+                    "forbidden_any": ["Payment Failed"],
+                },
+                {
+                    "id": "submit",
+                    "action": "click",
+                    "target": {"text": "Submit", "role": "button"},
+                    "post_action_assert_text": "Saved OK",
+                },
+                {
+                    "id": "verify",
+                    "action": "assert_text_contract",
+                    "required_all": ["Saved OK"],
+                    "forbidden_any": ["Payment Failed"],
+                },
             ],
         }
     )

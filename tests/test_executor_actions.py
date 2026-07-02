@@ -31,6 +31,25 @@ class FakeExecLocator:
     def drag_to(self, destination):
         self._record("drag_to", destination.selector)
 
+    @property
+    def first(self):
+        return self
+
+    def count(self):
+        return 1
+
+    def is_visible(self):
+        return True
+
+    def is_enabled(self):
+        return True
+
+    def is_editable(self):
+        return True
+
+    def bounding_box(self):
+        return {"x": 1, "y": 2, "width": 100, "height": 20}
+
 
 class FakeFrameScope:
     def __init__(self, page, frame_selector):
@@ -218,8 +237,13 @@ def test_new_actions_count_as_real_interactions_for_acceptance(tmp_path) -> None
         tmp_path,
         [
             {"id": "check", "action": "assert_text", "text": "Demo Ready"},
-            {"id": "upload", "action": "upload_file", "selector": "#file", "path": str(sample)},
-            {"id": "verify", "action": "assert_text", "text": "Demo Ready"},
+            {"id": "upload", "action": "upload_file", "selector": "#file", "path": str(sample), "post_action_assert_text": "Demo Ready"},
+            {
+                "id": "verify",
+                "action": "assert_text_contract",
+                "required_all": ["Demo Ready"],
+                "forbidden_any": ["Fatal Error"],
+            },
         ],
     )
 
