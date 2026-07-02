@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_capabilities import load_agent_profile, recommend_worker_config
+from .model_router import route_task, tier_task_kind
 from .codex_check import codex_coverage_summary
 from .git_diff import affected_workflows, changed_files
 from .models import to_jsonable
@@ -191,6 +192,8 @@ def build_chief_plan(
             repo_path=repo_path,
             verification_commands=commands,
             memory_notes=memory_notes,
+            changed_files=changed,
+            acceptance_criteria=_acceptance_criteria(objective, coverage_status=coverage_status, answers=answer_list),
         ),
         verification_commands=commands,
         next_actions=_next_actions(status=status, coverage=coverage, selected_refs=selected_refs, commands=commands),
@@ -251,6 +254,9 @@ def chief_plan_to_markdown(plan: ChiefPlan) -> str:
     if plan.worker_tracks:
         for track in plan.worker_tracks:
             lines.append(f"- `{track['id']}` using `{track['agent']}`: {track['role']}")
+            if track.get("tier"):
+                reason = track.get("route_reason") or ""
+                lines.append(f"  Cost tier: `{track['tier']}`" + (f" — {reason}" if reason else ""))
             if track.get("model"):
                 sandbox = (track.get("sandbox") or {}).get("name") or ""
                 approval = (track.get("approval") or {}).get("name") or ""
@@ -435,6 +441,8 @@ def _worker_tracks(
     repo_path: Path,
     verification_commands: list[str],
     memory_notes: list[str] | None = None,
+    changed_files: list[str] | None = None,
+    acceptance_criteria: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     tracks: list[dict[str, Any]] = []
     notes = [item for item in (memory_notes or []) if item]
@@ -446,9 +454,15 @@ def _worker_tracks(
             role = "multimodal inspection reviewer"
             task_kind = "inspection"
             prompt = _inspection_prompt(objective, verification_commands)
+            route = None
         else:
             role = "implementation worker" if index == 1 else "review and alternative implementation worker"
-            task_kind = "implementation"
+            route = route_task(
+                objective=objective,
+                changed_files=changed_files or [],
+                acceptance_criteria=acceptance_criteria or [],
+            )
+            task_kind = tier_task_kind(route.tier)
             prompt = _single_line_prompt(objective, verification_commands)
         prompt = _with_memory_notes(prompt, notes)
         model = ""
@@ -474,6 +488,8 @@ def _worker_tracks(
                 "repo_root": str(repo_path),
                 "checkpoint_workspace": str(workspace_path),
                 "model": model,
+                "tier": route.tier if route else "",
+                "route_reason": route.reason if route else "",
                 "sandbox": sandbox,
                 "approval": approval,
                 "parallelism_hint": parallelism_hint,

@@ -97,10 +97,20 @@ def recommend_worker_config(profile: dict[str, Any], *, task_kind: str = "implem
 
 
 def _select_model(models: list[Any], *, task_kind: str) -> str:
-    wanted_role = {"fast": "fast", "inspection": "default", "implementation": "default"}.get(task_kind, "default")
+    wanted_role = {
+        "fast": "fast",
+        "balanced": "balanced",
+        "inspection": "default",
+        "implementation": "default",
+    }.get(task_kind, "default")
     entries = [m for m in models if isinstance(m, dict) and m.get("id")]
     for entry in entries:
         if str(entry.get("role") or "") == wanted_role:
+            return str(entry["id"])
+    # No exact role (e.g. an agent without a "balanced" model): fall back to the
+    # default/first model rather than failing.
+    for entry in entries:
+        if str(entry.get("role") or "") == "default":
             return str(entry["id"])
     return str(entries[0]["id"]) if entries else ""
 
