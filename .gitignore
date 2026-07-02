@@ -8,6 +8,12 @@
 .agent-secrets/
 国产模型api组.txt
 model_api_keys.txt
+ai模型api.txt
+*api*.txt
+*.key
+*.secret
+.env
+.env.*
 .agent-workspace/runs/
 .agent-workspace/reports/
 .agent-workspace/gui/

@@ -806,6 +806,12 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     agents.add_argument("agent", nargs="?", default=None, help="Agent name for show (codex or claude-code).")
     agents.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
+    dashboard_cmd = subparsers.add_parser("dashboard", help="Serve a local web dashboard: missions, plans, verification status, installed agents.")
+    dashboard_cmd.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root to visualize.")
+    dashboard_cmd.add_argument("--host", default="127.0.0.1", help="Bind host. Default: 127.0.0.1 (local only).")
+    dashboard_cmd.add_argument("--port", type=int, default=8787, help="Bind port. Default: 8787.")
+    dashboard_cmd.add_argument("--no-open", action="store_true", help="Do not auto-open the browser.")
+
     verify = subparsers.add_parser("verify", help="Run verification-tagged workspace workflows.")
     verify.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
     verify.add_argument("--tags", default="verification", help="Comma-separated workflow tags to run. Default: verification.")
@@ -2154,6 +2160,16 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(chief_run_to_markdown(payload))
         return 0 if str(payload.get("status") or "") == "verified" else 1
+    if args.command == "dashboard":
+        from .dashboard import serve_dashboard
+
+        serve_dashboard(
+            workspace_root=args.workspace_root,
+            host=args.host,
+            port=args.port,
+            open_browser=not args.no_open,
+        )
+        return 0
     if args.command == "agents":
         from .agent_capabilities import (
             agent_profile_to_markdown,
