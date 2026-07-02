@@ -157,7 +157,9 @@ def test_chief_plan_defaults_to_one_coding_worker(tmp_path, monkeypatch) -> None
         repo_root=tmp_path,
     )
 
-    assert [track["agent"] for track in plan.worker_tracks] == ["codex"]
+    # One coding worker by default, and it is Claude Code (runs on the user's
+    # subscription; Codex stays available via --agent codex).
+    assert [track["agent"] for track in plan.worker_tracks] == ["claude-code"]
 
 
 def test_chief_plan_marks_gemini_as_inspection_lane(tmp_path, monkeypatch) -> None:

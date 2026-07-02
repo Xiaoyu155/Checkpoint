@@ -13,7 +13,10 @@ from .project_memory import build_project_memory, project_memory_handoff_notes
 from .workspace import WorkflowRef, discover_workflows, open_workspace
 
 
-DEFAULT_AGENT_ORDER = ("codex",)
+# Claude Code is the default coding worker: it runs on the user's existing
+# subscription (no extra API key), and Codex is currently unavailable. Codex
+# stays a supported adapter — pass --agent codex to use it.
+DEFAULT_AGENT_ORDER = ("claude-code",)
 ORCHESTRATION_PATTERNS = (
     {
         "name": "worktree_isolation",
@@ -484,13 +487,20 @@ def _worker_tracks(
 def _agent_command(profile: dict[str, Any], *, prompt: str, config: dict[str, Any]) -> str:
     headless = profile.get("headless") if isinstance(profile.get("headless"), dict) else {}
     base_template = str(headless.get("command") or "").strip()
-    flags = _dedupe_flags(
-        [
-            str(config.get("model_flag") or "").strip(),
-            str((config.get("sandbox") or {}).get("flag") or "").strip(),
-            str((config.get("approval") or {}).get("flag") or "").strip(),
-        ]
-    )
+    headless_perm = str(headless.get("permission_flag") or "").strip()
+    headless_extra = str(headless.get("extra_flags") or "").strip()
+    if headless_perm or headless_extra:
+        # Headless-safe flags (e.g. acceptEdits + json) so the previewed command
+        # matches the executed one and does not hang on interactive prompts.
+        flags = _dedupe_flags([str(config.get("model_flag") or "").strip(), headless_perm, headless_extra])
+    else:
+        flags = _dedupe_flags(
+            [
+                str(config.get("model_flag") or "").strip(),
+                str((config.get("sandbox") or {}).get("flag") or "").strip(),
+                str((config.get("approval") or {}).get("flag") or "").strip(),
+            ]
+        )
     if base_template and re.search(r"(^|\s)-p\s+\"?<prompt>\"?", base_template):
         base = re.sub(r"\s+-p\s+\"?<prompt>\"?", "", base_template).strip()
         parts = [base, *flags, "-p", _quote_cli(prompt)]

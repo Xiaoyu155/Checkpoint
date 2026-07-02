@@ -294,7 +294,8 @@ def _select_track(plan: dict[str, Any], *, track_id: str | None) -> dict[str, An
     for track in tracks:
         if not isinstance(track, dict):
             continue
-        if canonical_agent_name(str(track.get("agent") or "")) == "codex" and str(track.get("track_kind") or "implementation") != "inspection":
+        agent = canonical_agent_name(str(track.get("agent") or ""))
+        if agent in EXECUTABLE_CODING_AGENTS and str(track.get("track_kind") or "implementation") != "inspection":
             return track
     return next((track for track in tracks if isinstance(track, dict)), None)
 
