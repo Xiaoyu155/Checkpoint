@@ -30,6 +30,7 @@ def _build_value(root: Path, missions: list[dict[str, Any]], plans: list[dict[st
     verified = sum(1 for m in missions if str(m.get("status") or "") == "verified")
     tier_counts = {"cheap": 0, "standard": 0, "strong": 0}
     spent_usd = 0.0
+    saved_usd = 0.0
     input_tokens = 0
     output_tokens = 0
     real_runs = 0
@@ -44,12 +45,17 @@ def _build_value(root: Path, missions: list[dict[str, Any]], plans: list[dict[st
                 tier_counts[tier] += 1
         for record in load_worker_records(root, plan_id) or []:
             usage = record.get("usage") if isinstance(record.get("usage"), dict) else {}
+            cost = float(usage.get("cost_usd") or 0.0)
             if usage.get("cost_usd") is not None:
-                spent_usd += float(usage.get("cost_usd") or 0.0)
                 real_runs += 1
+                # A cheap external backend (e.g. MiMo) reports a Claude-priced cost
+                # but bills its own cheap credits, so it counts as saved, not spent.
+                if usage.get("cost_is_savings"):
+                    saved_usd += cost
+                else:
+                    spent_usd += cost
             input_tokens += int(usage.get("input_tokens") or 0)
             output_tokens += int(usage.get("output_tokens") or 0)
-    # Estimated savings: tokens actually spent, priced at each tier vs all-strong.
     routed_tasks = tier_counts["cheap"] + tier_counts["standard"]
     return {
         "missions_total": len(missions),
@@ -57,6 +63,7 @@ def _build_value(root: Path, missions: list[dict[str, Any]], plans: list[dict[st
         "tier_counts": tier_counts,
         "downgraded_tasks": routed_tasks,
         "spent_usd": round(spent_usd, 4),
+        "saved_usd": round(saved_usd, 4),
         "real_worker_runs": real_runs,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -226,14 +233,12 @@ async function load(){
   document.getElementById('vTiers').innerHTML =
     `便宜 <b>${tc.cheap||0}</b> · 中档 <b>${tc.standard||0}</b> · 强 <b>${tc.strong||0}</b>`;
   document.getElementById('vSpent').textContent = '$' + (v.spent_usd||0).toFixed(2);
-  // Estimated savings: what the same output tokens would cost if every task used
-  // the strong tier, minus the tiered price. Honest, rough, clearly labeled.
-  const price={cheap:1,standard:4,strong:30}, tok=((v.input_tokens||0)+(v.output_tokens||0))/1e6;
-  const total=(tc.cheap||0)+(tc.standard||0)+(tc.strong||0)||1;
-  const blended=((tc.cheap||0)*price.cheap+(tc.standard||0)*price.standard+(tc.strong||0)*price.strong)/total;
-  const saved=Math.max(0, tok*(price.strong-blended));
-  document.getElementById('vSaved').textContent = '$'+saved.toFixed(2);
-  if(!v.real_worker_runs){ document.getElementById('vSpentMeta').innerHTML='真跑一个任务后这里显示真实成本与省下的钱'; }
+  // Saved = cost that ran on a cheap external backend (billed to cheap credits,
+  // not the Claude subscription). Real, measured per run.
+  document.getElementById('vSaved').textContent = '$'+(v.saved_usd||0).toFixed(2);
+  document.getElementById('vSpentMeta').innerHTML = v.real_worker_runs
+    ? ('订阅真实花费；走便宜后端省下 <b id="vSaved">$'+(v.saved_usd||0).toFixed(2)+'</b>')
+    : '真跑一个任务后这里显示真实成本与省下的钱';
   const st = d.status.state || 'none';
   const sp = document.getElementById('statusPill'); sp.textContent = st; sp.className = 'pill '+pill(st);
   document.getElementById('status').textContent = st;
