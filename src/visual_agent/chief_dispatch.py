@@ -568,8 +568,54 @@ def _run_worker_attempt(
         "stdout_tail": str(result.get("stdout_tail") or ""),
         "stderr_tail": str(result.get("stderr_tail") or ""),
     }
+    usage = _extract_worker_usage(str(track.get("agent") or ""), log_path, str(result.get("stdout_tail") or ""))
+    if usage:
+        record["usage"] = usage
     append_worker_record(workspace_root, plan_id, record)
     return record
+
+
+def _extract_worker_usage(agent: str, log_path: Path, stdout_tail: str) -> dict[str, Any] | None:
+    """Pull real cost/token usage from a worker run.
+
+    Claude Code's ``-p --output-format json`` emits a result object with
+    ``total_cost_usd`` and a ``usage`` block. Recording it gives DevPacer a real
+    budget ledger instead of an estimate.
+    """
+    if canonical_agent_name(agent) != "claude-code":
+        return None
+    text = ""
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        text = (stdout_tail or "").strip()
+    if not text:
+        return None
+    payload: dict[str, Any] | None = None
+    candidates = [text]
+    if "{" in text:
+        candidates.append(text[text.rfind("{") :])
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(obj, dict) and ("total_cost_usd" in obj or "usage" in obj):
+            payload = obj
+            break
+    if payload is None:
+        return None
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    ledger = {
+        "cost_usd": payload.get("total_cost_usd"),
+        "input_tokens": usage.get("input_tokens"),
+        "output_tokens": usage.get("output_tokens"),
+        "cache_read_input_tokens": usage.get("cache_read_input_tokens"),
+        "cache_creation_input_tokens": usage.get("cache_creation_input_tokens"),
+        "num_turns": payload.get("num_turns"),
+        "session_id": payload.get("session_id"),
+    }
+    return {key: value for key, value in ledger.items() if value is not None}
 
 
 def run_process_capture(argv: list[str], cwd: Path, timeout_seconds: float, log_path: Path) -> dict[str, Any]:

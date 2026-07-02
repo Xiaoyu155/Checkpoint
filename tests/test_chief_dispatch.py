@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from visual_agent.chief_dispatch import build_worker_command, dispatch_chief_plan, run_dispatch_verification, workspace_record_dirty_prefixes
@@ -128,6 +129,31 @@ def test_chief_dispatch_inspection_only_verdict_is_not_verified(tmp_path, monkey
 
 def _codex_track() -> dict:
     return {"id": "track_1_codex", "agent": "codex", "model": "gpt-5-codex"}
+
+
+def test_extract_worker_usage_parses_claude_code_cost(tmp_path) -> None:
+    from visual_agent.chief_dispatch import _extract_worker_usage
+
+    log = tmp_path / "worker.log"
+    log.write_text(json.dumps({
+        "type": "result", "subtype": "success", "result": "DEVPACER_OK",
+        "total_cost_usd": 0.041891, "num_turns": 1, "session_id": "abc123",
+        "usage": {"input_tokens": 2301, "output_tokens": 11, "cache_read_input_tokens": 11662, "cache_creation_input_tokens": 2428},
+    }), encoding="utf-8")
+
+    usage = _extract_worker_usage("claude-code", log, "")
+
+    assert usage["cost_usd"] == 0.041891
+    assert usage["input_tokens"] == 2301
+    assert usage["session_id"] == "abc123"
+
+
+def test_extract_worker_usage_none_for_codex(tmp_path) -> None:
+    from visual_agent.chief_dispatch import _extract_worker_usage
+
+    log = tmp_path / "worker.log"
+    log.write_text("codex output, not json", encoding="utf-8")
+    assert _extract_worker_usage("codex", log, "") is None
 
 
 def test_build_worker_command_claude_code_is_headless(tmp_path) -> None:
