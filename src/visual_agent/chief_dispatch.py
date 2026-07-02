@@ -506,34 +506,42 @@ def run_dispatch_verification(
     verification_workspace_path = (verification_workspace_root or workspace_root).expanduser().resolve()
     now = datetime.now(timezone.utc).isoformat()
 
-    # 1) Command gate first: the project's own test/build command. This works on
-    # any project without authored workflows, and a failure here short-circuits
-    # (no point verifying the UI if the tests are red).
-    command_result = None
+    # Command gate: when a test/build command is given, it IS the acceptance
+    # (works on any project, no authored workflows). It is deterministic and
+    # cannot be gamed by the model, so it fully replaces workflow verification —
+    # otherwise a workspace's seeded demo workflows would fail on an unrelated
+    # project.
     if test_command:
         command_result = run_command_verification(command=test_command, repo_root=Path(repo_root))
-        if command_result.get("verdict") == "fail":
-            payload = {
-                "plan_id": plan_id,
-                "repo_root": str(repo_root),
-                "workspace_root": str(verification_workspace_path),
-                "records_workspace_root": str(workspace_root),
-                "run_profile": run_profile,
-                "passed": 0,
-                "inspection_only": 0,
-                "failed": 1,
-                "total": 1,
-                "verdict": "fail",
-                "command_verification": command_result,
-                "markdown": f"Test command failed: `{test_command}` (exit {command_result.get('exit_code')}).",
-                "repair_brief": command_repair_brief(command_result),
-                "recorded_at": now,
-            }
-            saved = save_verification(workspace_root, plan_id, payload)
-            payload["saved_path"] = saved["path"]
-            return payload
+        verdict = "pass" if command_result.get("verdict") == "pass" else "fail"
+        passed = 1 if verdict == "pass" else 0
+        payload = {
+            "plan_id": plan_id,
+            "repo_root": str(repo_root),
+            "workspace_root": str(verification_workspace_path),
+            "records_workspace_root": str(workspace_root),
+            "run_profile": run_profile,
+            "passed": passed,
+            "inspection_only": 0,
+            "failed": 0 if verdict == "pass" else 1,
+            "total": 1,
+            "verdict": verdict,
+            "command_verification": command_result,
+            "markdown": (
+                f"Test command `{test_command}` passed (exit 0)."
+                if verdict == "pass"
+                else f"Test command failed: `{test_command}` (exit {command_result.get('exit_code')})."
+            ),
+            "recorded_at": now,
+        }
+        if verdict == "fail":
+            payload["repair_brief"] = command_repair_brief(command_result)
+        saved = save_verification(workspace_root, plan_id, payload)
+        payload["saved_path"] = saved["path"]
+        return payload
 
-    # 2) Workflow verification (product UI), when workflows exist.
+    command_result = None
+    # Workflow verification (product UI), when no test command was given.
     workspace = open_workspace(verification_workspace_path)
     runner = codex_runner or run_codex_check
     changed = _coverage_changed_files(repo_root=Path(repo_root), workspace_root=verification_workspace_path)
