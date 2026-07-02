@@ -9,6 +9,7 @@ from .agent_capabilities import load_agent_profile, recommend_worker_config
 from .codex_check import codex_coverage_summary
 from .git_diff import affected_workflows, changed_files
 from .models import to_jsonable
+from .project_memory import build_project_memory, project_memory_handoff_notes
 from .workspace import WorkflowRef, discover_workflows, open_workspace
 
 
@@ -52,6 +53,7 @@ class ChiefPlan:
     handoff_prompt: str = ""
     clarity: dict[str, Any] = field(default_factory=dict)
     clarifying_questions: list[str] = field(default_factory=list)
+    project_memory: dict[str, Any] = field(default_factory=dict)
     plan_id: str = ""
     patterns_reused: tuple[dict[str, str], ...] = ORCHESTRATION_PATTERNS
 
@@ -109,6 +111,9 @@ def build_chief_plan(
             clarifying_questions=list(clarity["questions"]) if clarity["questions"] else [],
         )
 
+    project_memory = build_project_memory(workspace_root=workspace_path, goal=objective, limit=5)
+    memory_notes = project_memory_handoff_notes(project_memory)
+
     # Requirements gate: refuse to dispatch a goal with no verifiable definition
     # of done. Withholding dispatch here is the point — it saves a wasted agent
     # run and forces the objective to be sharpened first.
@@ -138,6 +143,7 @@ def build_chief_plan(
             handoff_prompt="",
             clarity=clarity,
             clarifying_questions=list(clarity["questions"]),
+            project_memory=project_memory,
         )
 
     workspace = open_workspace(workspace_path)
@@ -181,13 +187,15 @@ def build_chief_plan(
             workspace_path=workspace_path,
             repo_path=repo_path,
             verification_commands=commands,
+            memory_notes=memory_notes,
         ),
         verification_commands=commands,
         next_actions=_next_actions(status=status, coverage=coverage, selected_refs=selected_refs, commands=commands),
         risks=_risks(changed=changed, runnable_refs=runnable_refs, selected_refs=selected_refs, coverage=coverage),
         clarity=clarity,
         clarifying_questions=list(clarity["questions"]) if (interview and clarity["questions"]) else [],
-        handoff_prompt=_handoff_prompt(objective, selected_names, commands, status=status),
+        project_memory=project_memory,
+        handoff_prompt=_handoff_prompt(objective, selected_names, commands, status=status, memory_notes=memory_notes),
     )
 
 
@@ -223,6 +231,14 @@ def chief_plan_to_markdown(plan: ChiefPlan) -> str:
     )
     if plan.skipped_slow_workflows:
         lines.append("Skipped slow workflows: " + ", ".join(plan.skipped_slow_workflows))
+    memory_entries = plan.project_memory.get("entries") if isinstance(plan.project_memory, dict) else []
+    if memory_entries:
+        lines.extend(["", "### Project Memory", ""])
+        for note in project_memory_handoff_notes(plan.project_memory):
+            lines.append(f"- {note}")
+        if not project_memory_handoff_notes(plan.project_memory):
+            for item in memory_entries[:3]:
+                lines.append(f"- `{item.get('mission_id')}` [{item.get('status')}] {item.get('objective')}")
     lines.extend(["", "### Acceptance Criteria", ""])
     lines.extend(f"- {item}" for item in plan.acceptance_criteria)
     if plan.clarifying_questions:
@@ -415,8 +431,10 @@ def _worker_tracks(
     workspace_path: Path,
     repo_path: Path,
     verification_commands: list[str],
+    memory_notes: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     tracks: list[dict[str, Any]] = []
+    notes = [item for item in (memory_notes or []) if item]
     for index, agent in enumerate(agents, start=1):
         profile = load_agent_profile(agent)
         primary_role = str((profile or {}).get("primary_role") or "")
@@ -429,6 +447,7 @@ def _worker_tracks(
             role = "implementation worker" if index == 1 else "review and alternative implementation worker"
             task_kind = "implementation"
             prompt = _single_line_prompt(objective, verification_commands)
+        prompt = _with_memory_notes(prompt, notes)
         model = ""
         sandbox: dict[str, str] = {}
         approval: dict[str, str] = {}
@@ -622,20 +641,28 @@ def _risks(
     return risks
 
 
-def _handoff_prompt(objective: str, workflows: list[str], commands: list[str], *, status: str) -> str:
+def _handoff_prompt(
+    objective: str,
+    workflows: list[str],
+    commands: list[str],
+    *,
+    status: str,
+    memory_notes: list[str] | None = None,
+) -> str:
     workflow_text = ", ".join(workflows) if workflows else "no selected workflow yet"
     command_text = "\n".join(f"- {command}" for command in commands)
-    return "\n".join(
-        [
-            f"Objective: {objective}",
-            f"Chief plan status: {status}",
-            f"Selected Checkpoint workflows: {workflow_text}",
-            "Work only inside the repository. Keep changes scoped to the objective.",
-            "Before claiming done, run the verification command and read the failure evidence if it fails.",
-            "Verification commands:",
-            command_text,
-        ]
-    )
+    lines = [
+        f"Objective: {objective}",
+        f"Chief plan status: {status}",
+        f"Selected Checkpoint workflows: {workflow_text}",
+        "Work only inside the repository. Keep changes scoped to the objective.",
+        "Before claiming done, run the verification command and read the failure evidence if it fails.",
+    ]
+    notes = [item for item in (memory_notes or []) if item]
+    if notes:
+        lines.extend(["Project memory:", *[f"- {item}" for item in notes]])
+    lines.extend(["Verification commands:", command_text])
+    return "\n".join(lines)
 
 
 def _single_line_prompt(objective: str, commands: list[str]) -> str:
@@ -650,6 +677,13 @@ def _inspection_prompt(objective: str, commands: list[str]) -> str:
         f"read-only multimodal reviewer. Do not edit code. If more evidence is needed, suggest "
         f"running: {command}. Summarize visual risks and missing acceptance evidence."
     )
+
+
+def _with_memory_notes(prompt: str, notes: list[str]) -> str:
+    if not notes:
+        return prompt
+    memory = " ".join(f"Project memory: {item}" for item in notes[:3])
+    return f"{prompt} {memory}"
 
 
 def _safe_token(value: str) -> str:

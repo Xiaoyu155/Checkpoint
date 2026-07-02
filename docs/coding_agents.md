@@ -150,6 +150,22 @@ The queue marks an item `success` only when the mission result is `verified`;
 other stop reasons are recorded as `failed` with the mission stop reason and
 final report path.
 
+## DevPacer Project Memory
+
+Project memory is derived from durable evidence (`missions/`, `chief_plans/`,
+`rounds.jsonl`, and final reports). It is not an LLM-generated recollection.
+
+```powershell
+checkpoint chief-memory --workspace-root .agent-workspace --goal "Fix checkout total"
+```
+
+`chief-memory` ranks relevant previous missions, summarizes stop reasons,
+failed signatures, final reports, and recommendations such as "add workflow
+coverage before dispatching similar work" or "inspect the repeated failure
+before spending another run." `chief-plan` also reads this memory and injects a
+short project-memory block into worker handoff prompts, so a new mission can
+reuse evidence from earlier missions.
+
 Run the deterministic checkout mission demo when auditing the loop without
 spending coding-agent tokens:
 

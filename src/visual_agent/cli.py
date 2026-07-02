@@ -714,6 +714,12 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     chief_missions.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing missions.")
     chief_missions.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
+    chief_memory = subparsers.add_parser("chief-memory", help="Summarize evidence-derived DevPacer project memory.")
+    chief_memory.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing missions and plans.")
+    chief_memory.add_argument("--goal", default=None, help="Optional goal to rank relevant previous missions.")
+    chief_memory.add_argument("--limit", type=int, default=8, help="Maximum memory entries. Default: 8.")
+    chief_memory.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
     chief_status = subparsers.add_parser("chief-status", help="Show the current status of a saved DevPacer mission.")
     chief_status.add_argument("--mission", required=True, help="Mission id to inspect.")
     chief_status.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing missions.")
@@ -1768,6 +1774,15 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
         else:
             print(chief_run_to_markdown(payload))
+        return 0
+    if args.command == "chief-memory":
+        from .project_memory import build_project_memory, payload_to_json, project_memory_to_markdown
+
+        payload = build_project_memory(workspace_root=args.workspace_root, goal=args.goal, limit=args.limit)
+        if args.format == "json":
+            print(payload_to_json(payload))
+        else:
+            print(project_memory_to_markdown(payload))
         return 0
     if args.command == "chief-status":
         from .chief_run import chief_run_to_markdown, mission_status_payload, payload_to_json

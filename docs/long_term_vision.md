@@ -31,6 +31,17 @@ Mission queue contract:
 - File locking is enough for the local single-machine product. Do not expand
   this into a distributed scheduler until local mission reliability is proven.
 
+Project memory contract:
+
+- Project memory is computed from durable evidence: missions, plans, rounds,
+  final reports, and verification records.
+- It is not an LLM-authored diary. If a memory cannot point back to a mission or
+  report, it should not be treated as product memory.
+- `chief-memory` is the read surface; `chief-plan` may inject short memory notes
+  into worker handoff prompts.
+- Memory can advise, warn, and route attention. It must not override structured
+  verification verdicts.
+
 Stable stop reasons:
 
 - `verified`

@@ -18,12 +18,12 @@
 | 2 | 驱动 Codex 开发 | ✅ 已有：chief-dispatch/chief-run，worktree 隔离，Codex-only adapter，preview→execute 安全门 | **真实 token 场景未做最终验收**（deterministic demo 已证明框架） |
 | 3 | 合理利用各种模型 | 🚧 部分：能力档案（codex/claude-code/gemini YAML）+ recommend_worker_config（strong/fast 按任务选型）；budget.json 已有 model_policy 槽位（implementation/repair/classification/visual_review） | model_policy 还没有被执行路径真正消费——现在派发始终用同一模型；"简单修复用 fast 模型"未落地 |
 | 4 | 合理规划额度 | 🚧 部分：budget.json（max_rounds/wall_minutes/worker_minutes/repair_rounds），budget_exhausted 停机 | 无 token/费用统计；无"这个任务预计花多少、值不值"的预估；无跨 mission 的额度台账 |
-| 5 | 有记忆、熟悉单一工作的进程 | ❌ 最大缺口：mission 内有 rounds.jsonl/final_report，repair_history 有单 workflow 修复记录 | **无跨 mission 的项目记忆**——新 mission 不知道上次改了什么、哪里失败过、哪种修复有效。这是"中介熟悉工作进程"的核心 |
+| 5 | 有记忆、熟悉单一工作的进程 | 🚧 v1 已落地：`project_memory.py` 从 missions/plans/rounds/final_report 聚合项目记忆；`chief-memory` 可查询；`chief-plan` 会把相关记忆注入 worker handoff | 仍缺更深的跨 mission 失败签名升级、有效修复模式归纳、常改文件区和额度台账联动 |
 | 6 | 端到端测试验收 | ✅ 最强资产：Checkpoint 引擎（DOM/UIA/OCR/视觉、L1-L4 验收分级、结构化失败证据） | 对任意用户项目的 workflow 自动生成/录制还需要打磨（现在 demo 项目最顺） |
 | 7 | Codex 跑偏时及时纠正 | 🚧 部分：验收失败→repair brief→auto-repair-once；same_failure_repeated 停机 | 纠偏只有"验收失败"一种触发；缺进程中信号（改了不该改的文件、diff 规模异常、偏离验收标准）；修复只有一轮 |
 | 8 | 避免开发/测试死循环 | ✅ 设计正确：same_failure_repeated + budget_exhausted + 需求门拦截 | 失败签名只在单 mission 内比对；跨 mission 的"这个坑上次就踩过"要靠 #5 的记忆 |
 
-**结论：8 项能力中 3 项已成立、4 项部分成立、1 项（记忆）基本缺失。骨架是对的，愿景可达。**
+**结论：8 项能力中 3 项已成立、5 项部分成立。骨架是对的，愿景可达；记忆 v1 已补上，但还需要从"查历史"升级到"主动防止重复踩坑"。**
 
 ## 二、Gemini 世界模型评估（应负责人要求）
 
@@ -61,30 +61,34 @@ Gemini 可以把验收从"通过"升级为"通过但有 2 个视觉风险需人�
 
 1. **分批提交当前工作**（前置，防丢失；需负责人批准）。
 2. **真实 Codex token 干净验收**：隔离 repo + 真缺陷 + 真 `codex exec` + supervised 验收 + 记录 wall time/rounds。这是产品可信度的最后一块。
-3. **项目记忆 v1（能力 #5，最大缺口）**：
-   - 新增 `project_memory.py`：从既有 mission/plan/repair 落盘数据聚合出 per-repo 记忆——最近 missions（目标/结果/stop_reason）、失败签名史、有效修复模式、常改文件区。
-   - `chief-plan` / repair brief 注入"过往上下文"块：新 mission 自动知道"上次这个 workflow 在 assert_checkout_button 失败过，原因是文案改动"。
-   - 跨 mission 失败签名比对：同一签名第二次出现直接升级给人（死循环防护从单 mission 扩展到项目级）。
+3. **项目记忆 v1（能力 #5）— 已落地第一刀**：
+   - `project_memory.py` 从既有 mission/plan/rounds/final_report 聚合 per-repo 记忆：最近 missions、结果、stop_reason、失败签名、验收标准、final report。
+   - `checkpoint chief-memory --goal "..."` 可查询相关历史。
+   - `chief-plan` 注入项目记忆：worker prompt 会看到相关历史的 stop_reason / repeated failure / verified mission。
    - 不新建数据库：全部从已有 JSON/JSONL 聚合，保持本地、可审计。
-4. **入口收敛**：`checkpoint mission start --goal "..."`（内部串 plan→preview→确认→execute）、`mission status`、`mission list`。文档改成用户工作流叙事。
+4. **项目记忆 v2**：
+   - repair brief 注入更细的"过往上下文"块。
+   - 跨 mission 失败签名比对：同一签名第二次出现直接升级给人（死循环防护从单 mission 扩展到项目级）。
+   - 归纳有效修复模式和常改文件区。
+5. **入口收敛**：`checkpoint mission start --goal "..."`（内部串 plan→preview→确认→execute）、`mission status`、`mission list`。文档改成用户工作流叙事。
 
 **M1 完成标准**：负责人给一句开发计划 → 一条命令 → 走完派发+验收 → 回来看 final report；第二个 mission 能自动引用第一个的记忆。
 
 ### M2：首批用户可用
 
-5. **model_policy 真正生效（能力 #3）**：repair 轮用 fast 模型、implementation 用 strong 模型，按能力档案映射到具体 model id；省额度直接可量化。
-6. **额度台账（能力 #4）**：per-mission 和 per-repo 的 wall time / rounds / worker minutes 累计报表；`codex exec` 输出若含 token 信息则一并记录。
-7. **Gemini visual_review 接入**（按第二节设计，flag 默认关）。
-8. **queue cancel/retry + mission/queue 的 workflow coverage**（审计遗留项）。
-9. **进程中纠偏 v1（能力 #7 增强）**：worker 结束后、验收前，做 diff 规模与触碰范围检查（改了 plan 未涉及的目录 → 警告并入报告）。
+6. **model_policy 真正生效（能力 #3）**：repair 轮用 fast 模型、implementation 用 strong 模型，按能力档案映射到具体 model id；省额度直接可量化。
+7. **额度台账（能力 #4）**：per-mission 和 per-repo 的 wall time / rounds / worker minutes 累计报表；`codex exec` 输出若含 token 信息则一并记录。
+8. **Gemini visual_review 接入**（按第二节设计，flag 默认关）。
+9. **queue cancel/retry + mission/queue 的 workflow coverage**（审计遗留项）。
+10. **进程中纠偏 v1（能力 #7 增强）**：worker 结束后、验收前，做 diff 规模与触碰范围检查（改了 plan 未涉及的目录 → 警告并入报告）。
 
 **M2 完成标准**：一个非负责人的真实用户，用自己的 repo 跑通一个 mission，且账单/时间可解释。
 
 ### M3：产品化
 
-10. 多 worker 比较（此前一直押后，维持押后）。
-11. 简单 dashboard（读 mission/queue JSON 渲染，只读）。
-12. DevPacer CLI alias 与品牌落地。
+11. 多 worker 比较（此前一直押后，维持押后）。
+12. 简单 dashboard（读 mission/queue JSON 渲染，只读）。
+13. DevPacer CLI alias 与品牌落地。
 
 ## 四、原则重申（新增两条）
 
