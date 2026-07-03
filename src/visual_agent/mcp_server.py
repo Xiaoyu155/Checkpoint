@@ -7,7 +7,23 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .console import build_report_detail, report_detail_to_markdown
-from .mcp_audit import audit_mcp_call, workspace_for_audit
+from .mcp_helpers import (
+    RUN_PROFILE_ORDER,
+    audit_mcp_call,
+    build_benchmark_draft_payload,
+    build_benchmark_plan_payload,
+    enforce_mcp_run_profile,
+    get_session_context_payload,
+    get_visual_status_payload,
+    list_benchmarks_payload,
+    mcp_config as mcp_config,
+    quality_gate_payload,
+    run_browser_smoke_payload,
+    run_browser_smoke_suite_payload,
+    save_task_context_payload,
+    semantic_summary_payload,
+    workspace_for_audit,
+)
 from .mcp_common import (  # noqa: F401
     MCP_DETAIL_CONTENT_MAX_CHARS,
     MCP_DETAIL_RESPONSE_MAX_CHARS,
@@ -47,12 +63,7 @@ from .mcp_repair import (
     repair_workflow_payload,
     rollback_repair_payload,
 )
-from .mcp_benchmarks import build_benchmark_draft_payload, build_benchmark_plan_payload, list_benchmarks_payload
-from .mcp_browser import run_browser_smoke_payload, run_browser_smoke_suite_payload
-from .mcp_generation_format import quality_gate_payload, semantic_summary_payload
-from .mcp_policy import RUN_PROFILE_ORDER, enforce_mcp_run_profile, mcp_config as mcp_config
 from .mcp_response import budget_mcp_payload, mcp_error_payload
-from .mcp_session import get_session_context_payload, get_visual_status_payload, save_task_context_payload
 
 
 APP_NAME = "visual-agent"
