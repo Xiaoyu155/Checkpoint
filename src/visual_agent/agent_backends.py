@@ -77,3 +77,50 @@ def redact_backend(backend: dict[str, Any] | None) -> dict[str, Any] | None:
         "cost_is_savings": backend.get("cost_is_savings"),
         "base_url": (backend.get("env") or {}).get("ANTHROPIC_BASE_URL"),
     }
+
+
+def resolve_failover_backend(*, source: str | Path = DEFAULT_MODEL_CREDENTIAL_FILE) -> dict[str, Any] | None:
+    """Return a backend to keep working on when the subscription is exhausted.
+
+    Unlike ``resolve_backend_for_tier`` this ignores the task's tier: when the
+    Claude subscription is out of quota, running the task on a cheap backend
+    (MiMo) beats stopping, even for a non-cheap task. Returns None when no
+    backend token is configured (then the mission stops as before)."""
+    for name, cfg in BACKENDS.items():
+        token = _load_backend_token(name, source=source)
+        if token:
+            return {
+                "name": name,
+                "model": cfg["model"],
+                "cost_is_savings": bool(cfg.get("cost_is_savings")),
+                "env": {"ANTHROPIC_BASE_URL": cfg["base_url"], cfg["auth_env"]: token},
+            }
+    return None
+
+
+# Signatures Claude Code emits when the subscription hits its usage cap or is
+# rate-limited. Matched case-insensitively against the worker's stdout/stderr.
+_QUOTA_SIGNATURES = (
+    "usage limit reached",
+    "usage limit",
+    "rate limit",
+    "rate_limit",
+    "rate-limited",
+    "429",
+    "quota",
+    "insufficient credit",
+    "credit balance is too low",
+    "overloaded_error",
+    "resets at",
+    "upgrade to increase your usage",
+)
+
+
+def looks_like_quota_exhaustion(*texts: str) -> bool:
+    """True when worker output looks like a subscription quota / rate-limit block.
+
+    Deliberately broad: a false positive only means one extra cheap-backend
+    retry, while a miss would leave the user stuck exactly when they wanted to
+    keep going."""
+    blob = " ".join(str(t or "") for t in texts).lower()
+    return any(sig in blob for sig in _QUOTA_SIGNATURES)

@@ -18,7 +18,9 @@ Two hard rules:
 from __future__ import annotations
 
 import json
+import os
 import re
+from pathlib import Path
 from typing import Any
 
 from .chief_engineer import assess_goal_clarity
@@ -26,6 +28,73 @@ from .chief_engineer import assess_goal_clarity
 # Small, cheap default. Intake is a tiny classification/rewrite task; a large
 # model here would violate the whole point (spend less, not more).
 DEFAULT_INTAKE_MODEL = "claude-haiku-4-5-20251001"
+
+# Cheap third-party endpoints the receptionist prefers, in order. DeepSeek first:
+# in testing it was fast (~3s), answered in the user's language, and is cheap.
+# MiMo works too but is a slower reasoning model that drifts to English, so it
+# ranks lower for intake (its real strength is as a coding backend).
+_INTAKE_BACKENDS = [
+    {
+        "labels": ("deepseek",),
+        "model_id": "deepseek:deepseek-chat",
+        "base_url": "https://api.deepseek.com/v1",
+        "endpoint": "/chat/completions",
+        "key_re": r"sk-[A-Za-z0-9_\-]{20,}",
+        "max_tokens": 600,
+    },
+    {
+        "labels": ("mimo", "xiaomimimo", "小米"),
+        "model_id": "xiaomimimo:mimo-v2.5",
+        "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+        "endpoint": "/chat/completions",
+        "key_re": r"(?:sk|tp)-[A-Za-z0-9_\-]{16,}",
+        "max_tokens": 1200,
+    },
+]
+
+
+def _credential_candidates() -> list[Path]:
+    paths: list[Path] = []
+    override = os.environ.get("CHECKPOINT_MODEL_CREDENTIALS", "").strip()
+    if override:
+        paths.append(Path(override).expanduser())
+    paths.append(Path.cwd() / "model_api_keys.txt")
+    # The DevPacer install root (…/src/visual_agent/goal_intake.py -> repo root).
+    paths.append(Path(__file__).resolve().parents[2] / "model_api_keys.txt")
+    paths.append(Path.home() / "model_api_keys.txt")
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in paths:
+        if path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return unique
+
+
+def auto_intake_backend() -> dict[str, Any] | None:
+    """Resolve the best available cheap intake backend from the credential file.
+
+    Returns None when no key is found, so the receptionist works out of the box
+    for anyone who has a cheap key configured, without them passing URLs/keys."""
+    for candidate in _credential_candidates():
+        try:
+            text = candidate.read_text(encoding="utf-8-sig")
+        except OSError:
+            continue
+        for spec in _INTAKE_BACKENDS:
+            for line in text.splitlines():
+                low = line.lower()
+                if any(label in low for label in spec["labels"]):
+                    match = re.search(spec["key_re"], line)
+                    if match:
+                        return {
+                            "model_id": spec["model_id"],
+                            "api_key": match.group(0),
+                            "base_url": spec["base_url"],
+                            "endpoint": spec["endpoint"],
+                            "max_tokens": spec["max_tokens"],
+                        }
+    return None
 
 _SYSTEM_PROMPT = (
     "You are a requirements intake assistant for an autonomous coding task runner. "
@@ -46,9 +115,15 @@ def refine_goal(
     model_id: str | None = None,
     enable_model: bool = True,
     timeout_seconds: float = 20.0,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    endpoint: str | None = None,
+    max_tokens: int = 600,
 ) -> dict[str, Any]:
     """Return a sharpened-goal payload, using a cheap model when available.
 
+    ``base_url`` / ``api_key`` / ``endpoint`` let a caller point the receptionist
+    at any Anthropic/OpenAI-compatible cheap endpoint (e.g. MiMo, DeepSeek).
     Never raises: on any failure it returns the deterministic fallback so the
     caller (CLI, desktop app, web) can always show *something* useful."""
     clean = str(goal or "").strip()
@@ -65,8 +140,29 @@ def refine_goal(
     if not clean or not enable_model:
         return fallback
 
+    # If the caller did not pin a backend, auto-resolve a cheap one (e.g. the
+    # user's DeepSeek key) so the receptionist just works for a novice.
+    resolved_model = model_id
+    if api_key is None and base_url is None and model_id is None:
+        auto = auto_intake_backend()
+        if auto:
+            resolved_model = auto["model_id"]
+            api_key = auto["api_key"]
+            base_url = auto["base_url"]
+            endpoint = auto["endpoint"]
+            max_tokens = auto["max_tokens"]
+
     try:
-        text = _call_intake_model(clean, answers=answers, model_id=model_id, timeout_seconds=timeout_seconds)
+        text = _call_intake_model(
+            clean,
+            answers=answers,
+            model_id=resolved_model,
+            timeout_seconds=timeout_seconds,
+            api_key=api_key,
+            base_url=base_url,
+            endpoint=endpoint,
+            max_tokens=max_tokens,
+        )
         parsed = _parse_intake_json(text)
     except Exception as exc:  # noqa: BLE001 - any failure degrades to deterministic
         fallback["model_error"] = str(exc)[:200]
@@ -76,7 +172,7 @@ def refine_goal(
     suggested = str(parsed.get("suggested_goal") or "").strip() or clean
     return {
         "source": "model",
-        "model_id": model_id or DEFAULT_INTAKE_MODEL,
+        "model_id": resolved_model or DEFAULT_INTAKE_MODEL,
         "input_goal": clean,
         "already_clear": not questions,
         "clarifying_questions": questions,
@@ -92,6 +188,10 @@ def _call_intake_model(
     answers: list[str] | None,
     model_id: str | None,
     timeout_seconds: float,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    endpoint: str | None = None,
+    max_tokens: int = 600,
 ) -> str:
     from .llm_providers import resolve_llm_backend, run_llm_completion
 
@@ -104,7 +204,10 @@ def _call_intake_model(
         backend=backend,
         system_prompt=_SYSTEM_PROMPT,
         prompt=prompt,
-        max_tokens=400,
+        max_tokens=max_tokens,
+        api_key=api_key,
+        base_url=base_url,
+        endpoint=endpoint,
         timeout_seconds=timeout_seconds,
     )
 

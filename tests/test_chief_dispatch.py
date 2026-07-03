@@ -223,6 +223,93 @@ def test_chief_dispatch_cheap_tier_routes_to_external_backend(tmp_path, monkeypa
     assert "tp-secret" not in str(payload["worker"]["backend"])
 
 
+def test_summarize_worker_usage_separates_spend_and_savings() -> None:
+    from visual_agent.chief_dispatch import summarize_worker_usage
+
+    records = [
+        {"usage": {"input_tokens": 100, "output_tokens": 200, "cost_usd": 0.05}},
+        None,
+        {"usage": {"input_tokens": 10, "output_tokens": 20, "cost_usd": 0.30, "cost_is_savings": True}},
+    ]
+    summary = summarize_worker_usage(records)
+    assert summary["total_tokens"] == 330
+    assert summary["input_tokens"] == 110
+    assert summary["spent_usd"] == 0.05
+    assert summary["saved_usd"] == 0.30
+    assert summary["attempts_with_usage"] == 2
+
+
+def test_looks_like_quota_exhaustion() -> None:
+    from visual_agent.agent_backends import looks_like_quota_exhaustion
+
+    assert looks_like_quota_exhaustion("Claude usage limit reached")
+    assert looks_like_quota_exhaustion("", "HTTP 429 Too Many Requests")
+    assert looks_like_quota_exhaustion("Your credit balance is too low")
+    assert not looks_like_quota_exhaustion("build succeeded", "all tests passed")
+
+
+def test_chief_dispatch_quota_failover_to_mimo(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("claude-code",))
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: "claude" if name == "claude" else None)
+    # No cheap-tier backend initially (run on subscription), but a failover backend exists.
+    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.resolve_failover_backend",
+        lambda: {"name": "mimo", "model": "mimo-v2.5-pro", "cost_is_savings": True,
+                 "env": {"ANTHROPIC_BASE_URL": "https://mimo.example/anthropic", "ANTHROPIC_API_KEY": "tp-secret"}},
+    )
+
+    calls = []
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
+        calls.append({"argv": argv, "env": env})
+        if len(calls) == 1:
+            # Subscription attempt: Claude usage limit reached.
+            log_path.write_text("Claude usage limit reached. resets at 3pm", encoding="utf-8")
+            return {"exit_code": 1, "stdout_tail": "Claude usage limit reached. resets at 3pm", "stderr_tail": ""}
+        log_path.write_text("done on mimo", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "done on mimo", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root, plan_id=plan_id, execute=True, dry_run=False,
+        command_runner=fake_runner, codex_runner=passing_codex_result,
+    )
+
+    assert len(calls) == 2  # subscription attempt, then MiMo failover
+    assert payload["failover_worker_record"] is not None
+    assert payload["failover_worker_record"]["attempt"] == "quota_failover"
+    # The failover ran on the MiMo backend env.
+    assert calls[1]["env"]["ANTHROPIC_BASE_URL"] == "https://mimo.example/anthropic"
+    assert payload["status"] == "verified"
+    assert "tp-secret" not in str(payload["worker"].get("failover_backend"))
+
+
+def test_chief_dispatch_no_failover_on_normal_failure(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("claude-code",))
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: "claude" if name == "claude" else None)
+    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
+    failover_called = []
+    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_failover_backend", lambda: failover_called.append(1) or None)
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
+        # A normal compile error, not a quota block -> must NOT trigger failover.
+        log_path.write_text("SyntaxError: bad code", encoding="utf-8")
+        return {"exit_code": 1, "stdout_tail": "SyntaxError: bad code", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root, plan_id=plan_id, execute=True, dry_run=False,
+        command_runner=fake_runner, codex_runner=passing_codex_result,
+    )
+    assert payload["failover_worker_record"] is None
+    assert not failover_called  # quota detector never fired, so failover was not even resolved
+
+
 def test_chief_dispatch_executes_claude_code_worker(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("claude-code",))
     monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})

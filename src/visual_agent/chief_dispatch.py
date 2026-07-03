@@ -10,7 +10,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
 
-from .agent_backends import redact_backend, resolve_backend_for_tier
+from .agent_backends import looks_like_quota_exhaustion, redact_backend, resolve_backend_for_tier, resolve_failover_backend
 from .agent_capabilities import canonical_agent_name, load_agent_profile, recommend_worker_config
 from .command_verification import changed_test_files, command_repair_brief, run_command_verification, tamper_repair_brief
 from .chief_plans_store import append_worker_record, load_plan, plan_dir, save_verification
@@ -261,6 +261,37 @@ def dispatch_chief_plan(
         backend=worker_backend,
     )
 
+    # Quota failover: if the subscription worker was blocked by a usage/rate
+    # limit, keep going on a cheap backend (MiMo) instead of stopping — exactly
+    # the "Claude ran out, continue on MiMo" case. Only when we were not already
+    # on a backend and one is configured.
+    failover_record: dict[str, Any] | None = None
+    if (
+        worker_agent_norm == "claude-code"
+        and worker_backend is None
+        and worker_record.get("status") != "completed"
+        and looks_like_quota_exhaustion(worker_record.get("stdout_tail"), worker_record.get("stderr_tail"))
+    ):
+        failover_backend = resolve_failover_backend()
+        if failover_backend:
+            failover_argv = _override_model_flag(list(worker_command["argv"]), failover_backend["model"])
+            preview["worker"]["failover_backend"] = redact_backend(failover_backend)
+            failover_record = _run_worker_attempt(
+                workspace_root=workspace_path,
+                plan_id=plan_id,
+                attempt="quota_failover",
+                track=selected_track,
+                argv=failover_argv,
+                cwd=worktree,
+                timeout_seconds=timeout_seconds,
+                log_path=logs_dir / f"{track_token}-quota-failover.log",
+                runner=runner,
+                env=failover_backend["env"],
+                backend=failover_backend,
+            )
+            # The failover attempt is what verification should judge.
+            worker_record = failover_record
+
     verification_attempts: list[dict[str, Any]] = []
     verification = run_dispatch_verification(
         workspace_root=workspace_path,
@@ -353,13 +384,50 @@ def dispatch_chief_plan(
         "status": status,
         "dry_run": False,
         "worker_record": worker_record,
+        "failover_worker_record": failover_record,
         "repair_worker_record": repair_worker_record,
         "verification_attempts": verification_attempts,
         "latest_verification": latest_verification,
+        "usage_summary": summarize_worker_usage(
+            [worker_record, failover_record, repair_worker_record]
+        ),
     }
     if merge_result is not None:
         payload["merge"] = merge_result
     return payload
+
+
+def summarize_worker_usage(records: list[dict[str, Any] | None]) -> dict[str, Any]:
+    """Aggregate token/cost across a dispatch's worker attempts so the user can
+    see exactly what a task cost. Cheap-backend spend is kept separate (it burns
+    cheap credits, not the Claude subscription)."""
+    input_tokens = 0
+    output_tokens = 0
+    spent_usd = 0.0
+    saved_usd = 0.0
+    attempts = 0
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        usage = record.get("usage") if isinstance(record.get("usage"), dict) else None
+        if not usage:
+            continue
+        attempts += 1
+        input_tokens += int(usage.get("input_tokens") or 0)
+        output_tokens += int(usage.get("output_tokens") or 0)
+        cost = float(usage.get("cost_usd") or 0.0)
+        if usage.get("cost_is_savings"):
+            saved_usd += cost
+        else:
+            spent_usd += cost
+    return {
+        "attempts_with_usage": attempts,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "spent_usd": round(spent_usd, 4),
+        "saved_usd": round(saved_usd, 4),
+    }
 
 
 def _select_track(plan: dict[str, Any], *, track_id: str | None) -> dict[str, Any] | None:

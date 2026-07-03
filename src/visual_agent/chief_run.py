@@ -324,6 +324,7 @@ def _record_dispatch_attempts(workspace_root: Path, mission_id: str, dispatch: d
                     "payload": _compact_verification(attempt),
                 },
             )
+        _record_usage_round(workspace_root, mission_id, dispatch, start_round + len(attempts))
         return
     append_round(
         workspace_root,
@@ -334,6 +335,25 @@ def _record_dispatch_attempts(workspace_root: Path, mission_id: str, dispatch: d
             "status": str(dispatch.get("status") or ""),
             "stop_reason": str(dispatch.get("reason") or ""),
             "payload": _compact_dispatch(dispatch),
+        },
+    )
+
+
+def _record_usage_round(workspace_root: Path, mission_id: str, dispatch: dict[str, Any], round_no: int) -> None:
+    """Persist a token/cost round so the user can see what the task actually used."""
+    usage = dispatch.get("usage_summary") if isinstance(dispatch.get("usage_summary"), dict) else {}
+    if not usage or int(usage.get("total_tokens") or 0) <= 0:
+        return
+    failover = dispatch.get("failover_worker_record") if isinstance(dispatch.get("failover_worker_record"), dict) else None
+    append_round(
+        workspace_root,
+        mission_id,
+        {
+            "round": round_no,
+            "type": "usage",
+            "status": "recorded",
+            "usage_summary": usage,
+            "failover_backend": (failover or {}).get("backend"),
         },
     )
 
@@ -410,6 +430,19 @@ def _compact_dispatch(payload: dict[str, Any]) -> dict[str, Any]:
         "worker": payload.get("worker"),
         "worktree": payload.get("worktree"),
         "verification": payload.get("verification"),
+        "usage_summary": payload.get("usage_summary"),
+        "failover_worker_record": _compact_worker(payload.get("failover_worker_record")),
+    }
+
+
+def _compact_worker(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(record, dict):
+        return None
+    return {
+        "attempt": record.get("attempt"),
+        "status": record.get("status"),
+        "backend": record.get("backend"),
+        "usage": record.get("usage"),
     }
 
 
@@ -546,6 +579,19 @@ def chief_run_to_markdown(payload: dict[str, Any]) -> str:
             detail = str(item.get("failed_signature") or item.get("stop_reason") or "").strip()
             suffix = f" - {detail}" if detail else ""
             lines.append(f"- Round {item.get('round')}: `{item.get('type')}` -> `{item.get('status')}`{suffix}")
+    usage_round = next((item for item in reversed(rounds) if str(item.get("type")) == "usage"), None)
+    if usage_round:
+        usage = usage_round.get("usage_summary") if isinstance(usage_round.get("usage_summary"), dict) else {}
+        lines.extend(["", "### 用量 Tokens & Cost", ""])
+        lines.append(
+            f"- Tokens: {usage.get('total_tokens', 0)} "
+            f"(输入 {usage.get('input_tokens', 0)} / 输出 {usage.get('output_tokens', 0)})"
+        )
+        lines.append(f"- 订阅真实花费: ${usage.get('spent_usd', 0)}")
+        if float(usage.get("saved_usd") or 0) > 0:
+            lines.append(f"- 走便宜后端省下(按 Claude 价估): ${usage.get('saved_usd', 0)}")
+        if usage_round.get("failover_backend"):
+            lines.append(f"- ⚡ 额度失败转移到便宜后端: `{usage_round.get('failover_backend')}`")
     background = payload.get("background") if isinstance(payload.get("background"), dict) else {}
     if background:
         lines.extend(["", "### Background", ""])

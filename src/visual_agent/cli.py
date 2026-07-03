@@ -736,7 +736,9 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     refine_goal_cmd = subparsers.add_parser("refine-goal", help="Sharpen a vague goal via a cheap model (receptionist); falls back to rule-based questions offline.")
     refine_goal_cmd.add_argument("--goal", required=True, help="The rough goal to sharpen.")
     refine_goal_cmd.add_argument("--answer", action="append", default=[], help="Answer to a clarifying question. Can be repeated.")
-    refine_goal_cmd.add_argument("--model", default=None, help="Intake model id. Default: a cheap small model.")
+    refine_goal_cmd.add_argument("--model", default=None, help="Intake model id. Default: auto-resolve a cheap backend (e.g. DeepSeek) or a small model.")
+    refine_goal_cmd.add_argument("--base-url", default=None, help="Override the intake endpoint base URL (for a custom cheap endpoint).")
+    refine_goal_cmd.add_argument("--endpoint", default=None, help="Override the intake endpoint path (default: /chat/completions).")
     refine_goal_cmd.add_argument("--no-model", action="store_true", help="Skip the model; use deterministic rules only.")
     refine_goal_cmd.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
@@ -1892,6 +1894,8 @@ def main(argv: list[str] | None = None) -> int:
             args.goal,
             answers=list(args.answer or []),
             model_id=args.model,
+            base_url=args.base_url,
+            endpoint=args.endpoint,
             enable_model=not args.no_model,
         )
         if args.format == "json":
