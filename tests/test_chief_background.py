@@ -66,17 +66,30 @@ def test_start_background_chief_run_records_process(tmp_path, monkeypatch) -> No
 
     monkeypatch.setattr("visual_agent.chief_background.subprocess.Popen", fake_popen)
 
-    payload = start_background_chief_run(workspace_root=workspace.root, mission_id=mission_id)
+    payload = start_background_chief_run(
+        workspace_root=workspace.root,
+        mission_id=mission_id,
+        test_command="python -m pytest -q",
+        allow_test_edits=True,
+        merge=True,
+    )
 
     assert payload["status"] == "background_started"
     assert payload["background"]["pid"] == 43210
     assert "chief-background-worker" in captured["argv"]
     assert "--mission" in captured["argv"]
     assert mission_id in captured["argv"]
+    assert "--test-command" in captured["argv"]
+    assert "python -m pytest -q" in captured["argv"]
+    assert "--allow-test-edits" in captured["argv"]
+    assert "--merge" in captured["argv"]
     background_json = workspace.root / "missions" / mission_id / "background.json"
     saved = json.loads(background_json.read_text(encoding="utf-8"))
     assert saved["pid"] == 43210
     assert saved["status"] == "running"
+    assert saved["test_command"] == "python -m pytest -q"
+    assert saved["allow_test_edits"] is True
+    assert saved["merge"] is True
 
 
 def test_run_background_worker_writes_completion_receipt(tmp_path, monkeypatch) -> None:
@@ -92,14 +105,26 @@ def test_run_background_worker_writes_completion_receipt(tmp_path, monkeypatch) 
     mission_id = preview["mission"]["mission_id"]
     save_background_record(workspace.root, mission_id, {"status": "running", "pid": 123})
 
-    def fake_run(**_kwargs):
+    captured = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
         return {"status": "verified", "stop_reason": "verified", "final_report_path": "report.md"}
 
     monkeypatch.setattr("visual_agent.chief_background.run_chief_mission", fake_run)
 
-    payload = run_background_worker(workspace_root=workspace.root, mission_id=mission_id)
+    payload = run_background_worker(
+        workspace_root=workspace.root,
+        mission_id=mission_id,
+        test_command="python -m pytest -q",
+        allow_test_edits=True,
+        merge=True,
+    )
 
     assert payload["status"] == "verified"
+    assert captured["test_command"] == "python -m pytest -q"
+    assert captured["allow_test_edits"] is True
+    assert captured["merge"] is True
     saved = json.loads((workspace.root / "missions" / mission_id / "background.json").read_text(encoding="utf-8"))
     assert saved["status"] == "completed"
     assert saved["exit_code"] == 0

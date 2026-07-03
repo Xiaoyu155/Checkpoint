@@ -160,18 +160,7 @@ def init_workspace(
 # never hits "untracked files would be overwritten." If users want custom
 # workflows or fixtures to survive across branches they should store them in
 # the project proper (e.g. tests/fixtures/).
-_GITIGNORE_RUNTIME = (
-    "missions/",
-    "chief_plans/",
-    "runs/",
-    "reports/",
-    "mission_queue/",
-    "repo_map.json",
-    "workspace.json",
-    "fixtures/",
-    "inputs/",
-    "workflows/",
-)
+_GITIGNORE_RUNTIME = ("",)
 
 
 def _ensure_gitignored(workspace_root: Path) -> None:
@@ -190,11 +179,13 @@ def _ensure_gitignored(workspace_root: Path) -> None:
         return
     if not base:
         return
-    entries = [f"{base}/{item}" for item in _GITIGNORE_RUNTIME]
+    entries = [f"{base}/{item}" if item else f"{base}/" for item in _GITIGNORE_RUNTIME]
     gitignore = project_root / ".gitignore"
     try:
         existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
         present = {item.strip().rstrip("/") for item in existing.splitlines()}
+        if base in present:
+            return
         missing = [entry for entry in entries if entry.rstrip("/") not in present]
         if not missing:
             return

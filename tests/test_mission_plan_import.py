@@ -129,6 +129,31 @@ def test_import_development_plan_creates_and_queues_preview_missions(tmp_path, m
     assert queue_payload["pending_items"] == 1
 
 
+def test_import_development_plan_queues_worker_context(tmp_path, monkeypatch) -> None:
+    workspace = ready_workspace(tmp_path, monkeypatch)
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("- [ ] Fix checkout total display\n", encoding="utf-8")
+
+    payload = import_development_plan(
+        source_file=plan_file,
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        create=True,
+        queue=True,
+        limit=1,
+        agents=("codex",),
+        test_command="python -m pytest -q",
+        allow_test_edits=True,
+        merge_policy="auto",
+    )
+
+    item = payload["queued_items"][0]
+    assert item["agent"] == "codex"
+    assert item["test_command"] == "python -m pytest -q"
+    assert item["allow_test_edits"] is True
+    assert item["merge_policy"] == "auto"
+
+
 def test_mission_import_facade_outputs_json(tmp_path, capsys, monkeypatch) -> None:
     workspace = ready_workspace(tmp_path, monkeypatch)
     plan_file = tmp_path / "plan.md"
@@ -146,6 +171,12 @@ def test_mission_import_facade_outputs_json(tmp_path, capsys, monkeypatch) -> No
             str(tmp_path),
             "--create",
             "--queue",
+            "--agent",
+            "codex",
+            "--test-command",
+            "auto",
+            "--merge-policy",
+            "auto",
             "--format",
             "json",
         ]
@@ -157,3 +188,6 @@ def test_mission_import_facade_outputs_json(tmp_path, capsys, monkeypatch) -> No
     assert payload["total_drafts"] == 1
     assert payload["created_missions"][0]["mission_id"]
     assert payload["queued_items"][0]["queue_id"]
+    assert payload["queued_items"][0]["agent"] == "codex"
+    assert payload["queued_items"][0]["test_command"]
+    assert payload["queued_items"][0]["merge_policy"] == "auto"

@@ -170,6 +170,9 @@ def import_development_plan(
     timeout_seconds: float = 1800.0,
     allow_dirty: bool = False,
     allow_coverage_gap: bool = False,
+    test_command: str | None = None,
+    allow_test_edits: bool = False,
+    merge_policy: str = "manual",
     priority: int = 0,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -225,6 +228,8 @@ def import_development_plan(
                 timeout_seconds=timeout_seconds,
                 allow_dirty=allow_dirty,
                 allow_coverage_gap=allow_coverage_gap,
+                test_command=test_command,
+                allow_test_edits=allow_test_edits,
             )
             mission = result.get("mission") if isinstance(result.get("mission"), dict) else {}
             created = {
@@ -256,6 +261,10 @@ def import_development_plan(
                         timeout_seconds=timeout_seconds,
                         allow_dirty=allow_dirty,
                         allow_coverage_gap=allow_coverage_gap,
+                        agent=agents[0] if agents else None,
+                        test_command=test_command,
+                        allow_test_edits=allow_test_edits,
+                        merge_policy=merge_policy,
                         force=force,
                     )
                 except (FileNotFoundError, RuntimeError, ValueError) as exc:

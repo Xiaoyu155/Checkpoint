@@ -24,6 +24,12 @@ def test_command_verification_fail_keeps_output(tmp_path) -> None:
     assert "failed" in brief["message"].lower()
 
 
+def test_command_verification_classifies_invalid_command(tmp_path) -> None:
+    r = run_command_verification(command="definitely-not-a-real-devpacer-command-xyz", repo_root=tmp_path)
+    assert r["verdict"] == "fail"
+    assert r["failure_kind"] == "test_command_invalid"
+
+
 def _no_workflow_runner(*_args, **_kwargs):
     return CodexCheckResult(changed_files=[], selected_workflows=[], skipped_slow_workflows=[], coverage={"status": "no_changed_files"}, results=[])
 

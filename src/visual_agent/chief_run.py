@@ -26,6 +26,8 @@ from .missions import (
     write_final_report,
 )
 from .models import to_jsonable
+from .verification_profiles import resolve_test_command
+from .workspace import init_workspace
 
 
 DispatchRunner = Callable[..., dict[str, Any]]
@@ -64,6 +66,10 @@ def run_chief_mission(
     started = monotonic()
     workspace_path = Path(workspace_root).expanduser().resolve()
     repo_path = Path(repo_root).expanduser().resolve()
+    resolved_test_command, verification_profile = resolve_test_command(test_command, repo_root=repo_path)
+    test_command = resolved_test_command
+    if test_command and not workspace_path.exists():
+        init_workspace(workspace_path, with_demo=False)
     budget = default_budget_policy(
         max_rounds=max_rounds,
         max_wall_minutes=max_wall_minutes,
@@ -183,6 +189,25 @@ def run_chief_mission(
         plan_id = str(plan_payload.get("plan_id") or plan_id)
         if not goal:
             goal = str(plan_payload.get("objective") or "")
+    if agents:
+        changed_agent = _override_plan_agent(plan_payload, str(agents[0]))
+        if changed_agent and plan_id:
+            save_plan(plan_payload, workspace_root=workspace_path, plan_id=str(plan_id))
+    if verification_profile:
+        plan_payload["verification_profile"] = verification_profile
+        if plan_id:
+            save_plan(plan_payload, workspace_root=workspace_path, plan_id=str(plan_id))
+    effective_allow_test_edits = allow_test_edits or _objective_requests_test_edits(
+        str(goal or plan_payload.get("objective") or "")
+    )
+    if effective_allow_test_edits and not allow_test_edits:
+        plan_payload["test_edit_policy"] = {
+            "allow_test_edits": True,
+            "source": "objective",
+            "reason": "The objective explicitly asks to add or update tests.",
+        }
+        if plan_id:
+            save_plan(plan_payload, workspace_root=workspace_path, plan_id=str(plan_id))
 
     if mission is None:
         mission = create_mission(
@@ -290,7 +315,7 @@ def run_chief_mission(
         auto_repair_once=False,
         model_policy=budget.get("model_policy") if isinstance(budget, dict) else None,
         test_command=test_command,
-        allow_test_edits=allow_test_edits,
+        allow_test_edits=effective_allow_test_edits,
     )
     append_round(
         workspace_path,
@@ -354,7 +379,7 @@ def run_chief_mission(
         auto_repair_once=auto_repair_once,
         model_policy=budget.get("model_policy") if isinstance(budget, dict) else None,
         test_command=test_command,
-        allow_test_edits=allow_test_edits,
+        allow_test_edits=effective_allow_test_edits,
         merge=merge,
     )
     _record_dispatch_attempts(workspace_path, mission["mission_id"], dispatch, start_round=_next_round_number(workspace_path, mission["mission_id"]))
@@ -370,6 +395,34 @@ def run_chief_mission(
         started=started,
         dispatch_payload=dispatch,
     )
+
+
+def _objective_requests_test_edits(objective: str) -> bool:
+    text = str(objective or "").lower()
+    compact = "".join(text.split())
+    chinese_hits = (
+        "写测试",
+        "加测试",
+        "补测试",
+        "改测试",
+        "更新测试",
+        "添加测试",
+        "新增测试",
+        "测试用例",
+    )
+    if any(hit in compact for hit in chinese_hits):
+        return True
+    english_hits = (
+        "add test",
+        "add tests",
+        "write test",
+        "write tests",
+        "update test",
+        "update tests",
+        "test case",
+        "test cases",
+    )
+    return any(hit in text for hit in english_hits)
 
 
 def _record_dispatch_attempts(workspace_root: Path, mission_id: str, dispatch: dict[str, Any], *, start_round: int = 1) -> None:
@@ -426,6 +479,34 @@ def _record_merge_round(workspace_root: Path, mission_id: str, dispatch: dict[st
     )
 
 
+def _override_plan_agent(plan: dict[str, Any], agent: str) -> bool:
+    requested = str(agent or "").strip()
+    if not requested:
+        return False
+    tracks = plan.get("worker_tracks") if isinstance(plan.get("worker_tracks"), list) else []
+    for track in tracks:
+        if not isinstance(track, dict):
+            continue
+        if str(track.get("track_kind") or "implementation") == "inspection":
+            continue
+        if str(track.get("agent") or "") == requested:
+            return False
+        track["agent"] = requested
+        track["id"] = f"track_1_{requested.replace('-', '_')}"
+        return True
+    if tracks:
+        return False
+    plan["worker_tracks"] = [
+        {
+            "id": f"track_1_{requested.replace('-', '_')}",
+            "agent": requested,
+            "track_kind": "implementation",
+            "tier": "strong",
+        }
+    ]
+    return True
+
+
 def _record_usage_round(workspace_root: Path, mission_id: str, dispatch: dict[str, Any], round_no: int) -> None:
     """Persist a token/cost round so the user can see what the task actually used."""
     usage = dispatch.get("usage_summary") if isinstance(dispatch.get("usage_summary"), dict) else {}
@@ -466,6 +547,10 @@ def _stop_reason_from_dispatch(dispatch: dict[str, Any], budget: dict[str, Any])
         return "coverage_gap"
     if verdict == "inspection_only":
         return "inspection_only"
+    command_result = latest.get("command_verification") if isinstance(latest.get("command_verification"), dict) else {}
+    failure_kind = str(command_result.get("failure_kind") or "")
+    if failure_kind in {"test_command_invalid", "command_launch_error", "command_timeout"}:
+        return failure_kind
     attempts = dispatch.get("verification_attempts") if isinstance(dispatch.get("verification_attempts"), list) else []
     failed = [_failed_signature(item) for item in attempts if _failed_signature(item)]
     if len(failed) >= 2 and failed[-1] == failed[-2]:
@@ -551,6 +636,9 @@ def _message_for_stop(stop_reason: str) -> str:
         "verified": "Mission verified by Checkpoint.",
         "coverage_gap": "Mission stopped because verification coverage is missing or weak.",
         "inspection_only": "Mission produced inspection-only evidence; rerun with a real interaction profile when needed.",
+        "test_command_invalid": "Mission stopped because the verification command appears invalid for this environment.",
+        "command_launch_error": "Mission stopped because the verification command could not be launched.",
+        "command_timeout": "Mission stopped because the verification command timed out.",
         "same_failure_repeated": "Mission stopped because the same verification failure repeated after repair.",
         "budget_exhausted": "Mission stopped because the configured round budget was exhausted.",
         "worker_error": "Mission stopped because the worker process failed.",
@@ -599,7 +687,54 @@ def _finish(
         report_text = chief_run_to_markdown(payload)
         saved_report = write_final_report(workspace_root, str(mission["mission_id"]), report_text)
         payload["final_report_path"] = saved_report["path"]
+        record = _append_mandatory_record(payload)
+        if record.get("path"):
+            payload["mandatory_record_path"] = record["path"]
+        if record.get("error"):
+            payload["mandatory_record_error"] = record["error"]
     return payload
+
+
+def _append_mandatory_record(payload: dict[str, Any]) -> dict[str, Any]:
+    mission = payload.get("mission") if isinstance(payload.get("mission"), dict) else {}
+    if not mission:
+        return {}
+    repo_root_text = str(mission.get("repo_root") or "").strip()
+    if not repo_root_text:
+        return {}
+    try:
+        repo_root = Path(repo_root_text).expanduser().resolve()
+        repo_root.mkdir(parents=True, exist_ok=True)
+        path = repo_root / "强制测试记录.md"
+        dispatch = payload.get("dispatch") if isinstance(payload.get("dispatch"), dict) else {}
+        latest = dispatch.get("latest_verification") if isinstance(dispatch.get("latest_verification"), dict) else {}
+        command_verification = latest.get("command_verification") if isinstance(latest.get("command_verification"), dict) else {}
+        merge = dispatch.get("merge") if isinstance(dispatch.get("merge"), dict) else {}
+        usage = dispatch.get("usage_summary") if isinstance(dispatch.get("usage_summary"), dict) else {}
+        if not path.exists():
+            path.write_text(
+                "# 强制测试记录\n\n"
+                "本文件由 DevPacer / Checkpoint / Codex 自动追加。每次托管开发、验收、合并或失败都必须记录到这里，方便审查与回滚。\n",
+                encoding="utf-8",
+            )
+        lines = [
+            "",
+            f"## {mission.get('mission_id')} - {payload.get('status')} / {payload.get('stop_reason')}",
+            "",
+            f"- Time: {mission.get('updated_at') or ''}",
+            f"- Objective: {mission.get('objective') or ''}",
+            f"- Final report: {payload.get('final_report_path') or ''}",
+            f"- Verification command: {command_verification.get('command') or ''}",
+            f"- Verification verdict: {latest.get('verdict') or ''}",
+            f"- Merge: {merge.get('status') or 'not_requested'}",
+            f"- Tokens: {usage.get('total_tokens', 0)}",
+            f"- Message: {payload.get('message') or ''}",
+        ]
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines).rstrip() + "\n")
+        return {"path": str(path)}
+    except OSError as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 def _terminal_payload(

@@ -112,7 +112,8 @@ def test_worker_prompt_includes_repo_map_excerpt(tmp_path):
         verification_command="checkpoint codex-check",
         repo_map_text="- src/billing.py (8L): class Invoice(total, currency)",
     )
-    prompt = command["argv"][-1]
+    # Codex prompts travel via stdin since the Windows argv length fix.
+    prompt = command.get("stdin") or command["argv"][-1]
     assert "Repository map" in prompt
     assert "class Invoice(total, currency)" in prompt
 
@@ -126,4 +127,5 @@ def test_worker_prompt_without_map_is_unchanged(tmp_path):
         worktree=tmp_path,
         verification_command="checkpoint codex-check",
     )
-    assert "Repository map" not in command["argv"][-1]
+    prompt = command.get("stdin") or command["argv"][-1]
+    assert "Repository map" not in prompt

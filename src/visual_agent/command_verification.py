@@ -106,34 +106,73 @@ def run_command_verification(
             "exit_code": 124,
             "output_tail": (_decode(exc.stdout) + "\n" + _decode(exc.stderr))[-4000:],
             "reason": f"test command timed out after {timeout_seconds:.0f}s",
+            "failure_kind": "command_timeout",
         }
     except OSError as exc:
-        return {"verdict": "fail", "command": cmd, "exit_code": -1, "output_tail": str(exc)[:2000], "reason": "could not launch test command"}
+        return {
+            "verdict": "fail",
+            "command": cmd,
+            "exit_code": -1,
+            "output_tail": str(exc)[:2000],
+            "reason": "could not launch test command",
+            "failure_kind": "command_launch_error",
+        }
 
     combined = (stdout + ("\n" if stdout and stderr else "") + stderr).strip()
+    failure_kind = "" if exit_code == 0 else classify_command_failure(exit_code=exit_code, output=combined)
     return {
         "verdict": "pass" if exit_code == 0 else "fail",
         "command": cmd,
         "exit_code": exit_code,
         "output_tail": combined[-4000:],
+        "failure_kind": failure_kind,
     }
 
 
 def command_repair_brief(result: dict[str, Any]) -> dict[str, Any]:
     """Turn a failed command result into a repair brief for the worker."""
     output = str(result.get("output_tail") or "")
+    failure_kind = str(result.get("failure_kind") or "command_failed")
+    if failure_kind in {"test_command_invalid", "command_launch_error", "command_timeout"}:
+        repair_prompt = (
+            f"The verification command `{result.get('command')}` could not be trusted "
+            f"({failure_kind}, exit {result.get('exit_code')}). Do not guess at code changes. "
+            "Report the command/environment issue and suggest the exact corrected test command or setup step. "
+            f"Command output (tail):\n\n{output[-2500:]}"
+        )
+    else:
+        repair_prompt = (
+            f"The verification command `{result.get('command')}` failed with exit code "
+            f"{result.get('exit_code')}. Fix the code so it passes. Do not change the test "
+            f"command or weaken the tests. Command output (tail):\n\n{output[-2500:]}"
+        )
     return {
         "status": "found",
         "source": "test_command",
         "command": result.get("command"),
         "exit_code": result.get("exit_code"),
+        "failure_kind": failure_kind,
         "message": f"Test command failed (exit {result.get('exit_code')}): {result.get('command')}",
-        "repair_prompt": (
-            f"The verification command `{result.get('command')}` failed with exit code "
-            f"{result.get('exit_code')}. Fix the code so it passes. Do not change the test "
-            f"command or weaken the tests. Command output (tail):\n\n{output[-2500:]}"
-        ),
+        "repair_prompt": repair_prompt,
     }
+
+
+def classify_command_failure(*, exit_code: int, output: str) -> str:
+    text = str(output or "").lower()
+    invalid_markers = (
+        "is not recognized as an internal or external command",
+        "command not found",
+        "not recognized as the name of a cmdlet",
+        "the term ",
+        "no such file or directory",
+        "cannot find the path",
+        "could not find a part of the path",
+        "missing script:",
+        "enoent",
+    )
+    if int(exit_code) in {127, 9009} or any(marker in text for marker in invalid_markers):
+        return "test_command_invalid"
+    return "command_failed"
 
 
 def _os_environ() -> dict[str, str]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 from visual_agent.chief_engineer import build_chief_plan, chief_plan_to_markdown
 from visual_agent.cli import main
@@ -64,6 +65,56 @@ def test_build_chief_plan_reports_coverage_gap(tmp_path, monkeypatch) -> None:
     assert plan.coverage["status"] == "uncovered"
     assert plan.coverage["suggested_new_workflows"][0]["suggested_name"] == "src_payment_verification"
     assert any(risk["area"] == "coverage" for risk in plan.risks)
+
+
+def test_build_chief_plan_filters_checkpoint_runtime_artifacts(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    write_verification_workflow(workspace, "checkout", affects="src/payment/")
+    monkeypatch.setattr(
+        "visual_agent.chief_engineer.changed_files",
+        lambda **_kwargs: [
+            ".agent-workspace/runs/latest/report.json",
+            ".visual-agent-status.md",
+            "强制测试记录.md",
+            "src/payment/checkout.py",
+        ],
+    )
+
+    plan = build_chief_plan(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+    )
+
+    assert plan.changed_files == ["src/payment/checkout.py"]
+    assert plan.status == "ready"
+    assert plan.selected_workflows == ["checkout"]
+
+
+def test_build_chief_plan_ignores_generated_gitignore_bootstrap(tmp_path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "devpacer@example.local"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "DevPacer"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text("*.pyc\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=tmp_path, check=True, capture_output=True, text=True)
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    write_verification_workflow(workspace, "checkout", affects="src/payment/")
+    (tmp_path / ".gitignore").write_text(
+        "*.pyc\n# DevPacer / Checkpoint generated runtime files\n.agent-workspace/\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "payment.py").write_text("total = 1\n", encoding="utf-8")
+
+    plan = build_chief_plan(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+    )
+
+    assert ".gitignore" not in plan.changed_files
+    assert plan.changed_files == ["src/payment.py"]
 
 
 def test_chief_plan_markdown_contains_handoff_and_risks(tmp_path, monkeypatch) -> None:

@@ -11,8 +11,8 @@ def changed_files(*, base: str = "HEAD", cwd: Path | None = None, include_untrac
     root = cwd or Path.cwd()
     files: set[str] = set()
     for command in (
-        ["git", "diff", "--name-only", base],
-        ["git", "diff", "--name-only", "--cached"],
+        ["git", "-c", "core.quotePath=false", "diff", "--name-only", base],
+        ["git", "-c", "core.quotePath=false", "diff", "--name-only", "--cached"],
     ):
         try:
             result = subprocess.run(
@@ -80,7 +80,7 @@ def git_diff_name_status(*, base: str = "HEAD", cwd: Path | None = None) -> dict
     root = cwd or Path.cwd()
     try:
         result = subprocess.run(
-            ["git", "diff", "--name-status", base],
+        ["git", "-c", "core.quotePath=false", "diff", "--name-status", base],
             cwd=str(root),
             text=True,
             capture_output=True,
@@ -105,7 +105,7 @@ def git_untracked_files(*, cwd: Path | None = None) -> list[str]:
     root = cwd or Path.cwd()
     try:
         result = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard"],
+        ["git", "-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard"],
             cwd=str(root),
             text=True,
             capture_output=True,

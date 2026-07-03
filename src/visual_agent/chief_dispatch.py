@@ -15,6 +15,7 @@ from .agent_capabilities import canonical_agent_name, load_agent_profile, recomm
 from .command_verification import changed_test_files, command_repair_brief, run_command_verification, tamper_repair_brief
 from .chief_plans_store import append_worker_record, load_plan, plan_dir, save_verification
 from .codex_check import codex_check_to_markdown, run_codex_check
+from .diff_summary import build_diff_summary
 from .git_diff import changed_files
 from .models import to_jsonable
 from .repo_map import build_repo_map, render_repo_map, repo_map_cache_path
@@ -25,7 +26,7 @@ from .workspace import open_workspace
 # cache) into the repo it verifies. Those are tool outputs, not code under test,
 # and must never be counted as changed files — otherwise a second verification
 # round sees them as uncovered changes and reports a phantom coverage gap.
-_ARTIFACT_BASENAMES = {".visual-agent-status.md"}
+_ARTIFACT_BASENAMES = {".visual-agent-status.md", "强制测试记录.md"}
 _ARTIFACT_DIR_PREFIXES = (".pw-browsers/",)
 
 # Coding agents that have a real executable worker adapter (headless run + output
@@ -57,7 +58,7 @@ def _coverage_changed_files(*, repo_root: Path, workspace_root: Path) -> list[st
     return kept
 
 
-CommandRunner = Callable[[list[str], Path, float, Path], dict[str, Any]]
+CommandRunner = Callable[..., dict[str, Any]]
 
 
 def dispatch_chief_plan(
@@ -216,9 +217,11 @@ def dispatch_chief_plan(
     worker_command["argv"][0] = executable or exe_name
 
     setup = create_worktree(repo_root=repo_root, worktree=worktree, branch=branch)
-    if setup.get("status") != "created":
+    if setup.get("status") not in {"created", "reused"}:
         return {**preview, "status": "blocked", "reason": setup.get("reason"), "worktree_setup": setup}
     preview["worktree"]["created"] = True
+    if setup.get("status") == "reused":
+        preview["worktree"]["reused"] = True
     # The commit the worker branched from: the tamper guard diffs against it, so
     # test edits are caught even when the worker commits inside the worktree.
     worktree_base = _git_head(worktree)
@@ -253,6 +256,7 @@ def dispatch_chief_plan(
         attempt="initial",
         track=selected_track,
         argv=initial_argv,
+        stdin_text=worker_command.get("stdin"),
         cwd=worktree,
         timeout_seconds=timeout_seconds,
         log_path=logs_dir / f"{track_token}-initial.log",
@@ -282,6 +286,7 @@ def dispatch_chief_plan(
                 attempt="quota_failover",
                 track=selected_track,
                 argv=failover_argv,
+                stdin_text=worker_command.get("stdin"),
                 cwd=worktree,
                 timeout_seconds=timeout_seconds,
                 log_path=logs_dir / f"{track_token}-quota-failover.log",
@@ -330,6 +335,7 @@ def dispatch_chief_plan(
                 attempt="auto_repair_once",
                 track=selected_track,
                 argv=repair_command["argv"],
+                stdin_text=repair_command.get("stdin"),
                 cwd=worktree,
                 timeout_seconds=timeout_seconds,
                 log_path=logs_dir / f"{track_token}-auto-repair-once.log",
@@ -353,11 +359,14 @@ def dispatch_chief_plan(
             )
 
     latest_verification = verification_attempts[-1]
-    status = "completed" if worker_record.get("status") == "completed" else "worker_failed"
+    worker_completed = worker_record.get("status") == "completed"
+    status = "completed" if worker_completed else "worker_failed"
     if latest_verification.get("verdict") == "fail":
         status = "verification_failed"
-    elif latest_verification.get("verdict") == "pass":
+    elif latest_verification.get("verdict") == "pass" and worker_completed:
         status = "verified"
+    elif latest_verification.get("verdict") == "pass":
+        status = "worker_failed"
     elif latest_verification.get("verdict") == "inspection_only":
         # Inspection-only proves the page rendered, not that the product works.
         # It must never surface as verified (principle: dry-run cannot pose as
@@ -567,8 +576,10 @@ def build_worker_command(
         flag = str((source or {}).get("flag") or "").strip() if isinstance(source, dict) else ""
         if flag:
             argv.extend(shlex.split(flag, posix=False))
-    argv.append(prompt)
-    return {"argv": argv, "display": format_argv(argv)}
+    # Codex can read the initial prompt from stdin when PROMPT is "-".  Keeping
+    # large repo maps out of argv avoids Windows' command-line length limit.
+    argv.append("-")
+    return {"argv": argv, "display": format_argv(argv) + " < prompt via stdin", "stdin": prompt}
 
 
 def _override_model_flag(argv: list[str], model: str) -> list[str]:
@@ -732,6 +743,13 @@ def run_dispatch_verification(
         }
         if verdict == "fail":
             payload["repair_brief"] = command_repair_brief(command_result)
+        payload["diff_summary"] = _safe_diff_summary(repo_root=Path(repo_root), base_ref=worktree_base)
+        if payload["diff_summary"].get("large_diff"):
+            payload.setdefault("warnings", []).append(
+                f"Diff volume unusually large ({payload['diff_summary']['file_count']} files, "
+                f"+{payload['diff_summary']['lines_added']}/-{payload['diff_summary']['lines_removed']} lines). "
+                "Review the diff carefully to confirm the worker did not touch unrelated code."
+            )
         saved = save_verification(workspace_root, plan_id, payload)
         payload["saved_path"] = saved["path"]
         return payload
@@ -779,6 +797,15 @@ def run_dispatch_verification(
             workspace_root=verification_workspace_path,
             failure_evidence_builder=failure_evidence_builder,
         )
+    # Layer 2: always attach a diff summary so the dashboard can show what
+    # changed regardless of pass/fail.  Runs after verification to avoid adding
+    # latency to the hot path.
+    payload["diff_summary"] = _safe_diff_summary(repo_root=Path(repo_root), base_ref=None)
+    if payload["diff_summary"].get("large_diff"):
+        payload.setdefault("warnings", []).append(
+            f"Diff volume unusually large ({payload['diff_summary']['file_count']} files). "
+            "Review carefully."
+        )
     saved = save_verification(workspace_root, plan_id, payload)
     payload["saved_path"] = saved["path"]
     return payload
@@ -821,15 +848,27 @@ def _run_worker_attempt(
     timeout_seconds: float,
     log_path: Path,
     runner: CommandRunner,
+    stdin_text: str | None = None,
     env: dict[str, str] | None = None,
     backend: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     started = monotonic()
-    try:
-        result = runner(argv, cwd, timeout_seconds, log_path, env=env)
-    except TypeError:
-        # A custom/legacy runner may not accept env; fall back without it.
-        result = runner(argv, cwd, timeout_seconds, log_path)
+    if stdin_text is not None:
+        try:
+            result = runner(argv, cwd, timeout_seconds, log_path, env=env, stdin_text=stdin_text)
+        except TypeError:
+            try:
+                result = runner(argv, cwd, timeout_seconds, log_path, stdin_text=stdin_text)
+            except TypeError:
+                try:
+                    result = runner(argv, cwd, timeout_seconds, log_path, env=env)
+                except TypeError:
+                    result = runner(argv, cwd, timeout_seconds, log_path)
+    else:
+        try:
+            result = runner(argv, cwd, timeout_seconds, log_path, env=env)
+        except TypeError:
+            result = runner(argv, cwd, timeout_seconds, log_path)
     record = {
         "schema_version": 1,
         "plan_id": plan_id,
@@ -905,7 +944,14 @@ def _extract_worker_usage(agent: str, log_path: Path, stdout_tail: str) -> dict[
     return {key: value for key, value in ledger.items() if value is not None}
 
 
-def run_process_capture(argv: list[str], cwd: Path, timeout_seconds: float, log_path: Path, env: dict[str, str] | None = None) -> dict[str, Any]:
+def run_process_capture(
+    argv: list[str],
+    cwd: Path,
+    timeout_seconds: float,
+    log_path: Path,
+    env: dict[str, str] | None = None,
+    stdin_text: str | None = None,
+) -> dict[str, Any]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     run_env = None
     if env:
@@ -919,6 +965,7 @@ def run_process_capture(argv: list[str], cwd: Path, timeout_seconds: float, log_
             timeout=timeout_seconds,
             check=False,
             env=run_env,
+            input=stdin_text,
         )
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
@@ -972,8 +1019,10 @@ def merge_worktree_branch(*, repo_root: Path, worktree: Path, branch: str, messa
     target = current.stdout.strip()
     if current.returncode != 0 or not target or target == "HEAD":
         return {"status": "blocked", "reason": "main repo is in detached HEAD; not merging."}
-    dirty = g(repo_root, "status", "--porcelain")
-    dirty_lines = [line for line in dirty.stdout.splitlines() if line.strip() and ".agent-workspace" not in line and ".visual-agent-status.md" not in line]
+    dirty_lines = git_dirty_files(
+        repo_root,
+        ignored_prefixes=workspace_record_dirty_prefixes(repo_root=repo_root, workspace_root=repo_root / ".agent-workspace"),
+    )
     if dirty_lines:
         return {"status": "blocked", "reason": "target branch has uncommitted changes; not merging.", "dirty": dirty_lines[:10]}
 
@@ -1001,7 +1050,30 @@ def _git_head(repo_root: Path) -> str:
 
 def create_worktree(*, repo_root: Path, worktree: Path, branch: str) -> dict[str, Any]:
     if worktree.exists():
-        return {"status": "blocked", "reason": f"Worktree path already exists: {worktree}"}
+        check = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if check.returncode != 0 or "true" not in check.stdout.lower():
+            return {"status": "blocked", "reason": f"Worktree path already exists and is not a git worktree: {worktree}"}
+        dirty = subprocess.run(
+            ["git", "-C", str(worktree), "-c", "core.quotePath=false", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if dirty.returncode != 0:
+            return {"status": "blocked", "reason": f"Could not inspect existing worktree: {worktree}"}
+        dirty_lines = [line for line in dirty.stdout.splitlines() if line.strip()]
+        if dirty_lines:
+            return {
+                "status": "blocked",
+                "reason": f"Worktree path already exists with uncommitted changes: {worktree}",
+                "dirty": dirty_lines[:10],
+            }
+        return {"status": "reused", "path": str(worktree), "branch": branch}
     worktree.parent.mkdir(parents=True, exist_ok=True)
     completed = subprocess.run(
         ["git", "worktree", "add", "-b", branch, str(worktree), "HEAD"],
@@ -1060,7 +1132,7 @@ def prepare_worktree_workspace(*, source_workspace: Path, target_workspace: Path
 
 def git_dirty_files(repo_root: Path, *, ignored_prefixes: tuple[str, ...] = ()) -> list[str]:
     completed = subprocess.run(
-        ["git", "status", "--porcelain"],
+        ["git", "-c", "core.quotePath=false", "status", "--porcelain"],
         cwd=str(repo_root),
         capture_output=True,
         text=True,
@@ -1068,8 +1140,8 @@ def git_dirty_files(repo_root: Path, *, ignored_prefixes: tuple[str, ...] = ()) 
     )
     if completed.returncode != 0:
         return []
-    lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
-    return [line for line in lines if not _dirty_path_ignored(line, ignored_prefixes)]
+    lines = [line for line in completed.stdout.splitlines() if line.strip()]
+    return [line.strip() for line in lines if not _dirty_path_ignored(line, ignored_prefixes, repo_root=repo_root)]
 
 
 def workspace_record_dirty_prefixes(*, repo_root: Path, workspace_root: Path) -> tuple[str, ...]:
@@ -1084,13 +1156,15 @@ def workspace_record_dirty_prefixes(*, repo_root: Path, workspace_root: Path) ->
     # dirty-tree gate from tripping on the tool's own files — including a fresh
     # project where git collapses the entire untracked ".agent-workspace/" into
     # one porcelain entry.
-    return (f"{workspace_relative}/",)
+    return (f"{workspace_relative}/", "强制测试记录.md")
 
 
-def _dirty_path_ignored(line: str, ignored_prefixes: tuple[str, ...]) -> bool:
+def _dirty_path_ignored(line: str, ignored_prefixes: tuple[str, ...], *, repo_root: Path | None = None) -> bool:
     if not ignored_prefixes:
         return False
     path = _porcelain_path(line)
+    if path == ".gitignore" and repo_root is not None:
+        return _gitignore_change_is_only_checkpoint_runtime(repo_root, ignored_prefixes=ignored_prefixes)
     return any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in ignored_prefixes)
 
 
@@ -1099,6 +1173,43 @@ def _porcelain_path(line: str) -> str:
     if " -> " in raw:
         raw = raw.split(" -> ", 1)[1]
     return raw.strip().replace("\\", "/")
+
+
+def _gitignore_change_is_only_checkpoint_runtime(repo_root: Path, *, ignored_prefixes: tuple[str, ...]) -> bool:
+    gitignore = repo_root / ".gitignore"
+    allowed = {"# DevPacer / Checkpoint generated runtime files"}
+    allowed.update(prefix.rstrip("/") + "/" for prefix in ignored_prefixes if prefix.strip())
+    if not gitignore.exists():
+        return False
+
+    diff = subprocess.run(
+        ["git", "diff", "--", ".gitignore"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if diff.returncode == 0 and diff.stdout.strip():
+        saw_generated_addition = False
+        for raw in diff.stdout.splitlines():
+            if raw.startswith(("+++", "---", "@@")):
+                continue
+            if raw.startswith("-"):
+                return False
+            if raw.startswith("+"):
+                value = raw[1:].strip()
+                if not value:
+                    continue
+                if value not in allowed:
+                    return False
+                saw_generated_addition = True
+        return saw_generated_addition
+
+    try:
+        lines = [line.strip() for line in gitignore.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        return False
+    return bool(lines) and all(line in allowed for line in lines)
 
 
 def _check_repo(repo_root: Path) -> dict[str, Any]:
@@ -1206,6 +1317,15 @@ def quote_cli(value: str | Path) -> str:
     if os.name == "nt":
         return subprocess.list2cmdline([text])
     return shlex.quote(text)
+
+
+def _safe_diff_summary(*, repo_root: Path, base_ref: str | None) -> dict[str, Any]:
+    """Build a diff summary; degrade gracefully on any git / filesystem error."""
+    try:
+        return build_diff_summary(repo_root=repo_root, base_ref=base_ref)
+    except Exception:  # noqa: BLE001
+        return {"file_count": 0, "lines_added": 0, "lines_removed": 0, "large_diff": False,
+                "changed_files": [], "functions_touched": [], "user_checklist": [], "summary_text": ""}
 
 
 def _decode_timeout_text(value: Any) -> str:

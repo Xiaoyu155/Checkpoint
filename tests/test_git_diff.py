@@ -90,6 +90,16 @@ def test_changed_files_includes_untracked_files_by_default(tmp_path: Path) -> No
     assert changed_files(cwd=tmp_path, include_untracked=False) == ["tracked.txt"]
 
 
+def test_changed_files_preserves_non_ascii_untracked_names(tmp_path: Path) -> None:
+    init_git_repo(tmp_path)
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    git(tmp_path, "add", "README.md")
+    git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
+    (tmp_path / "强制测试记录.md").write_text("# record\n", encoding="utf-8")
+
+    assert changed_files(cwd=tmp_path) == ["强制测试记录.md"]
+
+
 def init_git_repo(path: Path) -> None:
     try:
         git(path, "init")

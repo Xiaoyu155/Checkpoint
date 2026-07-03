@@ -46,6 +46,10 @@ class MissionQueueItem:
     timeout_seconds: float = 1800.0
     allow_dirty: bool = False
     allow_coverage_gap: bool = False
+    agent: str | None = None
+    test_command: str | None = None
+    allow_test_edits: bool = False
+    merge_policy: str = "manual"
     last_result_status: str | None = None
     last_stop_reason: str | None = None
     last_error: str | None = None
@@ -105,6 +109,10 @@ def submit_mission_queue_item(
     timeout_seconds: float = 1800.0,
     allow_dirty: bool = False,
     allow_coverage_gap: bool = False,
+    agent: str | None = None,
+    test_command: str | None = None,
+    allow_test_edits: bool = False,
+    merge_policy: str = "manual",
     force: bool = False,
 ) -> MissionQueueItem:
     workspace_path = Path(workspace_root).expanduser().resolve()
@@ -118,6 +126,7 @@ def submit_mission_queue_item(
             "Queue only created/preview missions, or pass --force after reviewing the mission."
         )
     now = _now_iso()
+    normalized_merge_policy = normalize_merge_policy(merge_policy)
     item = MissionQueueItem(
         queue_id=f"mq-{uuid4().hex[:12]}",
         mission_id=str(mission_id),
@@ -131,6 +140,10 @@ def submit_mission_queue_item(
         timeout_seconds=max(1.0, float(timeout_seconds)),
         allow_dirty=bool(allow_dirty),
         allow_coverage_gap=bool(allow_coverage_gap),
+        agent=str(agent).strip() if str(agent or "").strip() else None,
+        test_command=str(test_command).strip() if str(test_command or "").strip() else None,
+        allow_test_edits=bool(allow_test_edits),
+        merge_policy=normalized_merge_policy,
     )
 
     def update(state: dict[str, Any]) -> MissionQueueItem:
@@ -256,6 +269,7 @@ def run_next_mission_queue_item(
         result = runner(
             workspace_root=workspace_path,
             resume_mission_id=item.mission_id,
+            agents=((item.agent,) if item.agent else ()),
             execute=True,
             dry_run=False,
             run_profile=item.run_profile,
@@ -264,6 +278,9 @@ def run_next_mission_queue_item(
             timeout_seconds=item.timeout_seconds,
             allow_dirty=item.allow_dirty,
             allow_coverage_gap=item.allow_coverage_gap,
+            test_command=item.test_command,
+            allow_test_edits=item.allow_test_edits,
+            merge=item.merge_policy == "auto",
         )
     except Exception as exc:
         updated = finish_mission_queue_item(workspace_path, item.queue_id, error=f"{type(exc).__name__}: {exc}")
@@ -362,7 +379,8 @@ def mission_queue_to_markdown(payload: dict[str, Any]) -> str:
                 suffix += f" / {stop}"
         lines.append(
             f"- `{item.get('queue_id')}` [{item.get('status')}] mission `{item.get('mission_id')}`"
-            f" priority={item.get('priority')} attempts={item.get('attempts')}{suffix}"
+            f" priority={item.get('priority')} attempts={item.get('attempts')}"
+            f" agent={item.get('agent') or 'mission-default'} merge={item.get('merge_policy') or 'manual'}{suffix}"
         )
     return "\n".join(lines)
 
@@ -377,6 +395,9 @@ def mission_queue_submit_to_markdown(item: MissionQueueItem) -> str:
             f"- Status: `{item.status}`",
             f"- Priority: `{item.priority}`",
             f"- Run profile: `{item.run_profile}`",
+            f"- Agent: `{item.agent or 'mission-default'}`",
+            f"- Test command: `{item.test_command or ''}`",
+            f"- Merge policy: `{item.merge_policy}`",
         ]
     )
 
@@ -418,6 +439,10 @@ def normalize_mission_queue_item(payload: dict[str, Any]) -> MissionQueueItem:
         timeout_seconds=max(1.0, float(payload.get("timeout_seconds") or 1800.0)),
         allow_dirty=bool(payload.get("allow_dirty", False)),
         allow_coverage_gap=bool(payload.get("allow_coverage_gap", False)),
+        agent=str(payload.get("agent")).strip() if payload.get("agent") else None,
+        test_command=str(payload.get("test_command")).strip() if payload.get("test_command") else None,
+        allow_test_edits=bool(payload.get("allow_test_edits", False)),
+        merge_policy=normalize_merge_policy(str(payload.get("merge_policy") or "manual")),
         last_result_status=str(payload.get("last_result_status")) if payload.get("last_result_status") else None,
         last_stop_reason=str(payload.get("last_stop_reason")) if payload.get("last_stop_reason") else None,
         last_error=str(payload.get("last_error")) if payload.get("last_error") else None,
@@ -461,6 +486,15 @@ def append_mission_queue_history(
 
 def mission_queue_sort_key(item: MissionQueueItem) -> tuple[int, str]:
     return (-item.priority, item.created_at)
+
+
+def normalize_merge_policy(value: str | None) -> str:
+    policy = str(value or "manual").strip().lower()
+    if policy in {"auto", "automatic", "merge"}:
+        return "auto"
+    if policy in {"never", "no", "none"}:
+        return "never"
+    return "manual"
 
 
 def payload_to_json(payload: dict[str, Any] | MissionQueueItem) -> str:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from visual_agent.chief_dispatch import _dirty_path_ignored, build_worker_command, dispatch_chief_plan, run_dispatch_verification, workspace_record_dirty_prefixes
+from visual_agent.chief_dispatch import _dirty_path_ignored, build_worker_command, dispatch_chief_plan, git_dirty_files, run_dispatch_verification, workspace_record_dirty_prefixes
 from visual_agent.chief_engineer import build_chief_plan, chief_plan_to_dict
 from visual_agent.chief_plans_store import load_verification, load_worker_records, save_plan
 from visual_agent.codex_check import CodexCheckResult, CodexWorkflowCheck
@@ -380,6 +380,9 @@ def test_build_worker_command_codex_uses_cli_default_model(tmp_path) -> None:
 
     assert "--model" not in impl["argv"]
     assert "--model" not in repair["argv"]
+    assert impl["argv"][-1] == "-"
+    assert "Objective: fix" in impl["stdin"]
+    assert "Objective: fix" not in impl["argv"]
 
 
 def test_build_worker_command_honors_explicit_codex_model(tmp_path) -> None:
@@ -492,6 +495,58 @@ def test_chief_dispatch_execute_records_worker_and_verification(tmp_path, monkey
     assert verification["verdict"] == "pass"
 
 
+def test_chief_dispatch_reuses_clean_existing_worktree_on_resume(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.create_worktree",
+        lambda **kwargs: {"status": "reused", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]},
+    )
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, **_kwargs):
+        log_path.write_text("worker done", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        codex_runner=passing_codex_result,
+    )
+
+    assert payload["status"] == "verified"
+    assert payload["worktree"]["created"] is True
+    assert payload["worktree"]["reused"] is True
+
+
+def test_chief_dispatch_does_not_verify_when_worker_fails_even_if_check_passes(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path):
+        log_path.write_text("worker failed", encoding="utf-8")
+        return {"exit_code": 1, "stdout_tail": "", "stderr_tail": "failed"}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        codex_runner=passing_codex_result,
+    )
+
+    assert payload["status"] == "worker_failed"
+    assert payload["latest_verification"]["verdict"] == "pass"
+
+
 def test_dispatch_verification_failure_builds_repair_brief(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
 
@@ -530,7 +585,64 @@ def test_workspace_record_dirty_prefixes_ignore_whole_workspace(tmp_path) -> Non
     workspace = repo / ".agent-workspace"
     prefixes = workspace_record_dirty_prefixes(repo_root=repo, workspace_root=workspace)
 
-    assert prefixes == (".agent-workspace/",)
+    assert prefixes == (".agent-workspace/", "强制测试记录.md")
     assert _dirty_path_ignored("?? .agent-workspace/", prefixes)
     assert _dirty_path_ignored("?? .agent-workspace/missions/m1/plan.json", prefixes)
     assert not _dirty_path_ignored("?? src/calc.py", prefixes)
+
+
+def test_dirty_gate_ignores_checkpoint_gitignore_bootstrap(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "devpacer@example.local"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "DevPacer"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("*.pyc\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=repo, check=True, capture_output=True, text=True)
+
+    (repo / ".gitignore").write_text(
+        "*.pyc\n# DevPacer / Checkpoint generated runtime files\n.agent-workspace/\n",
+        encoding="utf-8",
+    )
+
+    dirty = git_dirty_files(repo, ignored_prefixes=(".agent-workspace/",))
+    assert dirty == []
+
+
+def test_dirty_gate_keeps_user_gitignore_changes(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "devpacer@example.local"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "DevPacer"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("*.pyc\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=repo, check=True, capture_output=True, text=True)
+
+    (repo / ".gitignore").write_text("*.pyc\nsecrets.env\n", encoding="utf-8")
+
+    dirty = git_dirty_files(repo, ignored_prefixes=(".agent-workspace/",))
+    assert dirty == ["M .gitignore"]
+
+
+def test_dirty_gate_ignores_mandatory_record(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "devpacer@example.local"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "DevPacer"], cwd=repo, check=True)
+    (repo / "README.md").write_text("demo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=repo, check=True, capture_output=True, text=True)
+
+    (repo / "强制测试记录.md").write_text("# 强制测试记录\n", encoding="utf-8")
+
+    dirty = git_dirty_files(repo, ignored_prefixes=(".agent-workspace/", "强制测试记录.md"))
+    assert dirty == []

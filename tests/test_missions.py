@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+
+from visual_agent.cli import main
 from visual_agent.missions import (
     append_round,
     create_mission,
@@ -9,6 +12,17 @@ from visual_agent.missions import (
     load_rounds,
     write_final_report,
 )
+
+
+def _seed_mission(workspace, tmp_path, mission_id: str, objective: str) -> None:
+    create_mission(
+        workspace_root=workspace,
+        objective=objective,
+        repo_root=tmp_path,
+        plan_id=f"plan-{mission_id}",
+        budget_policy=default_budget_policy(),
+        mission_id=mission_id,
+    )
 
 
 def test_mission_storage_roundtrip(tmp_path) -> None:
@@ -44,3 +58,33 @@ def test_default_budget_policy_caps_first_repair_round() -> None:
     # The first executable loop only supports one automatic repair round.
     assert budget["max_repair_rounds"] == 1
     assert budget["model_policy"]["visual_review"] == "multimodal"
+
+
+def test_chief_missions_list_limit_applies_to_json(tmp_path, capsys) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    _seed_mission(workspace, tmp_path, "20260703-000001-old", "Oldest mission")
+    _seed_mission(workspace, tmp_path, "20260703-000002-middle", "Middle mission")
+    _seed_mission(workspace, tmp_path, "20260703-000003-new", "Newest mission")
+
+    code = main(["chief-missions", "list", "--workspace-root", str(workspace), "--limit", "2", "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert [item["mission_id"] for item in payload] == ["20260703-000003-new", "20260703-000002-middle"]
+    assert "20260703-000001-old" not in {item["mission_id"] for item in payload}
+
+
+def test_chief_missions_list_limit_applies_to_markdown(tmp_path, capsys) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    _seed_mission(workspace, tmp_path, "20260703-000001-old", "Oldest mission")
+    _seed_mission(workspace, tmp_path, "20260703-000002-middle", "Middle mission")
+    _seed_mission(workspace, tmp_path, "20260703-000003-new", "Newest mission")
+
+    code = main(["chief-missions", "list", "--workspace-root", str(workspace), "--limit", "2", "--format", "markdown"])
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert "20260703-000003-new" in output
+    assert "20260703-000002-middle" in output
+    assert "20260703-000001-old" not in output
+    assert "Oldest mission" not in output

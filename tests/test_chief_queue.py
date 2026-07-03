@@ -133,6 +133,30 @@ def test_run_mission_queue_worker_run_once_marks_success(tmp_path) -> None:
     assert saved.last_result_status == "verified"
 
 
+def test_queue_item_carries_worker_and_verification_context(tmp_path) -> None:
+    workspace, mission = create_preview_mission(tmp_path)
+    submit_mission_queue_item(
+        workspace_root=workspace,
+        mission_id=mission["mission_id"],
+        agent="codex",
+        test_command="npm test",
+        allow_test_edits=True,
+        merge_policy="auto",
+    )
+    captured = {}
+
+    def fake_runner(**kwargs):
+        captured.update(kwargs)
+        return {"status": "verified", "stop_reason": "verified"}
+
+    run_mission_queue_worker(workspace_root=workspace, run_once=True, mission_runner=fake_runner)
+
+    assert captured["agents"] == ("codex",)
+    assert captured["test_command"] == "npm test"
+    assert captured["allow_test_edits"] is True
+    assert captured["merge"] is True
+
+
 def test_run_mission_queue_worker_marks_non_verified_result_failed(tmp_path) -> None:
     workspace, mission = create_preview_mission(tmp_path)
     submitted = submit_mission_queue_item(workspace_root=workspace, mission_id=mission["mission_id"])

@@ -109,6 +109,51 @@ def test_chief_run_dry_run_saves_preview_mission(tmp_path, monkeypatch) -> None:
     assert rounds[0]["type"] == "dispatch_preview"
 
 
+def test_chief_run_with_test_command_bootstraps_missing_workspace(tmp_path, monkeypatch) -> None:
+    workspace_root = tmp_path / ".agent-workspace"
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("visual_agent.chief_engineer.changed_files", lambda **_kwargs: [])
+
+    def fake_dispatch(**kwargs):
+        captured.update(kwargs)
+        return preview_payload(**kwargs)
+
+    payload = run_chief_mission(
+        goal="给 utils 加 slugify，要求 slugify(' Hello, World! ') == 'hello-world'",
+        workspace_root=workspace_root,
+        repo_root=tmp_path,
+        test_command="python -m pytest -q",
+        dispatch_runner=fake_dispatch,
+    )
+
+    assert payload["status"] == "preview"
+    assert workspace_root.exists()
+    assert captured["test_command"] == "python -m pytest -q"
+    assert captured["allow_test_edits"] is False
+
+
+def test_chief_run_allows_test_edits_when_objective_requests_tests(tmp_path, monkeypatch) -> None:
+    workspace_root = tmp_path / ".agent-workspace"
+    captured: dict[str, object] = {}
+    monkeypatch.setattr("visual_agent.chief_engineer.changed_files", lambda **_kwargs: [])
+
+    def fake_dispatch(**kwargs):
+        captured.update(kwargs)
+        return preview_payload(**kwargs)
+
+    payload = run_chief_mission(
+        goal="给 utils 加 slugify 并写测试，要求 slugify(' Hello, World! ') == 'hello-world'",
+        workspace_root=workspace_root,
+        repo_root=tmp_path,
+        test_command="python -m pytest -q",
+        dispatch_runner=fake_dispatch,
+    )
+
+    assert payload["status"] == "preview"
+    assert captured["allow_test_edits"] is True
+    assert payload["plan"]["test_edit_policy"]["source"] == "objective"
+
+
 def test_chief_run_blocks_vague_goal_before_dispatch(tmp_path, monkeypatch) -> None:
     workspace = ready_workspace(tmp_path, monkeypatch)
 
@@ -216,6 +261,8 @@ def test_chief_run_execute_verified(tmp_path, monkeypatch) -> None:
 
     assert payload["status"] == "verified"
     assert payload["stop_reason"] == "verified"
+    assert Path(payload["mandatory_record_path"]).name == "强制测试记录.md"
+    assert "Fix checkout total display" in Path(payload["mandatory_record_path"]).read_text(encoding="utf-8")
     rounds = load_rounds(workspace.root, payload["mission"]["mission_id"])
     assert rounds[-1]["status"] == "pass"
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,10 @@ from .git_diff import affected_workflows, changed_files
 from .models import to_jsonable
 from .project_memory import build_project_memory, project_memory_handoff_notes
 from .workspace import WorkflowRef, discover_workflows, open_workspace
+
+
+_CHECKPOINT_ARTIFACT_BASENAMES = {".visual-agent-status.md", "强制测试记录.md"}
+_CHECKPOINT_ARTIFACT_DIR_PREFIXES = (".agent-workspace/", ".pw-browsers/")
 
 
 # Codex is the default executable coding worker. It uses the user's existing
@@ -155,7 +160,7 @@ def build_chief_plan(
     verification_refs = [ref for ref in all_refs if "verification" in set(ref.tags)]
     skipped_slow = [ref.name for ref in verification_refs if "slow" in set(ref.tags) and not include_slow]
     runnable_refs = [ref for ref in verification_refs if include_slow or "slow" not in set(ref.tags)]
-    changed = changed_files(base=base, cwd=repo_path)
+    changed = _product_changed_files(changed_files(base=base, cwd=repo_path), repo_root=repo_path)
     selected_refs = affected_workflows(runnable_refs, changed=changed)[: max(0, int(max_workflows))]
     coverage = codex_coverage_summary(changed, runnable_refs)
     coverage_status = str(coverage.get("status") or "")
@@ -203,6 +208,58 @@ def build_chief_plan(
         project_memory=project_memory,
         handoff_prompt=_handoff_prompt(objective, selected_names, commands, status=status, memory_notes=memory_notes),
     )
+
+
+def _product_changed_files(paths: list[str], *, repo_root: Path | None = None) -> list[str]:
+    """Remove Checkpoint's own runtime artifacts from product planning input."""
+    kept: list[str] = []
+    for path in paths:
+        normalized = str(path).replace("\\", "/").strip()
+        if not normalized:
+            continue
+        basename = normalized.rsplit("/", 1)[-1]
+        if basename in _CHECKPOINT_ARTIFACT_BASENAMES:
+            continue
+        if normalized == ".gitignore" and repo_root is not None and _gitignore_change_is_only_checkpoint_runtime(repo_root):
+            continue
+        if any(normalized == prefix.rstrip("/") or normalized.startswith(prefix) for prefix in _CHECKPOINT_ARTIFACT_DIR_PREFIXES):
+            continue
+        kept.append(normalized)
+    return kept
+
+
+def _gitignore_change_is_only_checkpoint_runtime(repo_root: Path) -> bool:
+    gitignore = repo_root / ".gitignore"
+    allowed = {"# DevPacer / Checkpoint generated runtime files", ".agent-workspace/"}
+    if not gitignore.exists():
+        return False
+    diff = subprocess.run(
+        ["git", "-c", "core.quotePath=false", "diff", "--", ".gitignore"],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if diff.returncode == 0 and diff.stdout.strip():
+        saw_generated_addition = False
+        for raw in diff.stdout.splitlines():
+            if raw.startswith(("+++", "---", "@@")):
+                continue
+            if raw.startswith("-"):
+                return False
+            if raw.startswith("+"):
+                value = raw[1:].strip()
+                if not value:
+                    continue
+                if value not in allowed:
+                    return False
+                saw_generated_addition = True
+        return saw_generated_addition
+    try:
+        lines = [line.strip() for line in gitignore.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        return False
+    return bool(lines) and all(line in allowed for line in lines)
 
 
 def chief_plan_to_dict(plan: ChiefPlan) -> dict[str, Any]:

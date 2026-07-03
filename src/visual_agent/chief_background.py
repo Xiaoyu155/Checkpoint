@@ -26,6 +26,9 @@ def start_background_chief_run(
     timeout_seconds: float = 1800.0,
     allow_dirty: bool = False,
     allow_coverage_gap: bool = False,
+    test_command: str | None = None,
+    allow_test_edits: bool = False,
+    merge: bool = False,
 ) -> dict[str, Any]:
     workspace_path = Path(workspace_root).expanduser().resolve()
     mission = load_mission(workspace_path, mission_id)
@@ -67,6 +70,12 @@ def start_background_chief_run(
         argv.append("--allow-dirty")
     if allow_coverage_gap:
         argv.append("--allow-coverage-gap")
+    if test_command:
+        argv.extend(["--test-command", str(test_command)])
+    if allow_test_edits:
+        argv.append("--allow-test-edits")
+    if merge:
+        argv.append("--merge")
 
     env = os.environ.copy()
     src_dir = Path(__file__).resolve().parent.parent
@@ -105,6 +114,9 @@ def start_background_chief_run(
         "stdout_log": str(stdout_path),
         "stderr_log": str(stderr_path),
         "started_at": datetime.now(timezone.utc).isoformat(),
+        "test_command": str(test_command or ""),
+        "allow_test_edits": bool(allow_test_edits),
+        "merge": bool(merge),
     }
     (directory / "background.json").write_text(json.dumps(to_jsonable(record), ensure_ascii=False, indent=2), encoding="utf-8")
     append_round(
@@ -144,6 +156,9 @@ def run_background_worker(
     timeout_seconds: float = 1800.0,
     allow_dirty: bool = False,
     allow_coverage_gap: bool = False,
+    test_command: str | None = None,
+    allow_test_edits: bool = False,
+    merge: bool = False,
 ) -> dict[str, Any]:
     """Run a mission in a child process and write a completion receipt."""
     workspace_path = Path(workspace_root).expanduser().resolve()
@@ -168,6 +183,9 @@ def run_background_worker(
             timeout_seconds=timeout_seconds,
             allow_dirty=allow_dirty,
             allow_coverage_gap=allow_coverage_gap,
+            test_command=test_command or str(background.get("test_command") or "") or None,
+            allow_test_edits=allow_test_edits or bool(background.get("allow_test_edits")),
+            merge=merge or bool(background.get("merge")),
         )
         exit_code = 0 if str(payload.get("status") or "") == "verified" else 1
         background.update(
