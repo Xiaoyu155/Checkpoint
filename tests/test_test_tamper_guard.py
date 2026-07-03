@@ -110,6 +110,18 @@ def test_verification_allows_test_edits_when_explicit(tmp_path):
     assert payload["test_files_changed"] == ["tests/test_calc.py"]
 
 
+def test_test_command_exempts_coverage_gap(tmp_path):
+    # A fresh project has no authored workflows, so plans are flagged
+    # needs_workflow_coverage. With a test command that must not block dispatch.
+    from visual_agent.chief_dispatch import _dispatch_block_reason
+
+    plan = {"status": "needs_workflow_coverage"}
+    track = {"agent": "claude-code", "track_kind": "implementation"}
+    assert _dispatch_block_reason(plan=plan, track=track, allow_coverage_gap=False, execute=True, has_test_command=True) == ""
+    # Without a test command (and no override) the coverage gate still blocks.
+    assert _dispatch_block_reason(plan=plan, track=track, allow_coverage_gap=False, execute=True, has_test_command=False) != ""
+
+
 def test_verification_passes_untampered_repo(tmp_path):
     repo = _make_repo(tmp_path)
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)

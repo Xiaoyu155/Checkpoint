@@ -185,6 +185,7 @@ def dispatch_chief_plan(
         track=selected_track,
         allow_coverage_gap=allow_coverage_gap,
         execute=execute and not dry_run,
+        has_test_command=bool(str(test_command or "").strip()),
     )
     if blocked_reason:
         return {**preview, "status": "blocked", "reason": blocked_reason}
@@ -381,11 +382,16 @@ def _dispatch_block_reason(
     track: dict[str, Any],
     allow_coverage_gap: bool,
     execute: bool,
+    has_test_command: bool = False,
 ) -> str:
     plan_status = str(plan.get("status") or "")
     if plan_status in {"blocked", "needs_clarification"}:
         return f"Plan status is {plan_status}; resolve it before dispatch."
-    if plan_status == "needs_workflow_coverage" and not allow_coverage_gap:
+    # A test/build command IS the acceptance gate, so authored-workflow coverage
+    # is irrelevant — otherwise every fresh project (which has no workflows) is
+    # blocked by a coverage gap it can never satisfy. This mirrors the same
+    # exemption in run_chief_mission.
+    if plan_status == "needs_workflow_coverage" and not allow_coverage_gap and not has_test_command:
         return "Plan has weak workflow coverage; rerun chief-plan after adding coverage or pass --allow-coverage-gap for a dry experiment."
     agent = canonical_agent_name(str(track.get("agent") or ""))
     if str(track.get("track_kind") or "implementation") == "inspection":
@@ -995,14 +1001,12 @@ def workspace_record_dirty_prefixes(*, repo_root: Path, workspace_root: Path) ->
         return ()
     if not workspace_relative:
         return ()
-    generated_dirs = (
-        "chief_plans",
-        "missions",
-        "runs",
-        "reports",
-        "demo_repos",
-    )
-    return tuple(f"{workspace_relative}/{dirname}/" for dirname in generated_dirs)
+    # The whole workspace is DevPacer's runtime dir (plans, missions, runs,
+    # repo_map.json, ...), never user source. Ignoring the root prefix keeps the
+    # dirty-tree gate from tripping on the tool's own files — including a fresh
+    # project where git collapses the entire untracked ".agent-workspace/" into
+    # one porcelain entry.
+    return (f"{workspace_relative}/",)
 
 
 def _dirty_path_ignored(line: str, ignored_prefixes: tuple[str, ...]) -> bool:

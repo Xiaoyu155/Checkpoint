@@ -151,7 +151,44 @@ def init_workspace(
         copy_demo_assets(workspace, overwrite=overwrite)
     if framework_hint:
         write_framework_demo_assets(workspace, framework_hint=framework_hint, overwrite=overwrite)
+    _ensure_gitignored(workspace.root)
     return workspace
+
+
+# Generated runtime output under the workspace — safe to gitignore so DevPacer's
+# churn never clutters git status. Authored assets (workflows/, fixtures/,
+# inputs/, workspace.json) are deliberately NOT ignored: users commit those so
+# git-diff-aware verification can see them.
+_GITIGNORE_RUNTIME = ("missions/", "chief_plans/", "runs/", "reports/", "mission_queue/", "repo_map.json")
+
+
+def _ensure_gitignored(workspace_root: Path) -> None:
+    """Add DevPacer's generated runtime paths to the project .gitignore so they
+    never show up as the user's uncommitted changes. Best-effort only: the
+    workspace must live under a git repo. Authored workflows/fixtures stay
+    trackable so they can be committed."""
+    project_root = workspace_root.parent
+    if not (project_root / ".git").exists():
+        return
+    try:
+        base = workspace_root.relative_to(project_root).as_posix().rstrip("/")
+    except ValueError:
+        return
+    if not base:
+        return
+    entries = [f"{base}/{item}" for item in _GITIGNORE_RUNTIME]
+    gitignore = project_root / ".gitignore"
+    try:
+        existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+        present = {item.strip().rstrip("/") for item in existing.splitlines()}
+        missing = [entry for entry in entries if entry.rstrip("/") not in present]
+        if not missing:
+            return
+        prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+        with gitignore.open("a", encoding="utf-8") as handle:
+            handle.write(f"{prefix}# DevPacer / Checkpoint generated runtime files\n" + "\n".join(missing) + "\n")
+    except OSError:
+        return
 
 
 def infer_project_root(workspace_root: Path) -> Path:

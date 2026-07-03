@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import threading
 import webbrowser
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,80 @@ from .agent_capabilities import agents_doctor
 from .chief_plans_store import list_plans, load_plan, load_worker_records
 from .chief_queue import list_mission_queue_items
 from .missions import list_missions, load_mission
+
+
+# In-flight workbench launches (missions started from the web form). The mission
+# itself is the source of truth on disk; this registry only lets the page show a
+# "starting/running" row before the mission file is written, plus launch errors.
+_LAUNCHES: dict[str, dict[str, Any]] = {}
+_LAUNCH_LOCK = threading.Lock()
+
+
+def _record_launch(launch_id: str, **fields: Any) -> None:
+    with _LAUNCH_LOCK:
+        entry = _LAUNCHES.setdefault(launch_id, {"launch_id": launch_id})
+        entry.update(fields)
+
+
+def _launch_snapshot() -> list[dict[str, Any]]:
+    with _LAUNCH_LOCK:
+        return [dict(item) for item in _LAUNCHES.values()]
+
+
+def start_workbench_mission(
+    *,
+    workspace_root: str | Path,
+    repo_root: str,
+    goal: str,
+    test_command: str,
+    agent: str,
+    execute: bool,
+) -> dict[str, Any]:
+    """Launch a mission from the workbench form in a background thread.
+
+    Runs ``run_chief_mission`` in-process (it honors ``test_command``), so the
+    dashboard server thread returns immediately and the polling page shows the
+    mission as it progresses. Preview (execute=False) is fast; execute runs a
+    real worker and merges verified changes back."""
+    goal = str(goal or "").strip()
+    if not goal:
+        return {"ok": False, "error": "请填写目标（goal）。"}
+    launch_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    _record_launch(
+        launch_id,
+        goal=goal,
+        execute=bool(execute),
+        state="starting",
+        started_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    def _run() -> None:
+        from .chief_run import run_chief_mission
+
+        try:
+            result = run_chief_mission(
+                goal=goal,
+                workspace_root=workspace_root,
+                repo_root=repo_root or ".",
+                test_command=(test_command or None),
+                agents=((agent,) if agent else ()),
+                execute=bool(execute),
+                dry_run=not bool(execute),
+                merge=bool(execute),
+            )
+            mission = result.get("mission") if isinstance(result, dict) else {}
+            _record_launch(
+                launch_id,
+                state="done",
+                status=str((result or {}).get("status") or ""),
+                stop_reason=str((result or {}).get("stop_reason") or ""),
+                mission_id=str((mission or {}).get("mission_id") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001 - surface launch failures to the page
+            _record_launch(launch_id, state="error", error=str(exc)[:400])
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "launch_id": launch_id, "execute": bool(execute)}
 
 
 # Rough public per-Mtoken USD prices, only for an *estimated* savings figure so
@@ -103,17 +178,21 @@ def build_dashboard_data(workspace_root: str | Path) -> dict[str, Any]:
     counts: dict[str, int] = {}
     for mission in missions:
         counts[mission.get("status") or "unknown"] = counts.get(mission.get("status") or "unknown", 0) + 1
+    installed_agents = [str(a.get("agent")) for a in agents if isinstance(a, dict) and a.get("installed")]
     return {
         "product": "DevPacer",
         "engine": "Checkpoint",
         "workspace_root": str(root),
+        "repo_root": str(root.parent),
         "status": _read_status(root),
         "value": _build_value(root, missions, plans),
         "agents": agents,
+        "installed_agents": installed_agents,
         "missions": missions,
         "mission_counts": counts,
         "plans": plans,
         "queue": queue,
+        "launches": _launch_snapshot(),
     }
 
 
@@ -189,6 +268,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <span class="sub" id="ws"></span>
 </header>
 <div class="wrap">
+  <section class="card" style="margin-bottom:20px;">
+    <h2>新建任务（工作台）</h2>
+    <div style="display:grid;gap:10px;">
+      <textarea id="fGoal" rows="2" placeholder="用一句话说要做什么，例如：修复 src/calc.py 的 add，让 pytest 通过" style="width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:10px;font:inherit;"></textarea>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+        <input id="fRepo" placeholder="项目根目录（默认：工作区上级）" style="background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;"/>
+        <input id="fTest" placeholder="验收命令，如 pytest -q / npm test / cargo test" style="background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;"/>
+      </div>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+        <label class="meta">编码 agent
+          <select id="fAgent" style="background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px;font:inherit;"></select>
+        </label>
+        <button id="btnPreview" onclick="startMission(false)" style="background:#243; color:var(--ok); border:1px solid var(--line); border-radius:8px; padding:9px 16px; cursor:pointer; font:inherit; font-weight:600;">预览（不花钱）</button>
+        <button id="btnRun" onclick="startMission(true)" style="background:var(--acc); color:#04101f; border:none; border-radius:8px; padding:9px 18px; cursor:pointer; font:inherit; font-weight:700;">开始执行</button>
+        <span id="launchMsg" class="meta"></span>
+      </div>
+      <div class="meta">预览只看它准备怎么干、派给谁、怎么验收；执行会在隔离分支里真改代码、跑验收命令，过了才合并回主分支。含糊的目标会被拦下来让你先说清楚。</div>
+    </div>
+  </section>
   <section class="hero">
     <div class="card big"><h2>已验收交付</h2><div id="vVerified" class="stat ok">0</div><div class="meta">通过 Checkpoint 产品验收的任务（不是"AI 说完成了"）</div></div>
     <div class="card big"><h2>省钱大脑路由</h2><div id="vDowngraded" class="stat acc">0</div><div class="meta" id="vTiers">把机械/普通任务派给便宜模型，而不是无脑用最贵的</div></div>
@@ -223,8 +321,45 @@ const pill = s => { const t=(s||'').toLowerCase();
   return 'mut'; };
 const esc = s => (s||'').replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 
+let agentsFilled = false;
+function fillAgents(d){
+  if(agentsFilled) return;
+  const sel = document.getElementById('fAgent');
+  const installed = (d.installed_agents||[]);
+  const opts = installed.length ? installed : ['claude-code','codex'];
+  sel.innerHTML = opts.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('');
+  if(d.repo_root && !document.getElementById('fRepo').value) document.getElementById('fRepo').placeholder = d.repo_root;
+  agentsFilled = true;
+}
+
+async function startMission(execute){
+  const goal = document.getElementById('fGoal').value.trim();
+  const msg = document.getElementById('launchMsg');
+  if(!goal){ msg.textContent = '请先填写目标。'; return; }
+  const body = {
+    goal,
+    repo_root: document.getElementById('fRepo').value.trim() || document.getElementById('fRepo').placeholder || '.',
+    test_command: document.getElementById('fTest').value.trim(),
+    agent: document.getElementById('fAgent').value,
+    execute: !!execute
+  };
+  document.getElementById('btnPreview').disabled = true;
+  document.getElementById('btnRun').disabled = true;
+  msg.textContent = execute ? '已开始执行，下面会实时更新…' : '正在生成预览…';
+  try{
+    const r = await (await fetch('/api/mission/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)})).json();
+    msg.textContent = r.ok ? (execute?'任务已派发，隔离分支里干活中。':'预览已生成，见下方任务列表。') : ('无法开始：'+esc(r.error||'未知错误'));
+  }catch(e){ msg.textContent = '请求失败：'+esc(String(e)); }
+  finally{
+    document.getElementById('btnPreview').disabled = false;
+    document.getElementById('btnRun').disabled = false;
+    load();
+  }
+}
+
 async function load(){
   const d = await (await fetch('/api/data')).json();
+  fillAgents(d);
   document.getElementById('ws').textContent = d.workspace_root;
   const v = d.value || {};
   document.getElementById('vVerified').textContent = v.verified || 0;
@@ -252,12 +387,19 @@ async function load(){
     return `<li><span class="pill ${ok?'ok':'mut'}">${ok?'已安装':'未找到'}</span> <b>${esc(a.display_name||a.agent)}</b><span class="meta">${v}</span></li>`;
   }).join('') || '<li class="empty">无</li>';
 
+  const active = (d.launches||[]).filter(l=>l.state==='starting'||l.state==='error');
+  const lv = active.map(l=>{
+    const p = l.state==='error' ? 'fail' : 'warn';
+    const txt = l.state==='error' ? ('启动失败：'+esc(l.error||'')) : (l.execute?'派发中…':'生成预览中…');
+    return `<div class="row"><span class="obj">${esc(l.goal)}</span><span><span class="pill ${p}">${txt}</span></span></div>`;
+  }).join('');
+
   const mv = d.missions.length ? d.missions.map(m=>`
      <div class="row click" onclick="detail('${esc(m.mission_id)}')">
        <span class="obj">${esc(m.objective)||'(无目标)'}</span>
        <span><span class="pill ${pill(m.status)}">${esc(m.status)}</span> <span class="meta">${esc(m.stop_reason)}</span></span>
-     </div>`).join('') : '<div class="empty">还没有任务。运行 <code>checkpoint mission start --goal "…"</code></div>';
-  document.getElementById('missions').innerHTML = mv;
+     </div>`).join('') : '<div class="empty">还没有任务。在上面的工作台填目标点“开始执行”，或运行 <code>checkpoint mission start --goal "…"</code></div>';
+  document.getElementById('missions').innerHTML = lv + mv;
 
   const pv = d.plans.length ? d.plans.map(p=>`
      <div class="row"><span class="obj">${esc(p.objective)}</span>
@@ -315,6 +457,30 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             return
         self.send_response(404)
         self.end_headers()
+
+    def do_POST(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if path != "/api/mission/start":
+            self.send_response(404)
+            self.end_headers()
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b"{}"
+            payload = json.loads(body.decode("utf-8") or "{}")
+        except (ValueError, OSError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        result = start_workbench_mission(
+            workspace_root=self.server.workspace_root,
+            repo_root=str(payload.get("repo_root") or str(self.server.workspace_root.parent)),
+            goal=str(payload.get("goal") or ""),
+            test_command=str(payload.get("test_command") or ""),
+            agent=str(payload.get("agent") or ""),
+            execute=bool(payload.get("execute")),
+        )
+        self._send(json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
 
 class _DashboardServer(ThreadingHTTPServer):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from visual_agent.chief_dispatch import build_worker_command, dispatch_chief_plan, run_dispatch_verification, workspace_record_dirty_prefixes
+from visual_agent.chief_dispatch import _dirty_path_ignored, build_worker_command, dispatch_chief_plan, run_dispatch_verification, workspace_record_dirty_prefixes
 from visual_agent.chief_engineer import build_chief_plan, chief_plan_to_dict
 from visual_agent.chief_plans_store import load_verification, load_worker_records, save_plan
 from visual_agent.codex_check import CodexCheckResult, CodexWorkflowCheck
@@ -435,11 +435,15 @@ def test_dispatch_verification_failure_builds_repair_brief(tmp_path, monkeypatch
     assert saved["repair_brief"]["workflow"] == "checkout"
 
 
-def test_workspace_record_dirty_prefixes_ignore_generated_records_only(tmp_path) -> None:
+def test_workspace_record_dirty_prefixes_ignore_whole_workspace(tmp_path) -> None:
+    # The workspace is DevPacer's runtime dir; the dirty gate must ignore all of
+    # it, including the fresh-project case where git collapses the entire
+    # untracked ".agent-workspace/" into a single porcelain entry.
     repo = tmp_path / "repo"
     workspace = repo / ".agent-workspace"
     prefixes = workspace_record_dirty_prefixes(repo_root=repo, workspace_root=workspace)
 
-    assert ".agent-workspace/chief_plans/" in prefixes
-    assert ".agent-workspace/missions/" in prefixes
-    assert ".agent-workspace/workflows/" not in prefixes
+    assert prefixes == (".agent-workspace/",)
+    assert _dirty_path_ignored("?? .agent-workspace/", prefixes)
+    assert _dirty_path_ignored("?? .agent-workspace/missions/m1/plan.json", prefixes)
+    assert not _dirty_path_ignored("?? src/calc.py", prefixes)
