@@ -251,7 +251,7 @@ def test_generate_from_diff_cli_dry_run_outputs_context_workflow(tmp_path: Path,
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     page = workspace.fixtures_dir / "login.html"
     page.write_text("<form><input name='email'></form>\n", encoding="utf-8")
-    git(tmp_path, "add", ".agent-workspace/fixtures/login.html")
+    git(tmp_path, "add", "--force", ".agent-workspace/fixtures/login.html")
     git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
     page.write_text(
         "<form action='/dashboard'><label for='email'>Email</label><input id='email' name='email' type='email' required>"
@@ -308,7 +308,7 @@ def test_generate_from_diff_cli_appends_audit_log(tmp_path: Path, capsys) -> Non
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     page = workspace.fixtures_dir / "login.html"
     page.write_text("<form><input name='email'></form>\n", encoding="utf-8")
-    git(tmp_path, "add", ".agent-workspace/fixtures/login.html")
+    git(tmp_path, "add", "--force", ".agent-workspace/fixtures/login.html")
     git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
     page.write_text(
         "<form action='/dashboard'><label for='email'>Email</label><input id='email' name='email' type='email' required>"
@@ -769,7 +769,7 @@ def test_verify_impl_cli_dry_run_writes_status(tmp_path: Path, capsys) -> None:
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     page = workspace.fixtures_dir / "simple_form.html"
     page.write_text("<form><input name='email'></form>\n", encoding="utf-8")
-    git(tmp_path, "add", ".agent-workspace/fixtures/simple_form.html")
+    git(tmp_path, "add", "--force", ".agent-workspace/fixtures/simple_form.html")
     git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
     page.write_text(
         "<form><label for='email'>Email</label><input id='email' name='email'>"
@@ -810,7 +810,7 @@ def test_verify_impl_cli_infers_fixture_base_url(tmp_path: Path, capsys) -> None
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     page = workspace.fixtures_dir / "simple_form.html"
     page.write_text("<form><input name='email'></form>\n", encoding="utf-8")
-    git(tmp_path, "add", ".agent-workspace/fixtures/simple_form.html")
+    git(tmp_path, "add", "--force", ".agent-workspace/fixtures/simple_form.html")
     git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
     page.write_text(
         "<form><label for='email'>Email</label><input id='email' name='email'>"
@@ -846,7 +846,7 @@ def test_verify_impl_cli_can_run_negative_workflow_when_requested(tmp_path: Path
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     page = workspace.fixtures_dir / "simple_form.html"
     page.write_text("<form><input name='email'></form>\n", encoding="utf-8")
-    git(tmp_path, "add", ".agent-workspace/fixtures/simple_form.html")
+    git(tmp_path, "add", "--force", ".agent-workspace/fixtures/simple_form.html")
     git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
     page.write_text(
         "<form><label for='email'>Email</label><input id='email' name='email' type='email' required>"

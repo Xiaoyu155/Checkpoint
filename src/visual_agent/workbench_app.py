@@ -28,8 +28,9 @@ def workbench_agents() -> list[str]:
         doctor = []
     installed = [str(a.get("agent")) for a in doctor if isinstance(a, dict) and a.get("installed") and a.get("agent")]
     # Only agents with an executable coding adapter can actually run work.
-    coding = [a for a in installed if a in {"claude-code", "codex"}]
-    return coding or ["claude-code", "codex"]
+    order = ["codex", "claude-code"]
+    coding = [agent for agent in order if agent in installed]
+    return coding or order
 
 
 def resolve_workspace(project_dir: str | Path) -> Path:
@@ -56,6 +57,16 @@ def validate_launch(*, project_dir: str, goal: str, test_command: str) -> dict[s
             "warning": "没有填验收命令：将只能做检查性验收，建议填上项目的测试命令（如 pytest -q）以获得确定性验收。",
         }
     return {"ok": True}
+
+
+def _grounding_section(final_report: str) -> str:
+    """Extract the plan-review section from a mission report, if present."""
+    lines = str(final_report or "").splitlines()
+    start = next((i for i, line in enumerate(lines) if line.startswith("### 计划审查")), None)
+    if start is None:
+        return ""
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("### ")), len(lines))
+    return "\n".join(lines[start + 1 : end]).strip()
 
 
 def launch_desktop_app(project_dir: str | Path | None = None) -> int:
@@ -103,7 +114,7 @@ def launch_desktop_app(project_dir: str | Path | None = None) -> int:
     agent_box = ttk.Combobox(row2, textvariable=agent_var, values=agents, state="readonly", width=18)
     agent_box.current(0)
     agent_box.pack(side="left", padx=8)
-    ttk.Label(row2, text="（账号 = 该 CLI 已登录的账号；先在终端登录 claude / codex）", foreground="#888").pack(side="left")
+    ttk.Label(row2, text="（账号 = 该 CLI 已登录的账号；Codex 走你的 codex login 订阅，可切到 Claude Code）", foreground="#888").pack(side="left")
 
     # --- Goal ---
     goal_row = ttk.Frame(frm)
@@ -214,11 +225,27 @@ def launch_desktop_app(project_dir: str | Path | None = None) -> int:
         stop = str(mission.get("stop_reason") or "")
         status_var.set(f"状态：{status}  {('· ' + stop) if stop else ''}")
         if status and status not in {"running", "created", "preview_running"}:
-            append_log(f"■ 结束：{status} {('（' + stop + '）') if stop else ''}")
-            report = str(detail.get("final_report") or "").strip()
-            if report:
-                append_log("---- 最终报告 ----")
-                append_log(report[:4000])
+            if stop == "needs_clarification":
+                # The mission already reviewed the repo's plan documents before
+                # stopping; surface that conversation instead of a bare error.
+                review = _grounding_section(str(detail.get("final_report") or ""))
+                if review:
+                    append_log("⚠ 目标还不够具体。我先审查了项目里的计划文档：")
+                    append_log(review)
+                    append_log("按上面的建议确认下一步（或直接把待办写进目标），再点「预览」或「执行」。")
+                else:
+                    append_log("⚠ 目标太模糊，工作台无法派发。请把目标写得更具体：")
+                    append_log("  • 要实现什么功能？（如：给登录页加「记住我」勾选框）")
+                    append_log("  • 完成的标志是什么？（如：pytest -q 通过 / 页面出现某文字）")
+                    append_log("  • 哪个文件 / 页面 / 接口需要改？")
+                    append_log("修改好目标后重新点「预览」或「执行」。")
+                status_var.set("⚠ 目标需要更具体，请看下方审查建议")
+            else:
+                append_log(f"■ 结束：{status} {('（' + stop + '）') if stop else ''}")
+                report = str(detail.get("final_report") or "").strip()
+                if report:
+                    append_log("---- 最终报告 ----")
+                    append_log(report[:4000])
             set_busy(False)
             state["mission_id"] = None
             state["polling"] = False

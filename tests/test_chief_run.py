@@ -129,6 +129,79 @@ def test_chief_run_blocks_vague_goal_before_dispatch(tmp_path, monkeypatch) -> N
     assert mission["status"] == "stopped"
 
 
+def test_chief_run_grounds_vague_goal_onto_plan_document(tmp_path, monkeypatch) -> None:
+    """A vague goal that points at a repo plan gets resolved and dispatched,
+    not bounced back as an error."""
+    workspace = ready_workspace(tmp_path, monkeypatch)
+
+    def fake_grounding(*, goal, repo_root):
+        assert "开发计划" in goal
+        return {
+            "resolved": True,
+            "source": "model",
+            "plan_document": "docs/roadmap.md",
+            "grounded_goal": "修复结算页 checkout 金额显示，总价必须等于行项目之和",
+            "acceptance_hint": "checkout 工作流验收通过",
+            "evidence": "- [ ] 修复结算页金额",
+        }
+
+    payload = run_chief_mission(
+        goal="参照最新的开发计划，继续给我推进开发",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        dispatch_runner=preview_payload,
+        grounding_runner=fake_grounding,
+    )
+
+    assert payload["status"] == "preview"
+    mission = payload["mission"]
+    assert "checkout" in mission["objective"]
+    rounds = load_rounds(workspace.root, mission["mission_id"])
+    grounding_rounds = [r for r in rounds if r.get("type") == "grounding"]
+    assert grounding_rounds and grounding_rounds[0]["status"] == "resolved"
+    assert grounding_rounds[0]["plan_document"] == "docs/roadmap.md"
+    assert payload["plan"]["grounding"]["resolved"] is True
+    report = Path(payload["final_report_path"]).read_text(encoding="utf-8")
+    assert "计划审查" in report
+    assert "落地为具体任务" in report
+
+
+def test_chief_run_unresolved_grounding_stops_with_advice(tmp_path, monkeypatch) -> None:
+    workspace = ready_workspace(tmp_path, monkeypatch)
+
+    def fake_grounding(*, goal, repo_root):
+        return {
+            "resolved": False,
+            "source": "model",
+            "documents_reviewed": ["README.md"],
+            "plan_document": "",
+            "grounded_goal": "",
+            "proposed_plan": ["先定验收命令", "实现登录页"],
+            "questions": ["先做哪个功能？"],
+        }
+
+    def should_not_dispatch(**_kwargs):
+        raise AssertionError("dispatch should not run when grounding is unresolved")
+
+    payload = run_chief_mission(
+        goal="按照计划开发",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        dispatch_runner=should_not_dispatch,
+        grounding_runner=fake_grounding,
+    )
+
+    assert payload["status"] == "stopped"
+    assert payload["stop_reason"] == "needs_clarification"
+    assert payload["plan"]["grounding"]["proposed_plan"] == ["先定验收命令", "实现登录页"]
+    report = Path(payload["final_report_path"]).read_text(encoding="utf-8")
+    assert "计划审查" in report
+    assert "建议的开发计划" in report
+    assert "先做哪个功能？" in report
+    rounds = load_rounds(workspace.root, payload["mission"]["mission_id"])
+    assert any(r.get("type") == "grounding" and r.get("status") == "unresolved" for r in rounds)
+
+
 def test_chief_run_execute_verified(tmp_path, monkeypatch) -> None:
     workspace = ready_workspace(tmp_path, monkeypatch)
 

@@ -14,10 +14,10 @@ from .project_memory import build_project_memory, project_memory_handoff_notes
 from .workspace import WorkflowRef, discover_workflows, open_workspace
 
 
-# Claude Code is the default coding worker: it runs on the user's existing
-# subscription (no extra API key), and Codex is currently unavailable. Codex
-# stays a supported adapter — pass --agent codex to use it.
-DEFAULT_AGENT_ORDER = ("claude-code",)
+# Codex is the default executable coding worker. It uses the user's existing
+# Codex CLI login/subscription; Claude Code stays available as an explicit
+# switch with --agent claude-code.
+DEFAULT_AGENT_ORDER = ("codex",)
 ORCHESTRATION_PATTERNS = (
     {
         "name": "worktree_isolation",
@@ -395,18 +395,26 @@ def assess_goal_clarity(objective: str, *, answers: list[str] | None = None) -> 
     """
     text = objective.strip()
     lower = text.lower()
-    tokens = [tok for tok in re.split(r"[\s,.;:!?，。；：！？、]+", text) if tok]
-    meaningful = [tok for tok in tokens if len(tok) >= 3 or re.search(r"[一-鿿]", tok)]
+    _split_pat = re.compile(r'[\s,.;:!?，。；：！？、]+')
+    tokens = [tok for tok in _split_pat.split(text) if tok]
+    _cjk_pat = re.compile(r'[一-鿿]')
+    meaningful = [tok for tok in tokens if len(tok) >= 3 or _cjk_pat.search(tok)]
+    # Chinese text has no word separators, so whole clauses become one token.
+    # Count each 3 CJK characters as roughly one meaningful unit so Chinese
+    # goals aren't penalised by English-biased tokenisation.
+    cjk_chars = len(_cjk_pat.findall(text))
+    meaningful_count = len(meaningful) + cjk_chars // 3
     has_number = any(ch.isdigit() for ch in text)
-    has_quote = any(q in text for q in "\"'“”「」『』`")
-    has_pathish = "/" in text or any("." in tok and len(tok) > 3 for tok in tokens)
+    _quote_chars = '”\'“”「」『』`'
+    has_quote = any(q in text for q in _quote_chars)
+    has_pathish = '/' in text or any('.' in tok and len(tok) > 3 for tok in tokens)
     domain_hit = any(anchor in lower for anchor in _DOMAIN_ANCHORS)
     vague_hit = any(term in lower for term in _VAGUE_TERMS)
     answered = bool(answers)
 
     concrete_signal = has_number or has_quote or has_pathish or domain_hit
-    # "ok" unless the goal is short and purely vague with no concrete anchor.
-    ok = answered or concrete_signal or (len(meaningful) >= 4 and not (vague_hit and len(meaningful) < 5))
+    # “ok” unless the goal is short and purely vague with no concrete anchor.
+    ok = answered or concrete_signal or (meaningful_count >= 4 and not (vague_hit and meaningful_count < 5))
 
     questions: list[str] = []
     if not concrete_signal:
@@ -428,6 +436,8 @@ def assess_goal_clarity(objective: str, *, answers: list[str] | None = None) -> 
             "vague_hit": vague_hit,
             "answered": answered,
             "meaningful_words": len(meaningful),
+            "cjk_chars": cjk_chars,
+            "meaningful_count": meaningful_count,
         },
         "questions": questions,
     }
@@ -548,7 +558,7 @@ def _agent_command_template(agent: str, prompt: str) -> str:
     normalized = agent.strip().lower()
     quoted = _quote_cli(prompt)
     if normalized in {"codex", "openai-codex"}:
-        return f"codex {quoted}"
+        return f"codex exec {quoted}"
     if normalized in {"claude", "claude-code"}:
         return f"claude {quoted}"
     if normalized in {"gemini", "gemini-cli"}:

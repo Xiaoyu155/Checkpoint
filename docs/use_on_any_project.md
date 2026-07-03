@@ -13,7 +13,7 @@ checkpoint app
 目标不知道怎么写？点 **帮我理清目标**，会用便宜的小模型帮你把模糊目标改写清楚、列出该先说清楚的点
 （没配便宜模型时自动退回本地规则给建议，不联网也能用）。
 
-> 账号说明：agent 用的账号 = 你在终端登录的那个（先 `claude` 或 `codex` 登录一次即可），DevPacer 不替你管账号。
+> 账号说明：agent 用的账号 = 你在终端登录的那个。默认用 `codex`，先 `codex login` 登录你的 Codex 订阅；也可以切到 Claude Code（先 `claude` 登录）。
 
 ## 或者网页工作台
 
@@ -77,7 +77,7 @@ worker 改动测试文件会被机械检测到并直接判验收失败（测试�
 
 ## 适配 Codex / Cursor 等
 
-DevPacer 把编码工具当"打工人"来调度——默认 Claude Code，`--agent codex` 换成 Codex。验收门是通用的：无论谁改的代码，都跑同一条 `--test-command` 确认。Cursor 等工具改完的代码，也能用 `checkpoint mission start --test-command ...`（不派新 worker、只验收）来把关。
+DevPacer 把编码工具当"打工人"来调度——默认 Codex，`--agent claude-code` 可切到 Claude Code。验收门是通用的：无论谁改的代码，都跑同一条 `--test-command` 确认。Cursor 等工具改完的代码，也能用 `checkpoint mission start --test-command ...`（不派新 worker、只验收）来把关。
 
 ## 给 Claude Code 教用户的一句话
 

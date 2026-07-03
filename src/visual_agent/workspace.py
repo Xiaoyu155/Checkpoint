@@ -155,18 +155,32 @@ def init_workspace(
     return workspace
 
 
-# Generated runtime output under the workspace — safe to gitignore so DevPacer's
-# churn never clutters git status. Authored assets (workflows/, fixtures/,
-# inputs/, workspace.json) are deliberately NOT ignored: users commit those so
-# git-diff-aware verification can see them.
-_GITIGNORE_RUNTIME = ("missions/", "chief_plans/", "runs/", "reports/", "mission_queue/", "repo_map.json")
+# Everything under the workspace is generated runtime state — gitignore all of
+# it so DevPacer's churn never clutters git status and merge_worktree_branch
+# never hits "untracked files would be overwritten." If users want custom
+# workflows or fixtures to survive across branches they should store them in
+# the project proper (e.g. tests/fixtures/).
+_GITIGNORE_RUNTIME = (
+    "missions/",
+    "chief_plans/",
+    "runs/",
+    "reports/",
+    "mission_queue/",
+    "repo_map.json",
+    "workspace.json",
+    "fixtures/",
+    "inputs/",
+    "workflows/",
+)
 
 
 def _ensure_gitignored(workspace_root: Path) -> None:
-    """Add DevPacer's generated runtime paths to the project .gitignore so they
-    never show up as the user's uncommitted changes. Best-effort only: the
-    workspace must live under a git repo. Authored workflows/fixtures stay
-    trackable so they can be committed."""
+    """Add DevPacer's workspace paths to the project .gitignore.
+
+    Best-effort only: the workspace must live under a git repo. All workspace
+    content is gitignored so worker branches never commit DevPacer internals
+    that would block merge_worktree_branch with "untracked files overwritten."
+    """
     project_root = workspace_root.parent
     if not (project_root / ".git").exists():
         return

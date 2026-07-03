@@ -5,13 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from visual_agent.workbench_app import resolve_workspace, validate_launch, workbench_agents
+from visual_agent.workbench_app import _grounding_section, resolve_workspace, validate_launch, workbench_agents
 
 
 def test_workbench_agents_returns_coding_agents():
     agents = workbench_agents()
     assert agents  # never empty
     assert all(a in {"claude-code", "codex"} for a in agents)
+    assert agents[0] == "codex"
 
 
 def test_validate_launch_requires_project_goal():
@@ -36,6 +37,20 @@ def test_resolve_workspace_creates_and_gitignores(tmp_path):
     assert ws.exists() and ws.name == ".agent-workspace"
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
     assert ".agent-workspace/missions/" in gitignore
+
+
+def test_grounding_section_extracts_review_block():
+    report = (
+        "## DevPacer Mission\n\nStatus: `stopped`\n\n### Plan\n\n- Status: x\n\n"
+        "### 计划审查（先看项目里写了什么，再决定）\n\n"
+        "审查过的文档：`docs/roadmap.md`\n\n**需要和你确认：**\n- 先做哪个？\n\n"
+        "### Rounds\n\n- Round 0\n"
+    )
+    section = _grounding_section(report)
+    assert "docs/roadmap.md" in section
+    assert "先做哪个？" in section
+    assert "Rounds" not in section
+    assert _grounding_section("## 没有审查章节\n") == ""
 
 
 def test_desktop_app_window_builds_and_closes():

@@ -45,6 +45,12 @@ steps:
       role: button
       preferred: [dom, mock]
     post_action_assert_text: 15年
+  - id: assert_diagnosis_response
+    action: assert_response
+    url_contains: /api/diagnose
+    method: POST
+    status: 200
+    timeout_seconds: 15
   - id: observe_diagnosis_result
     action: observe_browser
     reuse_page: true
@@ -121,11 +127,21 @@ steps:
       role: button
       preferred: [dom, mock]
     post_action_assert_text: 检查知识库
-  - id: wait_knowledge_result
-    action: wait_for
-    condition: text
-    text: 未发现 undefined
+  - id: assert_knowledge_status_response
+    action: assert_response
+    url_contains: /api/knowledge/status
+    method: GET
+    status: 200
     timeout_seconds: 10
+  - id: assert_knowledge_foundation_response
+    action: assert_response
+    url_contains: /api/service-foundation
+    method: GET
+    status: 200
+    timeout_seconds: 10
+  - id: observe_knowledge_result
+    action: observe_browser
+    reuse_page: true
   - id: assert_knowledge_contract
     action: assert_text_contract
     required_all:

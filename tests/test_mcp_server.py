@@ -176,7 +176,7 @@ def test_mcp_generate_workflow_from_context_can_read_git_diff(tmp_path) -> None:
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     page = workspace.fixtures_dir / "login.html"
     page.write_text("<form><input name='email'></form>\n", encoding="utf-8")
-    git(tmp_path, "add", ".agent-workspace/fixtures/login.html")
+    git(tmp_path, "add", "--force", ".agent-workspace/fixtures/login.html")
     git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
     page.write_text(
         "<form action='/dashboard'><label for='email'>Email</label><input id='email' name='email'>"

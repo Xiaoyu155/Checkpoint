@@ -240,7 +240,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .stat.ok{color:var(--ok)} .stat.acc{color:var(--acc)}
   .bar { display:flex; height:8px; border-radius:6px; overflow:hidden; margin-top:8px; background:var(--line); }
   .bar i { display:block; height:100%; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; }
   .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.5px; color:var(--mut); margin:0 0 12px; }
   .stat { font-size:28px; font-weight:700; }
   .row { display:flex; justify-content:space-between; gap:8px; padding:8px 0; border-top:1px solid var(--line); cursor:default; }
@@ -284,7 +284,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <button id="btnRun" onclick="startMission(true)" style="background:var(--acc); color:#04101f; border:none; border-radius:8px; padding:9px 18px; cursor:pointer; font:inherit; font-weight:700;">开始执行</button>
         <span id="launchMsg" class="meta"></span>
       </div>
-      <div class="meta">预览只看它准备怎么干、派给谁、怎么验收；执行会在隔离分支里真改代码、跑验收命令，过了才合并回主分支。含糊的目标会被拦下来让你先说清楚。</div>
+      <div class="meta">默认用 Codex，走本机 <code>codex login</code> 的订阅账号；也可以切到 Claude Code。预览只看它准备怎么干、派给谁、怎么验收；执行会在隔离分支里真改代码、跑验收命令，过了才合并回主分支。</div>
     </div>
   </section>
   <section class="hero">
@@ -326,7 +326,8 @@ function fillAgents(d){
   if(agentsFilled) return;
   const sel = document.getElementById('fAgent');
   const installed = (d.installed_agents||[]);
-  const opts = installed.length ? installed : ['claude-code','codex'];
+  const order = ['codex','claude-code'];
+  const opts = installed.length ? order.filter(a => installed.includes(a)).concat(installed.filter(a => !order.includes(a))) : order;
   sel.innerHTML = opts.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('');
   if(d.repo_root && !document.getElementById('fRepo').value) document.getElementById('fRepo').placeholder = d.repo_root;
   agentsFilled = true;

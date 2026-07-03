@@ -400,9 +400,15 @@ def dispatch_chief_plan(
 def summarize_worker_usage(records: list[dict[str, Any] | None]) -> dict[str, Any]:
     """Aggregate token/cost across a dispatch's worker attempts so the user can
     see exactly what a task cost. Cheap-backend spend is kept separate (it burns
-    cheap credits, not the Claude subscription)."""
+    cheap credits, not the Claude subscription).
+
+    Cache tokens (cache_read_input_tokens, cache_creation_input_tokens) are
+    included in the total so the number reflects real model consumption, not
+    just the tiny uncached-new-input slice."""
     input_tokens = 0
     output_tokens = 0
+    cache_read_tokens = 0
+    cache_creation_tokens = 0
     spent_usd = 0.0
     saved_usd = 0.0
     attempts = 0
@@ -415,6 +421,8 @@ def summarize_worker_usage(records: list[dict[str, Any] | None]) -> dict[str, An
         attempts += 1
         input_tokens += int(usage.get("input_tokens") or 0)
         output_tokens += int(usage.get("output_tokens") or 0)
+        cache_read_tokens += int(usage.get("cache_read_input_tokens") or 0)
+        cache_creation_tokens += int(usage.get("cache_creation_input_tokens") or 0)
         cost = float(usage.get("cost_usd") or 0.0)
         if usage.get("cost_is_savings"):
             saved_usd += cost
@@ -424,7 +432,9 @@ def summarize_worker_usage(records: list[dict[str, Any] | None]) -> dict[str, An
         "attempts_with_usage": attempts,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "total_tokens": input_tokens + output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_creation_tokens": cache_creation_tokens,
+        "total_tokens": input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens,
         "spent_usd": round(spent_usd, 4),
         "saved_usd": round(saved_usd, 4),
     }

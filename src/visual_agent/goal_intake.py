@@ -57,7 +57,10 @@ def _credential_candidates() -> list[Path]:
     paths: list[Path] = []
     override = os.environ.get("CHECKPOINT_MODEL_CREDENTIALS", "").strip()
     if override:
-        paths.append(Path(override).expanduser())
+        # An explicit override is exclusive: whoever set it (a user pinning
+        # credentials, or a test isolating from the developer's real keys)
+        # does not want fallback files silently picked up.
+        return [Path(override).expanduser()]
     paths.append(Path.cwd() / "model_api_keys.txt")
     # The DevPacer install root (…/src/visual_agent/goal_intake.py -> repo root).
     paths.append(Path(__file__).resolve().parents[2] / "model_api_keys.txt")
@@ -71,17 +74,25 @@ def _credential_candidates() -> list[Path]:
     return unique
 
 
-def auto_intake_backend() -> dict[str, Any] | None:
-    """Resolve the best available cheap intake backend from the credential file.
+def resolve_cheap_backend(order: tuple[str, ...] = ()) -> dict[str, Any] | None:
+    """Resolve a configured cheap backend from the credential file.
 
-    Returns None when no key is found, so the receptionist works out of the box
-    for anyone who has a cheap key configured, without them passing URLs/keys."""
+    ``order`` names backend labels (e.g. ``("mimo", "deepseek")``) to try first;
+    unlisted backends keep their default rank. Returns None when no key is
+    found, so callers degrade to deterministic behavior."""
+    specs = sorted(
+        _INTAKE_BACKENDS,
+        key=lambda spec: next(
+            (idx for idx, label in enumerate(order) if label in spec["labels"]),
+            len(order),
+        ),
+    )
     for candidate in _credential_candidates():
         try:
             text = candidate.read_text(encoding="utf-8-sig")
         except OSError:
             continue
-        for spec in _INTAKE_BACKENDS:
+        for spec in specs:
             for line in text.splitlines():
                 low = line.lower()
                 if any(label in low for label in spec["labels"]):
@@ -95,6 +106,14 @@ def auto_intake_backend() -> dict[str, Any] | None:
                             "max_tokens": spec["max_tokens"],
                         }
     return None
+
+
+def auto_intake_backend() -> dict[str, Any] | None:
+    """Resolve the best available cheap intake backend from the credential file.
+
+    Returns None when no key is found, so the receptionist works out of the box
+    for anyone who has a cheap key configured, without them passing URLs/keys."""
+    return resolve_cheap_backend()
 
 _SYSTEM_PROMPT = (
     "You are a requirements intake assistant for an autonomous coding task runner. "

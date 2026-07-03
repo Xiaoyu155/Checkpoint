@@ -15,6 +15,7 @@ from typing import Any, Callable
 from .chief_dispatch import dispatch_chief_plan
 from .chief_engineer import build_chief_plan, chief_plan_to_dict
 from .chief_plans_store import load_plan, save_plan
+from .goal_grounding import goal_references_plan, ground_goal, grounding_to_markdown
 from .missions import (
     append_round,
     create_mission,
@@ -57,6 +58,8 @@ def run_chief_mission(
     allow_test_edits: bool = False,
     merge: bool = False,
     dispatch_runner: DispatchRunner | None = None,
+    ground_vague_goals: bool = True,
+    grounding_runner: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     started = monotonic()
     workspace_path = Path(workspace_root).expanduser().resolve()
@@ -68,6 +71,7 @@ def run_chief_mission(
     )
     runner = dispatch_runner or dispatch_chief_plan
     mission: dict[str, Any] | None = None
+    grounding_payload: dict[str, Any] | None = None
     if resume_mission_id:
         mission = load_mission(workspace_path, resume_mission_id)
         if mission is None:
@@ -132,6 +136,45 @@ def run_chief_mission(
             answers=answers,
         )
         plan_payload = chief_plan_to_dict(plan)
+        # A vague goal is not always noise: it often points at a plan document
+        # in the repo. Review those documents (cheap model) before refusing —
+        # resolve into the plan's next concrete task, or come back with a
+        # proposed plan to discuss instead of a bare error. A goal that cites a
+        # plan ("按照开发计划推进") is grounded even when it passes the clarity
+        # gate: dispatching it raw would burn a worker run on a goal whose
+        # definition of done lives in a file the worker never read.
+        if ground_vague_goals and (
+            str(plan_payload.get("status") or "") == "needs_clarification" or goal_references_plan(str(goal))
+        ):
+            grounder = grounding_runner or ground_goal
+            grounding_payload = grounder(goal=str(goal), repo_root=repo_path)
+            if not isinstance(grounding_payload, dict):
+                grounding_payload = None
+            if grounding_payload and grounding_payload.get("resolved") and str(grounding_payload.get("grounded_goal") or "").strip():
+                goal = str(grounding_payload["grounded_goal"]).strip()
+                grounded_answers = tuple(answers) + tuple(
+                    part
+                    for part in (
+                        f"依据项目计划文档 {grounding_payload.get('plan_document') or ''}：{grounding_payload.get('evidence') or ''}".strip("："),
+                        str(grounding_payload.get("acceptance_hint") or "").strip(),
+                    )
+                    if part
+                )
+                plan = build_chief_plan(
+                    goal=goal,
+                    workspace_root=workspace_path,
+                    repo_root=repo_path,
+                    base=base,
+                    agents=agents,
+                    include_slow=include_slow,
+                    max_workflows=max_workflows,
+                    run_profile=run_profile,
+                    interview=interview,
+                    answers=grounded_answers,
+                )
+                plan_payload = chief_plan_to_dict(plan)
+            if grounding_payload:
+                plan_payload["grounding"] = grounding_payload
         saved = save_plan(plan_payload, workspace_root=workspace_path)
         plan_payload["plan_id"] = saved["plan_id"]
         plan_payload["saved_path"] = saved["path"]
@@ -151,6 +194,19 @@ def run_chief_mission(
             mission_id=mission_id,
             status="created",
         )
+        if grounding_payload:
+            append_round(
+                workspace_path,
+                mission["mission_id"],
+                {
+                    "round": _next_round_number(workspace_path, mission["mission_id"]),
+                    "type": "grounding",
+                    "status": "resolved" if grounding_payload.get("resolved") else "unresolved",
+                    "source": str(grounding_payload.get("source") or ""),
+                    "plan_document": str(grounding_payload.get("plan_document") or ""),
+                    "grounded_goal": str(grounding_payload.get("grounded_goal") or ""),
+                },
+            )
     elif execute and not dry_run:
         mission["status"] = "running"
         mission["stop_reason"] = ""
@@ -167,26 +223,35 @@ def run_chief_mission(
         )
 
     plan_status = str(plan_payload.get("status") or "")
-    if plan_status in {"blocked", "needs_clarification"}:
-        stop_reason = "needs_clarification" if plan_status == "needs_clarification" else "blocked_plan"
+    # A plan-referencing goal that grounding could not resolve stops here even
+    # if the plan looks "ready": dispatching it would waste the worker run.
+    grounding_unresolved = bool(grounding_payload) and not bool(grounding_payload.get("resolved"))
+    if plan_status in {"blocked", "needs_clarification"} or grounding_unresolved:
+        stop_reason = "blocked_plan" if plan_status == "blocked" else "needs_clarification"
         append_round(
             workspace_path,
             mission["mission_id"],
             {
                 "round": _next_round_number(workspace_path, mission["mission_id"]),
                 "type": "planning",
-                "status": plan_status,
+                "status": plan_status if plan_status in {"blocked", "needs_clarification"} else "needs_clarification",
                 "stop_reason": stop_reason,
                 "plan_id": plan_id,
             },
         )
+        clarification_message = "Mission stopped before dispatch because the plan is not actionable."
+        if stop_reason == "needs_clarification" and grounding_payload:
+            clarification_message = (
+                "目标还不够具体，已先审查了项目里的计划文档（见报告的“计划审查”），"
+                "请按报告里的建议确认下一步，再重新发起。"
+            )
         return _finish(
             workspace_root=workspace_path,
             mission=mission,
             plan=plan_payload,
             status="stopped",
             stop_reason=stop_reason,
-            message="Mission stopped before dispatch because the plan is not actionable.",
+            message=clarification_message,
             started=started,
         )
     if plan_status == "needs_workflow_coverage" and not allow_coverage_gap and not test_command:
@@ -257,7 +322,7 @@ def run_chief_mission(
             plan=plan_payload,
             status="preview",
             stop_reason="preview_only",
-            message="Dry-run complete. Re-run with --execute to launch the Codex worker.",
+            message="Dry-run complete. Re-run with --execute to launch the selected coding worker.",
             started=started,
             dispatch_payload=preview,
         )
@@ -324,7 +389,9 @@ def _record_dispatch_attempts(workspace_root: Path, mission_id: str, dispatch: d
                     "payload": _compact_verification(attempt),
                 },
             )
-        _record_usage_round(workspace_root, mission_id, dispatch, start_round + len(attempts))
+        next_round = start_round + len(attempts)
+        _record_usage_round(workspace_root, mission_id, dispatch, next_round)
+        _record_merge_round(workspace_root, mission_id, dispatch, next_round + 1)
         return
     append_round(
         workspace_root,
@@ -335,6 +402,26 @@ def _record_dispatch_attempts(workspace_root: Path, mission_id: str, dispatch: d
             "status": str(dispatch.get("status") or ""),
             "stop_reason": str(dispatch.get("reason") or ""),
             "payload": _compact_dispatch(dispatch),
+        },
+    )
+
+
+def _record_merge_round(workspace_root: Path, mission_id: str, dispatch: dict[str, Any], round_no: int) -> None:
+    """Persist the merge result so users can see whether their branch was merged."""
+    merge = dispatch.get("merge") if isinstance(dispatch.get("merge"), dict) else None
+    if not merge:
+        return
+    append_round(
+        workspace_root,
+        mission_id,
+        {
+            "round": round_no,
+            "type": "merge",
+            "status": str(merge.get("status") or ""),
+            "branch": merge.get("branch"),
+            "target": merge.get("target"),
+            "commit": merge.get("commit"),
+            "reason": merge.get("reason"),
         },
     )
 
@@ -431,6 +518,7 @@ def _compact_dispatch(payload: dict[str, Any]) -> dict[str, Any]:
         "worktree": payload.get("worktree"),
         "verification": payload.get("verification"),
         "usage_summary": payload.get("usage_summary"),
+        "merge": payload.get("merge"),
         "failover_worker_record": _compact_worker(payload.get("failover_worker_record")),
     }
 
@@ -573,20 +661,29 @@ def chief_run_to_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- Status: `{plan.get('status')}`")
         workflows = ", ".join(plan.get("selected_workflows") or []) or "none"
         lines.append(f"- Selected workflows: {workflows}")
+    grounding = plan.get("grounding") if isinstance(plan.get("grounding"), dict) else None
+    if grounding:
+        lines.extend(["", grounding_to_markdown(grounding)])
     if rounds:
         lines.extend(["", "### Rounds", ""])
         for item in rounds:
-            detail = str(item.get("failed_signature") or item.get("stop_reason") or "").strip()
-            suffix = f" - {detail}" if detail else ""
+            if item.get("type") == "merge":
+                merge_detail = str(item.get("reason") or item.get("commit") or "").strip()[:80]
+                suffix = f" - {merge_detail}" if merge_detail else ""
+            else:
+                detail = str(item.get("failed_signature") or item.get("stop_reason") or "").strip()
+                suffix = f" - {detail}" if detail else ""
             lines.append(f"- Round {item.get('round')}: `{item.get('type')}` -> `{item.get('status')}`{suffix}")
     usage_round = next((item for item in reversed(rounds) if str(item.get("type")) == "usage"), None)
     if usage_round:
         usage = usage_round.get("usage_summary") if isinstance(usage_round.get("usage_summary"), dict) else {}
         lines.extend(["", "### 用量 Tokens & Cost", ""])
-        lines.append(
-            f"- Tokens: {usage.get('total_tokens', 0)} "
-            f"(输入 {usage.get('input_tokens', 0)} / 输出 {usage.get('output_tokens', 0)})"
-        )
+        cache_read = int(usage.get("cache_read_tokens") or 0)
+        cache_create = int(usage.get("cache_creation_tokens") or 0)
+        token_detail = f"新输入 {usage.get('input_tokens', 0)} / 输出 {usage.get('output_tokens', 0)}"
+        if cache_read or cache_create:
+            token_detail += f" / 缓存读 {cache_read} / 缓存写 {cache_create}"
+        lines.append(f"- Tokens: {usage.get('total_tokens', 0)} ({token_detail})")
         lines.append(f"- 订阅真实花费: ${usage.get('spent_usd', 0)}")
         if float(usage.get("saved_usd") or 0) > 0:
             lines.append(f"- 走便宜后端省下(按 Claude 价估): ${usage.get('saved_usd', 0)}")
@@ -667,7 +764,7 @@ def _status_next_action(mission: dict[str, Any]) -> str:
     if stop_reason == "coverage_gap":
         return "Add or select workflow coverage, then rerun or resume with an explicit coverage override only for experiments."
     if stop_reason == "needs_clarification":
-        return "Answer the clarifying questions and create a new mission."
+        return "See the plan-review section in the final report, confirm the next step, then start a new mission."
     if status == "verified":
         return "Mission is verified; review the final report and worktree before merge."
     return "Review the rounds and final report for the next action."

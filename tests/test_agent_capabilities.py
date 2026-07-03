@@ -25,11 +25,12 @@ def test_load_agent_profiles_present() -> None:
 def test_recommend_worker_config_codex_picks_model_and_writable_sandbox() -> None:
     profile = load_agent_profile("codex")
     config = recommend_worker_config(profile, task_kind="implementation")
-    assert config["model"] == "gpt-5-codex"
+    assert config["model"] == ""
     assert "--sandbox" in config["sandbox"]["flag"]
-    # A fast task should pick the fast-role model.
+    assert config["approval"] == {}
+    # Codex uses the user's Codex CLI default model for subscription compatibility.
     fast = recommend_worker_config(profile, task_kind="fast")
-    assert fast["model"] == "gpt-5-codex-mini"
+    assert fast["model"] == ""
 
 
 def test_recommend_worker_config_inspection_prefers_no_write() -> None:

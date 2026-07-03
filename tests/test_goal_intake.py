@@ -64,9 +64,9 @@ def test_auto_intake_backend_none_without_file(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     from visual_agent.goal_intake import auto_intake_backend
 
-    # No credential file anywhere the resolver looks under tmp; may still find the
-    # repo's own file, so only assert it does not raise.
-    auto_intake_backend()
+    # The explicit override is exclusive, so the repo's own credential file
+    # must NOT be silently picked up.
+    assert auto_intake_backend() is None
 
 
 def test_intake_markdown_renders():

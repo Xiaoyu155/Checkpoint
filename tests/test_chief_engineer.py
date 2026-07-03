@@ -138,7 +138,7 @@ def test_chief_plan_worker_tracks_use_capability_profiles(tmp_path, monkeypatch)
     )
 
     codex_track = plan.worker_tracks[0]
-    assert codex_track["model"]  # a concrete model id was chosen
+    assert codex_track["model"] == ""  # Codex uses the logged-in CLI default model.
     assert "codex exec" in codex_track["command"]
     assert "--sandbox" in codex_track["command"]
     claude_track = plan.worker_tracks[1]
@@ -157,9 +157,9 @@ def test_chief_plan_defaults_to_one_coding_worker(tmp_path, monkeypatch) -> None
         repo_root=tmp_path,
     )
 
-    # One coding worker by default, and it is Claude Code (runs on the user's
-    # subscription; Codex stays available via --agent codex).
-    assert [track["agent"] for track in plan.worker_tracks] == ["claude-code"]
+    # One coding worker by default, and it is Codex (runs on the user's
+    # existing codex login/subscription).
+    assert [track["agent"] for track in plan.worker_tracks] == ["codex"]
 
 
 def test_chief_plan_marks_gemini_as_inspection_lane(tmp_path, monkeypatch) -> None:
