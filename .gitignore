@@ -1,3 +1,9 @@
+build/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+
 .venv/
 .pw-browsers/
 .runs/
@@ -28,6 +34,10 @@ ai模型api.txt
 .agent-workspace/mission_queue/
 .agent-workspace/mission_imports/
 .agent-workspace/demo_repos/
+.agent-workspace/dogfood_*
+.agent-workspace/phase1_*
+.agent-workspace/*.checkpoint-worktrees/
+强制测试记录.md
 .agent-workspace/workflows/external_samples/
 .agent-workspace/workflows/.cloud_inline/
 .agent-workspace/workflows/browser_form_workflow.yaml

@@ -24,6 +24,7 @@ checkpoint dashboard
 ```
 
 浏览器会自动打开一个本地工作台，「新建任务」里同样填目标 → 验收命令 → 选 agent → 预览 / 执行。
+验收命令可以留空：DevPacer 会尝试从 `package.json`、`pyproject.toml`、`Cargo.toml`、`go.mod` 等文件里自动识别常见测试命令。
 （端口被占用会自动换一个，不会打不开。）
 
 ## 或者用命令行（3 条命令）
@@ -46,7 +47,7 @@ checkpoint mission start ^
 ```
 
 - `--goal`：说人话，要做什么。含糊的目标会被拦下来让你先说清楚（省一次白跑）。
-- `--test-command`：**你项目自己的测试/构建命令**当验收门。Python 用 `pytest -q`，前端用 `npm test`，Rust 用 `cargo test`，构建用 `npm run build`……随便你项目怎么测。
+- `--test-command`：**你项目自己的测试/构建命令**当验收门。Python 用 `pytest -q`，前端用 `npm test`，Rust 用 `cargo test`，构建用 `npm run build`……随便你项目怎么测。也可以填 `--test-command auto`，让 DevPacer 自动识别。
 - 不加 `--execute` 就是**预览**（只看它准备怎么干、派给哪个模型、预计怎么验收），不花钱、不改代码。
 
 它会：在隔离 git worktree 里派一个 worker 改代码 → 跑你的 `--test-command` → **过了才 verified，不过就带着报错自动重修一轮**。你的主分支全程不动。
@@ -65,6 +66,39 @@ checkpoint dashboard                    # 网页看板：已验收交付、省�
 checkpoint quota                        # Claude 订阅 5 小时 / 7 天额度用了多少（不是 API 花费）
 checkpoint repo-map --goal "你的目标"    # 零 token 的项目架构地图（worker 派发时自动带上）
 ```
+
+## 大任务托管
+
+已经有开发计划时，可以先把 Markdown 计划拆成 mission，再放入托管队列：
+
+```powershell
+checkpoint mission import ^
+  --file .\开发计划.md ^
+  --repo-root . ^
+  --create --queue ^
+  --agent codex ^
+  --test-command auto ^
+  --merge-policy manual
+
+checkpoint mission worker --watch
+```
+
+每个队列项会保存自己的 `agent`、验收命令、是否允许改测试、合并策略。你可以让一批任务用 Codex，另一批任务用 Claude Code；验收通过后默认等待确认合并，只有显式选择自动合并才会 merge。
+
+## 5 小时额度内的自动托管
+
+想让工具按 5 小时额度窗口规划今天能做什么，用 Autopilot：
+
+```powershell
+checkpoint autopilot ^
+  --file .\开发计划.md ^
+  --repo-root . ^
+  --hours 5 ^
+  --agent codex ^
+  --test-command auto
+```
+
+Autopilot 会创建一个 Program，按任务依赖和 5 小时额度窗口生成小时级计划：保留收尾额度，强模型额度紧张时不再启动新的强 worker，改做低额度任务、reference pack、文档和排队准备。实际执行仍走 `checkpoint mission worker --watch`，不会绕过 mission / queue / Checkpoint。
 
 额度感知需要一次性配置：把 Claude Code 的 statusline 指到 `checkpoint quota-statusline`
 （`~/.claude/settings.json` 里加 `{"statusLine": {"type": "command", "command": "checkpoint quota-statusline"}}`），
