@@ -489,10 +489,35 @@ class _DashboardServer(ThreadingHTTPServer):
         self.workspace_root = workspace_root
 
 
+def _bind_dashboard_server(host: str, port: int, root: Path) -> "_DashboardServer":
+    """Bind the server, tolerating Windows port reservations / in-use ports.
+
+    Windows raises PermissionError (WinError 10013) when a port falls in a
+    reserved Hyper-V/WSL range, and OSError when a port is already in use. Rather
+    than crash (the user just sees the dashboard "not open"), try the requested
+    port, then a few common fallbacks, then an OS-assigned free port."""
+    candidates = [port, 8787, 8080, 8899, 9797, 0]
+    seen: set[int] = set()
+    last_error: Exception | None = None
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            return _DashboardServer((host, candidate), root)
+        except (PermissionError, OSError) as exc:
+            last_error = exc
+            continue
+    raise RuntimeError(f"Could not bind the dashboard to any port on {host}: {last_error}")
+
+
 def serve_dashboard(*, workspace_root: str | Path, host: str = "127.0.0.1", port: int = 8787, open_browser: bool = True) -> None:
     root = Path(workspace_root).expanduser().resolve()
-    server = _DashboardServer((host, port), root)
-    url = f"http://{host}:{port}/"
+    server = _bind_dashboard_server(host, port, root)
+    actual_port = server.server_address[1]
+    url = f"http://{host}:{actual_port}/"
+    if actual_port != port:
+        print(f"Port {port} was unavailable; using {actual_port} instead.")
     print(f"DevPacer dashboard: {url}")
     print(f"Workspace: {root}")
     print("Press Ctrl+C to stop.")

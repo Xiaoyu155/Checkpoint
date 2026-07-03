@@ -733,6 +733,13 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     repo_map.add_argument("--max-lines", type=int, default=60, help="Line budget for the rendered excerpt. Default: 60.")
     repo_map.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
+    refine_goal_cmd = subparsers.add_parser("refine-goal", help="Sharpen a vague goal via a cheap model (receptionist); falls back to rule-based questions offline.")
+    refine_goal_cmd.add_argument("--goal", required=True, help="The rough goal to sharpen.")
+    refine_goal_cmd.add_argument("--answer", action="append", default=[], help="Answer to a clarifying question. Can be repeated.")
+    refine_goal_cmd.add_argument("--model", default=None, help="Intake model id. Default: a cheap small model.")
+    refine_goal_cmd.add_argument("--no-model", action="store_true", help="Skip the model; use deterministic rules only.")
+    refine_goal_cmd.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
     quota = subparsers.add_parser("quota", help="Show the Claude subscription 5-hour/7-day quota snapshot (not API spend).")
     quota.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
@@ -835,6 +842,9 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     dashboard_cmd.add_argument("--host", default="127.0.0.1", help="Bind host. Default: 127.0.0.1 (local only).")
     dashboard_cmd.add_argument("--port", type=int, default=8787, help="Bind port. Default: 8787.")
     dashboard_cmd.add_argument("--no-open", action="store_true", help="Do not auto-open the browser.")
+
+    app_cmd = subparsers.add_parser("app", help="Open the DevPacer desktop workbench (a real window: pick a project, type a goal, run).")
+    app_cmd.add_argument("--project", default=None, help="Optional project folder to preselect.")
 
     verify = subparsers.add_parser("verify", help="Run verification-tagged workspace workflows.")
     verify.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
@@ -1875,6 +1885,20 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(repo_map_to_markdown(payload, goal=args.goal, max_lines=args.max_lines))
         return 0
+    if args.command == "refine-goal":
+        from .goal_intake import intake_to_markdown, payload_to_json, refine_goal
+
+        payload = refine_goal(
+            args.goal,
+            answers=list(args.answer or []),
+            model_id=args.model,
+            enable_model=not args.no_model,
+        )
+        if args.format == "json":
+            print(payload_to_json(payload))
+        else:
+            print(intake_to_markdown(payload))
+        return 0
     if args.command == "quota":
         from .subscription_quota import load_quota_snapshot, payload_to_json, quota_status, quota_to_markdown
 
@@ -2242,6 +2266,19 @@ def main(argv: list[str] | None = None) -> int:
             open_browser=not args.no_open,
         )
         return 0
+    if args.command == "app":
+        try:
+            from .workbench_app import launch_desktop_app
+        except Exception as exc:  # noqa: BLE001 - Tk missing on some minimal installs
+            print(f"Could not start the desktop app: {exc}")
+            print("Fallback: run `checkpoint dashboard` for the web workbench.")
+            return 1
+        try:
+            return launch_desktop_app(project_dir=args.project or None)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Desktop app error: {exc}")
+            print("Fallback: run `checkpoint dashboard` for the web workbench.")
+            return 1
     if args.command == "agents":
         from .agent_capabilities import (
             agent_profile_to_markdown,
