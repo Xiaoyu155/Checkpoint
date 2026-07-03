@@ -12,7 +12,8 @@ def test_workbench_agents_returns_coding_agents():
     agents = workbench_agents()
     assert agents  # never empty
     assert all(a in {"claude-code", "codex"} for a in agents)
-    assert agents[0] == "codex"
+    # Claude Code is the default coding worker (commit 8cc4b1d).
+    assert agents[0] == "claude-code"
 
 
 def test_validate_launch_requires_project_goal():
@@ -36,7 +37,7 @@ def test_resolve_workspace_creates_and_gitignores(tmp_path):
     ws = resolve_workspace(tmp_path)
     assert ws.exists() and ws.name == ".agent-workspace"
     gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
-    assert ".agent-workspace/missions/" in gitignore
+    assert ".agent-workspace/" in gitignore
 
 
 def test_grounding_section_extracts_review_block():

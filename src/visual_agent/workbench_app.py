@@ -5,8 +5,8 @@ for non-technical users: pick a project folder, pick a coding agent, type a
 goal in plain words, give the acceptance command, and hit Preview or Run. It
 drives the exact same mission machinery as the CLI and the web dashboard
 (``start_workbench_mission`` → ``run_chief_mission``), so behavior — clarity
-gate, isolated worktree, test-command verification, merge-on-verified — is
-identical; only the surface differs.
+gate, isolated worktree, test-command verification — is identical; only the
+surface differs.
 
 The Tk wiring is intentionally thin; the decisions live in small pure helpers
 below so they can be tested without a display.
@@ -136,10 +136,14 @@ def launch_desktop_app(project_dir: str | Path | None = None) -> int:
     # --- Buttons ---
     row4 = ttk.Frame(frm)
     row4.pack(fill="x", **pad)
+    auto_merge_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(row4, text="验收通过后自动合并", variable=auto_merge_var).pack(side="right")
     preview_btn = ttk.Button(row4, text="预览（不花钱）")
     run_btn = ttk.Button(row4, text="开始执行")
+    board_btn = ttk.Button(row4, text="打开看板工作台")
     preview_btn.pack(side="left")
     run_btn.pack(side="left", padx=8)
+    board_btn.pack(side="left")
     status_var = tk.StringVar(value="填好上面的内容，点预览或执行。")
     ttk.Label(row4, textvariable=status_var, foreground="#4a9").pack(side="left", padx=10)
 
@@ -182,6 +186,7 @@ def launch_desktop_app(project_dir: str | Path | None = None) -> int:
                     test_command=test_command,
                     agent=agent_var.get(),
                     execute=execute,
+                    merge_policy="auto" if auto_merge_var.get() else "manual",
                 )
                 events.put(("launched", {"result": result, "workspace_root": str(workspace_root)}))
             except Exception as exc:  # noqa: BLE001 - surface to the window
@@ -191,6 +196,34 @@ def launch_desktop_app(project_dir: str | Path | None = None) -> int:
 
     preview_btn.configure(command=lambda: start(False))
     run_btn.configure(command=lambda: start(True))
+
+    def open_board() -> None:
+        # The kanban workbench (web) is the full product surface: board columns,
+        # diff review, one-click merge. This window stays a thin launcher.
+        project = project_var.get().strip()
+        if not project or not Path(project).expanduser().is_dir():
+            status_var.set("请先选择项目文件夹，再打开看板。")
+            return
+        if state.get("board_started"):
+            status_var.set("看板已在运行，看浏览器窗口（或重新打开刚才的地址）。")
+            return
+
+        def worker() -> None:
+            from .dashboard import serve_dashboard
+
+            try:
+                workspace_root = resolve_workspace(project)
+                serve_dashboard(workspace_root=workspace_root, open_browser=True)
+            except Exception as exc:  # noqa: BLE001 - surface to the window
+                state["board_started"] = False
+                events.put(("error", f"看板启动失败：{exc}"))
+
+        state["board_started"] = True
+        threading.Thread(target=worker, daemon=True).start()
+        append_log("▶ 看板工作台已启动，浏览器会自动打开。任务看板、改动审查、一键合并都在那里。")
+        status_var.set("看板已启动（关闭本窗口会一并停止）。")
+
+    board_btn.configure(command=open_board)
 
     def refine() -> None:
         goal = goal_text.get("1.0", "end").strip()

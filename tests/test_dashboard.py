@@ -51,5 +51,5 @@ def test_dashboard_mission_detail_includes_rounds_and_report(tmp_path) -> None:
 
 def test_dashboard_html_is_self_contained() -> None:
     # No external script/style URLs — the page must work offline/local-only.
-    assert "<title>DevPacer</title>" in DASHBOARD_HTML
+    assert "<title>DevPacer 工作台</title>" in DASHBOARD_HTML
     assert "http://" not in DASHBOARD_HTML.split("<script>")[0]
