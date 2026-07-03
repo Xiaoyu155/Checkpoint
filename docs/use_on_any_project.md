@@ -36,7 +36,18 @@ checkpoint mission start ^
 ```powershell
 checkpoint mission list                 # 所有任务：verified / 停在哪 / 花了多少 / 省了多少
 checkpoint dashboard                    # 网页看板：已验收交付、省钱路由、真实花费 vs 省下
+checkpoint quota                        # Claude 订阅 5 小时 / 7 天额度用了多少（不是 API 花费）
+checkpoint repo-map --goal "你的目标"    # 零 token 的项目架构地图（worker 派发时自动带上）
 ```
+
+额度感知需要一次性配置：把 Claude Code 的 statusline 指到 `checkpoint quota-statusline`
+（`~/.claude/settings.json` 里加 `{"statusLine": {"type": "command", "command": "checkpoint quota-statusline"}}`），
+之后每次 Claude Code 刷新状态栏，DevPacer 就有最新的 5h/7d 用量，可在派发前预警。
+
+## AI 不能糊弄验收
+
+worker 改动测试文件会被机械检测到并直接判验收失败（测试是验收契约，不许动）；
+任务本身就是要改测试时，显式加 `--allow-test-edits`。
 
 ## 适配 Codex / Cursor 等
 

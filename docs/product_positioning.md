@@ -92,6 +92,22 @@ verification workflow themselves.
 The user should not babysit the terminal. DevPacer should run until the mission
 is verified or a real decision is needed.
 
+## Business Model Positioning (decided 2026-07-03, not yet built)
+
+- Free and local-first. The user's own coding-agent subscription (Claude Code,
+  Codex) is the default token source; DevPacer adds scheduling, memory, and
+  verification on top without charging for the models.
+- Free third-party trial backend: at launch, MiMo (Claude Code-compatible
+  endpoint, ~¥40/month for 160M credits) is the recommended cheap-tier backend
+  so cheap-routed tasks burn inexpensive credits instead of the subscription.
+  Any Anthropic-compatible endpoint plugs into the same backend abstraction.
+- A hosted/cloud subscription tier is a later possibility, positioned but not
+  built: we do not invest in cloud before the local product has real external
+  users. Pricing follows first principles — whichever model delivers verified
+  results at the lowest cost wins the route, no model loyalty.
+- China-network hardening is deprioritized: users who can run Codex/Claude Code
+  already operate behind a working proxy.
+
 ## Non-Goals
 
 - It is not a hosted RPA SaaS.

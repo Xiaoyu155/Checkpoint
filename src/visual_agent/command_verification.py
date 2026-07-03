@@ -13,9 +13,66 @@ gets real evidence instead of the model's own words.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
+
+# The command gate is only trustworthy while the tests themselves are what the
+# user wrote. A worker that edits tests can turn any failure green, so test
+# changes are detected mechanically — the prompt-level "do not weaken tests"
+# instruction is a request, this is the enforcement.
+_TEST_DIR_NAMES = {"tests", "test", "__tests__", "spec", "specs", "testing"}
+_TEST_BASENAME = re.compile(r"(^test_.+|.+_test\.[^.]+$|.+\.test\.[^.]+$|.+\.spec\.[^.]+$|^conftest\.py$)", re.IGNORECASE)
+
+
+def is_test_path(path: str) -> bool:
+    normalized = str(path).replace("\\", "/").strip()
+    if not normalized:
+        return False
+    parts = normalized.split("/")
+    if any(part.lower() in _TEST_DIR_NAMES for part in parts[:-1]):
+        return True
+    return bool(_TEST_BASENAME.match(parts[-1]))
+
+
+def changed_test_files(*, repo_root: str | Path, base_ref: str | None = None) -> list[str]:
+    """List test files the worker touched (tracked diff against base + untracked).
+
+    Degrades open on git errors: a broken git setup should surface as the test
+    command failing, not as a phantom tampering verdict.
+    """
+    root = Path(repo_root).expanduser().resolve()
+    touched: set[str] = set()
+    diff_args = ["git", "-C", str(root), "diff", "--name-only"]
+    if str(base_ref or "").strip():
+        diff_args.append(str(base_ref).strip())
+    for args in (diff_args, ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard"]):
+        try:
+            completed = subprocess.run(args, capture_output=True, text=True, timeout=30.0, encoding="utf-8", errors="replace")
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        if completed.returncode != 0:
+            return []
+        touched.update(line.strip() for line in completed.stdout.splitlines() if line.strip())
+    return sorted(path for path in touched if is_test_path(path))
+
+
+def tamper_repair_brief(tampered: list[str], *, base_ref: str | None = None) -> dict[str, Any]:
+    base = str(base_ref or "").strip() or "the branch base"
+    files = "\n".join(f"- {item}" for item in tampered)
+    return {
+        "status": "found",
+        "source": "test_tampering",
+        "tampered_test_files": tampered,
+        "message": f"Worker modified {len(tampered)} test file(s); the command gate refuses to run against edited tests.",
+        "repair_prompt": (
+            "You modified test files, which the verification gate forbids: the tests are the"
+            " acceptance contract and must stay exactly as the user wrote them.\n"
+            f"Revert these files to {base} (e.g. `git checkout {base} -- <path>`):\n{files}\n"
+            "Then fix the production code so the original tests pass."
+        ),
+    }
 
 
 def run_command_verification(

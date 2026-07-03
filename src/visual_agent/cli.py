@@ -676,6 +676,7 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     chief_dispatch.add_argument("--allow-dirty", action="store_true", help="Allow executing from a dirty repository. Default: blocked.")
     chief_dispatch.add_argument("--allow-coverage-gap", action="store_true", help="Allow dispatch when plan status is needs_workflow_coverage.")
     chief_dispatch.add_argument("--test-command", default=None, help="Run this test/build command as the acceptance gate (works on any project, no workflow needed), e.g. 'pytest -q' or 'npm test'.")
+    chief_dispatch.add_argument("--allow-test-edits", action="store_true", help="Let the worker modify test files without failing verification (only for tasks explicitly about changing tests).")
     chief_dispatch.add_argument("--merge", action="store_true", help="After verification passes, merge the worker's isolated branch back into the current branch. Only merges when verified; aborts on conflict.")
     chief_dispatch.add_argument("--auto-repair-once", action="store_true", help="If verification fails, send one repair prompt to the same Codex worktree.")
     chief_dispatch.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
@@ -704,6 +705,7 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     chief_run.add_argument("--allow-dirty", action="store_true", help="Allow executing from a dirty repository. Default: blocked.")
     chief_run.add_argument("--allow-coverage-gap", action="store_true", help="Allow running even when plan coverage is weak.")
     chief_run.add_argument("--test-command", default=None, help="Run this test/build command as the acceptance gate (works on any project, no workflow needed), e.g. 'pytest -q' or 'npm test'.")
+    chief_run.add_argument("--allow-test-edits", action="store_true", help="Let the worker modify test files without failing verification (only for tasks explicitly about changing tests).")
     chief_run.add_argument("--merge", action="store_true", help="After verification passes, merge the worker's isolated branch back into the current branch. Only merges when verified; aborts on conflict.")
     chief_run.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
@@ -723,6 +725,21 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     chief_memory.add_argument("--goal", default=None, help="Optional goal to rank relevant previous missions.")
     chief_memory.add_argument("--limit", type=int, default=8, help="Maximum memory entries. Default: 8.")
     chief_memory.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    repo_map = subparsers.add_parser("repo-map", help="Build/refresh the zero-token repository architecture map.")
+    repo_map.add_argument("--repo-root", default=".", help="Repository root to index. Default: current directory.")
+    repo_map.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root holding the map cache.")
+    repo_map.add_argument("--goal", default="", help="Optional objective to focus the rendered excerpt.")
+    repo_map.add_argument("--max-lines", type=int, default=60, help="Line budget for the rendered excerpt. Default: 60.")
+    repo_map.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    quota = subparsers.add_parser("quota", help="Show the Claude subscription 5-hour/7-day quota snapshot (not API spend).")
+    quota.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    subparsers.add_parser(
+        "quota-statusline",
+        help="Claude Code statusLine command: reads session JSON on stdin, records rate_limits, prints a status line.",
+    )
 
     mission = subparsers.add_parser("mission", help="High-level DevPacer mission workflow.")
     mission.add_argument(
@@ -755,6 +772,7 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     mission.add_argument("--allow-dirty", action="store_true", help="Allow executing from a dirty repository.")
     mission.add_argument("--allow-coverage-gap", action="store_true", help="Allow running even when plan coverage is weak.")
     mission.add_argument("--test-command", default=None, help="Run this test/build command as the acceptance gate (works on any project, no workflow needed), e.g. 'pytest -q' or 'npm test'.")
+    mission.add_argument("--allow-test-edits", action="store_true", help="Let the worker modify test files without failing verification (only for tasks explicitly about changing tests).")
     mission.add_argument("--merge", action="store_true", help="After verification passes, merge the worker's isolated branch back into the current branch. Only merges when verified; aborts on conflict.")
     mission.add_argument("--priority", type=int, default=0, help="Queue priority for mission queue. Default: 0.")
     mission.add_argument("--force", action="store_true", help="Force queueing a non-runnable mission after review.")
@@ -1680,6 +1698,7 @@ def main(argv: list[str] | None = None) -> int:
 
         payload = dispatch_chief_plan(
             test_command=getattr(args, "test_command", None),
+                allow_test_edits=getattr(args, "allow_test_edits", False),
             merge=getattr(args, "merge", False),
             workspace_root=args.workspace_root,
             plan_id=args.plan,
@@ -1714,6 +1733,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 preview = run_chief_mission(
                     test_command=getattr(args, "test_command", None),
+                allow_test_edits=getattr(args, "allow_test_edits", False),
                     merge=getattr(args, "merge", False),
                     goal=args.goal,
                     workspace_root=args.workspace_root,
@@ -1758,6 +1778,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             payload = run_chief_mission(
                 test_command=getattr(args, "test_command", None),
+                allow_test_edits=getattr(args, "allow_test_edits", False),
                 merge=getattr(args, "merge", False),
                 goal=args.goal,
                 workspace_root=args.workspace_root,
@@ -1842,6 +1863,39 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(project_memory_to_markdown(payload))
         return 0
+    if args.command == "repo-map":
+        from .repo_map import build_repo_map, payload_to_json, repo_map_cache_path, repo_map_to_markdown
+
+        payload = build_repo_map(
+            repo_root=args.repo_root,
+            cache_path=repo_map_cache_path(args.workspace_root),
+        )
+        if args.format == "json":
+            print(payload_to_json(payload))
+        else:
+            print(repo_map_to_markdown(payload, goal=args.goal, max_lines=args.max_lines))
+        return 0
+    if args.command == "quota":
+        from .subscription_quota import load_quota_snapshot, payload_to_json, quota_status, quota_to_markdown
+
+        snapshot = load_quota_snapshot()
+        if args.format == "json":
+            print(payload_to_json({"snapshot": snapshot, "status": quota_status(snapshot)}))
+        else:
+            print(quota_to_markdown(snapshot))
+        return 0
+    if args.command == "quota-statusline":
+        from .subscription_quota import format_statusline, record_statusline_snapshot
+
+        try:
+            stdin_payload = json.loads(sys.stdin.read() or "{}")
+        except ValueError:
+            stdin_payload = {}
+        if not isinstance(stdin_payload, dict):
+            stdin_payload = {}
+        snapshot = record_statusline_snapshot(stdin_payload)
+        print(format_statusline(stdin_payload, snapshot))
+        return 0
     if args.command == "mission":
         action = str(args.action)
         if action in {"start", "resume"}:
@@ -1863,6 +1917,7 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     preview = run_chief_mission(
                         test_command=getattr(args, "test_command", None),
+                allow_test_edits=getattr(args, "allow_test_edits", False),
                         merge=getattr(args, "merge", False),
                         goal=args.goal,
                         workspace_root=args.workspace_root,
@@ -1907,6 +1962,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 payload = run_chief_mission(
                     test_command=getattr(args, "test_command", None),
+                allow_test_edits=getattr(args, "allow_test_edits", False),
                     merge=getattr(args, "merge", False),
                     goal=args.goal,
                     workspace_root=args.workspace_root,

@@ -12,11 +12,12 @@ from typing import Any, Callable
 
 from .agent_backends import redact_backend, resolve_backend_for_tier
 from .agent_capabilities import canonical_agent_name, load_agent_profile, recommend_worker_config
-from .command_verification import command_repair_brief, run_command_verification
+from .command_verification import changed_test_files, command_repair_brief, run_command_verification, tamper_repair_brief
 from .chief_plans_store import append_worker_record, load_plan, plan_dir, save_verification
 from .codex_check import codex_check_to_markdown, run_codex_check
 from .git_diff import changed_files
 from .models import to_jsonable
+from .repo_map import build_repo_map, render_repo_map, repo_map_cache_path
 from .workspace import open_workspace
 
 
@@ -75,6 +76,7 @@ def dispatch_chief_plan(
     auto_repair_once: bool = False,
     model_policy: dict[str, Any] | None = None,
     test_command: str | None = None,
+    allow_test_edits: bool = False,
     merge: bool = False,
     command_runner: CommandRunner | None = None,
     codex_runner: Any = None,
@@ -110,6 +112,27 @@ def dispatch_chief_plan(
         run_profile=run_profile,
         include_slow=include_slow,
     )
+    # Zero-token architecture memory: refresh the local index (only files that
+    # changed since the last dispatch are re-parsed) and hand every worker
+    # attempt a budgeted excerpt. The memory layer must never block dispatch.
+    repo_map_text = ""
+    repo_map_stats: dict[str, Any] = {}
+    try:
+        repo_map_payload = build_repo_map(repo_root=repo_root, cache_path=repo_map_cache_path(workspace_path))
+        changed_focus = [str(item) for item in (plan.get("changed_files") or []) if isinstance(item, str)]
+        repo_map_text = render_repo_map(
+            repo_map_payload,
+            goal=str(plan.get("objective") or ""),
+            focus_files=changed_focus,
+        )
+        repo_map_stats = {
+            "file_count": repo_map_payload.get("file_count"),
+            "parsed": repo_map_payload.get("parsed"),
+            "reused": repo_map_payload.get("reused"),
+        }
+    except Exception as exc:  # noqa: BLE001 - memory failure degrades to no map, never a blocked dispatch
+        repo_map_stats = {"error": str(exc)[:200]}
+
     worker_command = build_worker_command(
         plan=plan,
         track=selected_track,
@@ -117,6 +140,7 @@ def dispatch_chief_plan(
         verification_command=verification_command,
         phase="implementation",
         model_policy=model_policy,
+        repo_map_text=repo_map_text,
     )
     preview = {
         "schema_version": 1,
@@ -146,6 +170,8 @@ def dispatch_chief_plan(
             "include_slow": bool(include_slow),
             "max_workflows": int(max_workflows),
         },
+        "repo_map": repo_map_stats,
+        "subscription_quota": _quota_preview(),
         "warnings": _dispatch_warnings(plan, selected_track),
         "records": {
             "plan_dir": str(plan_dir(workspace_path, plan_id)),
@@ -192,6 +218,10 @@ def dispatch_chief_plan(
     if setup.get("status") != "created":
         return {**preview, "status": "blocked", "reason": setup.get("reason"), "worktree_setup": setup}
     preview["worktree"]["created"] = True
+    # The commit the worker branched from: the tamper guard diffs against it, so
+    # test edits are caught even when the worker commits inside the worktree.
+    worktree_base = _git_head(worktree)
+    preview["worktree"]["base_commit"] = worktree_base
     workspace_setup = prepare_worktree_workspace(
         source_workspace=workspace_path,
         target_workspace=verification_workspace,
@@ -242,6 +272,8 @@ def dispatch_chief_plan(
         codex_runner=codex_runner,
         failure_evidence_builder=failure_evidence_builder,
         test_command=test_command,
+        worktree_base=worktree_base,
+        allow_test_edits=allow_test_edits,
     )
     verification_attempts.append(verification)
 
@@ -257,6 +289,7 @@ def dispatch_chief_plan(
                 prompt_override=repair_prompt + "\n\nAfter repairing, run: " + verification_command,
                 phase="repair",
                 model_policy=model_policy,
+                repo_map_text=repo_map_text,
             )
             repair_command["argv"][0] = executable
             repair_worker_record = _run_worker_attempt(
@@ -282,6 +315,8 @@ def dispatch_chief_plan(
                     codex_runner=codex_runner,
                     failure_evidence_builder=failure_evidence_builder,
                     test_command=test_command,
+                    worktree_base=worktree_base,
+                    allow_test_edits=allow_test_edits,
                 )
             )
 
@@ -360,6 +395,24 @@ def _dispatch_block_reason(
     return ""
 
 
+def _quota_preview() -> dict[str, Any]:
+    """Latest subscription-window snapshot (5h/7d), so every preview shows how
+    much headroom a dispatch has. Warn-only by design: snapshots can be stale,
+    and blocking on stale data would strand missions."""
+    try:
+        from .subscription_quota import load_quota_snapshot, quota_status
+
+        snapshot = load_quota_snapshot()
+        status = quota_status(snapshot)
+        summary: dict[str, Any] = {"level": status["level"], "messages": status["messages"]}
+        if snapshot:
+            summary["rate_limits"] = snapshot.get("rate_limits")
+            summary["age_minutes"] = snapshot.get("age_minutes")
+        return summary
+    except OSError:
+        return {"level": "unknown", "messages": []}
+
+
 def _dispatch_warnings(plan: dict[str, Any], track: dict[str, Any]) -> list[str]:
     warnings: list[str] = []
     if str(plan.get("status") or "") == "needs_workflow_coverage":
@@ -392,12 +445,22 @@ def build_worker_command(
     prompt_override: str | None = None,
     phase: str = "implementation",
     model_policy: dict[str, Any] | None = None,
+    repo_map_text: str | None = None,
 ) -> dict[str, Any]:
     agent = canonical_agent_name(str(track.get("agent") or "codex"))
     profile = load_agent_profile(agent) or {}
     task_kind = _task_kind_for_phase(phase, model_policy)
     config = recommend_worker_config(profile, task_kind=task_kind) if profile else {}
     prompt = prompt_override or build_worker_prompt(plan=plan, track=track, worktree=worktree, verification_command=verification_command)
+    # Every attempt (including repair) is a fresh model session; the map is how
+    # the worker orients without re-reading the repository each round.
+    if repo_map_text:
+        prompt = (
+            prompt
+            + "\n\nRepository map (DevPacer local index, current at dispatch; trust it for"
+            " orientation instead of scanning the repo):\n"
+            + repo_map_text
+        )
     if agent != "codex":
         # Profile-driven headless command (e.g. Claude Code: `claude -p ...`).
         # Any agent with a headless profile becomes an executable worker.
@@ -522,6 +585,8 @@ def run_dispatch_verification(
     codex_runner: Any = None,
     failure_evidence_builder: Any = None,
     test_command: str | None = None,
+    worktree_base: str | None = None,
+    allow_test_edits: bool = False,
 ) -> dict[str, Any]:
     verification_workspace_path = (verification_workspace_root or workspace_root).expanduser().resolve()
     now = datetime.now(timezone.utc).isoformat()
@@ -532,6 +597,32 @@ def run_dispatch_verification(
     # otherwise a workspace's seeded demo workflows would fail on an unrelated
     # project.
     if test_command:
+        # A gate over edited tests proves nothing: refuse before running it.
+        tampered = changed_test_files(repo_root=Path(repo_root), base_ref=worktree_base)
+        if tampered and not allow_test_edits:
+            payload = {
+                "plan_id": plan_id,
+                "repo_root": str(repo_root),
+                "workspace_root": str(verification_workspace_path),
+                "records_workspace_root": str(workspace_root),
+                "run_profile": run_profile,
+                "passed": 0,
+                "inspection_only": 0,
+                "failed": 1,
+                "total": 1,
+                "verdict": "fail",
+                "tampered_test_files": tampered,
+                "repair_brief": tamper_repair_brief(tampered, base_ref=worktree_base),
+                "markdown": (
+                    f"Verification refused: worker modified test file(s) {', '.join(tampered[:5])}."
+                    " Tests are the acceptance contract; pass --allow-test-edits only when the task"
+                    " is explicitly about changing tests."
+                ),
+                "recorded_at": now,
+            }
+            saved = save_verification(workspace_root, plan_id, payload)
+            payload["saved_path"] = saved["path"]
+            return payload
         command_result = run_command_verification(command=test_command, repo_root=Path(repo_root))
         verdict = "pass" if command_result.get("verdict") == "pass" else "fail"
         passed = 1 if verdict == "pass" else 0
@@ -546,6 +637,7 @@ def run_dispatch_verification(
             "failed": 0 if verdict == "pass" else 1,
             "total": 1,
             "verdict": verdict,
+            "test_files_changed": tampered,
             "command_verification": command_result,
             "markdown": (
                 f"Test command `{test_command}` passed (exit 0)."
@@ -808,6 +900,19 @@ def merge_worktree_branch(*, repo_root: Path, worktree: Path, branch: str, messa
         return {"status": "conflict", "branch": branch, "target": target, "reason": (merge.stderr or merge.stdout).strip()[:400]}
     head = g(repo_root, "rev-parse", "HEAD")
     return {"status": "merged", "branch": branch, "target": target, "commit": head.stdout.strip()}
+
+
+def _git_head(repo_root: Path) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return completed.stdout.strip() if completed.returncode == 0 else ""
 
 
 def create_worktree(*, repo_root: Path, worktree: Path, branch: str) -> dict[str, Any]:
