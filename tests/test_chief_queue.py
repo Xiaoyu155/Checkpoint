@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
+import os
 import pytest
 
 from visual_agent.cli import main
 from visual_agent.chief_queue import (
+    _acquire_worker_lock,
+    _release_worker_lock,
+    _worker_lock_path,
     claim_next_mission_queue_item,
     list_mission_queue_items,
     load_mission_queue_item,
@@ -176,3 +181,41 @@ def test_run_mission_queue_worker_marks_non_verified_result_failed(tmp_path) -> 
     assert saved.status == "failed"
     assert saved.last_result_status == "stopped"
     assert saved.last_stop_reason == "coverage_gap"
+
+
+def test_worker_lock_blocks_second_watch_worker(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    workspace.mkdir(parents=True)
+    # Acquire lock as current process
+    existing = _acquire_worker_lock(workspace)
+    assert existing is None, "First acquire should succeed"
+    # Second acquire with same PID should see an active lock
+    existing2 = _acquire_worker_lock(workspace)
+    assert existing2 is not None, "Second acquire should fail when lock is held"
+    assert existing2.get("pid") == os.getpid()
+    _release_worker_lock(workspace)
+    assert not _worker_lock_path(workspace).exists()
+
+
+def test_stale_worker_lock_is_overwritten(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    workspace.mkdir(parents=True)
+    # Write a lock with a PID that cannot exist (max PID + 1 heuristic)
+    stale = {"pid": 9999999, "started_at": "2000-01-01T00:00:00+00:00"}
+    _worker_lock_path(workspace).write_text(json.dumps(stale), encoding="utf-8")
+    existing = _acquire_worker_lock(workspace)
+    assert existing is None, "Stale lock should be overwritten"
+    _release_worker_lock(workspace)
+
+
+def test_watch_worker_blocked_by_existing_lock(tmp_path) -> None:
+    workspace, mission = create_preview_mission(tmp_path)
+    # Plant a fake lock from a non-existent PID so it looks live
+    _worker_lock_path(workspace).write_text(
+        json.dumps({"pid": os.getpid(), "started_at": "2026-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    result = run_mission_queue_worker(workspace_root=workspace, watch=True)
+    assert result["status"] == "blocked"
+    assert "worker" in result["reason"].lower()
+    _release_worker_lock(workspace)

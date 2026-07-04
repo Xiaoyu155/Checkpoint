@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from visual_agent.chief_dispatch import _dirty_path_ignored, build_worker_command, dispatch_chief_plan, git_dirty_files, run_dispatch_verification, workspace_record_dirty_prefixes
+from visual_agent.chief_dispatch import _dirty_path_ignored, _write_worktree_gitignore, build_worker_command, dispatch_chief_plan, git_dirty_files, run_dispatch_verification, workspace_record_dirty_prefixes
 from visual_agent.chief_engineer import build_chief_plan, chief_plan_to_dict
 from visual_agent.chief_plans_store import load_verification, load_worker_records, save_plan
 from visual_agent.codex_check import CodexCheckResult, CodexWorkflowCheck
@@ -741,3 +741,33 @@ def test_dirty_gate_ignores_mandatory_record(tmp_path) -> None:
 
     dirty = git_dirty_files(repo, ignored_prefixes=(".agent-workspace/", "强制测试记录.md"))
     assert dirty == []
+
+
+def test_write_worktree_gitignore_creates_file_for_python_project(tmp_path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / "main.py").write_text("# python\n", encoding="utf-8")
+
+    _write_worktree_gitignore(worktree, repo_root)
+
+    gi = worktree / ".gitignore"
+    assert gi.exists(), ".gitignore should be written for a Python project"
+    content = gi.read_text(encoding="utf-8")
+    assert "__pycache__/" in content
+    assert "*.pyc" in content
+
+
+def test_write_worktree_gitignore_skips_when_already_exists(tmp_path) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    existing = worktree / ".gitignore"
+    existing.write_text("custom\n", encoding="utf-8")
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / "main.py").write_text("# python\n", encoding="utf-8")
+
+    _write_worktree_gitignore(worktree, repo_root)
+
+    assert existing.read_text(encoding="utf-8") == "custom\n"

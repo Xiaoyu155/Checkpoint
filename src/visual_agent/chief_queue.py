@@ -305,6 +305,45 @@ def run_next_mission_queue_item(
     }
 
 
+def _worker_lock_path(workspace_path: Path) -> Path:
+    return workspace_path / "worker_lock.json"
+
+
+def _acquire_worker_lock(workspace_path: Path) -> dict[str, Any] | None:
+    """Write a worker lock file. Returns None if the lock was acquired, or a
+    dict describing the existing lock if another worker is already running."""
+    lock_path = _worker_lock_path(workspace_path)
+    if lock_path.exists():
+        try:
+            existing = json.loads(lock_path.read_text(encoding="utf-8"))
+            pid = int(existing.get("pid") or 0)
+            if pid:
+                try:
+                    os.kill(pid, 0)  # signal 0 = check if process exists
+                    return existing  # process is alive → lock is held
+                except (OSError, ProcessLookupError):
+                    pass  # process is dead → stale lock, overwrite
+        except (ValueError, OSError):
+            pass
+    lock = {"pid": os.getpid(), "started_at": datetime.now(timezone.utc).isoformat()}
+    try:
+        lock_path.write_text(json.dumps(lock, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+    return None
+
+
+def _release_worker_lock(workspace_path: Path) -> None:
+    try:
+        lock_path = _worker_lock_path(workspace_path)
+        if lock_path.exists():
+            existing = json.loads(lock_path.read_text(encoding="utf-8"))
+            if int(existing.get("pid") or 0) == os.getpid():
+                lock_path.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
+
+
 def run_mission_queue_worker(
     *,
     workspace_root: str | Path,
@@ -316,6 +355,21 @@ def run_mission_queue_worker(
     mission_runner: MissionRunner | None = None,
 ) -> dict[str, Any]:
     workspace_path = Path(workspace_root).expanduser().resolve()
+    if watch:
+        # In watch mode only one worker should run per workspace.
+        existing_lock = _acquire_worker_lock(workspace_path)
+        if existing_lock:
+            return {
+                "schema_version": 1,
+                "product": "DevPacer",
+                "status": "blocked",
+                "reason": (
+                    f"Another queue worker is already running for this workspace "
+                    f"(PID {existing_lock.get('pid')}, started {existing_lock.get('started_at', '')[:19]}). "
+                    "Stop it first, or delete .agent-workspace/worker_lock.json if it is stale."
+                ),
+                "existing_lock": existing_lock,
+            }
     started = monotonic()
     processed = 0
     idle_polls = 0
@@ -367,6 +421,9 @@ def run_mission_queue_worker(
             status = "idle"
             break
         sleep(poll_delay)
+
+    if watch:
+        _release_worker_lock(workspace_path)
 
     return {
         "schema_version": 1,
