@@ -9,6 +9,8 @@ server; the page is a single self-contained HTML shell that polls a JSON API.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import threading
 import webbrowser
 from datetime import datetime, timezone
@@ -30,6 +32,10 @@ from .workbench_board import attach_board_fields, merge_mission_now, mission_rev
 _LAUNCHES: dict[str, dict[str, Any]] = {}
 _LAUNCH_LOCK = threading.Lock()
 
+# Queue worker process (started/stopped from the dashboard)
+_WORKER_PROC: subprocess.Popen[bytes] | None = None
+_WORKER_LOCK = threading.Lock()
+
 
 def _record_launch(launch_id: str, **fields: Any) -> None:
     with _LAUNCH_LOCK:
@@ -42,6 +48,81 @@ def _launch_snapshot() -> list[dict[str, Any]]:
         return [dict(item) for item in _LAUNCHES.values()]
 
 
+# ---------------------------------------------------------------------------
+# Worker process management
+# ---------------------------------------------------------------------------
+
+def worker_status() -> dict[str, Any]:
+    global _WORKER_PROC
+    with _WORKER_LOCK:
+        if _WORKER_PROC is None:
+            return {"running": False, "pid": None}
+        if _WORKER_PROC.poll() is not None:
+            _WORKER_PROC = None
+            return {"running": False, "pid": None}
+        return {"running": True, "pid": _WORKER_PROC.pid}
+
+
+def start_worker(workspace_root: Path) -> dict[str, Any]:
+    global _WORKER_PROC
+    with _WORKER_LOCK:
+        if _WORKER_PROC is not None and _WORKER_PROC.poll() is None:
+            return {"ok": False, "error": "Worker 已在运行中", "pid": _WORKER_PROC.pid}
+        cmd = [sys.executable, "-m", "visual_agent", "mission", "worker",
+               "--watch", "--workspace-root", str(workspace_root)]
+        try:
+            _WORKER_PROC = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "pid": _WORKER_PROC.pid}
+
+
+def stop_worker() -> dict[str, Any]:
+    global _WORKER_PROC
+    with _WORKER_LOCK:
+        if _WORKER_PROC is None or _WORKER_PROC.poll() is not None:
+            _WORKER_PROC = None
+            return {"ok": True, "was_running": False}
+        _WORKER_PROC.terminate()
+        try:
+            _WORKER_PROC.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _WORKER_PROC.kill()
+        _WORKER_PROC = None
+        return {"ok": True, "was_running": True}
+
+
+# ---------------------------------------------------------------------------
+# Mission retry
+# ---------------------------------------------------------------------------
+
+def retry_mission(workspace_root: Path, mission_id: str) -> dict[str, Any]:
+    """Create a new mission with the same goal/agent/test-command as a stopped one."""
+    mission = load_mission(workspace_root, mission_id) or {}
+    if not mission:
+        return {"ok": False, "error": "找不到该 mission"}
+    status = str(mission.get("status") or "")
+    if status == "verified":
+        return {"ok": False, "error": "任务已验收，无需重试"}
+    goal = str(mission.get("objective") or "").strip()
+    if not goal:
+        return {"ok": False, "error": "原任务没有记录目标文本"}
+    agent = str(mission.get("agent") or "")
+    test_command = str(mission.get("test_command") or "")
+    return start_workbench_mission(
+        workspace_root=workspace_root,
+        repo_root=str(workspace_root.parent),
+        goal=goal,
+        test_command=test_command,
+        agent=agent,
+        execute=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dashboard data
+# ---------------------------------------------------------------------------
+
 def start_workbench_mission(
     *,
     workspace_root: str | Path,
@@ -52,12 +133,7 @@ def start_workbench_mission(
     execute: bool,
     merge_policy: str = "manual",
 ) -> dict[str, Any]:
-    """Launch a mission from the workbench form in a background thread.
-
-    Runs ``run_chief_mission`` in-process (it honors ``test_command``), so the
-    dashboard server thread returns immediately and the polling page shows the
-    mission as it progresses. Preview (execute=False) is fast; execute runs a
-    real worker; verified changes wait for review unless merge_policy is auto."""
+    """Launch a mission from the workbench form in a background thread."""
     goal = str(goal or "").strip()
     if not goal:
         return {"ok": False, "error": "请填写目标（goal）。"}
@@ -77,7 +153,6 @@ def start_workbench_mission(
 
     def _run() -> None:
         from .chief_run import run_chief_mission
-
         try:
             result = run_chief_mission(
                 goal=goal,
@@ -97,7 +172,7 @@ def start_workbench_mission(
                 stop_reason=str((result or {}).get("stop_reason") or ""),
                 mission_id=str((mission or {}).get("mission_id") or ""),
             )
-        except Exception as exc:  # noqa: BLE001 - surface launch failures to the page
+        except Exception as exc:  # noqa: BLE001
             _record_launch(launch_id, state="error", error=str(exc)[:400])
 
     threading.Thread(target=_run, daemon=True).start()
@@ -111,8 +186,6 @@ def start_workbench_mission(
     }
 
 
-# Rough public per-Mtoken USD prices, only for an *estimated* savings figure so
-# the user can see the benefit. Not billing; real spend comes from worker records.
 _TIER_PRICE_PER_MTOK = {"cheap": 1.0, "standard": 4.0, "strong": 30.0}
 
 
@@ -138,8 +211,6 @@ def _build_value(root: Path, missions: list[dict[str, Any]], plans: list[dict[st
             cost = float(usage.get("cost_usd") or 0.0)
             if usage.get("cost_usd") is not None:
                 real_runs += 1
-                # A cheap external backend (e.g. MiMo) reports a Claude-priced cost
-                # but bills its own cheap credits, so it counts as saved, not spent.
                 if usage.get("cost_is_savings"):
                     saved_usd += cost
                 else:
@@ -161,7 +232,6 @@ def _build_value(root: Path, missions: list[dict[str, Any]], plans: list[dict[st
 
 
 def _read_status(workspace_root: Path) -> dict[str, Any]:
-    # Status file lives at repo root next to the workspace, or inside it.
     candidates = [
         workspace_root.parent / ".visual-agent-status.md",
         workspace_root / ".visual-agent-status.md",
@@ -183,9 +253,18 @@ def build_dashboard_data(workspace_root: str | Path) -> dict[str, Any]:
     missions = attach_board_fields(root, list_missions(root))
     plans = list_plans(root)
     try:
-        queue = list_mission_queue_items(root).get("entries", [])
+        raw_queue = list_mission_queue_items(root).get("entries", [])
     except Exception:
-        queue = []
+        raw_queue = []
+    # Enrich queue entries with mission objective so the UI can show goal text
+    mission_map = {str(m.get("mission_id") or ""): m for m in missions if m.get("mission_id")}
+    queue: list[dict[str, Any]] = []
+    for item in raw_queue:
+        mid = str(item.get("mission_id") or "")
+        enriched = dict(item)
+        m = mission_map.get(mid) or {}
+        enriched["objective"] = str(m.get("objective") or m.get("goal") or "")
+        queue.append(enriched)
     try:
         programs = list_programs(root)
     except Exception:
@@ -213,6 +292,7 @@ def build_dashboard_data(workspace_root: str | Path) -> dict[str, Any]:
         "queue": queue,
         "programs": programs,
         "launches": _launch_snapshot(),
+        "worker": worker_status(),
     }
 
 
@@ -244,6 +324,10 @@ def build_mission_detail(workspace_root: str | Path, mission_id: str) -> dict[st
     }
 
 
+# ---------------------------------------------------------------------------
+# Dashboard HTML
+# ---------------------------------------------------------------------------
+
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="zh">
 <head>
@@ -251,171 +335,338 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>DevPacer 工作台</title>
 <style>
-  :root { --bg:#0f1115; --card:#1a1d24; --line:#2a2f3a; --fg:#e6e8ec; --mut:#8a90a0;
-          --ok:#3fb950; --fail:#f85149; --warn:#d29922; --acc:#58a6ff; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; }
-  header { padding:14px 24px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
-  header h1 { font-size:18px; margin:0; letter-spacing:.5px; }
-  header .sub { color:var(--mut); font-size:12px; }
-  header .spacer { flex:1; }
-  .pill { padding:3px 10px; border-radius:999px; font-size:12px; font-weight:600; white-space:nowrap; }
-  .pill.ok{background:rgba(63,185,80,.15);color:var(--ok)} .pill.fail{background:rgba(248,81,73,.15);color:var(--fail)}
-  .pill.warn{background:rgba(210,153,34,.15);color:var(--warn)} .pill.mut{background:rgba(138,144,160,.15);color:var(--mut)}
-  .pill.acc{background:rgba(88,166,255,.15);color:var(--acc)}
-  .wrap { padding:20px 24px; max-width:1400px; margin:0 auto; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; }
-  .meta { color:var(--mut); font-size:12px; }
-  .empty { color:var(--mut); padding:10px 4px; font-size:13px; }
-  code { color:var(--acc); }
-  input, textarea, select { background:var(--bg); color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px; font:inherit; }
-  button { border-radius:8px; padding:8px 14px; cursor:pointer; font:inherit; font-weight:600; border:1px solid var(--line); background:var(--card); color:var(--fg); }
-  button.primary { background:var(--acc); color:#04101f; border:none; font-weight:700; }
-  button.ghost { background:#243; color:var(--ok); }
-  button.merge { background:rgba(63,185,80,.15); color:var(--ok); border:1px solid rgba(63,185,80,.4); padding:4px 12px; font-size:12px; }
-  button:disabled { opacity:.5; cursor:default; }
+:root {
+  --bg:#0f1115; --card:#1a1d24; --card2:#1e2128; --line:#252a35;
+  --fg:#e6e8ec; --mut:#8a90a0;
+  --ok:#3fb950; --fail:#f85149; --warn:#d29922; --acc:#58a6ff;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--bg);color:var(--fg);font:14px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;}
 
-  /* composer */
-  .composer { display:grid; gap:10px; margin-bottom:18px; }
-  .composer .rowline { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-  .composer textarea { width:100%; resize:vertical; }
-  .composer .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-  @media (max-width:800px){ .composer .grid2{grid-template-columns:1fr;} }
+/* ---------- header ---------- */
+header{
+  padding:10px 24px;border-bottom:1px solid var(--line);
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  position:sticky;top:0;background:var(--bg);z-index:20;
+}
+header h1{font-size:15px;font-weight:700;letter-spacing:.3px;white-space:nowrap;}
+.hdr-sep{color:var(--line);}
+#projPath{color:var(--mut);font-size:12px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.spacer{flex:1;}
+#agentsRow{display:flex;gap:6px;flex-wrap:wrap;}
+.worker-ctl{display:flex;align-items:center;gap:8px;white-space:nowrap;}
+.wdot{width:8px;height:8px;border-radius:50%;background:var(--mut);flex-shrink:0;}
+.wdot.on{background:var(--ok);box-shadow:0 0 6px var(--ok);}
+#wLabel{font-size:12px;color:var(--mut);}
 
-  /* value strip */
-  .strip { display:flex; gap:20px; flex-wrap:wrap; margin-bottom:18px; padding:10px 14px; }
-  .strip .item { display:flex; align-items:baseline; gap:8px; }
-  .strip .num { font-size:22px; font-weight:700; }
-  .num.ok{color:var(--ok)} .num.acc{color:var(--acc)}
+/* ---------- pills ---------- */
+.pill{padding:2px 9px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap;display:inline-block;}
+.pill.ok{background:rgba(63,185,80,.15);color:var(--ok);}
+.pill.fail{background:rgba(248,81,73,.15);color:var(--fail);}
+.pill.warn{background:rgba(210,153,34,.15);color:var(--warn);}
+.pill.acc{background:rgba(88,166,255,.15);color:var(--acc);}
+.pill.mut{background:rgba(138,144,160,.1);color:var(--mut);}
+.pill.sm{font-size:11px;padding:1px 7px;}
 
-  /* board */
-  .board { display:grid; grid-template-columns:repeat(4,1fr); gap:14px; align-items:start; }
-  @media (max-width:1100px){ .board{grid-template-columns:repeat(2,1fr);} }
-  @media (max-width:640px){ .board{grid-template-columns:1fr;} }
-  .col { background:rgba(255,255,255,.02); border:1px solid var(--line); border-radius:12px; padding:10px; min-height:120px; }
-  .col h3 { margin:2px 4px 10px; font-size:13px; color:var(--mut); text-transform:uppercase; letter-spacing:.6px; display:flex; justify-content:space-between; }
-  .col h3 .cnt { color:var(--fg); background:var(--line); border-radius:999px; padding:0 8px; font-size:12px; }
-  .tcard { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:8px; cursor:pointer; }
-  .tcard:hover { border-color:var(--acc); }
-  .tcard .obj { font-size:13px; line-height:1.4; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; margin-bottom:8px; }
-  .tcard .foot { display:flex; justify-content:space-between; align-items:center; gap:6px; flex-wrap:wrap; }
-  .tcard .foot .meta { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
+/* ---------- buttons ---------- */
+button{border-radius:8px;padding:7px 14px;cursor:pointer;font:inherit;font-size:13px;
+  font-weight:600;border:1px solid var(--line);background:var(--card);color:var(--fg);}
+button:hover:not(:disabled){border-color:var(--acc);color:var(--acc);}
+button.primary{background:var(--acc);color:#04101f;border:none;}
+button.primary:hover:not(:disabled){background:#79b8ff;}
+button.danger{background:rgba(248,81,73,.12);color:var(--fail);border-color:rgba(248,81,73,.3);}
+button.danger:hover:not(:disabled){background:rgba(248,81,73,.25);}
+button.ghost{background:rgba(63,185,80,.1);color:var(--ok);border-color:rgba(63,185,80,.3);}
+button.ghost:hover:not(:disabled){background:rgba(63,185,80,.2);}
+button.act-merge{background:rgba(63,185,80,.12);color:var(--ok);
+  border:1px solid rgba(63,185,80,.35);padding:4px 10px;font-size:12px;border-radius:6px;}
+button.act-retry{background:rgba(88,166,255,.1);color:var(--acc);
+  border:1px solid rgba(88,166,255,.3);padding:4px 10px;font-size:12px;border-radius:6px;}
+button:disabled{opacity:.4;cursor:default;}
 
-  section { margin-top:26px; }
-  section > h2 { font-size:14px; margin:0 0 10px; }
-  .row { display:flex; justify-content:space-between; gap:8px; padding:8px 0; border-top:1px solid var(--line); }
-  .row:first-of-type{border-top:none}
-  .obj { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .grid2col { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
-  @media (max-width:900px){ .grid2col{grid-template-columns:1fr;} }
+/* ---------- form inputs ---------- */
+input,textarea,select{
+  background:var(--card2);color:var(--fg);
+  border:1px solid var(--line);border-radius:8px;
+  padding:8px 10px;font:inherit;font-size:13px;width:100%;
+  transition:border .15s;
+}
+input:focus,textarea:focus,select:focus{outline:none;border-color:var(--acc);}
+select{width:auto;padding-right:24px;}
+label{font-size:12px;color:var(--mut);display:block;margin-bottom:4px;}
 
-  /* drawer */
-  #drawer { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; z-index:50; }
-  #drawer .panel { position:absolute; top:0; right:0; bottom:0; width:min(680px,92vw); background:var(--card); border-left:1px solid var(--line); overflow:auto; padding:20px 22px; }
-  #drawer h2 { margin:0 44px 8px 0; font-size:16px; }
-  #drawer h3 { font-size:13px; color:var(--mut); text-transform:uppercase; letter-spacing:.5px; margin:20px 0 8px; }
-  #drawer pre { white-space:pre-wrap; background:var(--bg); padding:12px; border-radius:8px; border:1px solid var(--line); font-size:12px; }
-  #drawer .close { position:absolute; top:14px; right:18px; color:var(--mut); cursor:pointer; font-size:15px; }
-  .filerow { display:flex; justify-content:space-between; gap:10px; padding:5px 0; border-top:1px solid var(--line); font-size:12px; }
-  .filerow:first-of-type{border-top:none}
-  .add{color:var(--ok)} .del{color:var(--fail)}
-  ul.checklist { margin:6px 0; padding-left:20px; }
-  ul.checklist li { margin:4px 0; }
+/* ---------- layout ---------- */
+.wrap{padding:18px 24px;max-width:1440px;margin:0 auto;}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+@media(max-width:760px){.g2{grid-template-columns:1fr;}}
+.g2b{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:20px;}
+@media(max-width:900px){.g2b{grid-template-columns:1fr;}}
+
+/* ---------- composer ---------- */
+.composer{margin-bottom:16px;}
+.composer-hdr{font-size:13px;font-weight:700;margin-bottom:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;}
+.field{margin-bottom:10px;}
+.field label{margin-bottom:5px;}
+.rowline{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px;}
+.rowline label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--fg);margin:0;}
+.rowline input[type=checkbox]{width:auto;}
+.composer-hint{margin-top:10px;font-size:12px;color:var(--mut);
+  background:rgba(88,166,255,.05);border:1px solid rgba(88,166,255,.12);
+  border-radius:8px;padding:8px 10px;line-height:1.5;}
+#launchMsg{font-size:12px;color:var(--acc);}
+
+/* ---------- stats strip ---------- */
+.stats{display:flex;gap:0;border:1px solid var(--line);border-radius:12px;
+  overflow:hidden;margin-bottom:16px;}
+.stat{flex:1;padding:12px 16px;border-right:1px solid var(--line);text-align:center;}
+.stat:last-child{border-right:none;}
+.stat-n{font-size:22px;font-weight:700;line-height:1.2;}
+.stat-n.ok{color:var(--ok);} .stat-n.acc{color:var(--acc);}
+.stat-l{font-size:11px;color:var(--mut);margin-top:2px;}
+
+/* ---------- kanban ---------- */
+.board{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:0;}
+@media(max-width:1100px){.board{grid-template-columns:repeat(2,1fr);}}
+@media(max-width:640px){.board{grid-template-columns:1fr;}}
+.col{background:rgba(255,255,255,.02);border:1px solid var(--line);border-radius:12px;padding:10px;min-height:140px;}
+.col-hdr{display:flex;justify-content:space-between;align-items:center;
+  font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.7px;
+  color:var(--mut);margin-bottom:10px;padding:0 2px;}
+.col-hdr .cnt{background:var(--line);border-radius:999px;padding:1px 8px;font-size:11px;color:var(--fg);}
+.col-hdr.accent{color:var(--acc);} .col-hdr.warn{color:var(--warn);} .col-hdr.ok2{color:var(--ok);}
+.empty{color:var(--mut);font-size:12px;padding:8px 4px;line-height:1.5;}
+.tcard{background:var(--card);border:1px solid var(--line);border-radius:10px;
+  padding:10px 12px;margin-bottom:8px;cursor:pointer;transition:border .15s;}
+.tcard:hover{border-color:var(--acc);}
+.tcard-goal{font-size:13px;line-height:1.4;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+  margin-bottom:7px;}
+.tcard-foot{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px;}
+.tcard-actions{display:flex;gap:5px;margin-left:auto;}
+.stop-tag{font-size:11px;color:var(--warn);background:rgba(210,153,34,.1);
+  border-radius:4px;padding:1px 6px;}
+.tcard-meta{font-size:11px;color:var(--mut);}
+
+/* ---------- queue / programs ---------- */
+.section-hdr{display:flex;align-items:baseline;gap:8px;margin-bottom:8px;}
+.section-hdr h2{font-size:13px;font-weight:700;}
+.section-hdr .sub{font-size:12px;color:var(--mut);}
+.qrow{display:flex;justify-content:space-between;align-items:center;gap:10px;
+  padding:8px 0;border-top:1px solid var(--line);}
+.qrow:first-child{border-top:none;}
+.qgoal{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;}
+.qmeta{display:flex;align-items:center;gap:6px;flex-shrink:0;}
+.muts{font-size:11px;color:var(--mut);}
+code{color:var(--acc);font-size:12px;}
+
+/* ---------- drawer ---------- */
+#drawer{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;z-index:50;}
+.panel{position:absolute;top:0;right:0;bottom:0;width:min(700px,94vw);
+  background:var(--card);border-left:1px solid var(--line);overflow-y:auto;padding:20px 24px;}
+.panel-top{display:flex;justify-content:flex-end;margin-bottom:12px;}
+.close-btn{background:none;border:none;color:var(--mut);cursor:pointer;font-size:13px;padding:4px 8px;}
+.close-btn:hover{color:var(--fg);}
+#drawerBody h2{font-size:16px;font-weight:700;margin-bottom:6px;line-height:1.4;}
+#drawerBody h3{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;
+  color:var(--mut);margin:18px 0 8px;}
+#drawerBody p{font-size:13px;color:var(--mut);margin-bottom:6px;}
+#drawerBody pre{white-space:pre-wrap;background:var(--bg);padding:12px;
+  border-radius:8px;border:1px solid var(--line);font-size:12px;line-height:1.5;}
+.stop-hint{background:rgba(210,153,34,.08);border:1px solid rgba(210,153,34,.2);
+  border-radius:8px;padding:10px 12px;margin:8px 0;font-size:13px;line-height:1.6;}
+.stop-hint .fix{color:var(--acc);margin-top:4px;}
+.action-row{display:flex;gap:8px;margin:12px 0;}
+.filerow{display:flex;justify-content:space-between;gap:12px;
+  padding:5px 0;border-top:1px solid var(--line);font-size:12px;}
+.filerow:first-child{border-top:none;}
+.add{color:var(--ok);} .del{color:var(--fail);}
+.round-row{display:flex;justify-content:space-between;align-items:center;gap:8px;
+  padding:6px 0;border-top:1px solid var(--line);font-size:13px;}
+.round-row:first-child{border-top:none;}
 </style>
 </head>
 <body>
+
 <header>
-  <h1>DevPacer 工作台</h1>
-  <span class="sub">验收引擎 <b>Checkpoint</b></span>
-  <span id="statusPill" class="pill mut">…</span>
+  <h1>DevPacer</h1>
+  <span class="hdr-sep">|</span>
+  <span id="projPath" title=""></span>
   <span class="spacer"></span>
-  <span id="agentsInline" class="sub"></span>
-  <span class="sub" id="ws"></span>
+  <div id="agentsRow"></div>
+  <div class="worker-ctl">
+    <div class="wdot" id="wDot"></div>
+    <span id="wLabel">queue worker</span>
+    <button id="btnWorker" onclick="toggleWorker()">启动 Worker</button>
+  </div>
 </header>
+
 <div class="wrap">
 
+  <!-- 任务表单 -->
   <div class="card composer">
-    <textarea id="fGoal" rows="2" placeholder="用一句话说要做什么，例如：修复 src/calc.py 的 add，让 pytest 通过"></textarea>
-    <div class="grid2">
-      <input id="fRepo" placeholder="项目根目录（默认：工作区上级）"/>
-      <input id="fTest" placeholder="验收命令，如 pytest -q / npm test（留空 = 自动探测）"/>
+    <div class="composer-hdr">新建任务</div>
+    <div class="field">
+      <label>目标 <span style="color:var(--mut)">— 用一句话说清楚要做什么</span></label>
+      <textarea id="fGoal" rows="2" placeholder="例：修复 src/calc.py 的 add 函数让 pytest 通过 / 给登录页加「记住我」复选框"></textarea>
+    </div>
+    <div class="g2">
+      <div class="field">
+        <label>项目根目录 <span style="color:var(--mut)">（留空 = 工作区上级）</span></label>
+        <input id="fRepo" placeholder="留空自动填入"/>
+      </div>
+      <div class="field">
+        <label>验收命令 <span style="color:var(--mut)">（留空 = 自动探测）</span></label>
+        <input id="fTest" placeholder="pytest -q / npm test / cargo test / npm run build"/>
+      </div>
     </div>
     <div class="rowline">
-      <label class="meta">编码 agent <select id="fAgent"></select></label>
-      <label class="meta"><input id="fAutoMerge" type="checkbox"/> 验收通过后自动合并</label>
-      <button class="ghost" id="btnPreview" onclick="startMission(false)">预览（不花钱）</button>
-      <button class="primary" id="btnRun" onclick="startMission(true)">开始执行</button>
-      <span id="launchMsg" class="meta"></span>
+      <label>编码 AI <select id="fAgent" style="margin-left:6px;"></select></label>
+      <label><input type="checkbox" id="fAutoMerge"/> 验收通过后自动合并</label>
+      <span class="spacer"></span>
+      <button id="btnPreview" onclick="startMission(false)">预览（看计划·不花钱）</button>
+      <button class="primary" id="btnRun" onclick="startMission(true)">▶ 开始执行</button>
+      <span id="launchMsg"></span>
     </div>
-    <div class="meta">执行时在隔离分支里改代码、跑验收命令；验收通过的任务出现在「待验收」列，点「合并」才进主分支。预览只花很少的钱看它准备怎么干。</div>
+    <div class="composer-hint">
+      执行时在隔离 git 分支里改代码、跑验收命令；验收通过的任务出现在「待验收」列，点「合并」才进主分支，主分支全程不动。
+      预览只花极少的钱看它打算怎么干，不改任何代码。
+    </div>
   </div>
 
-  <div class="card strip">
-    <span class="item"><span class="num ok" id="vVerified">0</span><span class="meta">已验收交付</span></span>
-    <span class="item"><span class="num acc" id="vDowngraded">0</span><span class="meta" id="vTiers">省钱路由</span></span>
-    <span class="item"><span class="num" id="vSpent">$0</span><span class="meta">真实花费</span></span>
-    <span class="item"><span class="num ok" id="vSaved">$0</span><span class="meta">省下（便宜后端）</span></span>
-    <span class="item"><span class="num" id="vTokens">0</span><span class="meta">tokens</span></span>
+  <!-- 统计条 -->
+  <div class="stats">
+    <div class="stat"><div class="stat-n ok" id="vVerified">0</div><div class="stat-l">已验收交付</div></div>
+    <div class="stat"><div class="stat-n acc" id="vDowngraded">0</div><div class="stat-l" id="vTiers">省钱路由</div></div>
+    <div class="stat"><div class="stat-n" id="vSpent">$0.00</div><div class="stat-l">真实花费</div></div>
+    <div class="stat"><div class="stat-n ok" id="vSaved">$0.00</div><div class="stat-l">省下（便宜后端）</div></div>
+    <div class="stat"><div class="stat-n" id="vTokens">0</div><div class="stat-l">总 Tokens</div></div>
   </div>
 
+  <!-- 看板 -->
   <div class="board">
-    <div class="col"><h3>待办 <span class="cnt" id="cTodo">0</span></h3><div id="colTodo"></div></div>
-    <div class="col"><h3>进行中 <span class="cnt" id="cRun">0</span></h3><div id="colRun"></div></div>
-    <div class="col"><h3>待验收 <span class="cnt" id="cReview">0</span></h3><div id="colReview"></div></div>
-    <div class="col"><h3>已完成 <span class="cnt" id="cDone">0</span></h3><div id="colDone"></div></div>
+    <div class="col">
+      <div class="col-hdr">待办 <span class="cnt" id="cTodo">0</span></div>
+      <div id="colTodo"><div class="empty">暂无待办。在上方填目标即可派发。</div></div>
+    </div>
+    <div class="col">
+      <div class="col-hdr accent">执行中 <span class="cnt" id="cRun">0</span></div>
+      <div id="colRun"><div class="empty">暂无执行中的任务。</div></div>
+    </div>
+    <div class="col">
+      <div class="col-hdr warn">待验收 <span class="cnt" id="cReview">0</span></div>
+      <div id="colReview"><div class="empty">没有等待合并的任务。</div></div>
+    </div>
+    <div class="col">
+      <div class="col-hdr ok2">已完成 <span class="cnt" id="cDone">0</span></div>
+      <div id="colDone"><div class="empty">还没有完成的任务。</div></div>
+    </div>
   </div>
 
-  <section>
-    <div class="grid2col">
-      <div>
-        <h2>托管队列 <span class="meta">批量排队的任务</span></h2>
-        <div class="card" id="queue"><div class="empty">加载中…</div></div>
-      </div>
-      <div>
-        <h2>项目托管 <span class="meta">按 5 小时额度窗口规划的大任务</span></h2>
-        <div class="card" id="programs"><div class="empty">加载中…</div></div>
-      </div>
+  <!-- 队列 + 项目托管 -->
+  <div class="g2b">
+    <div>
+      <div class="section-hdr"><h2>托管队列</h2><span class="sub">批量排队的任务</span></div>
+      <div class="card" id="queue"><div class="empty">加载中…</div></div>
     </div>
-  </section>
+    <div>
+      <div class="section-hdr"><h2>项目托管</h2><span class="sub">按 5 小时额度窗口规划的大任务</span></div>
+      <div class="card" id="programs"><div class="empty">加载中…</div></div>
+    </div>
+  </div>
+
 </div>
 
-<div id="drawer" onclick="if(event.target.id==='drawer')this.style.display='none'">
+<!-- 详情侧抽屉 -->
+<div id="drawer" onclick="if(event.target.id==='drawer')closeDrawer()">
   <div class="panel">
-    <span class="close" onclick="document.getElementById('drawer').style.display='none'">✕ 关闭</span>
+    <div class="panel-top">
+      <button class="close-btn" onclick="closeDrawer()">✕ 关闭</button>
+    </div>
     <div id="drawerBody"></div>
   </div>
 </div>
 
 <script>
-const pill = s => { const t=(s||'').toLowerCase();
+// ---------- 停止原因中文翻译 + 修复建议 ----------
+const STOP_REASON = {
+  coverage_gap:        { zh:'未找到测试命令', fix:'在「验收命令」里填上测试命令，如 pytest -q / npm test' },
+  permission_required: { zh:'仓库有未提交的改动', fix:'先在项目目录 git commit 或 git stash，再重试' },
+  same_failure_repeated:{ zh:'同一错误修复两次仍然失败', fix:'打开最终报告看具体报错，把目标改得更精确再重试' },
+  budget_exhausted:    { zh:'超出轮次预算', fix:'目标拆得更小，或命令行加 --max-rounds 参数再续跑' },
+  worker_error:        { zh:'AI Worker 进程异常退出', fix:'运行 checkpoint agents doctor 确认 Agent 可用，再恢复任务' },
+  quota_exhausted:     { zh:'AI 额度已用完', fix:'等额度恢复（Codex 每周 / Claude 每 5 小时），或切换编码 AI' },
+  needs_clarification: { zh:'目标不够具体无法执行', fix:'把目标改写为：做什么 + 改哪里 + 什么叫完成' },
+  verification_failed: { zh:'验收命令仍然失败', fix:'打开最终报告看具体报错，重新创建更精确的任务' },
+  command_timeout:     { zh:'验收命令超时', fix:'加快测试速度，或先跑部分测试验证思路' },
+  command_launch_error:{ zh:'验收命令无法启动', fix:'先手动运行一次验收命令确认它能跑' },
+  test_command_invalid:{ zh:'验收命令有误', fix:'检查测试命令是否正确，先手动运行确认' },
+  inspection_only:     { zh:'仅检查验收（无交互）', fix:'加 --run-profile supervised 做真实交互验收' },
+};
+function srInfo(code){ return STOP_REASON[code] || { zh: code||'', fix:'' }; }
+
+const STATUS_ZH = {
+  created:'待执行', running:'执行中', preview_running:'预览中', preview:'预览完成',
+  verified:'验收通过', merged:'已合并', stopped:'已停止', failed:'失败',
+};
+const zh = s => STATUS_ZH[s] || s;
+
+const esc = s => (s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function pc(s){
+  const t=(s||'').toLowerCase();
   if(t.includes('pass')||t.includes('verified')||t.includes('merged')) return 'ok';
   if(t.includes('fail')||t.includes('error')||t.includes('conflict')) return 'fail';
-  if(t.includes('clarif')||t.includes('coverage')||t.includes('budget')||t.includes('stopped')) return 'warn';
+  if(t.includes('clarif')||t.includes('coverage')||t.includes('budget')||
+     t.includes('stopped')||t.includes('exhausted')||t.includes('repeated')) return 'warn';
   if(t.includes('running')||t.includes('preview')) return 'acc';
-  return 'mut'; };
-const esc = s => (s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const zh = s => ({created:'待执行', running:'执行中', preview_running:'预览中', preview:'预览完成',
-  verified:'验收通过', merged:'已合并', stopped:'已停止', failed:'失败'})[s] || s;
+  return 'mut';
+}
 
-let agentsFilled = false;
+// ---------- Worker 控制 ----------
+let _workerRunning = false;
+async function toggleWorker(){
+  const btn = document.getElementById('btnWorker');
+  btn.disabled = true;
+  try{
+    const ep = _workerRunning ? '/api/worker/stop' : '/api/worker/start';
+    const r = await (await fetch(ep,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+    if(!r.ok && r.error) alert('操作失败：'+r.error);
+  }catch(e){ alert('请求失败：'+e); }
+  btn.disabled = false;
+  await load();
+}
+function updateWorker(w){
+  _workerRunning = !!(w&&w.running);
+  const dot = document.getElementById('wDot');
+  const lbl = document.getElementById('wLabel');
+  const btn = document.getElementById('btnWorker');
+  dot.className = 'wdot' + (_workerRunning?' on':'');
+  lbl.textContent = _workerRunning ? 'Queue Worker 运行中' : 'Queue Worker 已停止';
+  btn.textContent = _workerRunning ? '停止 Worker' : '启动 Worker';
+  btn.className = _workerRunning ? 'danger' : 'ghost';
+}
+
+// ---------- 新建任务 ----------
+let _agentsFilled = false;
 function fillAgents(d){
-  if(agentsFilled) return;
+  if(_agentsFilled) return;
   const sel = document.getElementById('fAgent');
-  const installed = (d.installed_agents||[]);
+  const inst = d.installed_agents||[];
   const order = ['codex','claude-code'];
-  const opts = installed.length ? order.filter(a => installed.includes(a)).concat(installed.filter(a => !order.includes(a))) : order;
+  const opts = inst.length ? order.filter(a=>inst.includes(a)).concat(inst.filter(a=>!order.includes(a))) : order;
   sel.innerHTML = opts.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('');
-  if(d.repo_root && !document.getElementById('fRepo').value) document.getElementById('fRepo').placeholder = d.repo_root;
-  agentsFilled = true;
+  if(d.repo_root) document.getElementById('fRepo').placeholder = d.repo_root;
+  _agentsFilled = true;
 }
 
 async function startMission(execute){
   const goal = document.getElementById('fGoal').value.trim();
   const msg = document.getElementById('launchMsg');
-  if(!goal){ msg.textContent = '请先填写目标。'; return; }
+  if(!goal){ msg.textContent='请先填写目标。'; return; }
   const body = {
     goal,
-    repo_root: document.getElementById('fRepo').value.trim() || document.getElementById('fRepo').placeholder || '.',
+    repo_root: document.getElementById('fRepo').value.trim() || '',
     test_command: document.getElementById('fTest').value.trim(),
     agent: document.getElementById('fAgent').value,
     merge_policy: document.getElementById('fAutoMerge').checked ? 'auto' : 'manual',
@@ -423,12 +674,17 @@ async function startMission(execute){
   };
   document.getElementById('btnPreview').disabled = true;
   document.getElementById('btnRun').disabled = true;
-  msg.textContent = execute ? '已开始执行，看板会实时更新…' : '正在生成预览…';
+  msg.textContent = execute ? '派发中…' : '生成预览中…';
   try{
-    const r = await (await fetch('/api/mission/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)})).json();
-    msg.textContent = r.ok ? (execute?'任务已派发，进行中列可见。':'预览生成中，稍后见待验收列。') : ('无法开始：'+esc(r.error||'未知错误'));
-    if(r.ok) document.getElementById('fGoal').value = '';
-  }catch(e){ msg.textContent = '请求失败：'+esc(String(e)); }
+    const r = await (await fetch('/api/mission/start',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+    if(r.ok){
+      msg.textContent = execute ? '✓ 已派发，在「执行中」列查看。' : '✓ 预览生成中，在「待验收」列查看。';
+      document.getElementById('fGoal').value = '';
+    } else {
+      msg.textContent = '错误：'+esc(r.error||'未知');
+    }
+  }catch(e){ msg.textContent='请求失败：'+esc(String(e)); }
   finally{
     document.getElementById('btnPreview').disabled = false;
     document.getElementById('btnRun').disabled = false;
@@ -436,125 +692,196 @@ async function startMission(execute){
   }
 }
 
+// ---------- 合并 / 重试 ----------
 async function mergeMission(ev, id){
   ev.stopPropagation();
-  const btn = ev.target; btn.disabled = true; btn.textContent = '合并中…';
+  const btn = ev.target; btn.disabled=true; btn.textContent='合并中…';
   try{
-    const r = await (await fetch('/api/mission/merge', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mission_id:id})})).json();
-    if(!r.ok){ alert('合并失败：' + (r.error || (r.merge&&r.merge.reason) || (r.merge&&r.merge.status) || '未知原因')); }
-  }catch(e){ alert('合并请求失败：'+e); }
+    const r = await (await fetch('/api/mission/merge',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({mission_id:id})})).json();
+    if(!r.ok) alert('合并失败：'+(r.error||(r.merge&&r.merge.reason)||'未知'));
+  }catch(e){ alert('合并失败：'+e); }
   load();
 }
 
+async function retryMission(ev, id){
+  ev.stopPropagation();
+  const btn = ev.target; btn.disabled=true; btn.textContent='重试中…';
+  try{
+    const r = await (await fetch('/api/mission/retry',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({mission_id:id})})).json();
+    if(r.ok){ closeDrawer(); }
+    else{ alert('重试失败：'+(r.error||'未知')); btn.disabled=false; btn.textContent='↺ 重试'; }
+  }catch(e){ alert('重试失败：'+e); btn.disabled=false; btn.textContent='↺ 重试'; }
+  load();
+}
+
+// ---------- 看板 ----------
 function missionCard(m){
-  const mergeBtn = m.can_merge ? `<button class="merge" onclick="mergeMission(event,'${esc(m.mission_id)}')">合并</button>` : '';
-  const stop = m.stop_reason && m.stop_reason!=='verified' ? ` · ${esc(m.stop_reason)}` : '';
+  const sr = srInfo(m.stop_reason);
+  const isStopped = m.status==='stopped'||m.status==='failed';
+  const hasStop = m.stop_reason && m.stop_reason!=='verified';
+  const mergeBtn = m.can_merge
+    ? `<button class="act-merge" onclick="mergeMission(event,'${esc(m.mission_id)}')">✓ 合并</button>` : '';
+  const retryBtn = isStopped && hasStop
+    ? `<button class="act-retry" onclick="retryMission(event,'${esc(m.mission_id)}')">↺ 重试</button>` : '';
+  const stopTag = hasStop && !m.can_merge
+    ? `<span class="stop-tag">${esc(sr.zh)}</span>` : '';
   return `<div class="tcard" onclick="detail('${esc(m.mission_id)}')">
-    <div class="obj">${esc(m.objective)||'(无目标)'}</div>
-    <div class="foot">
-      <span><span class="pill ${pill(m.status)}">${esc(zh(m.status))}</span>${mergeBtn?' '+mergeBtn:''}</span>
-      <span class="meta">${esc(m.mission_id).slice(0,17)}${stop}</span>
-    </div></div>`;
+    <div class="tcard-goal">${esc(m.objective||'（无目标）')}</div>
+    <div class="tcard-foot">
+      <span class="pill ${pc(m.status)} sm">${esc(zh(m.status))}</span>
+      ${stopTag}
+      <span class="tcard-actions">${mergeBtn}${retryBtn}</span>
+    </div>
+    <div class="tcard-meta">${esc((m.mission_id||'').slice(0,17))}</div>
+  </div>`;
 }
-
 function launchCard(l){
-  const p = l.state==='error' ? 'fail' : 'acc';
-  const txt = l.state==='error' ? '启动失败' : (l.execute?'派发中…':'预览中…');
-  const extra = l.state==='error' ? `<div class="meta">${esc(l.error||'')}</div>` : '';
-  return `<div class="tcard"><div class="obj">${esc(l.goal)}</div>
-    <div class="foot"><span class="pill ${p}">${txt}</span></div>${extra}</div>`;
+  const p = l.state==='error'?'fail':'acc';
+  const txt = l.state==='error'?'启动失败':(l.execute?'派发中…':'预览中…');
+  const extra = l.state==='error'?`<div class="tcard-meta" style="color:var(--fail)">${esc(l.error||'')}</div>`:'';
+  return `<div class="tcard"><div class="tcard-goal">${esc(l.goal)}</div>
+    <div class="tcard-foot"><span class="pill ${p} sm">${txt}</span></div>${extra}</div>`;
 }
-
 function renderBoard(d){
-  const cols = {todo:[], in_progress:[], in_review:[], done:[]};
-  const runningObjectives = new Set((d.missions||[]).filter(m=>m.board_column==='in_progress').map(m=>m.objective));
+  const cols={todo:[],in_progress:[],in_review:[],done:[]};
+  const runObjs = new Set((d.missions||[]).filter(m=>m.board_column==='in_progress').map(m=>m.objective));
   (d.launches||[]).forEach(l=>{
-    if(l.state==='starting' && !runningObjectives.has(l.goal)) cols.in_progress.push(launchCard(l));
+    if(l.state==='starting'&&!runObjs.has(l.goal)) cols.in_progress.push(launchCard(l));
     else if(l.state==='error') cols.in_review.push(launchCard(l));
   });
   (d.missions||[]).forEach(m=>{ (cols[m.board_column]||cols.in_review).push(missionCard(m)); });
-  const empty = t => `<div class="empty">${t}</div>`;
-  document.getElementById('colTodo').innerHTML = cols.todo.join('') || empty('暂无待办。上面填目标即可开工。');
-  document.getElementById('colRun').innerHTML = cols.in_progress.join('') || empty('没有正在执行的任务。');
-  document.getElementById('colReview').innerHTML = cols.in_review.join('') || empty('没有等你验收的任务。');
-  document.getElementById('colDone').innerHTML = cols.done.join('') || empty('还没有完成的任务。');
-  document.getElementById('cTodo').textContent = cols.todo.length;
-  document.getElementById('cRun').textContent = cols.in_progress.length;
-  document.getElementById('cReview').textContent = cols.in_review.length;
-  document.getElementById('cDone').textContent = cols.done.length;
+  const emp=t=>`<div class="empty">${t}</div>`;
+  document.getElementById('colTodo').innerHTML=cols.todo.join('')||emp('暂无待办。在上方填目标即可派发。');
+  document.getElementById('colRun').innerHTML=cols.in_progress.join('')||emp('暂无执行中的任务。');
+  document.getElementById('colReview').innerHTML=cols.in_review.join('')||emp('没有等待合并的任务。');
+  document.getElementById('colDone').innerHTML=cols.done.join('')||emp('还没有完成的任务。');
+  document.getElementById('cTodo').textContent=cols.todo.length;
+  document.getElementById('cRun').textContent=cols.in_progress.length;
+  document.getElementById('cReview').textContent=cols.in_review.length;
+  document.getElementById('cDone').textContent=cols.done.length;
 }
 
+// ---------- 主加载 ----------
 async function load(){
-  const d = await (await fetch('/api/data')).json();
-  fillAgents(d);
-  document.getElementById('ws').textContent = d.workspace_root;
-  const v = d.value || {};
-  document.getElementById('vVerified').textContent = v.verified || 0;
-  document.getElementById('vDowngraded').textContent = v.downgraded_tasks || 0;
-  const tc = v.tier_counts || {};
-  document.getElementById('vTiers').textContent = `省钱路由（便宜${tc.cheap||0}·中${tc.standard||0}·强${tc.strong||0}）`;
-  document.getElementById('vSpent').textContent = '$' + (v.spent_usd||0).toFixed(2);
-  document.getElementById('vSaved').textContent = '$' + (v.saved_usd||0).toFixed(2);
-  document.getElementById('vTokens').textContent = ((v.input_tokens||0)+(v.output_tokens||0)).toLocaleString();
-  const st = d.status.state || 'none';
-  const sp = document.getElementById('statusPill'); sp.textContent = st; sp.className = 'pill '+pill(st);
-  document.getElementById('agentsInline').innerHTML = (d.agents||[])
-    .map(a=>`<span class="pill ${a.installed?'ok':'mut'}">${esc(a.display_name||a.agent)}</span>`).join(' ');
+  try{
+    const d = await (await fetch('/api/data')).json();
+    fillAgents(d);
 
-  renderBoard(d);
+    const proj = document.getElementById('projPath');
+    const rr = (d.repo_root||'').replace(/\\\\/g,'/');
+    proj.textContent = rr.split('/').slice(-2).join('/')||d.workspace_root;
+    proj.title = d.workspace_root;
 
-  const qv = (d.queue||[]).length ? (d.queue||[]).map(q=>`
-     <div class="row">
-       <span class="obj">${esc(q.mission_id||'')}</span>
-       <span>
-         <span class="pill ${pill(q.status)}">${esc(q.status)}</span>
-         <span class="meta">agent=${esc(q.agent||'默认')} · merge=${esc(q.merge_policy||'manual')} · 尝试=${esc(String(q.attempts||0))}</span>
-       </span>
-     </div>`).join('') : '<div class="empty">暂无托管队列。用 <code>checkpoint mission import --create --queue</code> 批量排队。</div>';
-  document.getElementById('queue').innerHTML = qv;
+    document.getElementById('agentsRow').innerHTML = (d.agents||[])
+      .map(a=>`<span class="pill ${a.installed?'ok':'mut'} sm">${esc(a.display_name||a.agent)}</span>`).join(' ');
 
-  const gv = (d.programs||[]).length ? (d.programs||[]).map(g=>`
-     <div class="row">
-       <span class="obj">${esc(g.objective||'')}</span>
-       <span><span class="pill ${pill(g.status)}">${esc(g.status)}</span> <span class="meta">${esc(g.program_id)} · 任务=${esc(String(g.task_count||0))}</span></span>
-     </div>`).join('') : '<div class="empty">暂无项目托管。用 <code>checkpoint autopilot --file 开发计划.md --hours 5</code> 创建。</div>';
-  document.getElementById('programs').innerHTML = gv;
+    updateWorker(d.worker||{});
+
+    const v=d.value||{};
+    document.getElementById('vVerified').textContent=v.verified||0;
+    document.getElementById('vDowngraded').textContent=v.downgraded_tasks||0;
+    const tc=v.tier_counts||{};
+    document.getElementById('vTiers').textContent=
+      `省钱路由（便宜${tc.cheap||0} 中${tc.standard||0} 强${tc.strong||0}）`;
+    document.getElementById('vSpent').textContent='$'+(v.spent_usd||0).toFixed(2);
+    document.getElementById('vSaved').textContent='$'+(v.saved_usd||0).toFixed(2);
+    document.getElementById('vTokens').textContent=
+      ((v.input_tokens||0)+(v.output_tokens||0)).toLocaleString();
+
+    renderBoard(d);
+
+    // 队列（enriched with objective from Python side）
+    const qEl=document.getElementById('queue');
+    if((d.queue||[]).length){
+      qEl.innerHTML=(d.queue||[]).map(q=>{
+        const sr=srInfo(q.stop_reason);
+        const stopTag=q.stop_reason?`<span class="pill ${pc(q.status)} sm">${esc(sr.zh||q.stop_reason)}</span>`:'';
+        return `<div class="qrow">
+          <span class="qgoal">${esc(q.objective||q.mission_id)}</span>
+          <span class="qmeta">
+            <span class="pill ${pc(q.status)} sm">${esc(q.status)}</span>
+            ${stopTag}
+            <span class="muts">${esc(q.agent||'codex')}</span>
+          </span>
+        </div>`;
+      }).join('');
+    } else {
+      qEl.innerHTML=`<div class="empty">暂无队列任务。<br>用 <code>checkpoint mission import --create --queue</code> 批量排队，<br>或点右上角「启动 Worker」让它自动处理。</div>`;
+    }
+
+    // 项目托管
+    const gEl=document.getElementById('programs');
+    if((d.programs||[]).length){
+      gEl.innerHTML=(d.programs||[]).map(g=>`<div class="qrow">
+        <span class="qgoal">${esc(g.objective||g.program_id)}</span>
+        <span class="qmeta">
+          <span class="pill ${pc(g.status)} sm">${esc(g.status)}</span>
+          <span class="muts">${esc(String(g.task_count||0))} 个任务</span>
+        </span>
+      </div>`).join('');
+    } else {
+      gEl.innerHTML=`<div class="empty">暂无项目托管。<br>用 <code>checkpoint autopilot --file 开发计划.md --hours 5</code> 创建。</div>`;
+    }
+  }catch(e){ console.error('load',e); }
 }
 
+// ---------- 详情抽屉 ----------
 function diffSection(rv){
-  const ds = (rv||{}).diff_summary || {};
+  const ds=(rv||{}).diff_summary||{};
   if(!ds.file_count) return '';
-  const files = (ds.changed_files||[]).slice(0,40).map(f=>`
-    <div class="filerow"><span class="obj">${esc(f.path)}</span>
+  const files=(ds.changed_files||[]).slice(0,40).map(f=>`
+    <div class="filerow"><span>${esc(f.path)}</span>
     <span><span class="add">+${f.lines_added||0}</span> <span class="del">-${f.lines_removed||0}</span></span></div>`).join('');
-  const fns = (ds.functions_touched||[]).slice(0,20).map(x=>`<code>${esc(x)}</code>`).join('、');
-  const checks = (ds.user_checklist||[]).map(c=>`<li>${esc(c)}</li>`).join('');
-  const warn = (rv.warnings||[]).map(w=>`<div class="pill warn" style="display:block;margin:6px 0;">${esc(w)}</div>`).join('');
+  const fns=(ds.functions_touched||[]).slice(0,20).map(x=>`<code>${esc(x)}</code>`).join('、');
+  const checks=(ds.user_checklist||[]).map(c=>`<li>${esc(c)}</li>`).join('');
+  const warn=(rv.warnings||[]).map(w=>`<div class="pill warn" style="display:block;margin:4px 0;">${esc(w)}</div>`).join('');
   return `<h3>改动摘要（${ds.file_count} 个文件，<span class="add">+${ds.lines_added}</span>/<span class="del">-${ds.lines_removed}</span>）</h3>
     ${warn}${files}
-    ${fns?`<div class="meta" style="margin-top:8px;">涉及函数：${fns}</div>`:''}
-    ${checks?`<h3>建议人工检查</h3><ul class="checklist">${checks}</ul>`:''}`;
+    ${fns?`<div class="muts" style="margin-top:6px;">涉及函数：${fns}</div>`:''}
+    ${checks?`<h3>建议人工检查</h3><ul style="padding-left:18px;">${checks}</ul>`:''}`;
 }
+
+function closeDrawer(){ document.getElementById('drawer').style.display='none'; }
 
 async function detail(id){
   const d = await (await fetch('/api/mission?id='+encodeURIComponent(id))).json();
-  const m = d.mission || {};
-  const rv = d.review || {};
-  const rounds = (d.rounds||[]).map(r=>`<div class="row"><span>Round ${esc(String(r.round))}: <b>${esc(r.type)}</b></span>
-      <span><span class="pill ${pill(r.status)}">${esc(r.status)}</span> <span class="meta">${esc(r.stop_reason||r.reason||'')}</span></span></div>`).join('');
-  const mergeBtn = d.can_merge ? `<button class="merge" style="font-size:14px;padding:8px 20px;" onclick="mergeMission(event,'${esc(m.mission_id)}');document.getElementById('drawer').style.display='none';">✓ 合并到主分支</button>` : '';
-  const verdict = rv.verdict ? `<p class="meta">验收命令：<code>${esc(rv.command||'(工作流验收)')}</code> · 结论：<span class="pill ${pill(rv.verdict)}">${esc(rv.verdict)}</span></p>` : '';
-  document.getElementById('drawerBody').innerHTML =
-     `<h2>${esc(m.objective||id)}</h2>
-      <p class="meta">状态：<span class="pill ${pill(m.status)}">${esc(zh(m.status))}</span> · ${esc(m.stop_reason||'')} ${d.merge_state?('· 合并：'+esc(d.merge_state)):''}</p>
-      ${mergeBtn}
-      ${verdict}
-      ${diffSection(rv)}
-      <h3>轮次</h3>${rounds||'<div class="empty">无</div>'}
-      <h3>最终报告</h3><pre>${esc(d.final_report)||'(无)'}</pre>`;
+  const m=d.mission||{};
+  const rv=d.review||{};
+  const sr=srInfo(m.stop_reason);
+  const isStopped=m.status==='stopped'||m.status==='failed';
+  const hasStop=m.stop_reason&&m.stop_reason!=='verified';
+  const canRetry=isStopped&&hasStop;
+
+  const mergeBtn=d.can_merge?`<button class="act-merge" style="padding:7px 16px;font-size:13px;" onclick="mergeMission(event,'${esc(m.mission_id)}')">✓ 合并到主分支</button>`:'';
+  const retryBtn=canRetry?`<button class="act-retry" style="padding:7px 16px;font-size:13px;" onclick="retryMission(event,'${esc(m.mission_id)}')">↺ 用相同目标重试</button>`:'';
+  const stopHint=hasStop?`<div class="stop-hint">
+    <div>停止原因：<b>${esc(sr.zh)}</b></div>
+    ${sr.fix?`<div class="fix">建议操作：${esc(sr.fix)}</div>`:''}
+  </div>`:'';
+
+  const rounds=(d.rounds||[]).map(r=>`<div class="round-row">
+    <span>Round ${r.round}：<b>${esc(r.type)}</b></span>
+    <span><span class="pill ${pc(r.status)} sm">${esc(r.status)}</span>
+    ${r.stop_reason||r.reason?`<span class="muts">${esc(r.stop_reason||r.reason)}</span>`:''}</span>
+  </div>`).join('');
+
+  document.getElementById('drawerBody').innerHTML=
+    `<h2>${esc(m.objective||id)}</h2>
+     <p>状态：<span class="pill ${pc(m.status)}">${esc(zh(m.status))}</span>
+     ${d.merge_state?' · 合并：'+esc(d.merge_state):''}</p>
+     ${stopHint}
+     <div class="action-row">${mergeBtn}${retryBtn}</div>
+     ${rv.verdict?`<p>验收命令：<code>${esc(rv.command||'工作流验收')}</code> · 结论：<span class="pill ${pc(rv.verdict)} sm">${esc(rv.verdict)}</span></p>`:''}
+     ${diffSection(rv)}
+     <h3>执行轮次</h3>${rounds||'<div class="empty">暂无轮次记录</div>'}
+     <h3>最终报告</h3><pre>${esc(d.final_report)||'（暂无报告）'}</pre>`;
   document.getElementById('drawer').style.display='block';
 }
-load(); setInterval(load, 4000);
+
+load();
+setInterval(load, 4000);
 </script>
 </body>
 </html>
@@ -564,7 +891,7 @@ load(); setInterval(load, 4000);
 class _DashboardHandler(BaseHTTPRequestHandler):
     server: "_DashboardServer"
 
-    def log_message(self, *args: Any) -> None:  # silence default logging
+    def log_message(self, *args: Any) -> None:
         return
 
     def _send(self, body: bytes, content_type: str) -> None:
@@ -574,42 +901,40 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_json(self, data: Any) -> None:
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self._send(body, "application/json; charset=utf-8")
+
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
             self._send(DASHBOARD_HTML.encode("utf-8"), "text/html; charset=utf-8")
             return
         if path == "/api/data":
-            data = build_dashboard_data(self.server.workspace_root)
-            self._send(json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            self._send_json(build_dashboard_data(self.server.workspace_root))
             return
         if path == "/api/mission":
             from urllib.parse import parse_qs, urlparse
-
             mission_id = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
-            data = build_mission_detail(self.server.workspace_root, mission_id)
-            self._send(json.dumps(data, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            self._send_json(build_mission_detail(self.server.workspace_root, mission_id))
             return
         self.send_response(404)
         self.end_headers()
 
-    def do_POST(self) -> None:
-        path = self.path.split("?", 1)[0]
-        if path not in ("/api/mission/start", "/api/mission/merge"):
-            self.send_response(404)
-            self.end_headers()
-            return
+    def _read_body(self) -> dict[str, Any]:
         try:
             length = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(length) if length else b"{}"
-            payload = json.loads(body.decode("utf-8") or "{}")
+            raw = self.rfile.read(length) if length else b"{}"
+            parsed = json.loads(raw.decode("utf-8") or "{}")
+            return parsed if isinstance(parsed, dict) else {}
         except (ValueError, OSError):
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
-        if path == "/api/mission/merge":
-            result = merge_mission_now(self.server.workspace_root, str(payload.get("mission_id") or ""))
-        else:
+            return {}
+
+    def do_POST(self) -> None:
+        path = self.path.split("?", 1)[0]
+        payload = self._read_body()
+
+        if path == "/api/mission/start":
             result = start_workbench_mission(
                 workspace_root=self.server.workspace_root,
                 repo_root=str(payload.get("repo_root") or str(self.server.workspace_root.parent)),
@@ -619,7 +944,20 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 execute=bool(payload.get("execute")),
                 merge_policy=str(payload.get("merge_policy") or "manual"),
             )
-        self._send(json.dumps(result, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            self._send_json(result)
+        elif path == "/api/mission/merge":
+            result = merge_mission_now(self.server.workspace_root, str(payload.get("mission_id") or ""))
+            self._send_json(result)
+        elif path == "/api/mission/retry":
+            result = retry_mission(self.server.workspace_root, str(payload.get("mission_id") or ""))
+            self._send_json(result)
+        elif path == "/api/worker/start":
+            self._send_json(start_worker(self.server.workspace_root))
+        elif path == "/api/worker/stop":
+            self._send_json(stop_worker())
+        else:
+            self.send_response(404)
+            self.end_headers()
 
 
 class _DashboardServer(ThreadingHTTPServer):
@@ -629,12 +967,6 @@ class _DashboardServer(ThreadingHTTPServer):
 
 
 def _bind_dashboard_server(host: str, port: int, root: Path) -> "_DashboardServer":
-    """Bind the server, tolerating Windows port reservations / in-use ports.
-
-    Windows raises PermissionError (WinError 10013) when a port falls in a
-    reserved Hyper-V/WSL range, and OSError when a port is already in use. Rather
-    than crash (the user just sees the dashboard "not open"), try the requested
-    port, then a few common fallbacks, then an OS-assigned free port."""
     candidates = [port, 8787, 8080, 8899, 9797, 0]
     seen: set[int] = set()
     last_error: Exception | None = None

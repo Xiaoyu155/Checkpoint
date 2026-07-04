@@ -156,7 +156,7 @@ def test_dashboard_html_has_workbench_form():
 def test_dashboard_html_has_kanban_board():
     # The workbench is a kanban board (Vibe Kanban-style): four columns and a
     # one-click merge for verified missions.
-    for column in ("待办", "进行中", "待验收", "已完成"):
+    for column in ("待办", "执行中", "待验收", "已完成"):
         assert column in DASHBOARD_HTML
     assert "/api/mission/merge" in DASHBOARD_HTML
     assert "mergeMission" in DASHBOARD_HTML
