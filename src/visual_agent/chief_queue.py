@@ -336,7 +336,27 @@ def run_mission_queue_worker(
         if result.get("ran"):
             processed += 1
             idle_polls = 0
-            runs.append(_compact_queue_run(result))
+            compact = _compact_queue_run(result)
+            # Keep sequential programs moving: sync the finished mission's
+            # program task and queue the next ready task. Advancement must
+            # never break the worker itself.
+            try:
+                from .program_scheduler import advance_program_for_mission
+
+                item = result.get("queue_item") if isinstance(result.get("queue_item"), dict) else {}
+                advanced = advance_program_for_mission(
+                    workspace_root=workspace_path,
+                    mission_id=str(item.get("mission_id") or ""),
+                )
+                if advanced:
+                    compact["program_advance"] = {
+                        "program_id": advanced.get("program_id"),
+                        "synced": advanced.get("synced"),
+                        "queued": [q.get("task_id") for q in (advanced.get("queued_items") or [])],
+                    }
+            except Exception:  # noqa: BLE001
+                pass
+            runs.append(compact)
             if run_once and not watch:
                 status = "run_once_completed"
                 break

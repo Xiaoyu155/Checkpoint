@@ -12,6 +12,7 @@ from .programs import (
     append_program_event,
     build_program_hourly_plan,
     load_program,
+    ready_program_tasks,
     refresh_daily_plan,
     save_program,
 )
@@ -19,6 +20,87 @@ from .reference_research import build_reference_pack, save_reference_pack
 
 
 MissionRunner = Callable[..., dict[str, Any]]
+
+# Mission outcomes that map to a terminal program-task status.
+_MISSION_VERIFIED = {"verified"}
+_MISSION_FAILED = {"stopped", "failed", "worker_failed", "verification_failed"}
+# Task statuses that are still waiting on a mission outcome.
+_TASK_IN_FLIGHT = {"queued", "preview_created", "running"}
+
+
+def sync_program_tasks(*, workspace_root: str | Path, program_id: str) -> dict[str, Any]:
+    """Pull mission outcomes back into program task statuses.
+
+    Without this sync a sequential program can never advance: task N stays
+    "queued" forever even after its mission verified, so task N+1 never
+    becomes ready (found by V5 cold-start validation).
+    """
+    from .missions import load_mission
+
+    workspace_path = Path(workspace_root).expanduser().resolve()
+    program = load_program(workspace_path, program_id)
+    if program is None:
+        raise FileNotFoundError(f"No saved program found: {program_id}")
+    tasks = program.get("tasks") if isinstance(program.get("tasks"), list) else []
+    updated: list[dict[str, Any]] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if str(task.get("status") or "") not in _TASK_IN_FLIGHT:
+            continue
+        mission_id = str(task.get("mission_id") or "")
+        if not mission_id:
+            continue
+        mission = load_mission(workspace_path, mission_id)
+        if not mission:
+            continue
+        mission_status = str(mission.get("status") or "")
+        stop_reason = str(mission.get("stop_reason") or "")
+        if mission_status in _MISSION_VERIFIED or stop_reason == "verified":
+            task["status"] = "verified"
+            updated.append({"task_id": task.get("task_id"), "status": "verified"})
+        elif mission_status in _MISSION_FAILED and stop_reason not in {"", "verified"}:
+            task["status"] = "failed"
+            task["block_reason"] = stop_reason
+            updated.append({"task_id": task.get("task_id"), "status": "failed", "reason": stop_reason})
+    if updated:
+        program["tasks"] = tasks
+        save_program(workspace_path, program)
+        append_program_event(workspace_path, program_id, {"event": "tasks_synced", "updated": updated})
+    return {"program_id": program_id, "updated": updated}
+
+
+def advance_program_for_mission(*, workspace_root: str | Path, mission_id: str) -> dict[str, Any] | None:
+    """After a queue item finishes, sync its program and queue newly-ready tasks.
+
+    Called by the mission queue worker so a sequential program keeps moving
+    without the user re-running `program start` by hand. Returns None when the
+    mission does not belong to any program.
+    """
+    from .programs import list_programs
+
+    workspace_path = Path(workspace_root).expanduser().resolve()
+    target = str(mission_id or "")
+    if not target:
+        return None
+    for summary in list_programs(workspace_path):
+        program_id = str(summary.get("program_id") or "")
+        program = load_program(workspace_path, program_id)
+        if program is None:
+            continue
+        tasks = program.get("tasks") if isinstance(program.get("tasks"), list) else []
+        if not any(str(t.get("mission_id") or "") == target for t in tasks if isinstance(t, dict)):
+            continue
+        synced = sync_program_tasks(workspace_root=workspace_path, program_id=program_id)
+        result: dict[str, Any] = {"program_id": program_id, "synced": synced.get("updated") or []}
+        refreshed = load_program(workspace_path, program_id) or program
+        if ready_program_tasks(refreshed):
+            started = start_program(workspace_root=workspace_path, program_id=program_id)
+            result["queued_items"] = started.get("queued_items") or []
+        else:
+            result["queued_items"] = []
+        return result
+    return None
 
 
 def start_program(
@@ -30,9 +112,12 @@ def start_program(
     mission_runner: MissionRunner | None = None,
 ) -> dict[str, Any]:
     workspace_path = Path(workspace_root).expanduser().resolve()
-    program = load_program(workspace_path, program_id)
-    if program is None:
+    if load_program(workspace_path, program_id) is None:
         raise FileNotFoundError(f"No saved program found: {program_id}")
+    # Pull mission outcomes into task statuses first, so re-running
+    # `program start` advances a sequential program past verified tasks.
+    sync_program_tasks(workspace_root=workspace_path, program_id=program_id)
+    program = load_program(workspace_path, program_id)
     hourly = refresh_daily_plan(workspace_path, program_id, hours=hours)
     scheduled = hourly.get("scheduled") if isinstance(hourly.get("scheduled"), list) else []
     tasks = program.get("tasks") if isinstance(program.get("tasks"), list) else []
