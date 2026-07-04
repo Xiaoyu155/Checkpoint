@@ -33,6 +33,8 @@ _ARTIFACT_DIR_PREFIXES = (".pw-browsers/",)
 # capture). Codex remains the default; Claude Code breaks the single-point
 # dependency so a Codex outage does not stop all delivery.
 EXECUTABLE_CODING_AGENTS = {"codex", "claude-code"}
+PYTHON_WORKTREE_GITIGNORE = "__pycache__/\n*.pyc\n"
+PYTHON_PROJECT_MARKERS = ("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile", "poetry.lock")
 
 
 def _coverage_changed_files(*, repo_root: Path, workspace_root: Path) -> list[str]:
@@ -1173,7 +1175,30 @@ def create_worktree(*, repo_root: Path, worktree: Path, branch: str) -> dict[str
             "status": "failed",
             "reason": (completed.stderr or completed.stdout or "git worktree add failed").strip(),
         }
+    try:
+        _bootstrap_python_worktree_gitignore(worktree)
+    except OSError as exc:
+        return {
+            "status": "failed",
+            "reason": f"Could not write worktree .gitignore: {type(exc).__name__}: {exc}",
+        }
     return {"status": "created", "path": str(worktree), "branch": branch}
+
+
+def _bootstrap_python_worktree_gitignore(worktree: Path) -> None:
+    gitignore = worktree / ".gitignore"
+    if gitignore.exists() or not _looks_like_python_project(worktree):
+        return
+    gitignore.write_text(PYTHON_WORKTREE_GITIGNORE, encoding="utf-8")
+
+
+def _looks_like_python_project(root: Path) -> bool:
+    if any((root / marker).exists() for marker in PYTHON_PROJECT_MARKERS):
+        return True
+    if any(root.glob("*.py")):
+        return True
+    src = root / "src"
+    return src.is_dir() and any(src.glob("**/*.py"))
 
 
 def default_worktree_workspace_path(*, source_workspace: Path, repo_root: Path, worktree: Path) -> Path:

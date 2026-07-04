@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
-from visual_agent.chief_dispatch import _dirty_path_ignored, build_worker_command, dispatch_chief_plan, git_dirty_files, run_dispatch_verification, workspace_record_dirty_prefixes
+from visual_agent.chief_dispatch import _dirty_path_ignored, build_worker_command, create_worktree, dispatch_chief_plan, git_dirty_files, run_dispatch_verification, workspace_record_dirty_prefixes
 from visual_agent.chief_engineer import build_chief_plan, chief_plan_to_dict
 from visual_agent.chief_plans_store import load_verification, load_worker_records, save_plan
 from visual_agent.codex_check import CodexCheckResult, CodexWorkflowCheck
@@ -616,6 +617,27 @@ def test_chief_dispatch_reuses_clean_existing_worktree_on_resume(tmp_path, monke
     assert payload["status"] == "verified"
     assert payload["worktree"]["created"] is True
     assert payload["worktree"]["reused"] is True
+
+
+def test_create_worktree_bootstraps_python_gitignore(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "devpacer@example.local"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "DevPacer"], cwd=repo, check=True)
+    (repo / "pyproject.toml").write_text("[project]\nname = \"demo\"\nversion = \"0.1.0\"\n", encoding="utf-8")
+    subprocess.run(["git", "add", "pyproject.toml"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=repo, check=True, capture_output=True, text=True)
+
+    worktree = tmp_path / "worker"
+    result = create_worktree(repo_root=repo, worktree=worktree, branch="checkpoint/test-python-gitignore")
+
+    assert result["status"] == "created"
+    gitignore = worktree / ".gitignore"
+    assert gitignore.exists()
+    content = gitignore.read_text(encoding="utf-8")
+    assert "__pycache__/" in content
+    assert "*.pyc" in content
 
 
 def test_chief_dispatch_does_not_verify_when_worker_fails_even_if_check_passes(tmp_path, monkeypatch) -> None:
