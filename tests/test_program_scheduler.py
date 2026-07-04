@@ -99,6 +99,47 @@ def test_advance_program_for_mission_queues_next_task(tmp_path) -> None:
     assert [q.get("task_id") for q in advanced["queued_items"]] == ["task-002"]
 
 
+def test_sync_promotes_failed_task_when_retried_mission_verifies(tmp_path) -> None:
+    """V5 live finding: a task that failed earlier must flip to verified after a retry succeeds."""
+    workspace, program = _sequential_program(tmp_path)
+    start_program(workspace_root=workspace.root, program_id=program["program_id"], hours=5)
+    mission_id = _mark_first_task_mission(workspace.root, program["program_id"], "stopped", stop_reason="worker_error")
+    sync_program_tasks(workspace_root=workspace.root, program_id=program["program_id"])
+    saved = load_program(workspace.root, program["program_id"])
+    assert saved["tasks"][0]["status"] == "failed"
+
+    # The mission is retried through the queue and verifies.
+    mission = load_mission(workspace.root, mission_id)
+    mission["status"] = "verified"
+    mission["stop_reason"] = "verified"
+    save_mission(workspace.root, mission)
+
+    advanced = advance_program_for_mission(workspace_root=workspace.root, mission_id=mission_id)
+
+    assert advanced is not None
+    saved = load_program(workspace.root, program["program_id"])
+    assert saved["tasks"][0]["status"] == "verified"
+    assert "block_reason" not in saved["tasks"][0]
+    assert [q.get("task_id") for q in advanced["queued_items"]] == ["task-002"]
+
+
+def test_sync_never_regresses_verified_task(tmp_path) -> None:
+    workspace, program = _sequential_program(tmp_path)
+    start_program(workspace_root=workspace.root, program_id=program["program_id"], hours=5)
+    mission_id = _mark_first_task_mission(workspace.root, program["program_id"], "verified")
+    sync_program_tasks(workspace_root=workspace.root, program_id=program["program_id"])
+
+    # Later mission state changes must not un-verify the task.
+    mission = load_mission(workspace.root, mission_id)
+    mission["status"] = "stopped"
+    mission["stop_reason"] = "worker_error"
+    save_mission(workspace.root, mission)
+    sync_program_tasks(workspace_root=workspace.root, program_id=program["program_id"])
+
+    saved = load_program(workspace.root, program["program_id"])
+    assert saved["tasks"][0]["status"] == "verified"
+
+
 def test_advance_program_for_mission_ignores_unknown_mission(tmp_path) -> None:
     workspace, program = _sequential_program(tmp_path)
     start_program(workspace_root=workspace.root, program_id=program["program_id"], hours=5)

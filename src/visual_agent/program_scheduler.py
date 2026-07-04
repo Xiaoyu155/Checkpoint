@@ -24,8 +24,11 @@ MissionRunner = Callable[..., dict[str, Any]]
 # Mission outcomes that map to a terminal program-task status.
 _MISSION_VERIFIED = {"verified"}
 _MISSION_FAILED = {"stopped", "failed", "worker_failed", "verification_failed"}
-# Task statuses that are still waiting on a mission outcome.
+# Task statuses the sync may update. "failed" stays syncable because a retried
+# mission can verify later (V5: task-001 failed four times, then verified);
+# only verified/done are final.
 _TASK_IN_FLIGHT = {"queued", "preview_created", "running"}
+_TASK_SYNCABLE = _TASK_IN_FLIGHT | {"failed"}
 
 
 def sync_program_tasks(*, workspace_root: str | Path, program_id: str) -> dict[str, Any]:
@@ -46,7 +49,8 @@ def sync_program_tasks(*, workspace_root: str | Path, program_id: str) -> dict[s
     for task in tasks:
         if not isinstance(task, dict):
             continue
-        if str(task.get("status") or "") not in _TASK_IN_FLIGHT:
+        task_status = str(task.get("status") or "")
+        if task_status not in _TASK_SYNCABLE:
             continue
         mission_id = str(task.get("mission_id") or "")
         if not mission_id:
@@ -58,8 +62,13 @@ def sync_program_tasks(*, workspace_root: str | Path, program_id: str) -> dict[s
         stop_reason = str(mission.get("stop_reason") or "")
         if mission_status in _MISSION_VERIFIED or stop_reason == "verified":
             task["status"] = "verified"
+            task.pop("block_reason", None)
             updated.append({"task_id": task.get("task_id"), "status": "verified"})
-        elif mission_status in _MISSION_FAILED and stop_reason not in {"", "verified"}:
+        elif (
+            task_status in _TASK_IN_FLIGHT
+            and mission_status in _MISSION_FAILED
+            and stop_reason not in {"", "verified"}
+        ):
             task["status"] = "failed"
             task["block_reason"] = stop_reason
             updated.append({"task_id": task.get("task_id"), "status": "failed", "reason": stop_reason})
