@@ -537,6 +537,9 @@ def _stop_reason_from_dispatch(dispatch: dict[str, Any], budget: dict[str, Any])
     status = str(dispatch.get("status") or "")
     if status == "blocked":
         return _dispatch_stop_reason(dispatch)
+    if dispatch.get("quota_exhausted"):
+        # The worker never got to do the task; a gate failure here is noise.
+        return "quota_exhausted"
     if status == "worker_failed":
         return "worker_error"
     latest = dispatch.get("latest_verification") if isinstance(dispatch.get("latest_verification"), dict) else {}

@@ -287,6 +287,101 @@ def test_chief_dispatch_quota_failover_to_mimo(tmp_path, monkeypatch) -> None:
     assert "tp-secret" not in str(payload["worker"].get("failover_backend"))
 
 
+def test_chief_dispatch_codex_quota_fails_over_to_claude(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("codex",))
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: name if name in {"codex", "claude"} else None)
+    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
+
+    calls = []
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
+        calls.append({"argv": argv, "env": env})
+        if len(calls) == 1:
+            # Codex subscription exhausted.
+            log_path.write_text("ERROR: You've hit your usage limit.", encoding="utf-8")
+            return {"exit_code": 1, "stdout_tail": "", "stderr_tail": "ERROR: You've hit your usage limit."}
+        log_path.write_text("done on claude", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "done on claude", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root, plan_id=plan_id, execute=True, dry_run=False,
+        command_runner=fake_runner, codex_runner=passing_codex_result,
+    )
+
+    assert len(calls) == 2  # codex attempt, then claude-code agent failover
+    assert calls[0]["argv"][0] == "codex"
+    assert calls[1]["argv"][0] == "claude"
+    assert payload["failover_worker_record"]["attempt"] == "agent_failover"
+    assert payload["worker"].get("failover_agent") == "claude-code"
+    assert payload["status"] == "verified"
+    assert payload["quota_exhausted"] is False
+
+
+def test_chief_dispatch_codex_quota_chains_to_backend(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("codex",))
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: name if name in {"codex", "claude"} else None)
+    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.resolve_failover_backend",
+        lambda: {"name": "mimo", "model": "mimo-v2.5-pro", "cost_is_savings": True,
+                 "env": {"ANTHROPIC_BASE_URL": "https://mimo.example/anthropic", "ANTHROPIC_API_KEY": "tp-secret"}},
+    )
+
+    calls = []
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
+        calls.append({"argv": argv, "env": env})
+        if len(calls) <= 2:
+            # Codex quota, then Claude quota.
+            log_path.write_text("usage limit reached", encoding="utf-8")
+            return {"exit_code": 1, "stdout_tail": "usage limit reached", "stderr_tail": ""}
+        log_path.write_text("done on mimo", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "done on mimo", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root, plan_id=plan_id, execute=True, dry_run=False,
+        command_runner=fake_runner, codex_runner=passing_codex_result,
+    )
+
+    assert len(calls) == 3  # codex -> claude -> mimo backend
+    assert calls[2]["env"]["ANTHROPIC_BASE_URL"] == "https://mimo.example/anthropic"
+    assert payload["failover_worker_record"]["attempt"] == "quota_failover"
+    assert payload["status"] == "verified"
+    assert "tp-secret" not in str(payload["worker"].get("failover_backend"))
+
+
+def test_chief_dispatch_quota_exhausted_is_honest_when_no_failover(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("codex",))
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    # Claude is NOT installed: no failover hop is possible.
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: name if name == "codex" else None)
+    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
+        log_path.write_text("ERROR: You've hit your usage limit.", encoding="utf-8")
+        return {"exit_code": 1, "stdout_tail": "", "stderr_tail": "ERROR: You've hit your usage limit."}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root, plan_id=plan_id, execute=True, dry_run=False,
+        command_runner=fake_runner, codex_runner=failing_codex_result,
+    )
+
+    assert payload["quota_exhausted"] is True
+    assert any("quota" in w.lower() for w in payload.get("warnings") or [])
+
+    from visual_agent.chief_run import _stop_reason_from_dispatch
+
+    assert _stop_reason_from_dispatch(payload, {"max_rounds": 2}) == "quota_exhausted"
+
+
 def test_chief_dispatch_no_failover_on_normal_failure(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("claude-code",))
     monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})

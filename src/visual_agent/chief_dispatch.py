@@ -266,16 +266,17 @@ def dispatch_chief_plan(
     )
 
     # Quota failover: if the subscription worker was blocked by a usage/rate
-    # limit, keep going on a cheap backend (MiMo) instead of stopping — exactly
-    # the "Claude ran out, continue on MiMo" case. Only when we were not already
-    # on a backend and one is configured.
+    # limit, keep going instead of stopping. Claude Code falls over to a cheap
+    # backend (MiMo); Codex falls over to the Claude Code worker first (which
+    # may then itself take the backend hop). Only when we were not already on
+    # a backend.
     failover_record: dict[str, Any] | None = None
-    if (
-        worker_agent_norm == "claude-code"
-        and worker_backend is None
+    quota_hit = (
+        worker_backend is None
         and worker_record.get("status") != "completed"
         and looks_like_quota_exhaustion(worker_record.get("stdout_tail"), worker_record.get("stderr_tail"))
-    ):
+    )
+    if quota_hit and worker_agent_norm == "claude-code":
         failover_backend = resolve_failover_backend()
         if failover_backend:
             failover_argv = _override_model_flag(list(worker_command["argv"]), failover_backend["model"])
@@ -295,6 +296,60 @@ def dispatch_chief_plan(
                 backend=failover_backend,
             )
             # The failover attempt is what verification should judge.
+            worker_record = failover_record
+    elif quota_hit and worker_agent_norm == "codex":
+        # Codex subscription ran out (found live by V5): rebuild the same task
+        # for the Claude Code worker and keep going in the same worktree.
+        claude_track = {**selected_track, "agent": "claude-code"}
+        claude_command = build_worker_command(
+            plan=plan,
+            track=claude_track,
+            worktree=worktree,
+            verification_command=verification_command,
+            phase="implementation",
+            model_policy=model_policy,
+            repo_map_text=repo_map_text,
+        )
+        claude_profile = load_agent_profile("claude-code") or {}
+        claude_exe = shutil.which(str(claude_profile.get("executable") or "claude"))
+        if claude_exe:
+            claude_argv = list(claude_command["argv"])
+            claude_argv[0] = claude_exe
+            preview["worker"]["failover_agent"] = "claude-code"
+            failover_record = _run_worker_attempt(
+                workspace_root=workspace_path,
+                plan_id=plan_id,
+                attempt="agent_failover",
+                track=claude_track,
+                argv=claude_argv,
+                stdin_text=claude_command.get("stdin"),
+                cwd=worktree,
+                timeout_seconds=timeout_seconds,
+                log_path=logs_dir / f"{track_token}-agent-failover.log",
+                runner=runner,
+            )
+            if (
+                failover_record.get("status") != "completed"
+                and looks_like_quota_exhaustion(failover_record.get("stdout_tail"), failover_record.get("stderr_tail"))
+            ):
+                failover_backend = resolve_failover_backend()
+                if failover_backend:
+                    backend_argv = _override_model_flag(list(claude_argv), failover_backend["model"])
+                    preview["worker"]["failover_backend"] = redact_backend(failover_backend)
+                    failover_record = _run_worker_attempt(
+                        workspace_root=workspace_path,
+                        plan_id=plan_id,
+                        attempt="quota_failover",
+                        track=claude_track,
+                        argv=backend_argv,
+                        stdin_text=claude_command.get("stdin"),
+                        cwd=worktree,
+                        timeout_seconds=timeout_seconds,
+                        log_path=logs_dir / f"{track_token}-quota-failover.log",
+                        runner=runner,
+                        env=failover_backend["env"],
+                        backend=failover_backend,
+                    )
             worker_record = failover_record
 
     verification_attempts: list[dict[str, Any]] = []
@@ -360,6 +415,13 @@ def dispatch_chief_plan(
 
     latest_verification = verification_attempts[-1]
     worker_completed = worker_record.get("status") == "completed"
+    # Every failover hop is exhausted and the worker still hit a quota wall:
+    # surface that honestly instead of letting the gate failure masquerade as
+    # a code problem ("same_failure_repeated" on an untouched worktree).
+    quota_exhausted = (
+        not worker_completed
+        and looks_like_quota_exhaustion(worker_record.get("stdout_tail"), worker_record.get("stderr_tail"))
+    )
     status = "completed" if worker_completed else "worker_failed"
     if latest_verification.get("verdict") == "fail":
         status = "verification_failed"
@@ -392,6 +454,7 @@ def dispatch_chief_plan(
         **preview,
         "status": status,
         "dry_run": False,
+        "quota_exhausted": quota_exhausted,
         "worker_record": worker_record,
         "failover_worker_record": failover_record,
         "repair_worker_record": repair_worker_record,
@@ -401,6 +464,11 @@ def dispatch_chief_plan(
             [worker_record, failover_record, repair_worker_record]
         ),
     }
+    if quota_exhausted:
+        payload.setdefault("warnings", []).append(
+            "Worker hit a subscription quota/usage limit and no failover completed."
+            " The task itself was not attempted; retry after the quota resets."
+        )
     if merge_result is not None:
         payload["merge"] = merge_result
     return payload
