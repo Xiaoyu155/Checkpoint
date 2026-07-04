@@ -128,8 +128,8 @@ def test_empty_cli_prints_concise_getting_started(capsys) -> None:
     output = capsys.readouterr().out
 
     assert code == 0
-    assert "Checkpoint verifies product behavior" in output
-    assert "checkpoint verify-now" in output
+    assert "DevPacer" in output
+    assert "checkpoint init --root .agent-workspace" in output
     assert "Run checkpoint --help for the full command list." in output
 
 
@@ -139,7 +139,7 @@ def test_quickstart_cli_prints_same_getting_started(capsys) -> None:
 
     assert code == 0
     assert "checkpoint init --root .agent-workspace" in output
-    assert "checkpoint workspace-product-issues" in output
+    assert "mission start" in output
 
 
 def test_codex_check_cli_returns_one_when_any_workflow_fails(tmp_path, capsys, monkeypatch) -> None:

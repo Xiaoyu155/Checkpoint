@@ -628,16 +628,53 @@ def _compact_verification(payload: dict[str, Any]) -> dict[str, Any]:
 def _message_for_stop(stop_reason: str) -> str:
     return {
         "verified": "Mission verified by Checkpoint.",
-        "coverage_gap": "Mission stopped because verification coverage is missing or weak.",
+        "coverage_gap": (
+            "Mission stopped: no test command or workflow coverage found. "
+            "Fix: add --test-command \"pytest -q\" (or your project's test command), "
+            "or add --allow-coverage-gap to skip this gate."
+        ),
         "inspection_only": "Mission produced inspection-only evidence; rerun with a real interaction profile when needed.",
-        "test_command_invalid": "Mission stopped because the verification command appears invalid for this environment.",
-        "command_launch_error": "Mission stopped because the verification command could not be launched.",
-        "command_timeout": "Mission stopped because the verification command timed out.",
-        "same_failure_repeated": "Mission stopped because the same verification failure repeated after repair.",
-        "budget_exhausted": "Mission stopped because the configured round budget was exhausted.",
-        "worker_error": "Mission stopped because the worker process failed.",
-        "verification_failed": "Mission stopped because verification still fails.",
-        "permission_required": "Mission stopped because human approval or a clean repository is required.",
+        "test_command_invalid": (
+            "Mission stopped: the verification command exited with an error before running any tests. "
+            "Fix: run the test command manually to confirm it works, then retry."
+        ),
+        "command_launch_error": (
+            "Mission stopped: the verification command could not be launched. "
+            "Fix: check that the command is on PATH and the test dependencies are installed."
+        ),
+        "command_timeout": (
+            "Mission stopped: the verification command timed out. "
+            "Fix: increase --timeout-seconds or make the test suite faster."
+        ),
+        "same_failure_repeated": (
+            "Mission stopped: the same test failure repeated after the auto-repair round. "
+            "Fix: open final_report.md, read the failing test output, then start a new mission with a more specific goal."
+        ),
+        "budget_exhausted": (
+            "Mission stopped: the configured round budget was exhausted. "
+            "Fix: resume the mission with --max-rounds increased, or start a new mission with a narrower goal."
+        ),
+        "worker_error": (
+            "Mission stopped: the AI worker process failed or was killed. "
+            "Fix: run `checkpoint agents doctor` to confirm the agent is available, then resume."
+        ),
+        "verification_failed": (
+            "Mission stopped: verification still fails after all repair rounds. "
+            "Fix: open final_report.md to see what the worker tried, then refine the goal."
+        ),
+        "permission_required": (
+            "Mission stopped: the repository has uncommitted changes (dirty working tree). "
+            "Fix: commit or stash your changes first, then retry. "
+            "Or add --allow-dirty to skip this safety check."
+        ),
+        "quota_exhausted": (
+            "Mission stopped: all available AI backends hit their quota limit. "
+            "Fix: wait for quota to reset (codex: weekly, claude: 5-hour window) or switch to a different --agent."
+        ),
+        "needs_clarification": (
+            "Mission stopped: the goal is too vague to plan safely. "
+            "Fix: refine the --goal to include a specific acceptance criterion, e.g. 'add X so that test Y passes'."
+        ),
     }.get(stop_reason, "Mission stopped.")
 
 
@@ -889,14 +926,24 @@ def _status_next_action(mission: dict[str, Any]) -> str:
     if status == "background_running":
         return "Background run is active or recently started. Inspect logs if it does not update."
     if status == "preview" and stop_reason == "preview_only":
-        return "Run `chief-run --resume <mission_id> --execute` to execute this previewed mission."
-    if stop_reason == "coverage_gap":
-        return "Add or select workflow coverage, then rerun or resume with an explicit coverage override only for experiments."
-    if stop_reason == "needs_clarification":
-        return "See the plan-review section in the final report, confirm the next step, then start a new mission."
+        return "Run `mission start --resume <mission_id> --execute` to execute this previewed mission."
     if status == "verified":
-        return "Mission is verified; review the final report and worktree before merge."
-    return "Review the rounds and final report for the next action."
+        return "Mission verified. Run `checkpoint mission list` to review, or `git log` to see the merged commit."
+    if stop_reason == "coverage_gap":
+        return "Add --test-command \"<your test command>\" to your next mission start, or add --allow-coverage-gap."
+    if stop_reason == "needs_clarification":
+        return "Refine the goal with a concrete acceptance criterion and start a new mission."
+    if stop_reason == "permission_required":
+        return "Run `git status` to see dirty files. Commit or stash them, then retry."
+    if stop_reason in ("same_failure_repeated", "verification_failed"):
+        return "Open final_report.md to read the failing test output, then start a new mission with a more specific goal."
+    if stop_reason == "quota_exhausted":
+        return "Wait for quota reset or switch agent with --agent claude-code (or --agent mimo)."
+    if stop_reason == "worker_error":
+        return "Run `checkpoint agents doctor` to confirm the agent is installed, then resume the mission."
+    if stop_reason in ("budget_exhausted", "command_timeout"):
+        return "Resume with a larger --max-rounds or narrower --goal to reduce scope."
+    return "Run `checkpoint mission list` and open final_report.md for the next action."
 
 
 def payload_to_json(payload: dict[str, Any]) -> str:

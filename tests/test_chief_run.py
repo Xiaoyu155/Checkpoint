@@ -336,5 +336,5 @@ def test_mission_status_payload_reports_next_action(tmp_path, monkeypatch) -> No
     payload = mission_status_payload(workspace_root=workspace.root, mission_id=preview["mission"]["mission_id"])
 
     assert payload["status"] == "preview"
-    assert "chief-run --resume" in payload["message"]
+    assert "--resume" in payload["message"]
     assert payload["rounds"][0]["type"] == "dispatch_preview"
