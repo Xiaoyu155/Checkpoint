@@ -8,12 +8,32 @@ import pytest
 from visual_agent.workbench_app import _grounding_section, resolve_workspace, validate_launch, workbench_agents
 
 
-def test_workbench_agents_returns_coding_agents():
-    agents = workbench_agents()
-    assert agents  # never empty
-    assert all(a in {"claude-code", "codex"} for a in agents)
-    # Claude Code is the default coding worker (commit 8cc4b1d).
-    assert agents[0] == "claude-code"
+def test_workbench_agents_returns_coding_agents(monkeypatch):
+    # Deterministic: never depend on what is actually installed on this machine.
+    monkeypatch.setattr(
+        "visual_agent.workbench_app.agents_doctor",
+        lambda: [
+            {"agent": "claude-code", "installed": True},
+            {"agent": "codex", "installed": True},
+        ],
+    )
+    assert workbench_agents() == ["codex", "claude-code"]
+
+
+def test_workbench_agents_falls_back_when_none_installed(monkeypatch):
+    monkeypatch.setattr("visual_agent.workbench_app.agents_doctor", lambda: [])
+    assert workbench_agents() == ["codex", "claude-code"]
+
+
+def test_workbench_agents_only_offers_installed(monkeypatch):
+    monkeypatch.setattr(
+        "visual_agent.workbench_app.agents_doctor",
+        lambda: [
+            {"agent": "claude-code", "installed": True},
+            {"agent": "codex", "installed": False},
+        ],
+    )
+    assert workbench_agents() == ["claude-code"]
 
 
 def test_validate_launch_requires_project_goal():
