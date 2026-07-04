@@ -271,6 +271,12 @@ def dispatch_chief_plan(
     # may then itself take the backend hop). Only when we were not already on
     # a backend.
     failover_record: dict[str, Any] | None = None
+    # Repair must run on whichever worker actually did the work; when a
+    # failover hop takes over, these follow it.
+    repair_track = selected_track
+    repair_executable = executable
+    repair_env: dict[str, str] | None = None
+    repair_backend: dict[str, Any] | None = None
     quota_hit = (
         worker_backend is None
         and worker_record.get("status") != "completed"
@@ -297,6 +303,8 @@ def dispatch_chief_plan(
             )
             # The failover attempt is what verification should judge.
             worker_record = failover_record
+            repair_env = failover_backend["env"]
+            repair_backend = failover_backend
     elif quota_hit and worker_agent_norm == "codex":
         # Codex subscription ran out (found live by V5): rebuild the same task
         # for the Claude Code worker and keep going in the same worktree.
@@ -328,6 +336,8 @@ def dispatch_chief_plan(
                 log_path=logs_dir / f"{track_token}-agent-failover.log",
                 runner=runner,
             )
+            repair_track = claude_track
+            repair_executable = claude_exe
             if (
                 failover_record.get("status") != "completed"
                 and looks_like_quota_exhaustion(failover_record.get("stdout_tail"), failover_record.get("stderr_tail"))
@@ -350,6 +360,8 @@ def dispatch_chief_plan(
                         env=failover_backend["env"],
                         backend=failover_backend,
                     )
+                    repair_env = failover_backend["env"]
+                    repair_backend = failover_backend
             worker_record = failover_record
 
     verification_attempts: list[dict[str, Any]] = []
@@ -375,7 +387,7 @@ def dispatch_chief_plan(
         if repair_prompt:
             repair_command = build_worker_command(
                 plan=plan,
-                track=selected_track,
+                track=repair_track,
                 worktree=worktree,
                 verification_command=verification_command,
                 prompt_override=repair_prompt + "\n\nAfter repairing, run: " + verification_command,
@@ -383,18 +395,24 @@ def dispatch_chief_plan(
                 model_policy=model_policy,
                 repo_map_text=repo_map_text,
             )
-            repair_command["argv"][0] = executable
+            repair_argv = list(repair_command["argv"])
+            if repair_executable:
+                repair_argv[0] = repair_executable
+            if repair_backend:
+                repair_argv = _override_model_flag(repair_argv, repair_backend["model"])
             repair_worker_record = _run_worker_attempt(
                 workspace_root=workspace_path,
                 plan_id=plan_id,
                 attempt="auto_repair_once",
-                track=selected_track,
-                argv=repair_command["argv"],
+                track=repair_track,
+                argv=repair_argv,
                 stdin_text=repair_command.get("stdin"),
                 cwd=worktree,
                 timeout_seconds=timeout_seconds,
                 log_path=logs_dir / f"{track_token}-auto-repair-once.log",
                 runner=runner,
+                env=repair_env,
+                backend=repair_backend,
             )
             verification_attempts.append(
                 run_dispatch_verification(

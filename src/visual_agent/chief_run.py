@@ -8,6 +8,7 @@ and stop with a durable reason.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
@@ -397,32 +398,22 @@ def run_chief_mission(
     )
 
 
+_TEST_EDIT_REQUEST_PATTERNS = (
+    # Verb + up to a clause of qualifiers + 测试, so "写 pytest 测试" or
+    # "添加对应的单元测试" match, not only the literal "写测试" (V5 finding:
+    # the cold-start objective said "写 pytest 测试" and the guard then
+    # deleted the tests the task explicitly asked for).
+    re.compile(r"(写|加|补|改|更新|添加|新增|创建|编写)[^。！？!?；;\n]{0,16}测试"),
+    re.compile(r"测试用例"),
+    re.compile(r"\b(add|write|update|create)\b[^.!?\n]{0,40}\btests?\b"),
+    re.compile(r"\btest cases?\b"),
+)
+
+
 def _objective_requests_test_edits(objective: str) -> bool:
     text = str(objective or "").lower()
     compact = "".join(text.split())
-    chinese_hits = (
-        "写测试",
-        "加测试",
-        "补测试",
-        "改测试",
-        "更新测试",
-        "添加测试",
-        "新增测试",
-        "测试用例",
-    )
-    if any(hit in compact for hit in chinese_hits):
-        return True
-    english_hits = (
-        "add test",
-        "add tests",
-        "write test",
-        "write tests",
-        "update test",
-        "update tests",
-        "test case",
-        "test cases",
-    )
-    return any(hit in text for hit in english_hits)
+    return any(p.search(compact) or p.search(text) for p in _TEST_EDIT_REQUEST_PATTERNS)
 
 
 def _record_dispatch_attempts(workspace_root: Path, mission_id: str, dispatch: dict[str, Any], *, start_round: int = 1) -> None:

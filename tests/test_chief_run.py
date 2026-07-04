@@ -154,6 +154,19 @@ def test_chief_run_allows_test_edits_when_objective_requests_tests(tmp_path, mon
     assert payload["plan"]["test_edit_policy"]["source"] == "objective"
 
 
+def test_objective_test_edit_inference_handles_qualified_phrases() -> None:
+    from visual_agent.chief_run import _objective_requests_test_edits
+
+    # V5 cold-start regression: a qualifier between the verb and 测试 must match.
+    assert _objective_requests_test_edits("创建 counting.py 并写 pytest 测试到 tests/test_counting.py")
+    assert _objective_requests_test_edits("添加对应的单元测试")
+    assert _objective_requests_test_edits("write unit tests for the parser")
+    assert _objective_requests_test_edits("add integration tests covering login")
+    # Plain implementation goals must not unlock test edits.
+    assert not _objective_requests_test_edits("修复登录页面的崩溃")
+    assert not _objective_requests_test_edits("optimize the query planner")
+
+
 def test_chief_run_blocks_vague_goal_before_dispatch(tmp_path, monkeypatch) -> None:
     workspace = ready_workspace(tmp_path, monkeypatch)
 
