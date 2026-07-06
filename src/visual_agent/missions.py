@@ -1,7 +1,7 @@
 """Durable mission state for the autonomous development loop.
 
 Checkpoint remains the verification engine. A mission is the product-level unit
-for DevPacer: objective, plan, budget, rounds, and final report.
+for Pacer: objective, plan, budget, rounds, and final report.
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ def create_mission(
     record = {
         "schema_version": 1,
         "mission_id": mid,
-        "product": "DevPacer",
+        "product": "Pacer",
         "verification_engine": "Checkpoint",
         "objective": str(objective),
         "status": status,
@@ -170,6 +170,8 @@ def list_missions(workspace_root: str | Path) -> list[dict[str, Any]]:
             payload = json.loads(mission_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        if bool(payload.get("hidden")) or str(payload.get("status") or "").strip().lower() in {"archived", "deleted"}:
+            continue
         summaries.append(
             {
                 "mission_id": str(payload.get("mission_id") or mission_path.parent.name),
@@ -184,10 +186,25 @@ def list_missions(workspace_root: str | Path) -> list[dict[str, Any]]:
     return summaries
 
 
+def load_any_mission(workspace_root: str | Path, mission_id: str) -> dict[str, Any] | None:
+    """Load an active mission; if missing, fall back to the archived copy."""
+    mission = load_mission(workspace_root, mission_id)
+    if mission is not None:
+        return mission
+    archived = Path(workspace_root).expanduser().resolve() / "archived_missions" / str(mission_id) / "mission.json"
+    if not archived.exists():
+        return None
+    try:
+        payload = json.loads(archived.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def list_missions_to_markdown(summaries: list[dict[str, Any]]) -> str:
     if not summaries:
         return "No saved missions yet. Run `chief-run --goal ...` to create one."
-    lines = ["## DevPacer Missions", ""]
+    lines = ["## Pacer Missions", ""]
     for item in summaries:
         stop = f" / {item['stop_reason']}" if item.get("stop_reason") else ""
         lines.append(f"- `{item['mission_id']}` [{item['status']}{stop}] {item['objective']}")

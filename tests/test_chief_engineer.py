@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 
-from visual_agent.chief_engineer import build_chief_plan, chief_plan_to_markdown
+from visual_agent.chief_engineer import assess_goal_clarity, build_chief_plan, chief_plan_to_markdown
 from visual_agent.cli import main
 from visual_agent.workspace import init_workspace
 
@@ -42,11 +42,13 @@ def test_build_chief_plan_selects_affected_workflow(tmp_path, monkeypatch) -> No
     assert plan.changed_files == ["src/payment/checkout.py"]
     assert plan.selected_workflows == ["checkout"]
     assert plan.coverage["status"] == "covered"
+    assert plan.permission_plan["decision"] == "allow"
     assert plan.worker_tracks[0]["agent"] == "codex"
     assert plan.worker_tracks[1]["agent"] == "claude-code"
-    assert "checkpoint codex-check" in plan.verification_commands[0]
+    assert "python -m visual_agent.cli codex-check" in plan.verification_commands[0]
     assert "--workflow checkout" in plan.verification_commands[1]
     assert "Fix checkout total display" in plan.handoff_prompt
+    assert "Permission plan: allow / low" in plan.handoff_prompt
 
 
 def test_build_chief_plan_reports_coverage_gap(tmp_path, monkeypatch) -> None:
@@ -91,6 +93,29 @@ def test_build_chief_plan_filters_checkpoint_runtime_artifacts(tmp_path, monkeyp
     assert plan.selected_workflows == ["checkout"]
 
 
+def test_build_chief_plan_filters_non_product_dirty_paths(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    write_verification_workflow(workspace, "checkout", affects="src/payment/")
+    monkeypatch.setattr(
+        "visual_agent.chief_engineer.changed_files",
+        lambda **_kwargs: [
+            "_graveyard_2026_07/server_compose_current.yml",
+            "_open_source_cases/remotion-tiktok",
+            "repo.checkpoint-worktrees/old/track/src/payment/checkout.py",
+            "src/payment/checkout.py",
+        ],
+    )
+
+    plan = build_chief_plan(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+    )
+
+    assert plan.changed_files == ["src/payment/checkout.py"]
+    assert plan.status == "ready"
+
+
 def test_build_chief_plan_ignores_generated_gitignore_bootstrap(tmp_path) -> None:
     subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.email", "devpacer@example.local"], cwd=tmp_path, check=True)
@@ -127,6 +152,7 @@ def test_chief_plan_markdown_contains_handoff_and_risks(tmp_path, monkeypatch) -
     assert "## Chief Engineer Plan" in text
     assert "Improve dashboard empty state" in text
     assert "Worker Handoff Prompt" in text
+    assert "Permission decision" in text
     assert "No verification-tagged workflows" in text
 
 
@@ -142,6 +168,12 @@ def test_chief_plan_blocks_vague_goal_with_clarifying_questions(tmp_path, monkey
     assert plan.handoff_prompt == ""
     assert plan.clarifying_questions
     assert any(risk["area"] == "requirements" for risk in plan.risks)
+
+
+def test_assess_goal_clarity_requires_concrete_anchor() -> None:
+    clarity = assess_goal_clarity("让我在不懂命令的情况下也能发起一次检查。")
+    assert clarity["ok"] is False
+    assert any("可验证结果" in q for q in clarity["questions"])
 
 
 def test_chief_plan_answers_satisfy_clarity_gate(tmp_path, monkeypatch) -> None:
@@ -179,6 +211,23 @@ def test_chief_plan_infers_domain_acceptance_criteria(tmp_path, monkeypatch) -> 
 def test_chief_plan_worker_tracks_use_capability_profiles(tmp_path, monkeypatch) -> None:
     workspace = init_workspace(tmp_path / "workspace", with_demo=False)
     write_verification_workflow(workspace, "checkout", affects="src/payment/")
+    (workspace.root / "model_pool.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "id": "local-economy",
+                        "provider": "local",
+                        "model": "economy",
+                        "capability": 0.55,
+                        "cost": 0.10,
+                        "modes": ["cheap", "standard"],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr("visual_agent.chief_engineer.changed_files", lambda **_kwargs: ["src/payment/checkout.py"])
 
     plan = build_chief_plan(
@@ -190,6 +239,8 @@ def test_chief_plan_worker_tracks_use_capability_profiles(tmp_path, monkeypatch)
 
     codex_track = plan.worker_tracks[0]
     assert codex_track["model"] == ""  # Codex uses the logged-in CLI default model.
+    assert codex_track["model_selection"]["status"] == "selected"
+    assert codex_track["model_selection"]["selected"]["id"] == "local-economy"
     assert "codex exec" in codex_track["command"]
     assert "--sandbox" in codex_track["command"]
     claude_track = plan.worker_tracks[1]
@@ -256,3 +307,21 @@ def test_chief_plan_cli_outputs_json(tmp_path, capsys, monkeypatch) -> None:
     assert payload["status"] == "ready"
     assert payload["selected_workflows"] == ["checkout"]
     assert payload["worker_tracks"][0]["workspace_strategy"] == "git worktree per agent before merging"
+
+
+def test_assess_goal_clarity_passes_diagnosis_goals() -> None:
+    # V7 dogfood finding (2026-07-05): the owner's first real goal was a
+    # diagnosis question and the gate bounced it twice. A diagnosis goal's
+    # definition of done is inherent — a root-cause report — so it must pass.
+    from visual_agent.chief_engineer import assess_goal_clarity, is_diagnosis_goal
+
+    goal = "帮我看一下这个项目，有一个每天自动推送公众号推文到草稿的脚本，为什么今天不给推送了"
+    assert is_diagnosis_goal(goal)
+    verdict = assess_goal_clarity(goal)
+    assert verdict["ok"] is True
+    assert verdict["signals"]["diagnosis"] is True
+    assert verdict["questions"] == []
+
+    assert is_diagnosis_goal("排查登录接口报错")
+    assert is_diagnosis_goal("investigate why the nightly job stopped")
+    assert not is_diagnosis_goal("把按钮改成蓝色")

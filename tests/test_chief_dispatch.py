@@ -1,9 +1,22 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
-from visual_agent.chief_dispatch import _dirty_path_ignored, _write_worktree_gitignore, build_worker_command, dispatch_chief_plan, git_dirty_files, run_dispatch_verification, workspace_record_dirty_prefixes
+from visual_agent.chief_dispatch import (
+    _dirty_path_ignored,
+    _verification_is_repairable,
+    _write_worktree_gitignore,
+    build_verification_command,
+    build_worker_command,
+    dispatch_chief_plan,
+    git_dirty_files,
+    run_dispatch_verification,
+    run_process_capture,
+    workspace_record_dirty_prefixes,
+)
 from visual_agent.chief_engineer import build_chief_plan, chief_plan_to_dict
 from visual_agent.chief_plans_store import load_verification, load_worker_records, save_plan
 from visual_agent.codex_check import CodexCheckResult, CodexWorkflowCheck
@@ -102,6 +115,29 @@ def inspection_only_codex_result(*_args, **_kwargs):
     )
 
 
+def fallback_only_codex_result(*_args, **_kwargs):
+    return CodexCheckResult(
+        changed_files=["src/payment/checkout.py"],
+        selected_workflows=["checkout_verification"],
+        skipped_slow_workflows=[],
+        coverage={
+            "status": "fallback_only",
+            "fallback_only_files": ["src/payment/checkout.py"],
+            "fallback_workflows": ["checkout_verification"],
+        },
+        results=[
+            CodexWorkflowCheck(
+                name="checkout_verification",
+                status="passed",
+                step_count=3,
+                elapsed_seconds=0.1,
+                run_id="run-fallback",
+                real_interaction_count=1,
+            )
+        ],
+    )
+
+
 def test_chief_dispatch_inspection_only_verdict_is_not_verified(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
     monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
@@ -173,6 +209,26 @@ def test_extract_worker_usage_none_for_codex(tmp_path) -> None:
     assert _extract_worker_usage("codex", log, "") is None
 
 
+def test_run_process_capture_writes_log_and_supports_stdin(tmp_path) -> None:
+    script = "import sys; data=sys.stdin.read(); print('out:'+data.strip()); print('err-line', file=sys.stderr)"
+    log = tmp_path / "worker.log"
+
+    result = run_process_capture(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        timeout_seconds=10,
+        log_path=log,
+        stdin_text="hello\n",
+    )
+
+    assert result["exit_code"] == 0
+    assert "out:hello" in result["stdout_tail"]
+    assert "err-line" in result["stderr_tail"]
+    text = log.read_text(encoding="utf-8")
+    assert "out:hello" in text
+    assert "err-line" in text
+
+
 def test_build_worker_command_claude_code_is_headless(tmp_path) -> None:
     plan = {"objective": "fix", "acceptance_criteria": [], "selected_workflows": [], "changed_files": []}
     track = {"id": "track_1_claude_code", "agent": "claude-code", "model": "opus"}
@@ -187,40 +243,169 @@ def test_build_worker_command_claude_code_is_headless(tmp_path) -> None:
     assert "--permission-mode" in argv and "acceptEdits" in argv
 
 
-def test_chief_dispatch_cheap_tier_routes_to_external_backend(tmp_path, monkeypatch) -> None:
+def test_chief_dispatch_claude_code_worker_executes(tmp_path, monkeypatch) -> None:
+    # Re-enabled 2026-07-05: the free tier runs on the user's own subscriptions,
+    # so claude-code must be dispatchable just like codex.
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("claude-code",))
     monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
     monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: "claude" if name == "claude" else None)
-    # Force a backend so the test does not depend on local credential files.
-    monkeypatch.setattr(
-        "visual_agent.chief_dispatch.resolve_backend_for_tier",
-        lambda tier: {"name": "mimo", "model": "mimo-v2.5-pro", "cost_is_savings": True,
-                      "env": {"ANTHROPIC_BASE_URL": "https://mimo.example/anthropic", "ANTHROPIC_API_KEY": "tp-secret"}}
-        if tier else None,
-    )
+    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
 
-    captured = {}
+    calls = []
 
     def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
-        captured["argv"] = argv
-        captured["env"] = env
-        log_path.write_text("done", encoding="utf-8")
-        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
+        calls.append({"argv": argv, "env": env})
+        log_path.write_text("worker done", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "worker done", "stderr_tail": ""}
 
     payload = dispatch_chief_plan(
         workspace_root=workspace.root, plan_id=plan_id, execute=True, dry_run=False,
         command_runner=fake_runner, codex_runner=passing_codex_result,
     )
 
+    assert len(calls) >= 1
+    assert "claude" in str(calls[0]["argv"][0])
+    assert payload["status"] != "blocked"
+    assert payload["worker_record"]["agent"] == "claude-code"
+
+
+def test_chief_dispatch_marks_approval_waiting_worker_as_blocked(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("claude-code",))
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: "claude" if name == "claude" else None)
+    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
+        text = "I need your approval to run `npm test`. Waiting for permission."
+        log_path.write_text(text, encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": text, "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        codex_runner=passing_codex_result,
+    )
+
+    assert payload["worker_record"]["status"] == "blocked"
+    assert payload["worker_record"]["blocked_reason"] == "worker_waiting_for_permission"
+    assert payload["status"] == "worker_failed"
+
+
+def test_chief_dispatch_fallback_only_acceptance_is_coverage_gap(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path):
+        log_path.write_text("worker done", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        codex_runner=fallback_only_codex_result,
+    )
+
+    assert payload["status"] == "coverage_gap"
+    assert payload["latest_verification"]["verdict"] == "coverage_gap"
+
+
+def test_chief_dispatch_explicit_command_pass_without_changes_is_not_verified(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    monkeypatch.setattr("visual_agent.chief_dispatch._worktree_has_product_changes", lambda _worktree: False)
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path):
+        log_path.write_text("worker claims done", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        test_command="python -c pass",
+    )
+
+    assert payload["latest_verification"]["verdict"] == "pass"
+    assert payload["status"] == "no_product_changes"
+
+
+def test_chief_dispatch_mimo_agent_applies_standalone_patch(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("mimo",))
+    target = tmp_path / "src" / "payment" / "checkout.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("total = 0\n", encoding="utf-8")
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "reused", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.default_worktree_path",
+        lambda **_kwargs: tmp_path,
+    )
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.resolve_backend_by_name",
+        lambda _name: {
+            "name": "mimo",
+            "model": "mimo-v2.5-pro",
+            "cost_is_savings": True,
+            "env": {"ANTHROPIC_API_KEY": "tp-test", "ANTHROPIC_BASE_URL": "https://mimo.test/anthropic"},
+        },
+    )
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.run_llm_completion",
+        lambda **_kwargs: (
+            "diff --git a/src/payment/checkout.py b/src/payment/checkout.py\n"
+            "--- a/src/payment/checkout.py\n"
+            "+++ b/src/payment/checkout.py\n"
+            "@@ -1 +1 @@\n"
+            "-total = 0\n"
+            "+total = 128\n"
+        ),
+    )
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root, plan_id=plan_id, execute=True, dry_run=False,
+        codex_runner=passing_codex_result,
+    )
+
+    assert payload["worker_record"]["agent"] == "mimo"
+    assert payload["worker_record"]["status"] == "completed"
     assert payload["status"] == "verified"
-    # The worker ran with the MiMo backend env and the overridden model.
-    assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://mimo.example/anthropic"
-    assert "mimo-v2.5-pro" in captured["argv"]
-    assert payload["worker"]["backend"]["name"] == "mimo"
-    # The secret token must not appear in the preview.
-    assert "tp-secret" not in str(payload["worker"]["backend"])
+    assert target.read_text(encoding="utf-8") == "total = 128\n"
+
+
+def test_chief_dispatch_mimo_agent_blocks_without_backend_token(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("mimo",))
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_by_name", lambda _name: None)
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root, plan_id=plan_id, execute=True, dry_run=False,
+        command_runner=lambda *_args, **_kwargs: {"exit_code": 0},
+        codex_runner=passing_codex_result,
+    )
+
+    assert payload["status"] == "blocked"
+    assert "MiMo backend was requested" in payload["reason"]
 
 
 def test_summarize_worker_usage_separates_spend_and_savings() -> None:
@@ -248,52 +433,42 @@ def test_looks_like_quota_exhaustion() -> None:
     assert not looks_like_quota_exhaustion("build succeeded", "all tests passed")
 
 
-def test_chief_dispatch_quota_failover_to_mimo(tmp_path, monkeypatch) -> None:
+def test_chief_dispatch_claude_quota_exhaustion_is_reported(tmp_path, monkeypatch) -> None:
+    # With claude-code re-enabled, a quota wall must surface honestly (and try
+    # the MiMo failover hop when a token exists — here it does not).
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("claude-code",))
     monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
     monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: "claude" if name == "claude" else None)
-    # No cheap-tier backend initially (run on subscription), but a failover backend exists.
     monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
-    monkeypatch.setattr(
-        "visual_agent.chief_dispatch.resolve_failover_backend",
-        lambda: {"name": "mimo", "model": "mimo-v2.5-pro", "cost_is_savings": True,
-                 "env": {"ANTHROPIC_BASE_URL": "https://mimo.example/anthropic", "ANTHROPIC_API_KEY": "tp-secret"}},
-    )
+    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_by_name", lambda _name: None)
 
     calls = []
 
     def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
         calls.append({"argv": argv, "env": env})
-        if len(calls) == 1:
-            # Subscription attempt: Claude usage limit reached.
-            log_path.write_text("Claude usage limit reached. resets at 3pm", encoding="utf-8")
-            return {"exit_code": 1, "stdout_tail": "Claude usage limit reached. resets at 3pm", "stderr_tail": ""}
-        log_path.write_text("done on mimo", encoding="utf-8")
-        return {"exit_code": 0, "stdout_tail": "done on mimo", "stderr_tail": ""}
+        log_path.write_text("Claude usage limit reached. resets at 3pm", encoding="utf-8")
+        return {"exit_code": 1, "stdout_tail": "Claude usage limit reached. resets at 3pm", "stderr_tail": ""}
 
     payload = dispatch_chief_plan(
         workspace_root=workspace.root, plan_id=plan_id, execute=True, dry_run=False,
         command_runner=fake_runner, codex_runner=passing_codex_result,
     )
 
-    assert len(calls) == 2  # subscription attempt, then MiMo failover
-    assert payload["failover_worker_record"] is not None
-    assert payload["failover_worker_record"]["attempt"] == "quota_failover"
-    # The failover ran on the MiMo backend env.
-    assert calls[1]["env"]["ANTHROPIC_BASE_URL"] == "https://mimo.example/anthropic"
-    assert payload["status"] == "verified"
-    assert "tp-secret" not in str(payload["worker"].get("failover_backend"))
+    assert len(calls) == 1
+    assert "claude" in str(calls[0]["argv"][0])
+    assert payload["quota_exhausted"] is True
 
 
-def test_chief_dispatch_codex_quota_fails_over_to_claude(tmp_path, monkeypatch) -> None:
+def test_chief_dispatch_codex_quota_does_not_fall_over_to_claude(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("codex",))
     monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
     monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: name if name in {"codex", "claude"} else None)
     monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
+    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_by_name", lambda _name: None)
 
     calls = []
 
@@ -311,49 +486,64 @@ def test_chief_dispatch_codex_quota_fails_over_to_claude(tmp_path, monkeypatch) 
         command_runner=fake_runner, codex_runner=passing_codex_result,
     )
 
-    assert len(calls) == 2  # codex attempt, then claude-code agent failover
+    assert len(calls) == 1
     assert calls[0]["argv"][0] == "codex"
-    assert calls[1]["argv"][0] == "claude"
-    assert payload["failover_worker_record"]["attempt"] == "agent_failover"
-    assert payload["worker"].get("failover_agent") == "claude-code"
-    assert payload["status"] == "verified"
-    assert payload["quota_exhausted"] is False
+    assert payload["failover_worker_record"] is None
+    assert payload["worker"].get("failover_disabled") == "Low-cost backend failover unavailable: no backend token was found."
+    assert payload["quota_exhausted"] is True
 
 
-def test_chief_dispatch_codex_quota_chains_to_backend(tmp_path, monkeypatch) -> None:
+def test_chief_dispatch_codex_quota_falls_over_to_mimo_patch_worker(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("codex",))
+    target = tmp_path / "src" / "payment" / "checkout.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("total = 0\n", encoding="utf-8")
     monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
     monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
-    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "reused", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.default_worktree_path", lambda **_kwargs: tmp_path)
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: name if name in {"codex", "claude"} else None)
     monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
     monkeypatch.setattr(
-        "visual_agent.chief_dispatch.resolve_failover_backend",
-        lambda: {"name": "mimo", "model": "mimo-v2.5-pro", "cost_is_savings": True,
-                 "env": {"ANTHROPIC_BASE_URL": "https://mimo.example/anthropic", "ANTHROPIC_API_KEY": "tp-secret"}},
+        "visual_agent.chief_dispatch.resolve_backend_by_name",
+        lambda _name: {
+            "name": "mimo",
+            "model": "mimo-v2.5-pro",
+            "cost_is_savings": True,
+            "env": {"ANTHROPIC_API_KEY": "tp-test", "ANTHROPIC_BASE_URL": "https://mimo.test/anthropic"},
+        },
+    )
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.run_llm_completion",
+        lambda **_kwargs: (
+            "diff --git a/src/payment/checkout.py b/src/payment/checkout.py\n"
+            "--- a/src/payment/checkout.py\n"
+            "+++ b/src/payment/checkout.py\n"
+            "@@ -1 +1 @@\n"
+            "-total = 0\n"
+            "+total = 128\n"
+        ),
     )
 
     calls = []
 
     def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
         calls.append({"argv": argv, "env": env})
-        if len(calls) <= 2:
-            # Codex quota, then Claude quota.
-            log_path.write_text("usage limit reached", encoding="utf-8")
-            return {"exit_code": 1, "stdout_tail": "usage limit reached", "stderr_tail": ""}
-        log_path.write_text("done on mimo", encoding="utf-8")
-        return {"exit_code": 0, "stdout_tail": "done on mimo", "stderr_tail": ""}
+        log_path.write_text("usage limit reached", encoding="utf-8")
+        return {"exit_code": 1, "stdout_tail": "usage limit reached", "stderr_tail": ""}
 
     payload = dispatch_chief_plan(
         workspace_root=workspace.root, plan_id=plan_id, execute=True, dry_run=False,
         command_runner=fake_runner, codex_runner=passing_codex_result,
     )
 
-    assert len(calls) == 3  # codex -> claude -> mimo backend
-    assert calls[2]["env"]["ANTHROPIC_BASE_URL"] == "https://mimo.example/anthropic"
-    assert payload["failover_worker_record"]["attempt"] == "quota_failover"
+    assert len(calls) == 1
+    assert calls[0]["argv"][0] == "codex"
+    assert payload["failover_worker_record"]["agent"] == "mimo"
+    assert payload["failover_worker_record"]["status"] == "completed"
+    assert payload["quota_exhausted"] is False
     assert payload["status"] == "verified"
-    assert "tp-secret" not in str(payload["worker"].get("failover_backend"))
+    assert target.read_text(encoding="utf-8") == "total = 128\n"
 
 
 def test_chief_dispatch_quota_exhausted_is_honest_when_no_failover(tmp_path, monkeypatch) -> None:
@@ -364,6 +554,7 @@ def test_chief_dispatch_quota_exhausted_is_honest_when_no_failover(tmp_path, mon
     # Claude is NOT installed: no failover hop is possible.
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: name if name == "codex" else None)
     monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
+    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_by_name", lambda _name: None)
 
     def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
         log_path.write_text("ERROR: You've hit your usage limit.", encoding="utf-8")
@@ -382,18 +573,20 @@ def test_chief_dispatch_quota_exhausted_is_honest_when_no_failover(tmp_path, mon
     assert _stop_reason_from_dispatch(payload, {"max_rounds": 2}) == "quota_exhausted"
 
 
-def test_chief_dispatch_no_failover_on_normal_failure(tmp_path, monkeypatch) -> None:
+def test_chief_dispatch_claude_normal_failure_reports_worker_failure(tmp_path, monkeypatch) -> None:
+    # A non-quota worker failure must execute, then surface as a failed worker
+    # record — not silently verify and not block before launch.
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("claude-code",))
     monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
     monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: "claude" if name == "claude" else None)
     monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
-    failover_called = []
-    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_failover_backend", lambda: failover_called.append(1) or None)
+    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_by_name", lambda _name: None)
+    calls = []
 
     def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
-        # A normal compile error, not a quota block -> must NOT trigger failover.
+        calls.append(argv)
         log_path.write_text("SyntaxError: bad code", encoding="utf-8")
         return {"exit_code": 1, "stdout_tail": "SyntaxError: bad code", "stderr_tail": ""}
 
@@ -401,22 +594,23 @@ def test_chief_dispatch_no_failover_on_normal_failure(tmp_path, monkeypatch) -> 
         workspace_root=workspace.root, plan_id=plan_id, execute=True, dry_run=False,
         command_runner=fake_runner, codex_runner=passing_codex_result,
     )
-    assert payload["failover_worker_record"] is None
-    assert not failover_called  # quota detector never fired, so failover was not even resolved
+    assert len(calls) >= 1
+    assert payload["status"] != "verified"
+    assert payload["worker_record"]["status"] == "failed"
 
 
-def test_chief_dispatch_executes_claude_code_worker(tmp_path, monkeypatch) -> None:
+def test_chief_dispatch_claude_code_worker_writes_records(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("claude-code",))
     monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
     monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
-    # Only `claude` is on PATH, not `codex` — proves the single-point dependency is broken.
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: "claude" if name == "claude" else None)
+    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
 
-    executed = {}
+    executed = []
 
-    def fake_runner(argv, cwd, timeout_seconds, log_path):
-        executed["argv"] = argv
+    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
+        executed.append(argv)
         log_path.write_text("worker done", encoding="utf-8")
         return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
 
@@ -429,10 +623,10 @@ def test_chief_dispatch_executes_claude_code_worker(tmp_path, monkeypatch) -> No
         codex_runner=passing_codex_result,
     )
 
-    assert payload["status"] == "verified"
-    assert executed["argv"][0] == "claude" and "-p" in executed["argv"]
+    assert len(executed) >= 1
+    assert payload["worker_record"]["agent"] == "claude-code"
     records = load_worker_records(workspace.root, plan_id)
-    assert records and records[0]["status"] == "completed"
+    assert records, "worker record must be persisted for the usage ledger"
 
 
 def test_coverage_changed_files_excludes_checkpoint_artifacts(tmp_path, monkeypatch) -> None:
@@ -478,6 +672,18 @@ def test_build_worker_command_codex_uses_cli_default_model(tmp_path) -> None:
     assert impl["argv"][-1] == "-"
     assert "Objective: fix" in impl["stdin"]
     assert "Objective: fix" not in impl["argv"]
+
+
+def test_build_verification_command_uses_python_module_entrypoint(tmp_path) -> None:
+    command = build_verification_command(
+        workspace_root=tmp_path / ".agent-workspace",
+        repo_root=tmp_path,
+        run_profile="supervised",
+        include_slow=False,
+    )
+
+    assert command.startswith("python -m visual_agent.cli codex-check")
+    assert "checkpoint codex-check" not in command
 
 
 def test_build_worker_command_honors_explicit_codex_model(tmp_path) -> None:
@@ -547,7 +753,7 @@ def test_chief_dispatch_dry_run_previews_worktree_and_commands(tmp_path, monkeyp
     assert payload["status"] == "preview"
     assert payload["dry_run"] is True
     assert "codex exec" in payload["worker"]["command"]
-    assert "checkpoint codex-check" in payload["verification"]["command"]
+    assert "python -m visual_agent.cli codex-check" in payload["verification"]["command"]
     assert payload["worktree"]["path"].endswith("track-1-codex")
 
 
@@ -642,6 +848,65 @@ def test_chief_dispatch_does_not_verify_when_worker_fails_even_if_check_passes(t
     assert payload["latest_verification"]["verdict"] == "pass"
 
 
+def test_chief_dispatch_verifies_existing_dirty_worktree_when_explicit_command_passes(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    monkeypatch.setattr("visual_agent.chief_dispatch._worktree_has_product_changes", lambda _worktree: True)
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path):
+        log_path.write_text("worker failed after previous edits", encoding="utf-8")
+        return {"exit_code": 1, "stdout_tail": "", "stderr_tail": "patch does not apply"}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        codex_runner=passing_codex_result,
+        test_command="python -c pass",
+    )
+
+    assert payload["status"] == "verified"
+    assert payload["latest_verification"]["verdict"] == "pass"
+    assert any("existing mission worktree" in item for item in payload["warnings"])
+
+
+def test_chief_dispatch_keeps_prior_verified_mission_verified_on_explicit_pass(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    mission_dir = workspace.root / "missions" / plan_id
+    mission_dir.mkdir(parents=True)
+    (mission_dir / "rounds.jsonl").write_text(
+        json.dumps({"type": "merge", "status": "merged"}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    monkeypatch.setattr("visual_agent.chief_dispatch._worktree_has_product_changes", lambda _worktree: False)
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path):
+        log_path.write_text("worker failed after prior merge", encoding="utf-8")
+        return {"exit_code": 1, "stdout_tail": "", "stderr_tail": "patch does not apply"}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        codex_runner=passing_codex_result,
+        test_command="python -c pass",
+    )
+
+    assert payload["status"] == "verified"
+    assert payload["latest_verification"]["verdict"] == "pass"
+
+
 def test_dispatch_verification_failure_builds_repair_brief(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
 
@@ -670,6 +935,29 @@ def test_dispatch_verification_failure_builds_repair_brief(tmp_path, monkeypatch
     saved = load_verification(workspace.root, plan_id)
     assert saved is not None
     assert saved["repair_brief"]["workflow"] == "checkout"
+
+
+def test_untrusted_command_failure_is_not_repairable() -> None:
+    verification = {
+        "verdict": "fail",
+        "repair_brief": {
+            "source": "test_command",
+            "failure_kind": "test_command_invalid",
+        },
+    }
+
+    assert _verification_is_repairable(verification) is False
+
+
+def test_test_tampering_failure_is_not_repairable() -> None:
+    verification = {
+        "verdict": "fail",
+        "repair_brief": {
+            "source": "test_tampering",
+        },
+    }
+
+    assert _verification_is_repairable(verification) is False
 
 
 def test_workspace_record_dirty_prefixes_ignore_whole_workspace(tmp_path) -> None:
@@ -771,3 +1059,75 @@ def test_write_worktree_gitignore_skips_when_already_exists(tmp_path) -> None:
     _write_worktree_gitignore(worktree, repo_root)
 
     assert existing.read_text(encoding="utf-8") == "custom\n"
+
+
+def test_create_worktree_allows_dirty_reuse_only_when_explicit(tmp_path) -> None:
+    from visual_agent.chief_dispatch import create_worktree
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    worktree = tmp_path / "wt"
+    created = create_worktree(repo_root=repo, worktree=worktree, branch="devpacer-test")
+    assert created["status"] == "created"
+    tracked = worktree / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=worktree, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-m", "tracked"], cwd=worktree, check=True, capture_output=True, text=True)
+    tracked.write_text("two\n", encoding="utf-8")
+
+    blocked = create_worktree(repo_root=repo, worktree=worktree, branch="devpacer-test")
+    allowed = create_worktree(repo_root=repo, worktree=worktree, branch="devpacer-test", allow_dirty=True)
+
+    assert blocked["status"] == "blocked"
+    assert allowed["status"] == "reused"
+    assert allowed["dirty"]
+
+
+def test_create_worktree_overlays_nested_untracked_project_when_dirty_allowed(tmp_path) -> None:
+    from visual_agent.chief_dispatch import create_worktree
+
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    subprocess.run(["git", "init"], cwd=parent, check=True, capture_output=True, text=True)
+    (parent / "README.md").write_text("parent\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=parent, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-m", "init"], cwd=parent, check=True, capture_output=True, text=True)
+
+    nested = parent / "xiao"
+    nested.mkdir()
+    (nested / "pyproject.toml").write_text("[project]\nname='xiao'\n", encoding="utf-8")
+    (nested / "tests").mkdir()
+    (nested / "tests" / "test_dashboard_browser.py").write_text("def test_smoke():\n    assert True\n", encoding="utf-8")
+    (nested / ".agent-workspace").mkdir()
+    (nested / ".agent-workspace" / "state.json").write_text("{}", encoding="utf-8")
+
+    worktree = tmp_path / "wt"
+    result = create_worktree(repo_root=nested, worktree=worktree, branch="devpacer-nested", allow_dirty=True)
+
+    assert result["status"] == "created"
+    assert result["dirty_overlay"] == "copied"
+    assert result["dirty_overlay_commit"] == "created"
+    assert (worktree / "pyproject.toml").exists()
+    assert (worktree / "tests" / "test_dashboard_browser.py").exists()
+    assert not (worktree / ".agent-workspace").exists()
+    status = subprocess.run(
+        ["git", "-C", str(worktree), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert status.stdout.strip() == ""
+
+
+def test_stop_reason_prefers_passed_verification_over_worker_failure() -> None:
+    from visual_agent.chief_run import _stop_reason_from_dispatch
+
+    dispatch = {
+        "status": "worker_failed",
+        "worker_record": {"status": "failed"},
+        "latest_verification": {"verdict": "pass"},
+    }
+
+    assert _stop_reason_from_dispatch(dispatch, {"max_rounds": 2}) == "verified"

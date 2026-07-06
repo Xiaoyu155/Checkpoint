@@ -218,6 +218,7 @@ def _handle_chief_run(args: Any) -> int:
         payload = start_background_chief_run(
             workspace_root=args.workspace_root,
             mission_id=mission_id,
+            agents=tuple(args.agent or ()),
             run_profile=args.run_profile,
             include_slow=args.include_slow,
             max_workflows=args.max_workflows,
@@ -291,7 +292,7 @@ def _handle_chief_missions(args: Any) -> int:
 def _handle_chief_memory(args: Any) -> int:
     from .project_memory import build_project_memory, payload_to_json, project_memory_to_markdown
 
-    payload = build_project_memory(workspace_root=args.workspace_root, goal=args.goal, limit=args.limit)
+    payload = build_project_memory(workspace_root=args.workspace_root, repo_root=getattr(args, "repo_root", "."), goal=args.goal, limit=args.limit)
     print(payload_to_json(payload) if args.format == "json" else project_memory_to_markdown(payload))
     return 0
 
@@ -471,6 +472,7 @@ def _mission_start_or_resume(args: Any, action: str) -> int:
         payload = start_background_chief_run(
             workspace_root=args.workspace_root,
             mission_id=mission_id,
+            agents=tuple(args.agent or ()),
             run_profile=args.run_profile,
             include_slow=args.include_slow,
             max_workflows=args.max_workflows,
@@ -585,7 +587,7 @@ def _mission_worker(args: Any) -> int:
 def _mission_memory(args: Any) -> int:
     from .project_memory import build_project_memory, payload_to_json, project_memory_to_markdown
 
-    payload = build_project_memory(workspace_root=args.workspace_root, goal=args.goal, limit=args.limit)
+    payload = build_project_memory(workspace_root=args.workspace_root, repo_root=getattr(args, "repo_root", "."), goal=args.goal, limit=args.limit)
     print(payload_to_json(payload) if args.format == "json" else project_memory_to_markdown(payload))
     return 0
 
@@ -718,6 +720,7 @@ def _handle_chief_background_worker(args: Any) -> int:
     payload = run_background_worker(
         workspace_root=args.workspace_root,
         mission_id=args.mission,
+        agents=tuple(getattr(args, "agent", []) or ()),
         run_profile=args.run_profile,
         include_slow=args.include_slow,
         max_workflows=args.max_workflows,

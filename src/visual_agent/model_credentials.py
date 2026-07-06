@@ -22,6 +22,12 @@ PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
         "model": DEFAULT_MIMO_MODEL,
         "auth_style": "api-key",
     },
+    "bugteam": {
+        "base_url": "",
+        "endpoint": "/chat/completions",
+        "model": "",
+        "auth_style": "bearer",
+    },
     "qwen": {
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "endpoint": "/chat/completions",
@@ -67,6 +73,7 @@ PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
 }
 PROVIDER_ALIASES = {
     "xiaomimimo": ("xiaomimimo", "xiaomi", "mimo", "小米", "小米mimo"),
+    "bugteam": ("bugteam", "bug-team", "gpt bug team", "gptbugteam"),
     "qwen": ("qwen", "千问", "通义", "dashscope"),
     "kimi": ("kimi", "moonshot"),
     "deepseek": ("deepseek",),

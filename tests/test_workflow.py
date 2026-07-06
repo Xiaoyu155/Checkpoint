@@ -54,6 +54,76 @@ def test_workflow_from_dict_parses_steps() -> None:
     assert workflow.steps[1].params["target"] == "登录"
 
 
+def test_run_command_dry_run_does_not_execute(tmp_path) -> None:
+    marker = tmp_path / "marker.txt"
+    workflow = Workflow(
+        name="command",
+        version=1,
+        steps=(
+            WorkflowStep(
+                id="cmd",
+                action="run_command",
+                params={
+                    "command": f"python -c \"from pathlib import Path; Path(r'{marker}').write_text('ran')\"",
+                    "description": "write marker",
+                },
+            ),
+        ),
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path / "runs").run(workflow, run_profile="dry-run")
+
+    assert result.steps[0].status == ActionStatus.DRY_RUN
+    assert not marker.exists()
+
+
+def test_run_command_supervised_executes_and_records_receipt(tmp_path) -> None:
+    workflow = Workflow(
+        name="command",
+        version=1,
+        steps=(
+            WorkflowStep(
+                id="cmd",
+                action="run_command",
+                params={
+                    "command": "python -c \"print('tool smoke ok')\"",
+                    "expect_text": "tool smoke ok",
+                    "description": "print smoke",
+                },
+            ),
+        ),
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path / "runs").run(workflow, run_profile="supervised")
+    step = result.steps[0]
+
+    assert step.status == ActionStatus.SUCCESS
+    assert step.metadata["exit_code"] == 0
+    assert validate_operation_receipt(step).valid is True
+
+
+def test_run_command_fails_on_unexpected_exit_code(tmp_path) -> None:
+    workflow = Workflow(
+        name="command",
+        version=1,
+        steps=(
+            WorkflowStep(
+                id="cmd",
+                action="run_command",
+                params={
+                    "command": "python -c \"import sys; sys.exit(7)\"",
+                    "description": "fail smoke",
+                },
+            ),
+        ),
+    )
+
+    result = WorkflowRuntime(output_dir=tmp_path / "runs").run(workflow, run_profile="supervised")
+
+    assert result.steps[0].status == ActionStatus.FAILED
+    assert "exit code 7 != 0" in result.steps[0].message
+
+
 def test_run_profile_semi_auto_policy_allows_medium_risk_actions() -> None:
     policy = policy_for_profile("semi-auto")
 

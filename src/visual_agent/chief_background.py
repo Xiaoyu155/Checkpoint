@@ -20,6 +20,7 @@ def start_background_chief_run(
     *,
     workspace_root: str | Path,
     mission_id: str,
+    agents: tuple[str, ...] = (),
     run_profile: str = "dry-run",
     include_slow: bool = False,
     max_workflows: int = 10,
@@ -66,6 +67,10 @@ def start_background_chief_run(
     ]
     if include_slow:
         argv.append("--include-slow")
+    for agent in agents:
+        clean_agent = str(agent or "").strip()
+        if clean_agent:
+            argv.extend(["--agent", clean_agent])
     if allow_dirty:
         argv.append("--allow-dirty")
     if allow_coverage_gap:
@@ -114,6 +119,7 @@ def start_background_chief_run(
         "stdout_log": str(stdout_path),
         "stderr_log": str(stderr_path),
         "started_at": datetime.now(timezone.utc).isoformat(),
+        "agents": [str(agent) for agent in agents if str(agent or "").strip()],
         "test_command": str(test_command or ""),
         "allow_test_edits": bool(allow_test_edits),
         "merge": bool(merge),
@@ -136,7 +142,7 @@ def start_background_chief_run(
     save_mission(workspace_path, mission)
     return {
         "schema_version": 1,
-        "product": "DevPacer",
+        "product": "Pacer",
         "verification_engine": "Checkpoint",
         "status": "background_started",
         "stop_reason": "",
@@ -150,6 +156,7 @@ def run_background_worker(
     *,
     workspace_root: str | Path,
     mission_id: str,
+    agents: tuple[str, ...] = (),
     run_profile: str = "dry-run",
     include_slow: bool = False,
     max_workflows: int = 10,
@@ -181,6 +188,7 @@ def run_background_worker(
             include_slow=include_slow,
             max_workflows=max_workflows,
             timeout_seconds=timeout_seconds,
+            agents=tuple(agents or tuple(background.get("agents") or ())),
             allow_dirty=allow_dirty,
             allow_coverage_gap=allow_coverage_gap,
             test_command=test_command or str(background.get("test_command") or "") or None,

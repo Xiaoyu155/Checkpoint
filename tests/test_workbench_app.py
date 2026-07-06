@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from visual_agent.workbench_app import _grounding_section, resolve_workspace, validate_launch, workbench_agents
+from visual_agent.workbench_app import (
+    _grounding_section,
+    resolve_workspace,
+    start_dashboard_process,
+    start_portfolio_dashboard_process,
+    validate_launch,
+    workbench_agents,
+)
 
 
 def test_workbench_agents_returns_coding_agents(monkeypatch):
@@ -17,11 +24,13 @@ def test_workbench_agents_returns_coding_agents(monkeypatch):
             {"agent": "codex", "installed": True},
         ],
     )
+    monkeypatch.setattr("visual_agent.agent_backends.resolve_backend_by_name", lambda _name: None)
     assert workbench_agents() == ["codex", "claude-code"]
 
 
 def test_workbench_agents_falls_back_when_none_installed(monkeypatch):
     monkeypatch.setattr("visual_agent.workbench_app.agents_doctor", lambda: [])
+    monkeypatch.setattr("visual_agent.agent_backends.resolve_backend_by_name", lambda _name: None)
     assert workbench_agents() == ["codex", "claude-code"]
 
 
@@ -33,7 +42,78 @@ def test_workbench_agents_only_offers_installed(monkeypatch):
             {"agent": "codex", "installed": False},
         ],
     )
+    monkeypatch.setattr("visual_agent.agent_backends.resolve_backend_by_name", lambda _name: None)
     assert workbench_agents() == ["claude-code"]
+
+
+def test_workbench_agents_offers_bugteam_when_backend_configured(monkeypatch):
+    monkeypatch.setattr(
+        "visual_agent.workbench_app.agents_doctor",
+        lambda: [{"agent": "claude-code", "installed": True}],
+    )
+    monkeypatch.setattr("visual_agent.agent_backends.resolve_backend_by_name", lambda name: {"name": name} if name == "bugteam" else None)
+
+    # Low-cost backend goes first when configured: subscription quota is only
+    # burned when the user opts in.
+    assert workbench_agents() == ["bugteam", "claude-code"]
+
+
+def test_workbench_agents_keeps_mimo_compatibility(monkeypatch):
+    monkeypatch.setattr(
+        "visual_agent.workbench_app.agents_doctor",
+        lambda: [{"agent": "claude-code", "installed": True}],
+    )
+    monkeypatch.setattr("visual_agent.agent_backends.resolve_backend_by_name", lambda name: {"name": name} if name == "mimo" else None)
+
+    # MiMo remains a compatibility fallback for existing local setups.
+    # default so subscription quota is only burned when the user opts in.
+    assert workbench_agents() == ["mimo", "claude-code"]
+
+
+def test_start_dashboard_process_launches_independent_cli(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeProc:
+        pid = 4321
+
+    def fake_popen(cmd, cwd):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    pid = start_dashboard_process(tmp_path / ".agent-workspace")
+
+    assert pid == 4321
+    assert captured["cmd"][1:4] == ["-m", "visual_agent.cli", "dashboard"]
+    assert captured["cmd"][-2:] == ["--workspace-root", str(tmp_path / ".agent-workspace")]
+    assert captured["cwd"] == str(tmp_path)
+
+
+def test_start_portfolio_dashboard_process_launches_independent_cli(tmp_path, monkeypatch):
+    captured = {}
+
+    class FakeProc:
+        pid = 9876
+
+    def fake_popen(cmd, cwd):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+        return FakeProc()
+
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    pid = start_portfolio_dashboard_process([a, b])
+
+    assert pid == 9876
+    assert captured["cmd"][1:4] == ["-m", "visual_agent.cli", "portfolio-dashboard"]
+    assert captured["cmd"].count("--project") == 2
+    assert captured["cwd"] == str(tmp_path)
 
 
 def test_validate_launch_requires_project_goal():
@@ -96,3 +176,14 @@ def test_desktop_app_window_builds_and_closes():
         assert wa.launch_desktop_app(project_dir=None) == 0
     finally:
         tk.Tk = original
+
+
+def test_desktop_app_has_product_overview_sections():
+    import visual_agent.workbench_app as wa
+
+    source = Path(wa.__file__).read_text(encoding="utf-8")
+    for text in ("工作台概览", "最近任务", "待办队列", "MiMo 节省", "时间节省", "综合效率"):
+        assert text in source
+    assert "Pacer 工作台" in source
+    assert "当前执行日志" in source
+    assert "多项目观察台" in source

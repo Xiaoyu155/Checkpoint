@@ -9,7 +9,7 @@ from .models import to_jsonable
 from .workspace import open_workspace
 
 
-VERIFICATION_COMMANDS = {"verify", "verify-now", "codex-check", "connect"}
+VERIFICATION_COMMANDS = {"verify", "verify-now", "codex-check", "test-plan", "connect"}
 
 
 def handle_verification_command(args: Any, *, codex_runner: Any = None) -> int:
@@ -93,6 +93,26 @@ def handle_verification_command(args: Any, *, codex_runner: Any = None) -> int:
         if getattr(args, "strict", False) and result.verdict == "coverage_gap":
             return 1
         return 0
+    if args.command == "test-plan":
+        from .verification_profiles import build_test_plan
+
+        plan = build_test_plan(args.repo_root, base=args.base)
+        if args.format == "json":
+            print(json.dumps(plan, ensure_ascii=False, indent=2))
+        else:
+            print("## Test Plan")
+            print("")
+            print(f"Status: `{plan.get('status')}`")
+            print(f"Command: `{plan.get('command') or ''}`")
+            profiles = plan.get("profiles") if isinstance(plan.get("profiles"), list) else []
+            for profile in profiles:
+                name = profile.get("name")
+                reason = profile.get("reason")
+                print(f"- {name}: {reason}")
+                targets = profile.get("targets")
+                if isinstance(targets, list) and targets:
+                    print("  Targets: " + ", ".join(f"`{target}`" for target in targets))
+        return 0 if plan.get("command") else 1
     if args.command == "connect":
         result = connect_platform(
             args.platform,

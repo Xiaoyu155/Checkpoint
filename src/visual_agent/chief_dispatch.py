@@ -2,21 +2,31 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
 
-from .agent_backends import looks_like_quota_exhaustion, redact_backend, resolve_backend_for_tier, resolve_failover_backend
+from .agent_backends import (
+    canonical_backend_name,
+    looks_like_quota_exhaustion,
+    redact_backend,
+    resolve_backend_by_name,
+    resolve_failover_backend,
+    resolve_backend_for_tier,
+)
 from .agent_capabilities import canonical_agent_name, load_agent_profile, recommend_worker_config
 from .command_verification import changed_test_files, command_repair_brief, run_command_verification, tamper_repair_brief
 from .chief_plans_store import append_worker_record, load_plan, plan_dir, save_verification
 from .codex_check import codex_check_to_markdown, run_codex_check
 from .diff_summary import build_diff_summary
 from .git_diff import changed_files
+from .llm_providers import LLMBackend, run_llm_completion
 from .models import to_jsonable
 from .repo_map import build_repo_map, render_repo_map, repo_map_cache_path
 from .workspace import open_workspace
@@ -28,11 +38,16 @@ from .workspace import open_workspace
 # round sees them as uncovered changes and reports a phantom coverage gap.
 _ARTIFACT_BASENAMES = {".visual-agent-status.md", "强制测试记录.md"}
 _ARTIFACT_DIR_PREFIXES = (".pw-browsers/",)
+_NON_PRODUCT_DIR_PREFIXES = ("_graveyard_", "graveyard/", "archive/", "archives/", "_open_source_cases/")
+# Python cache and compiled files should never be counted as product changes.
+_CACHE_DIR_PREFIXES = ("__pycache__/", ".pytest_cache/")
+_CACHE_EXTENSIONS = {".pyc", ".pyo", ".pyd"}
 
-# Coding agents that have a real executable worker adapter (headless run + output
-# capture). Codex remains the default; Claude Code breaks the single-point
-# dependency so a Codex outage does not stop all delivery.
-EXECUTABLE_CODING_AGENTS = {"codex", "claude-code"}
+# Coding agents that have a real unattended worker adapter. Claude Code was
+# re-enabled 2026-07-05 by product decision: the free tier runs on the user's
+# own codex/claude subscriptions, so both must be dispatchable. Note that
+# unattended claude-code missions consume the 5-hour subscription window.
+EXECUTABLE_CODING_AGENTS = {"codex", "claude-code", "mimo"}
 
 
 def _coverage_changed_files(*, repo_root: Path, workspace_root: Path) -> list[str]:
@@ -54,8 +69,25 @@ def _coverage_changed_files(*, repo_root: Path, workspace_root: Path) -> list[st
             continue
         if any(normalized == prefix.rstrip("/") or normalized.startswith(prefix) for prefix in _ARTIFACT_DIR_PREFIXES):
             continue
+        if _is_non_product_path(normalized):
+            continue
+        # Filter out Python cache and compiled files
+        if any(normalized.startswith(prefix) for prefix in _CACHE_DIR_PREFIXES):
+            continue
+        if any(basename.endswith(ext) for ext in _CACHE_EXTENSIONS):
+            continue
         kept.append(normalized)
     return kept
+
+
+def _is_non_product_path(path: str) -> bool:
+    normalized = str(path).replace("\\", "/").strip().lstrip("/")
+    if not normalized:
+        return True
+    parts = normalized.split("/")
+    if any(part.endswith(".checkpoint-worktrees") or ".checkpoint-worktrees" in part for part in parts):
+        return True
+    return any(normalized == prefix.rstrip("/") or normalized.startswith(prefix) for prefix in _NON_PRODUCT_DIR_PREFIXES)
 
 
 CommandRunner = Callable[..., dict[str, Any]]
@@ -134,6 +166,22 @@ def dispatch_chief_plan(
     except Exception as exc:  # noqa: BLE001 - memory failure degrades to no map, never a blocked dispatch
         repo_map_stats = {"error": str(exc)[:200]}
 
+    # Diagnosis missions ("why didn't X run?") deliver a root-cause report, not
+    # a code change: the worker investigates and writes 诊断报告.md, and that
+    # file is the acceptance gate instead of workflows.
+    from .chief_engineer import is_diagnosis_goal as _is_diagnosis_goal
+
+    objective_text = str(plan.get("objective") or "")
+    diagnosis_mode = _is_diagnosis_goal(objective_text) and not str(test_command or "").strip()
+    diagnosis_prompt = None
+    if diagnosis_mode:
+        diagnosis_prompt = (
+            objective_text.strip()
+            + "\n\n这是诊断任务：不要修改任何现有代码文件。"
+            "请调查仓库（脚本、配置、README、日志与定时任务线索），找出最可能的根因，"
+            "然后创建一个新文件 诊断报告.md（放在仓库根目录），用中文写三节：## 根因、## 证据、## 修复建议。"
+        )
+
     worker_command = build_worker_command(
         plan=plan,
         track=selected_track,
@@ -142,6 +190,7 @@ def dispatch_chief_plan(
         phase="implementation",
         model_policy=model_policy,
         repo_map_text=repo_map_text,
+        prompt_override=diagnosis_prompt,
     )
     preview = {
         "schema_version": 1,
@@ -208,15 +257,18 @@ def dispatch_chief_plan(
             "dirty_files": dirty[:20],
         }
 
-    worker_agent = canonical_agent_name(str(selected_track.get("agent") or "codex"))
+    requested_agent = str(selected_track.get("agent") or "codex").strip()
+    requested_agent_norm = requested_agent.lower()
+    worker_agent = canonical_agent_name(requested_agent)
     worker_profile = load_agent_profile(worker_agent) or {}
     exe_name = str(worker_profile.get("executable") or worker_agent)
-    executable = shutil.which(exe_name)
-    if not executable and command_runner is None:
+    executable = "" if worker_agent == "mimo" else shutil.which(exe_name)
+    if worker_agent != "mimo" and not executable and command_runner is None:
         return {**preview, "status": "blocked", "reason": f"{exe_name} executable was not found on PATH."}
-    worker_command["argv"][0] = executable or exe_name
+    if worker_agent != "mimo":
+        worker_command["argv"][0] = executable or exe_name
 
-    setup = create_worktree(repo_root=repo_root, worktree=worktree, branch=branch)
+    setup = create_worktree(repo_root=repo_root, worktree=worktree, branch=branch, allow_dirty=allow_dirty)
     if setup.get("status") not in {"created", "reused"}:
         return {**preview, "status": "blocked", "reason": setup.get("reason"), "worktree_setup": setup}
     preview["worktree"]["created"] = True
@@ -244,34 +296,82 @@ def dispatch_chief_plan(
     # burns that provider's credits, not the Claude subscription. Repair escalates
     # the tier, so it falls back to the subscription automatically.
     worker_agent_norm = canonical_agent_name(str(selected_track.get("agent") or ""))
-    worker_backend = resolve_backend_for_tier(str(selected_track.get("tier") or "")) if worker_agent_norm == "claude-code" else None
+
+    # Proactive quota check: if this agent recently failed due to quota exhaustion,
+    # warn the user and suggest alternatives.
+    from .agent_backends import has_recent_quota_failure, get_available_agents
+    if has_recent_quota_failure(worker_agent_norm):
+        available = get_available_agents()
+        if available:
+            preview["worker"]["quota_warning"] = (
+                f"Agent '{worker_agent}' recently failed due to quota exhaustion. "
+                f"Consider switching to: {', '.join(available[:3])}"
+            )
+
+    force_backend_name = canonical_backend_name(requested_agent_norm) if requested_agent_norm in {"bugteam", "bug-team", "gpt-bug-team", "mimo", "xiaomimimo"} else ""
+    worker_backend = None
+    if force_backend_name:
+        worker_backend = resolve_backend_by_name(force_backend_name)
+        if not worker_backend:
+            return {
+                **preview,
+                "status": "blocked",
+                "reason": (
+                    "MiMo backend was requested, but no MiMo token was found. "
+                    "Set CHECKPOINT_BUGTEAM_API_KEY plus CHECKPOINT_BUGTEAM_BASE_URL, "
+                    "or add a backend token to model_api_keys.txt."
+                ),
+                "worker": {
+                    **(preview.get("worker") if isinstance(preview.get("worker"), dict) else {}),
+                    "requested_backend": force_backend_name,
+                },
+            }
+    elif worker_agent_norm == "claude-code":
+        worker_backend = resolve_backend_for_tier(str(selected_track.get("tier") or ""))
     initial_argv = list(worker_command["argv"])
     initial_env: dict[str, str] | None = None
     if worker_backend:
         initial_argv = _override_model_flag(initial_argv, worker_backend["model"])
         initial_env = worker_backend["env"]
         preview["worker"]["backend"] = redact_backend(worker_backend)
+        if force_backend_name:
+            preview["worker"]["forced_backend"] = force_backend_name
 
-    worker_record = _run_worker_attempt(
-        workspace_root=workspace_path,
-        plan_id=plan_id,
-        attempt="initial",
-        track=selected_track,
-        argv=initial_argv,
-        stdin_text=worker_command.get("stdin"),
-        cwd=worktree,
-        timeout_seconds=timeout_seconds,
-        log_path=logs_dir / f"{track_token}-initial.log",
-        runner=runner,
-        env=initial_env,
-        backend=worker_backend,
-    )
+    if worker_agent == "mimo":
+        worker_record = _run_mimo_patch_attempt(
+            workspace_root=workspace_path,
+            plan_id=plan_id,
+            attempt="initial",
+            track=selected_track,
+            plan=plan,
+            cwd=worktree,
+            timeout_seconds=timeout_seconds,
+            log_path=logs_dir / f"{track_token}-initial.log",
+            backend=worker_backend,
+            repo_map_text=repo_map_text,
+            verification_command=verification_command,
+            prompt_override=diagnosis_prompt,
+        )
+        repair_backend = worker_backend
+    else:
+        worker_record = _run_worker_attempt(
+            workspace_root=workspace_path,
+            plan_id=plan_id,
+            attempt="initial",
+            track=selected_track,
+            argv=initial_argv,
+            stdin_text=worker_command.get("stdin"),
+            cwd=worktree,
+            timeout_seconds=timeout_seconds,
+            log_path=logs_dir / f"{track_token}-initial.log",
+            runner=runner,
+            env=initial_env,
+            backend=worker_backend,
+        )
 
     # Quota failover: if the subscription worker was blocked by a usage/rate
-    # limit, keep going instead of stopping. Claude Code falls over to a cheap
-    # backend (MiMo); Codex falls over to the Claude Code worker first (which
-    # may then itself take the backend hop). Only when we were not already on
-    # a backend.
+    # limit, continue once through the standalone MiMo patch worker when a MiMo
+    # token is configured. This keeps xiao useful without launching claude.exe.
     failover_record: dict[str, Any] | None = None
     # Repair must run on whichever worker actually did the work; when a
     # failover hop takes over, these follow it.
@@ -284,138 +384,113 @@ def dispatch_chief_plan(
         and worker_record.get("status") != "completed"
         and looks_like_quota_exhaustion(worker_record.get("stdout_tail"), worker_record.get("stderr_tail"))
     )
-    if quota_hit and worker_agent_norm == "claude-code":
-        failover_backend = resolve_failover_backend()
+    if quota_hit:
+        # Record the quota failure so future dispatches can skip this agent
+        from .agent_backends import record_quota_failure
+        record_quota_failure(worker_agent_norm)
+    if quota_hit:
+        failover_backend = resolve_backend_by_name("bugteam") or resolve_backend_by_name("mimo")
         if failover_backend:
-            failover_argv = _override_model_flag(list(worker_command["argv"]), failover_backend["model"])
-            preview["worker"]["failover_backend"] = redact_backend(failover_backend)
-            failover_record = _run_worker_attempt(
+            failover_name = str(failover_backend.get("name") or "backend")
+            failover_track = {
+                **selected_track,
+                "id": f"{track_token}_{failover_name}_failover",
+                "agent": failover_name,
+                "model": failover_backend.get("model"),
+            }
+            failover_record = _run_mimo_patch_attempt(
                 workspace_root=workspace_path,
                 plan_id=plan_id,
-                attempt="quota_failover",
-                track=selected_track,
-                argv=failover_argv,
-                stdin_text=worker_command.get("stdin"),
+                attempt=f"quota_failover_{failover_name}",
+                track=failover_track,
+                plan=plan,
                 cwd=worktree,
                 timeout_seconds=timeout_seconds,
-                log_path=logs_dir / f"{track_token}-quota-failover.log",
-                runner=runner,
-                env=failover_backend["env"],
+                log_path=logs_dir / f"{track_token}-quota-failover-{failover_name}.log",
                 backend=failover_backend,
+                repo_map_text=repo_map_text,
+                verification_command=verification_command,
             )
-            # The failover attempt is what verification should judge.
-            worker_record = failover_record
-            repair_env = failover_backend["env"]
-            repair_backend = failover_backend
-    elif quota_hit and worker_agent_norm == "codex":
-        # Codex subscription ran out (found live by V5): rebuild the same task
-        # for the Claude Code worker and keep going in the same worktree.
-        claude_track = {**selected_track, "agent": "claude-code"}
-        claude_command = build_worker_command(
-            plan=plan,
-            track=claude_track,
-            worktree=worktree,
-            verification_command=verification_command,
-            phase="implementation",
-            model_policy=model_policy,
-            repo_map_text=repo_map_text,
-        )
-        claude_profile = load_agent_profile("claude-code") or {}
-        claude_exe = shutil.which(str(claude_profile.get("executable") or "claude"))
-        if claude_exe:
-            claude_argv = list(claude_command["argv"])
-            claude_argv[0] = claude_exe
-            preview["worker"]["failover_agent"] = "claude-code"
-            failover_record = _run_worker_attempt(
-                workspace_root=workspace_path,
-                plan_id=plan_id,
-                attempt="agent_failover",
-                track=claude_track,
-                argv=claude_argv,
-                stdin_text=claude_command.get("stdin"),
-                cwd=worktree,
-                timeout_seconds=timeout_seconds,
-                log_path=logs_dir / f"{track_token}-agent-failover.log",
-                runner=runner,
-            )
-            repair_track = claude_track
-            repair_executable = claude_exe
-            if (
-                failover_record.get("status") != "completed"
-                and looks_like_quota_exhaustion(failover_record.get("stdout_tail"), failover_record.get("stderr_tail"))
-            ):
-                failover_backend = resolve_failover_backend()
-                if failover_backend:
-                    backend_argv = _override_model_flag(list(claude_argv), failover_backend["model"])
-                    preview["worker"]["failover_backend"] = redact_backend(failover_backend)
-                    failover_record = _run_worker_attempt(
-                        workspace_root=workspace_path,
-                        plan_id=plan_id,
-                        attempt="quota_failover",
-                        track=claude_track,
-                        argv=backend_argv,
-                        stdin_text=claude_command.get("stdin"),
-                        cwd=worktree,
-                        timeout_seconds=timeout_seconds,
-                        log_path=logs_dir / f"{track_token}-quota-failover.log",
-                        runner=runner,
-                        env=failover_backend["env"],
-                        backend=failover_backend,
-                    )
-                    repair_env = failover_backend["env"]
-                    repair_backend = failover_backend
-            worker_record = failover_record
+            if failover_record.get("status") == "completed":
+                repair_track = failover_track
+                repair_executable = ""
+                repair_env = None
+                repair_backend = failover_backend
+        else:
+            preview["worker"]["failover_disabled"] = "Low-cost backend failover unavailable: no backend token was found."
 
     verification_attempts: list[dict[str, Any]] = []
-    verification = run_dispatch_verification(
-        workspace_root=workspace_path,
-        verification_workspace_root=verification_workspace,
-        plan_id=plan_id,
-        repo_root=worktree,
-        run_profile=run_profile,
-        include_slow=include_slow,
-        max_workflows=max_workflows,
-        codex_runner=codex_runner,
-        failure_evidence_builder=failure_evidence_builder,
-        test_command=test_command,
-        worktree_base=worktree_base,
-        allow_test_edits=allow_test_edits,
-    )
+    if diagnosis_mode:
+        # The deliverable IS the report; running seeded demo workflows against a
+        # diagnosis mission produces irrelevant failures (V7 dogfood finding).
+        verification = _diagnosis_verification(worktree)
+    else:
+        verification = run_dispatch_verification(
+            workspace_root=workspace_path,
+            verification_workspace_root=verification_workspace,
+            plan_id=plan_id,
+            repo_root=worktree,
+            run_profile=run_profile,
+            include_slow=include_slow,
+            max_workflows=max_workflows,
+            codex_runner=codex_runner,
+            failure_evidence_builder=failure_evidence_builder,
+            test_command=test_command,
+            worktree_base=worktree_base,
+            allow_test_edits=allow_test_edits,
+        )
     verification_attempts.append(verification)
 
     repair_worker_record: dict[str, Any] | None = None
-    if auto_repair_once and verification.get("verdict") == "fail":
+    if auto_repair_once and verification.get("verdict") == "fail" and _verification_is_repairable(verification):
         repair_prompt = str((verification.get("repair_brief") or {}).get("repair_prompt") or "").strip()
         if repair_prompt:
-            repair_command = build_worker_command(
-                plan=plan,
-                track=repair_track,
-                worktree=worktree,
-                verification_command=verification_command,
-                prompt_override=repair_prompt + "\n\nAfter repairing, run: " + verification_command,
-                phase="repair",
-                model_policy=model_policy,
-                repo_map_text=repo_map_text,
-            )
-            repair_argv = list(repair_command["argv"])
-            if repair_executable:
-                repair_argv[0] = repair_executable
-            if repair_backend:
-                repair_argv = _override_model_flag(repair_argv, repair_backend["model"])
-            repair_worker_record = _run_worker_attempt(
-                workspace_root=workspace_path,
-                plan_id=plan_id,
-                attempt="auto_repair_once",
-                track=repair_track,
-                argv=repair_argv,
-                stdin_text=repair_command.get("stdin"),
-                cwd=worktree,
-                timeout_seconds=timeout_seconds,
-                log_path=logs_dir / f"{track_token}-auto-repair-once.log",
-                runner=runner,
-                env=repair_env,
-                backend=repair_backend,
-            )
+            repair_prompt_full = repair_prompt + "\n\nAfter repairing, run: " + verification_command
+            if canonical_agent_name(str(repair_track.get("agent") or "")) == "mimo":
+                repair_worker_record = _run_mimo_patch_attempt(
+                    workspace_root=workspace_path,
+                    plan_id=plan_id,
+                    attempt="auto_repair_once",
+                    track=repair_track,
+                    plan=plan,
+                    cwd=worktree,
+                    timeout_seconds=timeout_seconds,
+                    log_path=logs_dir / f"{track_token}-auto-repair-once.log",
+                    backend=repair_backend or resolve_failover_backend(),
+                    repo_map_text=repo_map_text,
+                    verification_command=verification_command,
+                    prompt_override=repair_prompt_full,
+                )
+            else:
+                repair_command = build_worker_command(
+                    plan=plan,
+                    track=repair_track,
+                    worktree=worktree,
+                    verification_command=verification_command,
+                    prompt_override=repair_prompt_full,
+                    phase="repair",
+                    model_policy=model_policy,
+                    repo_map_text=repo_map_text,
+                )
+                repair_argv = list(repair_command["argv"])
+                if repair_executable:
+                    repair_argv[0] = repair_executable
+                if repair_backend:
+                    repair_argv = _override_model_flag(repair_argv, repair_backend["model"])
+                repair_worker_record = _run_worker_attempt(
+                    workspace_root=workspace_path,
+                    plan_id=plan_id,
+                    attempt="auto_repair_once",
+                    track=repair_track,
+                    argv=repair_argv,
+                    stdin_text=repair_command.get("stdin"),
+                    cwd=worktree,
+                    timeout_seconds=timeout_seconds,
+                    log_path=logs_dir / f"{track_token}-auto-repair-once.log",
+                    runner=runner,
+                    env=repair_env,
+                    backend=repair_backend,
+                )
             verification_attempts.append(
                 run_dispatch_verification(
                     workspace_root=workspace_path,
@@ -434,26 +509,65 @@ def dispatch_chief_plan(
             )
 
     latest_verification = verification_attempts[-1]
-    worker_completed = worker_record.get("status") == "completed"
+    effective_worker_record = (
+        failover_record
+        if isinstance(failover_record, dict) and failover_record.get("status") == "completed"
+        else worker_record
+    )
+    worker_completed = effective_worker_record.get("status") == "completed"
     # Every failover hop is exhausted and the worker still hit a quota wall:
     # surface that honestly instead of letting the gate failure masquerade as
     # a code problem ("same_failure_repeated" on an untouched worktree).
-    quota_exhausted = (
-        not worker_completed
-        and looks_like_quota_exhaustion(worker_record.get("stdout_tail"), worker_record.get("stderr_tail"))
+    # Check both the primary worker and any failover for quota exhaustion signs.
+    primary_quota = looks_like_quota_exhaustion(worker_record.get("stdout_tail"), worker_record.get("stderr_tail"))
+    failover_quota = (
+        isinstance(failover_record, dict)
+        and failover_record.get("status") != "completed"
+        and looks_like_quota_exhaustion(failover_record.get("stdout_tail"), failover_record.get("stderr_tail"))
+    )
+    quota_exhausted = not worker_completed and (primary_quota or failover_quota)
+    has_product_changes = _worktree_has_product_changes(worktree)
+    has_prior_verified = _mission_has_prior_verified_evidence(workspace_path, plan_id)
+    existing_verified_change = (
+        bool(test_command)
+        and latest_verification.get("verdict") == "pass"
+        and (
+            has_product_changes
+            or has_prior_verified
+        )
     )
     status = "completed" if worker_completed else "worker_failed"
-    if latest_verification.get("verdict") == "fail":
+    latest_verdict = str(latest_verification.get("verdict") or "")
+    verification_changed = latest_verification.get("changed_files")
+    if not isinstance(verification_changed, list):
+        diff = latest_verification.get("diff_summary") if isinstance(latest_verification.get("diff_summary"), dict) else {}
+        verification_changed = diff.get("changed_files") if isinstance(diff.get("changed_files"), list) else []
+    has_change_evidence = has_product_changes or bool(verification_changed) or has_prior_verified
+    if latest_verdict == "fail":
         status = "verification_failed"
-    elif latest_verification.get("verdict") == "pass" and worker_completed:
+    elif latest_verdict == "pass" and worker_completed and has_change_evidence:
         status = "verified"
-    elif latest_verification.get("verdict") == "pass":
+    elif latest_verdict == "pass" and worker_completed:
+        status = "no_product_changes"
+    elif existing_verified_change:
+        # Mark as verified if:
+        # 1. There are actual product changes in the worktree, OR
+        # 2. There's prior verified evidence AND the current verification passed (code is still correct)
+        status = "verified"
+    elif latest_verdict == "pass":
         status = "worker_failed"
-    elif latest_verification.get("verdict") == "inspection_only":
+    elif latest_verdict in {"coverage_gap", "no_workflows", "no_changed_files"}:
+        status = "coverage_gap"
+    elif latest_verdict == "inspection_only":
         # Inspection-only proves the page rendered, not that the product works.
         # It must never surface as verified (principle: dry-run cannot pose as
         # real acceptance).
         status = "inspection_only"
+
+    # Clear quota failure record if the task succeeded (verified or merged)
+    if status in {"verified", "merged"}:
+        from .agent_backends import clear_quota_failure
+        clear_quota_failure(worker_agent_norm)
 
     # Close the loop: merge the worker's isolated branch back only when the
     # change is genuinely verified. Verification is the sole gate — never merge
@@ -484,6 +598,8 @@ def dispatch_chief_plan(
             [worker_record, failover_record, repair_worker_record]
         ),
     }
+    if diagnosis_mode and latest_verification.get("diagnosis_report"):
+        payload["diagnosis_report"] = latest_verification["diagnosis_report"]
     if quota_exhausted:
         payload.setdefault("warnings", []).append(
             "Worker hit a subscription quota/usage limit and no failover completed."
@@ -491,7 +607,74 @@ def dispatch_chief_plan(
         )
     if merge_result is not None:
         payload["merge"] = merge_result
+    if existing_verified_change and not worker_completed:
+        payload.setdefault("warnings", []).append(
+            "Worker failed to apply an additional patch, but the existing mission worktree "
+            "contains product changes and the explicit test command passed."
+        )
     return payload
+
+
+def _verification_is_repairable(verification: dict[str, Any]) -> bool:
+    repair = verification.get("repair_brief") if isinstance(verification.get("repair_brief"), dict) else {}
+    source = str(repair.get("source") or "")
+    failure_kind = str(repair.get("failure_kind") or "")
+    if source == "test_tampering":
+        return False
+    if failure_kind in {"test_command_invalid", "command_launch_error", "command_timeout"}:
+        return False
+    return True
+
+
+def _worktree_has_product_changes(worktree: Path) -> bool:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(worktree), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if completed.returncode != 0:
+        return False
+    for raw in completed.stdout.splitlines():
+        path = raw[3:].replace("\\", "/").strip()
+        if not path:
+            continue
+        if path.startswith(".agent-workspace/") or path == ".visual-agent-status.md":
+            continue
+        # Filter out Python cache and compiled files
+        if any(path.startswith(prefix) for prefix in _CACHE_DIR_PREFIXES):
+            continue
+        basename = path.rsplit("/", 1)[-1]
+        if any(basename.endswith(ext) for ext in _CACHE_EXTENSIONS):
+            continue
+        return True
+    return False
+
+
+def _mission_has_prior_verified_evidence(workspace_root: Path, plan_id: str) -> bool:
+    rounds_path = workspace_root / "missions" / str(plan_id) / "rounds.jsonl"
+    if not rounds_path.exists():
+        return False
+    try:
+        lines = rounds_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return False
+    for raw in lines:
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        round_type = str(record.get("type") or "")
+        status = str(record.get("status") or "")
+        if round_type == "verification" and status == "pass":
+            return True
+        if round_type == "merge" and status in {"merged", "nothing_to_merge"}:
+            return True
+    return False
 
 
 def summarize_worker_usage(records: list[dict[str, Any] | None]) -> dict[str, Any]:
@@ -551,6 +734,39 @@ def _select_track(plan: dict[str, Any], *, track_id: str | None) -> dict[str, An
     return next((track for track in tracks if isinstance(track, dict)), None)
 
 
+_DIAGNOSIS_REPORT_NAMES = ("诊断报告.md", "DIAGNOSIS.md", "diagnosis.md", "诊断.md")
+
+
+def _diagnosis_verification(worktree: Path) -> dict[str, Any]:
+    """Acceptance for diagnosis missions: the worker must have written a
+    non-trivial root-cause report file. Deterministic — no workflows, no LLM."""
+    for name in _DIAGNOSIS_REPORT_NAMES:
+        path = worktree / name
+        if path.exists():
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                continue
+            if len(text) >= 80:
+                return {
+                    "verdict": "pass",
+                    "passed": 1,
+                    "failed": 0,
+                    "total": 1,
+                    "run_profile": "diagnosis",
+                    "diagnosis_report": text[:6000],
+                    "diagnosis_report_path": str(path),
+                }
+    return {
+        "verdict": "fail",
+        "passed": 0,
+        "failed": 1,
+        "total": 1,
+        "run_profile": "diagnosis",
+        "reason": "worker 未产出 诊断报告.md（或内容过短），无法交付诊断结论。",
+    }
+
+
 def _dispatch_block_reason(
     *,
     plan: dict[str, Any],
@@ -565,8 +781,16 @@ def _dispatch_block_reason(
     # A test/build command IS the acceptance gate, so authored-workflow coverage
     # is irrelevant — otherwise every fresh project (which has no workflows) is
     # blocked by a coverage gap it can never satisfy. This mirrors the same
-    # exemption in run_chief_mission.
-    if plan_status == "needs_workflow_coverage" and not allow_coverage_gap and not has_test_command:
+    # exemption in run_chief_mission. Diagnosis missions are exempt too: their
+    # deliverable is a root-cause report, not a verifiable code change.
+    from .chief_engineer import is_diagnosis_goal
+
+    if (
+        plan_status == "needs_workflow_coverage"
+        and not allow_coverage_gap
+        and not has_test_command
+        and not is_diagnosis_goal(str(plan.get("objective") or ""))
+    ):
         return "Plan has weak workflow coverage; rerun chief-plan after adding coverage or pass --allow-coverage-gap for a dry experiment."
     agent = canonical_agent_name(str(track.get("agent") or ""))
     if str(track.get("track_kind") or "implementation") == "inspection":
@@ -720,11 +944,29 @@ def build_worker_prompt(
     if criteria:
         lines.append("Acceptance criteria:")
         lines.extend(f"- {item}" for item in criteria)
+    objective_paths = [
+        item for item in _extract_context_paths(str(plan.get("objective") or ""))
+        if not _is_ignored_context_path(item) and not _is_non_product_path(item)
+    ]
     changed = plan.get("changed_files") if isinstance(plan.get("changed_files"), list) else []
-    scoped = [str(item) for item in changed if not str(item).startswith(".agent-workspace")][:12]
+    scoped: list[str] = []
+    for item in [*objective_paths, *(str(raw) for raw in changed)]:
+        normalized = str(item).replace("\\", "/").strip()
+        if not normalized or normalized in scoped:
+            continue
+        if normalized.startswith(".agent-workspace") or _is_ignored_context_path(normalized) or _is_non_product_path(normalized):
+            continue
+        scoped.append(normalized)
+        if len(scoped) >= 12:
+            break
     if scoped:
-        lines.append("Touch only the files this task requires; the changed files in scope are:")
+        lines.append("Touch only the files this task requires; target files in scope are:")
         lines.extend(f"- {item}" for item in scoped)
+    else:
+        lines.append(
+            "No trusted target file was inferred from the objective. Do not edit archive,"
+            " graveyard, checkpoint worktree, or third-party sample directories unless the objective names them."
+        )
     lines.extend(
         [
             "Work efficiently to conserve model budget: read only the files you need for this objective;"
@@ -745,7 +987,7 @@ def build_verification_command(
 ) -> str:
     slow = " --include-slow" if include_slow else ""
     return (
-        "checkpoint codex-check"
+        "python -m visual_agent.cli codex-check"
         f" --workspace-root {quote_cli(workspace_root)}"
         f" --repo-root {quote_cli(repo_root)}"
         " --base HEAD"
@@ -857,6 +1099,9 @@ def run_dispatch_verification(
         changed=changed,
     )
     verdict = result.verdict
+    coverage_status = str((result.coverage or {}).get("status") or "")
+    if coverage_status in {"fallback_only", "no_changed_files"} and verdict != "fail":
+        verdict = "coverage_gap"
     # If the command gate passed and there are no product workflows to run, the
     # test command IS the acceptance evidence -> pass.
     if command_result and command_result.get("verdict") == "pass" and verdict in {"no_workflows", "coverage_gap", "no_changed_files"}:
@@ -925,6 +1170,466 @@ def build_repair_brief(*, workspace_root: Path, failure_evidence_builder: Any = 
     }
 
 
+def _run_mimo_patch_attempt(
+    *,
+    workspace_root: Path,
+    plan_id: str,
+    attempt: str,
+    track: dict[str, Any],
+    plan: dict[str, Any],
+    cwd: Path,
+    timeout_seconds: float,
+    log_path: Path,
+    backend: dict[str, Any] | None,
+    repo_map_text: str | None,
+    verification_command: str,
+    prompt_override: str | None = None,
+) -> dict[str, Any]:
+    started = monotonic()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    backend = backend or resolve_failover_backend()
+    if not backend:
+        stderr_tail = "Low-cost backend token was not found."
+        log_path.write_text(stderr_tail, encoding="utf-8")
+        record = _worker_record(
+            plan_id=plan_id,
+            attempt=attempt,
+            track=track,
+            status="failed",
+            exit_code=2,
+            elapsed_seconds=round(monotonic() - started, 6),
+            cwd=cwd,
+            command="low-cost-backend patch-worker",
+            log_path=log_path,
+            stdout_tail="",
+            stderr_tail=stderr_tail,
+            backend=None,
+        )
+        append_worker_record(workspace_root, plan_id, record)
+        return record
+
+    prompt = _build_mimo_patch_prompt(
+        plan=plan,
+        track=track,
+        cwd=cwd,
+        repo_map_text=repo_map_text or "",
+        verification_command=verification_command,
+        prompt_override=prompt_override,
+    )
+    response = ""
+    exit_code = 1
+    stdout_tail = ""
+    stderr_tail = ""
+    try:
+        response = run_llm_completion(
+            backend=LLMBackend(
+                provider=str(backend.get("provider") or "openai"),
+                model_id=str(backend.get("model") or "gpt-4o-mini"),
+            ),
+            system_prompt=(
+                "You are xiao's unattended coding worker. Return only a unified git diff. "
+                "Do not explain. Do not include markdown unless it wraps the diff."
+            ),
+            prompt=prompt,
+            max_tokens=6000,
+            api_key=str((backend.get("env") or {}).get("ANTHROPIC_API_KEY") or ""),
+            base_url=_mimo_openai_base_url(str((backend.get("env") or {}).get("ANTHROPIC_BASE_URL") or "")),
+            endpoint="/chat/completions",
+            timeout_seconds=max(30.0, min(float(timeout_seconds), 300.0)),
+        )
+        diff_text = _extract_unified_diff(response)
+        if not diff_text:
+            stderr_tail = f"{backend.get('name') or 'backend'} returned no unified diff."
+        else:
+            apply_result = _apply_unified_diff(cwd=cwd, diff_text=diff_text, timeout_seconds=min(float(timeout_seconds), 120.0))
+            exit_code = int(apply_result.get("exit_code") or 0)
+            stdout_tail = str(apply_result.get("stdout_tail") or "")[-4000:]
+            stderr_tail = str(apply_result.get("stderr_tail") or "")[-4000:]
+            if exit_code != 0 and _patch_failure_is_retriable(stderr_tail):
+                retry_prompt = _build_mimo_patch_retry_prompt(
+                    original_prompt=prompt,
+                    diff_text=diff_text,
+                    stderr_tail=stderr_tail,
+                    cwd=cwd,
+                )
+                response = run_llm_completion(
+                    backend=LLMBackend(
+                        provider=str(backend.get("provider") or "openai"),
+                        model_id=str(backend.get("model") or "gpt-4o-mini"),
+                    ),
+                    system_prompt=(
+                        "You are xiao's patch repair worker. Return only a corrected unified git diff. "
+                        "Use the current file contents in the prompt as the source of truth."
+                    ),
+                    prompt=retry_prompt,
+                    max_tokens=6000,
+                    api_key=str((backend.get("env") or {}).get("ANTHROPIC_API_KEY") or ""),
+                    base_url=_mimo_openai_base_url(str((backend.get("env") or {}).get("ANTHROPIC_BASE_URL") or "")),
+                    endpoint="/chat/completions",
+                    timeout_seconds=max(30.0, min(float(timeout_seconds), 300.0)),
+                )
+                retry_diff = _extract_unified_diff(response)
+                if retry_diff:
+                    apply_result = _apply_unified_diff(cwd=cwd, diff_text=retry_diff, timeout_seconds=min(float(timeout_seconds), 120.0))
+                    exit_code = int(apply_result.get("exit_code") or 0)
+                    stdout_tail = str(apply_result.get("stdout_tail") or "")[-4000:]
+                    stderr_tail = str(apply_result.get("stderr_tail") or "")[-4000:]
+            if exit_code == 0:
+                stdout_tail = (stdout_tail + f"\n{backend.get('name') or 'backend'} unified diff applied.").strip()
+    except Exception as exc:  # noqa: BLE001
+        stderr_tail = f"Low-cost backend patch worker failed: {exc}"
+
+    log_path.write_text(
+        json.dumps(
+            {
+                "attempt": attempt,
+                "backend": redact_backend(backend),
+                "response": response[-12000:],
+                "stdout_tail": stdout_tail,
+                "stderr_tail": stderr_tail,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    record = _worker_record(
+        plan_id=plan_id,
+        attempt=attempt,
+        track=track,
+        status="completed" if exit_code == 0 else "failed",
+        exit_code=exit_code,
+        elapsed_seconds=round(monotonic() - started, 6),
+        cwd=cwd,
+        command="low-cost-backend patch-worker",
+        log_path=log_path,
+        stdout_tail=stdout_tail,
+        stderr_tail=stderr_tail,
+        backend=backend,
+    )
+    append_worker_record(workspace_root, plan_id, record)
+    return record
+
+
+def _worker_record(
+    *,
+    plan_id: str,
+    attempt: str,
+    track: dict[str, Any],
+    status: str,
+    exit_code: int,
+    elapsed_seconds: float,
+    cwd: Path,
+    command: str,
+    log_path: Path,
+    stdout_tail: str,
+    stderr_tail: str,
+    backend: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "schema_version": 1,
+        "plan_id": plan_id,
+        "attempt": attempt,
+        "track_id": str(track.get("id") or ""),
+        "agent": str(track.get("agent") or ""),
+        "status": status,
+        "exit_code": int(exit_code),
+        "elapsed_seconds": elapsed_seconds,
+        "cwd": str(cwd),
+        "command": command,
+        "log_path": str(log_path),
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+    }
+    if backend:
+        record["backend"] = {"name": backend.get("name"), "model": backend.get("model")}
+        if backend.get("cost_is_savings"):
+            record["usage"] = {"cost_is_savings": True, "backend": backend.get("name")}
+    return record
+
+
+def _build_mimo_patch_prompt(
+    *,
+    plan: dict[str, Any],
+    track: dict[str, Any],
+    cwd: Path,
+    repo_map_text: str,
+    verification_command: str,
+    prompt_override: str | None = None,
+) -> str:
+    context = _mimo_file_context(cwd=cwd, plan=plan, extra_text=prompt_override or "")
+    objective = str(prompt_override or plan.get("objective") or "")
+    return (
+        f"Objective:\n{objective}\n\n"
+        f"Plan id: {plan.get('plan_id') or ''}\n"
+        f"Worker track: {track.get('id') or ''} ({track.get('agent') or ''})\n"
+        f"Repository root: {cwd}\n"
+        "Rules:\n"
+        "- Produce the smallest useful code change for the objective.\n"
+        "- Return only a unified git diff with paths relative to the repository root.\n"
+        "- Do not edit .agent-workspace, .visual-agent-status.md, or test artifacts unless the objective explicitly asks for tests.\n"
+        "- If no safe change is possible from the provided context, return no diff.\n\n"
+        f"Verification command to satisfy after patch:\n{verification_command}\n\n"
+        f"Repository map:\n{repo_map_text[:12000]}\n\n"
+        f"File context:\n{context}"
+    )
+
+
+def _mimo_file_context(*, cwd: Path, plan: dict[str, Any], extra_text: str = "", max_chars: int = 52000) -> str:
+    candidates: list[str] = []
+    for raw in plan.get("changed_files") or []:
+        if isinstance(raw, str):
+            candidates.append(raw)
+    candidates.extend(_extract_context_paths(str(plan.get("objective") or "")))
+    candidates.extend(_extract_context_paths(extra_text))
+    candidates.extend(["README.md", "package.json", "pubspec.yaml", "lib/main.dart", "src/app.js", "src/server.js", "app.js", "server.js"])
+    seen: set[str] = set()
+    chunks: list[str] = []
+    used = 0
+    for rel in candidates:
+        normalized = str(rel).replace("\\", "/").strip().lstrip("/")
+        if not normalized or normalized in seen or _is_ignored_context_path(normalized):
+            continue
+        seen.add(normalized)
+        path = cwd / normalized
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        budget = max_chars - used
+        if budget <= 0:
+            break
+        snippet = text[: min(len(text), budget, 12000)]
+        chunks.append(f"\n--- {normalized} ---\n{snippet}")
+        used += len(snippet)
+    return "\n".join(chunks) if chunks else "(No small text files were selected for context.)"
+
+
+def _extract_context_paths(text: str) -> list[str]:
+    pattern = r"(?:(?:[A-Za-z]:)?[\\/])?([A-Za-z0-9_.@()-]+(?:[\\/][A-Za-z0-9_.@()-]+)+)"
+    paths: list[str] = []
+    for match in re.finditer(pattern, text):
+        raw = match.group(1).replace("\\", "/")
+        if "." not in raw.rsplit("/", 1)[-1]:
+            continue
+        paths.append(raw)
+    return paths
+
+
+def _build_mimo_patch_retry_prompt(*, original_prompt: str, diff_text: str, stderr_tail: str, cwd: Path) -> str:
+    paths = _extract_diff_paths(diff_text)
+    file_context = _file_context_for_paths(cwd=cwd, paths=paths, max_chars=42000)
+    return (
+        original_prompt
+        + "\n\nThe previous diff failed to apply. Generate a smaller corrected diff against the CURRENT file contents."
+        + "\n\nGit apply error:\n"
+        + stderr_tail[-4000:]
+        + "\n\nPrevious diff:\n"
+        + diff_text[-12000:]
+        + "\n\nCurrent target file contents:\n"
+        + file_context
+    )
+
+
+def _extract_diff_paths(diff_text: str) -> list[str]:
+    paths: list[str] = []
+    for line in str(diff_text or "").splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split()
+            if len(parts) >= 4:
+                for raw in parts[2:4]:
+                    cleaned = raw[2:] if raw.startswith(("a/", "b/")) else raw
+                    if cleaned != "/dev/null":
+                        paths.append(cleaned)
+        elif line.startswith(("--- a/", "+++ b/")):
+            raw = line.split(maxsplit=1)[1]
+            paths.append(raw[2:])
+    kept: list[str] = []
+    seen: set[str] = set()
+    for path in paths:
+        norm = path.replace("\\", "/").strip()
+        if norm and norm not in seen:
+            seen.add(norm)
+            kept.append(norm)
+    return kept
+
+
+def _file_context_for_paths(*, cwd: Path, paths: list[str], max_chars: int) -> str:
+    chunks: list[str] = []
+    used = 0
+    for rel in paths:
+        normalized = str(rel).replace("\\", "/").strip().lstrip("/")
+        if not normalized or _is_ignored_context_path(normalized):
+            continue
+        path = cwd / normalized
+        if not path.exists():
+            chunks.append(f"\n--- {normalized} ---\n(FILE DOES NOT EXIST)")
+            continue
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        budget = max_chars - used
+        if budget <= 0:
+            break
+        snippet = text[: min(len(text), budget, 14000)]
+        chunks.append(f"\n--- {normalized} ---\n{snippet}")
+        used += len(snippet)
+    return "\n".join(chunks) if chunks else "(No target file context found.)"
+
+
+def _mimo_openai_base_url(raw_base_url: str) -> str:
+    value = str(raw_base_url or "").strip().rstrip("/")
+    if not value:
+        return "https://api.xiaomimimo.com/v1"
+    if value.endswith("/anthropic"):
+        return value[: -len("/anthropic")] + "/v1"
+    return value
+
+
+def _is_ignored_context_path(path: str) -> bool:
+    lowered = path.lower()
+    ignored = ("node_modules/", ".git/", ".agent-workspace/", "dist/", "build/", ".venv/", "__pycache__/")
+    return any(lowered == prefix.rstrip("/") or lowered.startswith(prefix) for prefix in ignored)
+
+
+def _extract_unified_diff(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+
+    # Handle code blocks that wrap the diff (e.g., ```diff ... ``` or ``` ... ```)
+    # Be careful with nested code blocks inside the diff itself.
+    if raw.startswith("```"):
+        # Find the first newline after the opening code fence
+        first_newline = raw.find("\n", 3)
+        if first_newline > 0:
+            # Check if there's a language specifier (e.g., "diff")
+            lang = raw[3:first_newline].strip().lower()
+            # Find the closing code fence - look for ``` at the start of a line
+            # Skip the first ``` and look for the next one that's on its own line
+            rest = raw[first_newline + 1:]
+            # Find closing ``` - it should be on its own line (or at the end)
+            lines = rest.split("\n")
+            end_idx = -1
+            for i, line in enumerate(lines):
+                if line.strip() == "```":
+                    end_idx = i
+                    break
+            if end_idx > 0:
+                content = "\n".join(lines[:end_idx]).strip()
+                if content.lower().startswith("diff\n"):
+                    content = content.split("\n", 1)[1].strip()
+                if "diff --git " in content or content.startswith("--- "):
+                    return content + "\n"
+
+    # Fallback: look for diff patterns in the raw text
+    idx = raw.find("diff --git ")
+    if idx >= 0:
+        return raw[idx:].strip() + "\n"
+    if raw.startswith("--- ") and "\n+++ " in raw:
+        return raw + "\n"
+
+    # Last resort: try to extract from code blocks more aggressively
+    if "```" in raw:
+        # Find all code blocks and try each one
+        parts = raw.split("```")
+        for i, part in enumerate(parts):
+            if i % 2 == 1:  # Odd indices are inside code blocks
+                candidate = part.strip()
+                if candidate.lower().startswith("diff\n"):
+                    candidate = candidate.split("\n", 1)[1].strip()
+                if candidate.startswith("--- ") and "\n+++ " in candidate:
+                    return candidate + "\n"
+
+    return ""
+
+
+def _apply_unified_diff(*, cwd: Path, diff_text: str, timeout_seconds: float) -> dict[str, Any]:
+    # If the diff tries to create a new file that already exists, convert it to a modification diff.
+    # This handles the case where MiMo generates a "new file" diff for an existing file.
+    diff_text = _fix_new_file_diff_for_existing_files(cwd, diff_text)
+
+    proc = _git_apply(cwd=cwd, diff_text=diff_text, timeout_seconds=timeout_seconds, extra_args=[])
+    if proc.returncode != 0 and ("corrupt patch" in (proc.stderr or "").lower() or "patch does not apply" in (proc.stderr or "").lower()):
+        retry = _git_apply(cwd=cwd, diff_text=diff_text, timeout_seconds=timeout_seconds, extra_args=["--recount"])
+        if retry.returncode == 0:
+            proc = retry
+        else:
+            proc = retry
+    if proc.returncode != 0 and _patch_failure_is_retriable(str(proc.stderr or "")):
+        retry = _git_apply(cwd=cwd, diff_text=diff_text, timeout_seconds=timeout_seconds, extra_args=["--3way"])
+        if retry.returncode == 0:
+            proc = retry
+    return {
+        "exit_code": int(proc.returncode),
+        "stdout_tail": str(proc.stdout or "")[-4000:],
+        "stderr_tail": str(proc.stderr or "")[-4000:],
+    }
+
+
+def _fix_new_file_diff_for_existing_files(cwd: Path, diff_text: str) -> str:
+    """Convert 'new file' diffs to 'modification' diffs when the target file already exists.
+
+    This handles the case where an LLM generates a diff with '--- /dev/null' for a
+    file that already exists in the working directory."""
+    import re
+
+    lines = diff_text.split('\n')
+    result = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # Check for "new file mode" pattern
+        if line.strip() == 'new file mode 100644':
+            # Look back to find the diff header
+            header_idx = len(result) - 1
+            while header_idx >= 0 and not result[header_idx].startswith('diff --git'):
+                header_idx -= 1
+            if header_idx >= 0:
+                # Extract the file path from the diff header
+                diff_header = result[header_idx]
+                match = re.search(r'b/(.+)$', diff_header)
+                if match:
+                    file_path = match.group(1)
+                    full_path = cwd / file_path
+                    if full_path.exists():
+                        # Skip the "new file mode" line and convert "--- /dev/null" to "--- a/file"
+                        i += 1
+                        if i < len(lines) and lines[i].startswith('--- /dev/null'):
+                            result.append(f'--- a/{file_path}')
+                            i += 1
+                            if i < len(lines) and lines[i].startswith('+++ b/'):
+                                result.append(lines[i])
+                                i += 1
+                            continue
+        result.append(line)
+        i += 1
+    return '\n'.join(result)
+
+
+def _patch_failure_is_retriable(stderr: str) -> bool:
+    blob = str(stderr or "").lower()
+    return any(marker in blob for marker in ("patch does not apply", "corrupt patch", "patch failed"))
+
+
+def _git_apply(*, cwd: Path, diff_text: str, timeout_seconds: float, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "apply", "--whitespace=nowarn", *extra_args, "-"],
+        cwd=str(cwd),
+        input=diff_text,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=float(timeout_seconds),
+        check=False,
+    )
+
+
 def _run_worker_attempt(
     *,
     workspace_root: Path,
@@ -957,21 +1662,30 @@ def _run_worker_attempt(
             result = runner(argv, cwd, timeout_seconds, log_path, env=env)
         except TypeError:
             result = runner(argv, cwd, timeout_seconds, log_path)
+    exit_code = int(result.get("exit_code") or 0)
+    stdout_tail = str(result.get("stdout_tail") or "")
+    stderr_tail = str(result.get("stderr_tail") or "")
+    status = "completed" if exit_code == 0 else "failed"
+    blocked_reason = _worker_blocked_reason(stdout_tail=stdout_tail, stderr_tail=stderr_tail, log_path=log_path)
+    if blocked_reason:
+        status = "blocked"
     record = {
         "schema_version": 1,
         "plan_id": plan_id,
         "attempt": attempt,
         "track_id": str(track.get("id") or ""),
         "agent": str(track.get("agent") or ""),
-        "status": "completed" if int(result.get("exit_code") or 0) == 0 else "failed",
-        "exit_code": int(result.get("exit_code") or 0),
+        "status": status,
+        "exit_code": exit_code,
         "elapsed_seconds": round(monotonic() - started, 6),
         "cwd": str(cwd),
         "command": format_argv(argv),
         "log_path": str(log_path),
-        "stdout_tail": str(result.get("stdout_tail") or ""),
-        "stderr_tail": str(result.get("stderr_tail") or ""),
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
     }
+    if blocked_reason:
+        record["blocked_reason"] = blocked_reason
     usage = _extract_worker_usage(str(track.get("agent") or ""), log_path, str(result.get("stdout_tail") or ""))
     if usage:
         # On a cheap external backend, the CLI-reported cost is priced at Claude
@@ -985,6 +1699,31 @@ def _run_worker_attempt(
         record["backend"] = {"name": backend.get("name"), "model": backend.get("model")}
     append_worker_record(workspace_root, plan_id, record)
     return record
+
+
+def _worker_blocked_reason(*, stdout_tail: str, stderr_tail: str, log_path: Path) -> str:
+    text = "\n".join([stdout_tail or "", stderr_tail or ""])
+    if not text.strip():
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+    lower = text.lower()
+    permission_markers = (
+        "waiting for your approval",
+        "need your approval",
+        "requires your approval",
+        "approval to run",
+        "waiting for permission",
+        "need permission",
+        "permission required",
+        "approve this command",
+    )
+    if any(marker in lower for marker in permission_markers):
+        return "worker_waiting_for_permission"
+    if "would you like to proceed" in lower or "continue?" in lower:
+        return "worker_waiting_for_interactive_input"
+    return ""
 
 
 def _extract_worker_usage(agent: str, log_path: Path, stdout_tail: str) -> dict[str, Any] | None:
@@ -1044,33 +1783,74 @@ def run_process_capture(
     run_env = None
     if env:
         run_env = {**os.environ, **{str(k): str(v) for k, v in env.items()}}
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+    lock = threading.Lock()
+
+    def append_stream(stream: Any, target: list[str]) -> None:
+        try:
+            for chunk in iter(stream.readline, ""):
+                if not chunk:
+                    break
+                with lock:
+                    target.append(chunk)
+                    with log_path.open("a", encoding="utf-8", errors="replace") as handle:
+                        handle.write(chunk)
+                        handle.flush()
+        finally:
+            try:
+                stream.close()
+            except Exception:
+                pass
+
     try:
-        completed = subprocess.run(
+        log_path.write_text("", encoding="utf-8")
+        proc = subprocess.Popen(
             argv,
             cwd=str(cwd),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE if stdin_text is not None else None,
             text=True,
-            timeout=timeout_seconds,
-            check=False,
             env=run_env,
-            input=stdin_text,
         )
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
-        log_path.write_text(stdout + ("\n" if stdout and stderr else "") + stderr, encoding="utf-8")
+        assert proc.stdout is not None
+        assert proc.stderr is not None
+        stdout_thread = threading.Thread(target=append_stream, args=(proc.stdout, stdout_parts), daemon=True)
+        stderr_thread = threading.Thread(target=append_stream, args=(proc.stderr, stderr_parts), daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+        if stdin_text is not None and proc.stdin is not None:
+            try:
+                proc.stdin.write(stdin_text)
+                proc.stdin.flush()
+            finally:
+                proc.stdin.close()
+        try:
+            return_code = proc.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            return_code = 124
+            with lock:
+                stderr_parts.append(f"Timed out after {timeout_seconds:.0f}s\n")
+                with log_path.open("a", encoding="utf-8", errors="replace") as handle:
+                    handle.write(f"\nTimed out after {timeout_seconds:.0f}s\n")
+        stdout_thread.join(timeout=1.0)
+        stderr_thread.join(timeout=1.0)
+        stdout = "".join(stdout_parts)
+        stderr = "".join(stderr_parts)
         return {
-            "exit_code": completed.returncode,
+            "exit_code": return_code,
             "stdout_tail": stdout[-2000:],
             "stderr_tail": stderr[-2000:],
         }
-    except subprocess.TimeoutExpired as exc:
-        stdout = _decode_timeout_text(exc.stdout)
-        stderr = _decode_timeout_text(exc.stderr)
-        log_path.write_text(stdout + ("\n" if stdout and stderr else "") + stderr, encoding="utf-8")
+    except OSError as exc:
+        stderr = f"{type(exc).__name__}: {exc}"
+        log_path.write_text(stderr, encoding="utf-8", errors="replace")
         return {
-            "exit_code": 124,
-            "stdout_tail": stdout[-2000:],
-            "stderr_tail": (stderr or f"Timed out after {timeout_seconds:.0f}s")[-2000:],
+            "exit_code": 127,
+            "stdout_tail": "",
+            "stderr_tail": stderr[-2000:],
         }
 
 
@@ -1085,14 +1865,20 @@ def merge_worktree_branch(*, repo_root: Path, worktree: Path, branch: str, messa
     def g(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, check=False)
 
-    # 1) Commit the worker's (uncommitted) edits onto its own branch.
+    # 1) Commit the worker's (uncommitted) edits onto its own branch — user code
+    # only. Pacer's own runtime artifacts (workspace dir, generated .gitignore,
+    # mandatory record, tool caches) must never ride along: committing them makes
+    # the merge collide with the main repo's untracked copies of the same files.
     g(worktree, "add", "-A")
+    for artifact in (".agent-workspace", ".gitignore", "强制测试记录.md", "*__pycache__*", "*.pytest_cache*"):
+        g(worktree, "reset", "-q", "HEAD", "--", artifact)
     wt_status = g(worktree, "status", "--porcelain")
-    if wt_status.stdout.strip():
+    staged = g(worktree, "diff", "--cached", "--name-only")
+    if wt_status.stdout.strip() and staged.stdout.strip():
         commit = g(
             worktree,
-            "-c", "user.email=devpacer@local", "-c", "user.name=DevPacer",
-            "commit", "-m", f"DevPacer verified change: {message}",
+            "-c", "user.email=pacer@local", "-c", "user.name=Pacer",
+            "commit", "-m", f"Pacer verified change: {message}",
         )
         if commit.returncode != 0:
             return {"status": "failed", "reason": "could not commit worker changes: " + (commit.stderr or commit.stdout).strip()[:300]}
@@ -1115,7 +1901,7 @@ def merge_worktree_branch(*, repo_root: Path, worktree: Path, branch: str, messa
         return {"status": "blocked", "reason": "target branch has uncommitted changes; not merging.", "dirty": dirty_lines[:10]}
 
     # 3) Merge (no fast-forward). On conflict, abort — never leave a mess.
-    merge = g(repo_root, "merge", "--no-ff", "-m", f"DevPacer merge {branch}: {message}", branch)
+    merge = g(repo_root, "merge", "--no-ff", "-m", f"Pacer merge {branch}: {message}", branch)
     if merge.returncode != 0:
         g(repo_root, "merge", "--abort")
         return {"status": "conflict", "branch": branch, "target": target, "reason": (merge.stderr or merge.stdout).strip()[:400]}
@@ -1136,7 +1922,7 @@ def _git_head(repo_root: Path) -> str:
     return completed.stdout.strip() if completed.returncode == 0 else ""
 
 
-def create_worktree(*, repo_root: Path, worktree: Path, branch: str) -> dict[str, Any]:
+def create_worktree(*, repo_root: Path, worktree: Path, branch: str, allow_dirty: bool = False) -> dict[str, Any]:
     if worktree.exists():
         check = subprocess.run(
             ["git", "-C", str(worktree), "rev-parse", "--is-inside-work-tree"],
@@ -1174,13 +1960,22 @@ def create_worktree(*, repo_root: Path, worktree: Path, branch: str) -> dict[str
             )
             still_dirty = [l for l in recheck.stdout.splitlines() if l.strip()]
             if still_dirty:
+                if allow_dirty:
+                    return {
+                        "status": "reused",
+                        "path": str(worktree),
+                        "branch": branch,
+                        "dirty": still_dirty[:20],
+                        "clean_output": clean.stdout.strip()[:200],
+                    }
                 return {
                     "status": "blocked",
                     "reason": f"Worktree has uncommitted tracked changes that cannot be auto-cleaned: {worktree}",
                     "dirty": still_dirty[:10],
                     "clean_output": clean.stdout.strip()[:200],
                 }
-        return {"status": "reused", "path": str(worktree), "branch": branch}
+        overlay = _overlay_nested_dirty_repo_root(repo_root=repo_root, worktree=worktree, allow_dirty=allow_dirty)
+        return {"status": "reused", "path": str(worktree), "branch": branch, **overlay}
     worktree.parent.mkdir(parents=True, exist_ok=True)
     completed = subprocess.run(
         ["git", "worktree", "add", "-b", branch, str(worktree), "HEAD"],
@@ -1194,7 +1989,121 @@ def create_worktree(*, repo_root: Path, worktree: Path, branch: str) -> dict[str
             "status": "failed",
             "reason": (completed.stderr or completed.stdout or "git worktree add failed").strip(),
         }
-    return {"status": "created", "path": str(worktree), "branch": branch}
+    overlay = _overlay_nested_dirty_repo_root(repo_root=repo_root, worktree=worktree, allow_dirty=allow_dirty)
+    return {"status": "created", "path": str(worktree), "branch": branch, **overlay}
+
+
+def _overlay_nested_dirty_repo_root(*, repo_root: Path, worktree: Path, allow_dirty: bool) -> dict[str, Any]:
+    """Copy a nested, untracked project root into the isolated worktree.
+
+    Some local Pacer dogfood checkouts live as an untracked subdirectory inside
+    a larger Git repository. Git worktree can only check out tracked content, so
+    the worker otherwise sees the parent repo without the actual project files.
+    """
+    if not allow_dirty:
+        return {}
+    repo = Path(repo_root).expanduser().resolve()
+    target = Path(worktree).expanduser().resolve()
+    if (repo / ".git").exists():
+        return {}
+    top = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if top.returncode != 0:
+        return {}
+    git_root = Path(top.stdout.strip()).expanduser().resolve()
+    if repo == git_root:
+        return {}
+    try:
+        repo.relative_to(git_root)
+    except ValueError:
+        return {}
+
+    ignored_dirs = {
+        ".git",
+        ".agent-workspace",
+        ".pytest_cache",
+        "__pycache__",
+        "node_modules",
+        ".mypy_cache",
+        ".ruff_cache",
+    }
+    copied = 0
+    for item in repo.iterdir():
+        name = item.name
+        if name in ignored_dirs or name.endswith(".checkpoint-worktrees"):
+            continue
+        dest = target / name
+        try:
+            if item.is_dir():
+                shutil.copytree(
+                    item,
+                    dest,
+                    dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns(
+                        ".git",
+                        ".agent-workspace",
+                        ".pytest_cache",
+                        "__pycache__",
+                        "node_modules",
+                        "*.pyc",
+                        "*.pyo",
+                    ),
+                )
+            elif item.is_file():
+                shutil.copy2(item, dest)
+            else:
+                continue
+            copied += 1
+        except OSError as exc:
+            return {"dirty_overlay": "failed", "dirty_overlay_error": str(exc)[:200]}
+    baseline = _commit_dirty_overlay_baseline(target)
+    return {
+        "dirty_overlay": "copied",
+        "dirty_overlay_items": copied,
+        "dirty_overlay_source": str(repo),
+        **baseline,
+    }
+
+
+def _commit_dirty_overlay_baseline(worktree: Path) -> dict[str, Any]:
+    status = subprocess.run(
+        ["git", "-C", str(worktree), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if status.returncode != 0:
+        return {"dirty_overlay_commit": "failed", "dirty_overlay_commit_error": status.stderr.strip()[:200]}
+    if not status.stdout.strip():
+        return {"dirty_overlay_commit": "unchanged"}
+    add = subprocess.run(["git", "-C", str(worktree), "add", "-A"], capture_output=True, text=True, check=False)
+    if add.returncode != 0:
+        return {"dirty_overlay_commit": "failed", "dirty_overlay_commit_error": add.stderr.strip()[:200]}
+    commit = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "-c",
+            "user.email=devpacer@example.local",
+            "-c",
+            "user.name=DevPacer",
+            "commit",
+            "-m",
+            "DevPacer dirty overlay baseline",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if commit.returncode != 0:
+        return {"dirty_overlay_commit": "failed", "dirty_overlay_commit_error": (commit.stderr or commit.stdout).strip()[:200]}
+    head = _git_head(worktree)
+    return {"dirty_overlay_commit": "created", "dirty_overlay_base_commit": head}
 
 
 _PYTHON_GITIGNORE = """\
@@ -1312,10 +2221,18 @@ def workspace_record_dirty_prefixes(*, repo_root: Path, workspace_root: Path) ->
     return (f"{workspace_relative}/", "强制测试记录.md")
 
 
+# Derived tool caches are never user source. They appear the moment a user runs
+# their own test suite (which the quickstart tells them to do), so treating them
+# as "uncommitted changes" blocks the golden path on step two.
+_DERIVED_CACHE_SEGMENTS = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+
+
 def _dirty_path_ignored(line: str, ignored_prefixes: tuple[str, ...], *, repo_root: Path | None = None) -> bool:
+    path = _porcelain_path(line)
+    if any(segment in _DERIVED_CACHE_SEGMENTS for segment in path.rstrip("/").split("/")):
+        return True
     if not ignored_prefixes:
         return False
-    path = _porcelain_path(line)
     if path == ".gitignore" and repo_root is not None:
         return _gitignore_change_is_only_checkpoint_runtime(repo_root, ignored_prefixes=ignored_prefixes)
     return any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in ignored_prefixes)

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 import subprocess
@@ -7,16 +7,20 @@ from pathlib import Path
 from typing import Any
 
 from .agent_capabilities import load_agent_profile, recommend_worker_config
+from .dynamic_model_selector import select_model_for_task, selection_to_dict
 from .model_router import route_task, tier_task_kind
 from .codex_check import codex_coverage_summary
 from .git_diff import affected_workflows, changed_files
 from .models import to_jsonable
+from .mission_pipeline import plan_status_to_pipeline_state
 from .project_memory import build_project_memory, project_memory_handoff_notes
+from .security import permission_plan
 from .workspace import WorkflowRef, discover_workflows, open_workspace
 
 
 _CHECKPOINT_ARTIFACT_BASENAMES = {".visual-agent-status.md", "强制测试记录.md"}
 _CHECKPOINT_ARTIFACT_DIR_PREFIXES = (".agent-workspace/", ".pw-browsers/")
+_NON_PRODUCT_DIR_PREFIXES = ("_graveyard_", "graveyard/", "archive/", "archives/", "_open_source_cases/")
 
 
 # Codex is the default executable coding worker. It uses the user's existing
@@ -63,6 +67,8 @@ class ChiefPlan:
     clarity: dict[str, Any] = field(default_factory=dict)
     clarifying_questions: list[str] = field(default_factory=list)
     project_memory: dict[str, Any] = field(default_factory=dict)
+    permission_plan: dict[str, Any] = field(default_factory=dict)
+    pipeline_state: str = ""
     plan_id: str = ""
     patterns_reused: tuple[dict[str, str], ...] = ORCHESTRATION_PATTERNS
 
@@ -92,6 +98,7 @@ def build_chief_plan(
 
     if not workspace_path.exists():
         init_command = f"checkpoint init --root {_quote_cli(workspace_path)}"
+        permissions = permission_plan([init_command], repo_root=repo_path)
         return ChiefPlan(
             schema_version=1,
             status="blocked",
@@ -115,12 +122,14 @@ def build_chief_plan(
                     "message": "Workspace root does not exist, so no product workflows can be selected.",
                 }
             ],
-            handoff_prompt=_handoff_prompt(objective, [], [init_command], status="blocked"),
+            handoff_prompt=_handoff_prompt(objective, [], [init_command], status="blocked", permission_summary=permissions),
             clarity=clarity,
             clarifying_questions=list(clarity["questions"]) if clarity["questions"] else [],
+            permission_plan=permissions,
+            pipeline_state=plan_status_to_pipeline_state("blocked"),
         )
 
-    project_memory = build_project_memory(workspace_root=workspace_path, goal=objective, limit=5)
+    project_memory = build_project_memory(workspace_root=workspace_path, repo_root=repo_path, goal=objective, limit=5)
     memory_notes = project_memory_handoff_notes(project_memory)
 
     # Requirements gate: refuse to dispatch a goal with no verifiable definition
@@ -153,6 +162,7 @@ def build_chief_plan(
             clarity=clarity,
             clarifying_questions=list(clarity["questions"]),
             project_memory=project_memory,
+            pipeline_state=plan_status_to_pipeline_state("needs_clarification"),
         )
 
     workspace = open_workspace(workspace_path)
@@ -179,6 +189,7 @@ def build_chief_plan(
         selected_refs=selected_refs,
         coverage_status=coverage_status,
     )
+    permissions = permission_plan(commands, repo_root=repo_path)
     return ChiefPlan(
         schema_version=1,
         status=status,
@@ -206,7 +217,9 @@ def build_chief_plan(
         clarity=clarity,
         clarifying_questions=list(clarity["questions"]) if (interview and clarity["questions"]) else [],
         project_memory=project_memory,
-        handoff_prompt=_handoff_prompt(objective, selected_names, commands, status=status, memory_notes=memory_notes),
+        permission_plan=permissions,
+        pipeline_state=plan_status_to_pipeline_state(status),
+        handoff_prompt=_handoff_prompt(objective, selected_names, commands, status=status, memory_notes=memory_notes, permission_summary=permissions),
     )
 
 
@@ -224,8 +237,20 @@ def _product_changed_files(paths: list[str], *, repo_root: Path | None = None) -
             continue
         if any(normalized == prefix.rstrip("/") or normalized.startswith(prefix) for prefix in _CHECKPOINT_ARTIFACT_DIR_PREFIXES):
             continue
+        if _is_non_product_path(normalized):
+            continue
         kept.append(normalized)
     return kept
+
+
+def _is_non_product_path(path: str) -> bool:
+    normalized = str(path).replace("\\", "/").strip().lstrip("/")
+    if not normalized:
+        return True
+    parts = normalized.split("/")
+    if any(part.endswith(".checkpoint-worktrees") or ".checkpoint-worktrees" in part for part in parts):
+        return True
+    return any(normalized == prefix.rstrip("/") or normalized.startswith(prefix) for prefix in _NON_PRODUCT_DIR_PREFIXES)
 
 
 def _gitignore_change_is_only_checkpoint_runtime(repo_root: Path) -> bool:
@@ -271,6 +296,7 @@ def chief_plan_to_markdown(plan: ChiefPlan) -> str:
         "## Chief Engineer Plan",
         "",
         f"Status: `{plan.status}`",
+        f"Pipeline state: `{plan.pipeline_state or plan_status_to_pipeline_state(plan.status)}`",
         f"Objective: {plan.objective}",
         f"Workspace: `{plan.workspace_root}`",
         f"Repo: `{plan.repo_root}`",
@@ -294,6 +320,13 @@ def chief_plan_to_markdown(plan: ChiefPlan) -> str:
     )
     if plan.skipped_slow_workflows:
         lines.append("Skipped slow workflows: " + ", ".join(plan.skipped_slow_workflows))
+    if plan.permission_plan:
+        lines.extend(
+            [
+                f"Permission decision: `{plan.permission_plan.get('decision', 'unknown')}`",
+                f"Permission risk: `{plan.permission_plan.get('risk', 'unknown')}`",
+            ]
+        )
     memory_entries = plan.project_memory.get("entries") if isinstance(plan.project_memory, dict) else []
     if memory_entries:
         lines.extend(["", "### Project Memory", ""])
@@ -319,6 +352,13 @@ def chief_plan_to_markdown(plan: ChiefPlan) -> str:
                 approval = (track.get("approval") or {}).get("name") or ""
                 posture = ", ".join(part for part in (f"model {track['model']}", f"sandbox {sandbox}" if sandbox else "", f"approval {approval}" if approval else "") if part)
                 lines.append(f"  Recommended: {posture}")
+            selection = track.get("model_selection") if isinstance(track.get("model_selection"), dict) else {}
+            selected_model = selection.get("selected") if isinstance(selection.get("selected"), dict) else {}
+            if selected_model:
+                lines.append(
+                    f"  Dynamic model: `{selected_model.get('id')}` "
+                    f"(tier `{selection.get('required_tier')}`, quota `{float(selection.get('quota_used_percentage') or 0):.1f}%`)"
+                )
             command = track.get("command") or track.get("command_template") or ""
             lines.append(f"  Command: `{command}`")
             if track.get("parallelism_hint"):
@@ -443,12 +483,28 @@ _DOMAIN_ANCHORS = {kw for keywords, _ in DOMAIN_CRITERIA for kw in keywords} | {
 }
 
 
+# Diagnosis goals ("why didn't X run today?") carry their own verifiable
+# outcome — a written root-cause report — so the clarity gate must not bounce
+# them back with "what is the observable result?" questions.
+_DIAGNOSIS_PATTERNS = (
+    re.compile(r"为什么[^。！？\n]{0,50}(没|不|失败|停|出错|报错|异常)"),
+    re.compile(r"(没|不)[^。！？\n]{0,20}(推送|运行|执行|触发|生效|工作)[^。！？\n]{0,20}(为什么|什么原因|怎么回事)?"),
+    re.compile(r"(排查|诊断|查明|定位)"),
+    re.compile(r"(怎么回事|什么原因|哪里出了?问题)"),
+    re.compile(r"\b(why|diagnose|investigate|root\s*cause)\b", re.IGNORECASE),
+)
+
+
+def is_diagnosis_goal(objective: str) -> bool:
+    text = str(objective or "")
+    return any(pattern.search(text) for pattern in _DIAGNOSIS_PATTERNS)
+
+
 def assess_goal_clarity(objective: str, *, answers: list[str] | None = None) -> dict[str, Any]:
     """Judge whether an objective has a verifiable definition of done.
 
-    Conservative on purpose: it only blocks genuinely uninformative goals
-    ("fix it", "make it better"), so real objectives flow through. When answers
-    are supplied they count as clarification and satisfy the gate.
+    Conservative on purpose: it only passes goals that have a concrete anchor
+    (observable result, path/file, domain term, or user clarification).
     """
     text = objective.strip()
     lower = text.lower()
@@ -464,23 +520,33 @@ def assess_goal_clarity(objective: str, *, answers: list[str] | None = None) -> 
     has_number = any(ch.isdigit() for ch in text)
     _quote_chars = '”\'“”「」『』`'
     has_quote = any(q in text for q in _quote_chars)
-    has_pathish = '/' in text or any('.' in tok and len(tok) > 3 for tok in tokens)
+    # Detect file paths and extensions (e.g., utils.py, src/main.js, test.ts)
+    # Use regex to match common file patterns before tokenization splits on '.'
+    _file_pattern = re.compile(r'[a-zA-Z0-9_]+\.[a-zA-Z0-9_]{1,10}')
+    has_pathish = '/' in text or bool(_file_pattern.search(text))
     domain_hit = any(anchor in lower for anchor in _DOMAIN_ANCHORS)
     vague_hit = any(term in lower for term in _VAGUE_TERMS)
     answered = bool(answers)
 
     concrete_signal = has_number or has_quote or has_pathish or domain_hit
-    # “ok” unless the goal is short and purely vague with no concrete anchor.
-    ok = answered or concrete_signal or (meaningful_count >= 4 and not (vague_hit and meaningful_count < 5))
+    diagnosis = is_diagnosis_goal(text)
+    # Keep the gate intentionally conservative: plain natural language without
+    # an observable anchor should keep asking questions instead of being marked
+    # "clear" just because it is long enough. Diagnosis goals pass because
+    # their definition of done is inherent: a root-cause report.
+    ok = answered or concrete_signal or diagnosis
 
     questions: list[str] = []
-    if not concrete_signal:
-        questions.append(
-            "What observable result means this is done? Name the exact text, number, or state to check."
-        )
-    if not domain_hit and not has_pathish:
-        questions.append("Which page, screen, or file does this change touch?")
-    questions.append("Is there anything that must not change or break?")
+    if diagnosis:
+        pass  # deliverable is the diagnosis report; no clarification needed
+    else:
+        if not concrete_signal:
+            questions.append(
+                "这个目标完成后，用户能看到什么可验证结果？请给出具体文字、数字或状态。"
+            )
+        if not domain_hit and not has_pathish:
+            questions.append("这次修改会影响哪个页面、屏幕或文件？")
+        questions.append("有什么内容绝对不能改坏？")
 
     return {
         "ok": bool(ok),
@@ -491,6 +557,7 @@ def assess_goal_clarity(objective: str, *, answers: list[str] | None = None) -> 
             "has_pathish": has_pathish,
             "domain_hit": domain_hit,
             "vague_hit": vague_hit,
+            "diagnosis": diagnosis,
             "answered": answered,
             "meaningful_words": len(meaningful),
             "cjk_chars": cjk_chars,
@@ -517,6 +584,7 @@ def _worker_tracks(
         profile = load_agent_profile(agent)
         primary_role = str((profile or {}).get("primary_role") or "")
         is_inspector = primary_role == "multimodal_inspection"
+        model_selection: dict[str, Any] | None = None
         if is_inspector:
             role = "multimodal inspection reviewer"
             task_kind = "inspection"
@@ -528,6 +596,14 @@ def _worker_tracks(
                 objective=objective,
                 changed_files=changed_files or [],
                 acceptance_criteria=acceptance_criteria or [],
+            )
+            model_selection = selection_to_dict(
+                select_model_for_task(
+                    objective=objective,
+                    changed_files=changed_files or [],
+                    acceptance_criteria=acceptance_criteria or [],
+                    workspace_root=workspace_path,
+                )
             )
             task_kind = tier_task_kind(route.tier)
             prompt = _single_line_prompt(objective, verification_commands)
@@ -557,6 +633,7 @@ def _worker_tracks(
                 "model": model,
                 "tier": route.tier if route else "",
                 "route_reason": route.reason if route else "",
+                "model_selection": model_selection if route else None,
                 "sandbox": sandbox,
                 "approval": approval,
                 "parallelism_hint": parallelism_hint,
@@ -639,7 +716,7 @@ def _verification_commands(
     slow = " --include-slow" if include_slow else ""
     commands = [
         (
-            "checkpoint codex-check"
+                "python -m visual_agent.cli codex-check"
             f" --workspace-root {root}"
             f" --repo-root {repo}"
             f" --base {_quote_cli(base)}"
@@ -652,7 +729,7 @@ def _verification_commands(
         workflow_args = " ".join(f"--workflow {_quote_cli(ref.name)}" for ref in selected_refs)
         commands.append(
             (
-                "checkpoint verify-now"
+                "python -m visual_agent.cli verify-now"
                 f" --workspace-root {root}"
                 f" {workflow_args}"
                 f" --run-profile {run_profile}"
@@ -661,7 +738,7 @@ def _verification_commands(
             )
         )
     else:
-        commands.append(f"checkpoint verify-now --workspace-root {root} --run-profile {run_profile}{slow} --format markdown")
+        commands.append(f"python -m visual_agent.cli verify-now --workspace-root {root} --run-profile {run_profile}{slow} --format markdown")
     return commands
 
 
@@ -741,6 +818,7 @@ def _handoff_prompt(
     *,
     status: str,
     memory_notes: list[str] | None = None,
+    permission_summary: dict[str, Any] | None = None,
 ) -> str:
     workflow_text = ", ".join(workflows) if workflows else "no selected workflow yet"
     command_text = "\n".join(f"- {command}" for command in commands)
@@ -754,17 +832,21 @@ def _handoff_prompt(
     notes = [item for item in (memory_notes or []) if item]
     if notes:
         lines.extend(["Project memory:", *[f"- {item}" for item in notes]])
+    if permission_summary:
+        decision = str(permission_summary.get("decision") or "unknown")
+        risk = str(permission_summary.get("risk") or "unknown")
+        lines.append(f"Permission plan: {decision} / {risk}. If any command is ask or deny, stop and surface the reason instead of bypassing it.")
     lines.extend(["Verification commands:", command_text])
     return "\n".join(lines)
 
 
 def _single_line_prompt(objective: str, commands: list[str]) -> str:
-    command = commands[0] if commands else "checkpoint verify-now --workspace-root .agent-workspace --format markdown"
+    command = commands[0] if commands else "python -m visual_agent.cli verify-now --workspace-root .agent-workspace --format markdown"
     return f"{objective} After editing, run this verification command: {command}. Summarize evidence before claiming done."
 
 
 def _inspection_prompt(objective: str, commands: list[str]) -> str:
-    command = commands[0] if commands else "checkpoint verify-now --workspace-root .agent-workspace --format markdown"
+    command = commands[0] if commands else "python -m visual_agent.cli verify-now --workspace-root .agent-workspace --format markdown"
     return (
         f"{objective} Inspect Checkpoint evidence, screenshots, and acceptance criteria as a "
         f"read-only multimodal reviewer. Do not edit code. If more evidence is needed, suggest "

@@ -1,6 +1,6 @@
 """Bounded autonomous development missions.
 
-``chief-run`` is the first DevPacer loop: build or load a plan, persist mission
+``chief-run`` is the first Pacer loop: build or load a plan, persist mission
 state, preview the dispatch, optionally execute Codex, verify with Checkpoint,
 and stop with a durable reason.
 """
@@ -13,10 +13,12 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
 
+from .agent_capabilities import canonical_agent_name, load_agent_profile, recommend_worker_config
 from .chief_dispatch import dispatch_chief_plan
 from .chief_engineer import build_chief_plan, chief_plan_to_dict
 from .chief_plans_store import load_plan, save_plan
 from .goal_grounding import goal_references_plan, ground_goal, grounding_to_markdown
+from .mission_intake import is_manual_verification_goal, is_review_plan_goal
 from .missions import (
     append_round,
     create_mission,
@@ -27,6 +29,8 @@ from .missions import (
     write_final_report,
 )
 from .models import to_jsonable
+from .mission_pipeline import mission_result_to_pipeline_state, write_mission_state
+from .notifications import build_event_notification, load_notification_config, send_email_notification
 from .verification_profiles import resolve_test_command
 from .workspace import init_workspace
 
@@ -65,6 +69,7 @@ def run_chief_mission(
     grounding_runner: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     started = monotonic()
+    original_goal = str(goal or "")
     workspace_path = Path(workspace_root).expanduser().resolve()
     repo_path = Path(repo_root).expanduser().resolve()
     resolved_test_command, verification_profile = resolve_test_command(test_command, repo_root=repo_path)
@@ -198,8 +203,11 @@ def run_chief_mission(
         plan_payload["verification_profile"] = verification_profile
         if plan_id:
             save_plan(plan_payload, workspace_root=workspace_path, plan_id=str(plan_id))
-    effective_allow_test_edits = allow_test_edits or _objective_requests_test_edits(
-        str(goal or plan_payload.get("objective") or "")
+    effective_allow_test_edits = allow_test_edits or _plan_requests_test_edits(
+        original_goal=original_goal,
+        goal=str(goal or ""),
+        plan=plan_payload,
+        grounding=grounding_payload,
     )
     if effective_allow_test_edits and not allow_test_edits:
         plan_payload["test_edit_policy"] = {
@@ -220,6 +228,14 @@ def run_chief_mission(
             mission_id=mission_id,
             status="created",
         )
+        write_mission_state(
+            workspace_path,
+            str(mission["mission_id"]),
+            current_state="DRAFT",
+            event="chief_run_mission_created",
+            goal=str(goal or plan_payload.get("objective") or ""),
+            plan_id=str(plan_id),
+        )
         if grounding_payload:
             append_round(
                 workspace_path,
@@ -237,6 +253,13 @@ def run_chief_mission(
         mission["status"] = "running"
         mission["stop_reason"] = ""
         save_mission(workspace_path, mission)
+        write_mission_state(
+            workspace_path,
+            str(mission["mission_id"]),
+            current_state="EXECUTING",
+            event="chief_run_resume_executing",
+            plan_id=str(plan_id or ""),
+        )
     if _elapsed_minutes(started) > budget["max_wall_minutes"]:
         return _finish(
             workspace_root=workspace_path,
@@ -249,9 +272,40 @@ def run_chief_mission(
         )
 
     plan_status = str(plan_payload.get("status") or "")
+    _mission_objective = str((mission or {}).get("objective") or goal or plan_payload.get("objective") or "")
+    manual_verification_goal = is_manual_verification_goal(_mission_objective)
+    review_plan_goal = is_review_plan_goal(_mission_objective)
     # A plan-referencing goal that grounding could not resolve stops here even
     # if the plan looks "ready": dispatching it would waste the worker run.
     grounding_unresolved = bool(grounding_payload) and not bool(grounding_payload.get("resolved"))
+    if (
+        (plan_status in {"needs_clarification", "needs_workflow_coverage"} or grounding_unresolved)
+        and not test_command
+        and (manual_verification_goal or review_plan_goal)
+    ):
+        append_round(
+            workspace_path,
+            mission["mission_id"],
+            {
+                "round": _next_round_number(workspace_path, mission["mission_id"]),
+                "type": "planning",
+                "status": "manual_acceptance_required" if manual_verification_goal else "review_plan_required",
+                "plan_id": plan_id,
+            },
+        )
+        return _finish(
+            workspace_root=workspace_path,
+            mission=mission,
+            plan=plan_payload,
+            status="preview",
+            stop_reason="manual_verification_required" if manual_verification_goal else "review_plan_required",
+            message=(
+                "任务需要人工/现场验收方案，请在工作台主对话框确认设备、场景、指标和结论模板。"
+                if manual_verification_goal
+                else "任务是审查/计划输出，请在工作台主对话框确认审查范围和交付格式。"
+            ),
+            started=started,
+        )
     if plan_status in {"blocked", "needs_clarification"} or grounding_unresolved:
         stop_reason = "blocked_plan" if plan_status == "blocked" else "needs_clarification"
         append_round(
@@ -280,7 +334,18 @@ def run_chief_mission(
             message=clarification_message,
             started=started,
         )
-    if plan_status == "needs_workflow_coverage" and not allow_coverage_gap and not test_command:
+    # Diagnosis missions deliver a root-cause report, not a code change, so
+    # workflow coverage does not apply to them.
+    from .chief_engineer import is_diagnosis_goal as _is_diag
+
+    if (
+        plan_status == "needs_workflow_coverage"
+        and not allow_coverage_gap
+        and not test_command
+        and not _is_diag(_mission_objective)
+        and not manual_verification_goal
+        and not review_plan_goal
+    ):
         append_round(
             workspace_path,
             mission["mission_id"],
@@ -299,6 +364,30 @@ def run_chief_mission(
             status="stopped",
             stop_reason="coverage_gap",
             message="Mission stopped because workflow coverage is missing or weak.",
+            started=started,
+        )
+    if plan_status == "needs_workflow_coverage" and not test_command and (manual_verification_goal or review_plan_goal):
+        append_round(
+            workspace_path,
+            mission["mission_id"],
+            {
+                "round": _next_round_number(workspace_path, mission["mission_id"]),
+                "type": "planning",
+                "status": "manual_acceptance_required" if manual_verification_goal else "review_plan_required",
+                "plan_id": plan_id,
+            },
+        )
+        return _finish(
+            workspace_root=workspace_path,
+            mission=mission,
+            plan=plan_payload,
+            status="preview",
+            stop_reason="manual_verification_required" if manual_verification_goal else "review_plan_required",
+            message=(
+                "任务需要人工/现场验收方案，请在工作台主对话框确认设备、场景、指标和结论模板。"
+                if manual_verification_goal
+                else "任务是审查/计划输出，请在工作台主对话框确认审查范围和交付格式。"
+            ),
             started=started,
         )
 
@@ -416,6 +505,26 @@ def _objective_requests_test_edits(objective: str) -> bool:
     return any(p.search(compact) or p.search(text) for p in _TEST_EDIT_REQUEST_PATTERNS)
 
 
+def _plan_requests_test_edits(
+    *,
+    original_goal: str,
+    goal: str,
+    plan: dict[str, Any] | None,
+    grounding: dict[str, Any] | None,
+) -> bool:
+    snippets = [original_goal, goal]
+    payload = plan if isinstance(plan, dict) else {}
+    snippets.append(str(payload.get("objective") or ""))
+    criteria = payload.get("acceptance_criteria") if isinstance(payload.get("acceptance_criteria"), list) else []
+    snippets.extend(str(item) for item in criteria)
+    if isinstance(grounding, dict):
+        snippets.extend(
+            str(grounding.get(key) or "")
+            for key in ("input_goal", "grounded_goal", "acceptance_hint", "evidence")
+        )
+    return _objective_requests_test_edits("\n".join(item for item in snippets if item))
+
+
 def _record_dispatch_attempts(workspace_root: Path, mission_id: str, dispatch: dict[str, Any], *, start_round: int = 1) -> None:
     attempts = dispatch.get("verification_attempts") if isinstance(dispatch.get("verification_attempts"), list) else []
     if attempts:
@@ -471,7 +580,7 @@ def _record_merge_round(workspace_root: Path, mission_id: str, dispatch: dict[st
 
 
 def _override_plan_agent(plan: dict[str, Any], agent: str) -> bool:
-    requested = str(agent or "").strip()
+    requested = canonical_agent_name(str(agent or "").strip())
     if not requested:
         return False
     tracks = plan.get("worker_tracks") if isinstance(plan.get("worker_tracks"), list) else []
@@ -480,22 +589,41 @@ def _override_plan_agent(plan: dict[str, Any], agent: str) -> bool:
             continue
         if str(track.get("track_kind") or "implementation") == "inspection":
             continue
-        if str(track.get("agent") or "") == requested:
-            return False
-        track["agent"] = requested
-        track["id"] = f"track_1_{requested.replace('-', '_')}"
+        before = json.dumps(to_jsonable(track), ensure_ascii=False, sort_keys=True)
+        if canonical_agent_name(str(track.get("agent") or "")) == requested:
+            _apply_agent_override_to_track(track, requested)
+            after = json.dumps(to_jsonable(track), ensure_ascii=False, sort_keys=True)
+            return before != after
+        _apply_agent_override_to_track(track, requested)
         return True
     if tracks:
         return False
     plan["worker_tracks"] = [
         {
-            "id": f"track_1_{requested.replace('-', '_')}",
             "agent": requested,
+            "id": f"track_1_{requested.replace('-', '_')}",
             "track_kind": "implementation",
             "tier": "strong",
         }
     ]
+    _apply_agent_override_to_track(plan["worker_tracks"][0], requested)
     return True
+
+
+def _apply_agent_override_to_track(track: dict[str, Any], agent: str) -> None:
+    profile = load_agent_profile(agent) or {}
+    config = recommend_worker_config(profile, task_kind="implementation") if profile else {}
+    track["agent"] = agent
+    track["id"] = f"track_1_{agent.replace('-', '_')}"
+    # Model and permission flags are agent-specific. When switching a saved
+    # mission from Claude/MiMo to Codex, carrying `opus`, `sonnet`, or
+    # `--permission-mode` makes the Codex worker fail before it can start.
+    track["model"] = str(config.get("model") or "")
+    track["sandbox"] = config.get("sandbox") or {}
+    track["approval"] = config.get("approval") or {}
+    track["parallelism_hint"] = str(config.get("parallelism_hint") or "")
+    track.pop("command", None)
+    track.pop("command_template", None)
 
 
 def _record_usage_round(workspace_root: Path, mission_id: str, dispatch: dict[str, Any], round_no: int) -> None:
@@ -531,12 +659,12 @@ def _stop_reason_from_dispatch(dispatch: dict[str, Any], budget: dict[str, Any])
     if dispatch.get("quota_exhausted"):
         # The worker never got to do the task; a gate failure here is noise.
         return "quota_exhausted"
-    if status == "worker_failed":
-        return "worker_error"
     latest = dispatch.get("latest_verification") if isinstance(dispatch.get("latest_verification"), dict) else {}
     verdict = str(latest.get("verdict") or "")
     if verdict == "pass":
         return "verified"
+    if status == "worker_failed":
+        return "worker_error"
     if verdict == "coverage_gap":
         return "coverage_gap"
     if verdict == "inspection_only":
@@ -593,6 +721,7 @@ def _compact_dispatch(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": payload.get("status"),
         "reason": payload.get("reason"),
+        "diagnosis_report": payload.get("diagnosis_report"),
         "worker": payload.get("worker"),
         "worktree": payload.get("worktree"),
         "verification": payload.get("verification"),
@@ -627,53 +756,57 @@ def _compact_verification(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _message_for_stop(stop_reason: str) -> str:
     return {
-        "verified": "Mission verified by Checkpoint.",
+        "verified": "任务已通过验收。",
         "coverage_gap": (
-            "Mission stopped: no test command or workflow coverage found. "
-            "Fix: add --test-command \"pytest -q\" (or your project's test command), "
-            "or add --allow-coverage-gap to skip this gate."
+            "任务停止：未找到测试命令或工作流覆盖。"
+            "修复：添加 --test-command \"pytest -q\"（或你项目的测试命令），"
+            "或添加 --allow-coverage-gap 跳过此检查。"
         ),
-        "inspection_only": "Mission produced inspection-only evidence; rerun with a real interaction profile when needed.",
+        "manual_verification_required": "任务需要人工/现场验收方案；请在工作台主对话框确认设备、场景、指标和结论模板。",
+        "review_plan_required": "任务需要审查/开发计划输出；请在工作台主对话框确认审查范围和交付格式。",
+        "inspection_only": "任务仅产生了检查性证据；如需真实交互，请重新运行。",
         "test_command_invalid": (
-            "Mission stopped: the verification command exited with an error before running any tests. "
-            "Fix: run the test command manually to confirm it works, then retry."
+            "任务停止：验证命令在运行测试前就出错了。"
+            "修复：手动运行测试命令确认可用，然后重试。"
         ),
         "command_launch_error": (
-            "Mission stopped: the verification command could not be launched. "
-            "Fix: check that the command is on PATH and the test dependencies are installed."
+            "任务停止：无法启动验证命令。"
+            "修复：检查命令是否在 PATH 中，以及测试依赖是否已安装。"
         ),
         "command_timeout": (
-            "Mission stopped: the verification command timed out. "
-            "Fix: increase --timeout-seconds or make the test suite faster."
+            "任务停止：验证命令超时。"
+            "修复：增加 --timeout-seconds 或加快测试速度。"
         ),
         "same_failure_repeated": (
-            "Mission stopped: the same test failure repeated after the auto-repair round. "
-            "Fix: open final_report.md, read the failing test output, then start a new mission with a more specific goal."
+            "任务停止：自动修复后同样的测试失败仍然出现。"
+            "修复：打开 final_report.md 查看失败输出，然后用更具体的目标重新开始。"
         ),
         "budget_exhausted": (
-            "Mission stopped: the configured round budget was exhausted. "
-            "Fix: resume the mission with --max-rounds increased, or start a new mission with a narrower goal."
+            "任务停止：已用完配置的轮次预算。"
+            "修复：用 --max-rounds 增加轮次后恢复任务，或用更窄的目标重新开始。"
         ),
         "worker_error": (
-            "Mission stopped: the AI worker process failed or was killed. "
-            "Fix: run `checkpoint agents doctor` to confirm the agent is available, then resume."
+            "任务停止：AI worker 进程失败或被终止。"
+            "修复：运行 `checkpoint agents doctor` 确认可用，然后恢复。"
+            "如果是额度问题，可以尝试切换 agent：--agent claude-code 或 --agent mimo。"
         ),
         "verification_failed": (
-            "Mission stopped: verification still fails after all repair rounds. "
-            "Fix: open final_report.md to see what the worker tried, then refine the goal."
+            "任务停止：所有修复轮次后验证仍然失败。"
+            "修复：打开 final_report.md 查看 worker 的尝试，然后细化目标。"
         ),
         "permission_required": (
-            "Mission stopped: the repository has uncommitted changes (dirty working tree). "
-            "Fix: commit or stash your changes first, then retry. "
-            "Or add --allow-dirty to skip this safety check."
+            "任务停止：仓库有未提交的更改（工作树不干净）。"
+            "修复：先提交或暂存更改，然后重试。"
+            "或添加 --allow-dirty 跳过此安全检查。"
         ),
         "quota_exhausted": (
-            "Mission stopped: all available AI backends hit their quota limit. "
-            "Fix: wait for quota to reset (codex: weekly, claude: 5-hour window) or switch to a different --agent."
+            "任务停止：所有可用的 AI 后端都达到了配额限制。"
+            "修复：等待配额重置（codex: 每周，claude: 5 小时窗口），"
+            "或切换到其他 agent：--agent claude-code（如果 codex 额度用完）或 --agent mimo（免费后端）。"
         ),
         "needs_clarification": (
-            "Mission stopped: the goal is too vague to plan safely. "
-            "Fix: refine the --goal to include a specific acceptance criterion, e.g. 'add X so that test Y passes'."
+            "任务停止：目标太模糊，无法安全规划。"
+            "修复：细化 --goal，包含具体的验收标准，例如 '添加 X 使测试 Y 通过'。"
         ),
     }.get(stop_reason, "Mission stopped.")
 
@@ -701,9 +834,26 @@ def _finish(
         )
         saved = save_mission(workspace_root, mission)
         mission = saved["mission"]
+        write_mission_state(
+            workspace_root,
+            str(mission["mission_id"]),
+            current_state=mission_result_to_pipeline_state(status, stop_reason),
+            event="chief_run_finished",
+            status=status,
+            stop_reason=stop_reason,
+        )
+
+    # Add failover information to the message if applicable
+    if dispatch_payload and status == "verified":
+        failover = dispatch_payload.get("failover_worker_record")
+        if isinstance(failover, dict) and failover.get("status") == "completed":
+            backend = failover.get("backend", {})
+            backend_name = backend.get("name", "unknown")
+            message += f"（使用 {backend_name} 后端完成，节省了主 agent 配额）"
+
     payload = {
         "schema_version": 1,
-        "product": "DevPacer",
+        "product": "Pacer",
         "verification_engine": "Checkpoint",
         "status": status,
         "stop_reason": stop_reason,
@@ -723,7 +873,62 @@ def _finish(
             payload["mandatory_record_path"] = record["path"]
         if record.get("error"):
             payload["mandatory_record_error"] = record["error"]
+        payload["notification"] = _send_terminal_notification(payload)
     return payload
+
+
+def _send_terminal_notification(payload: dict[str, Any]) -> dict[str, Any]:
+    event = _notification_event_for_terminal_payload(payload)
+    if not event:
+        return {"status": "skipped", "reason": "non_terminal_event"}
+    if load_notification_config() is None:
+        return {"status": "skipped", "reason": "notification_config_missing", "event": event}
+    mission = payload.get("mission") if isinstance(payload.get("mission"), dict) else {}
+    plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+    track = _first_implementation_track(plan)
+    selected = track.get("model_selection", {}).get("selected") if isinstance(track.get("model_selection"), dict) else {}
+    notification_payload = {
+        "project": mission.get("product") or payload.get("product") or "Pacer",
+        "mission_id": mission.get("mission_id"),
+        "objective": mission.get("objective"),
+        "status": payload.get("status"),
+        "stop_reason": payload.get("stop_reason"),
+        "message": payload.get("message"),
+        "report_path": payload.get("final_report_path"),
+        "agent": track.get("agent"),
+        "model": selected.get("id") if isinstance(selected, dict) else track.get("model"),
+    }
+    notification = build_event_notification(event, notification_payload)
+    try:
+        return send_email_notification(notification, dry_run=False)
+    except Exception as exc:  # pragma: no cover - network failures depend on local SMTP.
+        return {"status": "failed", "event": event, "error": str(exc)}
+
+
+def _notification_event_for_terminal_payload(payload: dict[str, Any]) -> str:
+    status = str(payload.get("status") or "")
+    stop_reason = str(payload.get("stop_reason") or "")
+    if status == "verified" or stop_reason == "verified":
+        return "mission_verified"
+    if stop_reason == "quota_exhausted":
+        return "quota_exhausted"
+    if stop_reason == "worker_error":
+        return "worker_error"
+    if stop_reason == "needs_clarification":
+        return "needs_user_input"
+    if status in {"blocked", "failed"}:
+        return "mission_failed"
+    if status in {"stopped", "preview"}:
+        return "mission_stopped"
+    return ""
+
+
+def _first_implementation_track(plan: dict[str, Any]) -> dict[str, Any]:
+    tracks = plan.get("worker_tracks") if isinstance(plan.get("worker_tracks"), list) else []
+    for item in tracks:
+        if isinstance(item, dict) and item.get("track_kind") == "implementation":
+            return item
+    return tracks[0] if tracks and isinstance(tracks[0], dict) else {}
 
 
 def _append_mandatory_record(payload: dict[str, Any]) -> dict[str, Any]:
@@ -797,11 +1002,15 @@ def chief_run_to_markdown(payload: dict[str, Any]) -> str:
     mission = payload.get("mission") if isinstance(payload.get("mission"), dict) else {}
     plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
     rounds = payload.get("rounds") if isinstance(payload.get("rounds"), list) else []
-    lines = ["## DevPacer Mission", ""]
+    lines = ["## Pacer Mission", ""]
     lines.append(f"Status: `{payload.get('status')}`")
     lines.append(f"Stop reason: `{payload.get('stop_reason')}`")
     if payload.get("message"):
         lines.append(f"Message: {payload['message']}")
+    dispatch_payload = payload.get("dispatch") if isinstance(payload.get("dispatch"), dict) else {}
+    diagnosis_report = str(dispatch_payload.get("diagnosis_report") or "")
+    if diagnosis_report:
+        lines.extend(["", "### 诊断报告", "", diagnosis_report])
     if mission:
         lines.extend(
             [
@@ -875,7 +1084,7 @@ def mission_status_payload(*, workspace_root: str | Path, mission_id: str) -> di
     if mission is None:
         return {
             "schema_version": 1,
-            "product": "DevPacer",
+            "product": "Pacer",
             "verification_engine": "Checkpoint",
             "status": "blocked",
             "stop_reason": "missing_mission",
@@ -886,7 +1095,7 @@ def mission_status_payload(*, workspace_root: str | Path, mission_id: str) -> di
     rounds = load_rounds(workspace_path, mission_id)
     payload = {
         "schema_version": 1,
-        "product": mission.get("product", "DevPacer"),
+        "product": mission.get("product", "Pacer"),
         "verification_engine": mission.get("verification_engine", "Checkpoint"),
         "status": mission.get("status", ""),
         "stop_reason": mission.get("stop_reason", ""),
@@ -931,6 +1140,10 @@ def _status_next_action(mission: dict[str, Any]) -> str:
         return "Mission verified. Run `checkpoint mission list` to review, or `git log` to see the merged commit."
     if stop_reason == "coverage_gap":
         return "Add --test-command \"<your test command>\" to your next mission start, or add --allow-coverage-gap."
+    if stop_reason == "manual_verification_required":
+        return "Confirm the manual/field acceptance plan in the workbench chat, then continue from that plan."
+    if stop_reason == "review_plan_required":
+        return "Confirm review scope and plan format in the workbench chat, then generate the development plan."
     if stop_reason == "needs_clarification":
         return "Refine the goal with a concrete acceptance criterion and start a new mission."
     if stop_reason == "permission_required":

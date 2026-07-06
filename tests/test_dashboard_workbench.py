@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import json
+import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from visual_agent.dashboard import (
     DASHBOARD_HTML,
+    _bind_dashboard_server,
     _launch_snapshot,
     build_dashboard_data,
     start_workbench_mission,
@@ -12,6 +17,7 @@ from visual_agent.dashboard import (
 from visual_agent.chief_queue import submit_mission_queue_item
 from visual_agent.missions import create_mission, default_budget_policy
 from visual_agent.programs import create_program_from_plan
+from visual_agent.workbench_board import archive_all_missions_now, archive_mission_now
 from visual_agent.workspace import init_workspace
 
 
@@ -75,6 +81,8 @@ def test_workbench_execute_defaults_to_manual_merge(tmp_path, monkeypatch):
     assert result["ok"] is True
     _wait_launch(result["launch_id"])
     assert captured["merge"] is False
+    assert captured["execute"] is False
+    assert captured["dry_run"] is True
 
 
 def test_workbench_auto_detects_test_command_when_empty(tmp_path, monkeypatch):
@@ -101,12 +109,252 @@ def test_workbench_auto_detects_test_command_when_empty(tmp_path, monkeypatch):
     assert captured["test_command"] == "npm test"
 
 
+def test_workbench_execute_rejects_missing_real_test_command(tmp_path):
+    ws = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+
+    result = start_workbench_mission(
+        workspace_root=ws.root,
+        repo_root=str(tmp_path),
+        goal="修复一个明确问题",
+        test_command="",
+        agent="codex",
+        execute=True,
+    )
+
+    assert result["ok"] is False
+    assert "真实验收命令" in result["error"]
+    assert result["verification_profile"]["status"] == "not_found"
+
+
+def test_workbench_execute_allows_manual_livekit_verification(tmp_path, monkeypatch):
+    ws = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    captured = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        return {"status": "preview", "stop_reason": "preview_only", "mission": {"mission_id": "m-livekit"}}
+
+    monkeypatch.setattr("visual_agent.chief_run.run_chief_mission", fake_run)
+    result = start_workbench_mission(
+        workspace_root=ws.root,
+        repo_root=str(tmp_path),
+        goal="完成LiveKit真机验证：真实手机弱网和户外噪声语音通话验收",
+        test_command="",
+        agent="codex",
+        execute=True,
+    )
+
+    assert result["ok"] is True
+    assert result["manual_verification"] is True
+    _wait_launch(result["launch_id"])
+    assert captured["allow_coverage_gap"] is True
+    assert captured["execute"] is False
+    assert captured["dry_run"] is True
+
+
+def test_workbench_execute_starts_background_worker(tmp_path, monkeypatch):
+    ws = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    mission_id = "m-bg"
+    captured = {}
+
+    def fake_run(**kwargs):
+        captured["run"] = kwargs
+        return {"status": "preview", "stop_reason": "preview_only", "mission": {"mission_id": mission_id}}
+
+    def fake_background(**kwargs):
+        captured["background"] = kwargs
+        return {
+            "status": "background_started",
+            "stop_reason": "",
+            "background": {"pid": 12345},
+        }
+
+    monkeypatch.setattr("visual_agent.chief_run.run_chief_mission", fake_run)
+    monkeypatch.setattr("visual_agent.chief_background.start_background_chief_run", fake_background)
+
+    result = start_workbench_mission(
+        workspace_root=ws.root,
+        repo_root=str(tmp_path),
+        goal="修复一个明确问题",
+        test_command="pytest -q",
+        agent="mimo",
+        execute=True,
+        merge_policy="auto",
+    )
+
+    final = _wait_launch(result["launch_id"])
+
+    assert final["status"] == "background_started"
+    assert final["mission_id"] == mission_id
+    assert final["background_pid"] == 12345
+    assert captured["run"]["agents"] == ("mimo",)
+    assert captured["run"]["execute"] is False
+    assert captured["run"]["dry_run"] is True
+    assert captured["background"]["mission_id"] == mission_id
+    assert captured["background"]["merge"] is True
+
+
+def test_workbench_execute_passes_allow_dirty_to_background_worker(tmp_path, monkeypatch):
+    ws = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    mission_id = "m-dirty"
+    captured = {}
+
+    def fake_run(**kwargs):
+        captured["run"] = kwargs
+        return {"status": "preview", "stop_reason": "preview_only", "mission": {"mission_id": mission_id}}
+
+    def fake_background(**kwargs):
+        captured["background"] = kwargs
+        return {"status": "background_started", "stop_reason": "", "background": {"pid": 4321}}
+
+    monkeypatch.setattr("visual_agent.chief_run.run_chief_mission", fake_run)
+    monkeypatch.setattr("visual_agent.chief_background.start_background_chief_run", fake_background)
+
+    result = start_workbench_mission(
+        workspace_root=ws.root,
+        repo_root=str(tmp_path),
+        goal="修复一个明确问题",
+        test_command="pytest -q",
+        agent="mimo",
+        execute=True,
+        allow_dirty=True,
+    )
+
+    final = _wait_launch(result["launch_id"])
+
+    assert final["status"] == "background_started"
+    assert captured["run"]["allow_dirty"] is True
+    assert captured["background"]["allow_dirty"] is True
+
+
+def test_workbench_writes_pipeline_state(tmp_path, monkeypatch):
+    ws = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    mission_id = "m-state"
+
+    def fake_run(**kwargs):
+        return {"status": "preview", "stop_reason": "preview_only", "mission": {"mission_id": mission_id}}
+
+    monkeypatch.setattr("visual_agent.chief_run.run_chief_mission", fake_run)
+    result = start_workbench_mission(
+        workspace_root=ws.root,
+        repo_root=str(tmp_path),
+        goal="修复一个明确问题",
+        test_command="pytest -q",
+        agent="codex",
+        execute=False,
+        spec={
+            "scope": ["src/visual_agent"],
+            "plan": ["修复一个明确问题"],
+            "test": ["pytest -q"],
+            "risk": ["低风险工作台派发测试"],
+            "rollback": ["回退派发包装改动"],
+        },
+    )
+
+    final = _wait_launch(result["launch_id"])
+    payload = json.loads(Path(result["state_path"]).read_text(encoding="utf-8"))
+    mission_payload = json.loads((ws.root / "missions" / mission_id / "state.json").read_text(encoding="utf-8"))
+    assert final["mission_id"] == mission_id
+    assert payload["current_state"] == "REVIEW"
+    assert mission_payload["context"]["spec"]["test"] == ["pytest -q"]
+
+
+def test_mission_start_api_rejects_missing_spec(tmp_path):
+    ws = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    server = _bind_dashboard_server("127.0.0.1", 0, ws.root)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/mission/start",
+            data=json.dumps({"goal": "修复一个明确问题"}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urllib.request.urlopen(request, timeout=5)
+        except urllib.error.HTTPError as exc:
+            body = json.loads(exc.read().decode("utf-8-sig"))
+            assert exc.code == 400
+            assert body["error_code"] == "spec_validation_failed"
+        else:
+            raise AssertionError("missing spec should return 400")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_dashboard_data_exposes_workbench_fields(tmp_path):
     ws = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     data = build_dashboard_data(ws.root)
     assert "installed_agents" in data
     assert "launches" in data
     assert "repo_root" in data
+
+
+def test_archive_mission_hides_it_from_board(tmp_path):
+    ws = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    mission = create_mission(
+        workspace_root=ws.root,
+        objective="清理待验收任务",
+        repo_root=tmp_path,
+        plan_id="plan-archive",
+        budget_policy=default_budget_policy(),
+        mission_id="mission-archive",
+        status="stopped",
+    )
+
+    result = archive_mission_now(ws.root, mission["mission_id"])
+    assert result["ok"] is True
+
+    data = build_dashboard_data(ws.root)
+    assert all(item["mission_id"] != mission["mission_id"] for item in data["missions"])
+
+    state_path = ws.root / "missions" / mission["mission_id"] / "mission.json"
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "archived"
+    assert payload["hidden"] is True
+
+
+def test_archive_all_missions_hides_non_running_only(tmp_path):
+    ws = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    create_mission(
+        workspace_root=ws.root,
+        objective="失败任务",
+        repo_root=tmp_path,
+        plan_id="plan-stopped",
+        budget_policy=default_budget_policy(),
+        mission_id="mission-stopped",
+        status="stopped",
+    )
+    create_mission(
+        workspace_root=ws.root,
+        objective="待办任务",
+        repo_root=tmp_path,
+        plan_id="plan-created",
+        budget_policy=default_budget_policy(),
+        mission_id="mission-created",
+        status="created",
+    )
+    create_mission(
+        workspace_root=ws.root,
+        objective="运行任务",
+        repo_root=tmp_path,
+        plan_id="plan-running",
+        budget_policy=default_budget_policy(),
+        mission_id="mission-running",
+        status="background_running",
+    )
+
+    result = archive_all_missions_now(ws.root)
+    data = build_dashboard_data(ws.root)
+
+    assert result["ok"] is True
+    assert result["archived"] == 2
+    assert result["skipped_running"] == 1
+    assert [item["mission_id"] for item in data["missions"]] == ["mission-running"]
 
 
 def test_dashboard_data_exposes_mission_queue_context(tmp_path):
@@ -149,6 +397,12 @@ def test_dashboard_data_exposes_programs(tmp_path):
 def test_dashboard_html_has_workbench_form():
     assert "托管队列" in DASHBOARD_HTML
     assert "项目托管" in DASHBOARD_HTML
+    assert "main-chat" in DASHBOARD_HTML
+    assert "确认任务" in DASHBOARD_HTML
+    assert "sendMainChat" in DASHBOARD_HTML
+    assert "applyMainDraftToMission" in DASHBOARD_HTML
+    assert "openTaskIntake" in DASHBOARD_HTML
+    assert "applyIntakeToMission" not in DASHBOARD_HTML
     assert "/api/mission/start" in DASHBOARD_HTML
     assert "startMission" in DASHBOARD_HTML
 
@@ -159,6 +413,9 @@ def test_dashboard_html_has_kanban_board():
     for column in ("待办", "执行中", "待验收", "已完成"):
         assert column in DASHBOARD_HTML
     assert "/api/mission/merge" in DASHBOARD_HTML
+    assert "/api/mission/delete-all" in DASHBOARD_HTML
+    assert "deleteAllMissions" in DASHBOARD_HTML
+    assert "全部删除" in DASHBOARD_HTML
     assert "mergeMission" in DASHBOARD_HTML
     assert "diffSection" in DASHBOARD_HTML
 
@@ -181,3 +438,55 @@ def test_dashboard_data_missions_carry_board_fields(tmp_path):
     assert mission["board_column"] == "in_review"
     assert mission["can_merge"] is True
     assert mission["merge_state"] == ""
+
+
+def test_dashboard_mimo_efficiency_from_worker_records(tmp_path):
+    """Dashboard data must expose mimo_efficiency with core metrics,
+    and MiMo backend usage must count as savings, not spend."""
+    from visual_agent.chief_plans_store import append_worker_record, save_plan
+
+    ws = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    plan_id = "20260704-100000-efficiency-test"
+    # Save a minimal plan so load_worker_records can find the directory.
+    save_plan(
+        {"objective": "test efficiency", "worker_tracks": []},
+        workspace_root=ws.root,
+        plan_id=plan_id,
+    )
+
+    # MiMo backend record: cost_is_savings=True -> should be savings
+    append_worker_record(ws.root, plan_id, {
+        "status": "completed",
+        "elapsed_seconds": 120.0,
+        "usage": {"cost_usd": 0.05, "cost_is_savings": True, "input_tokens": 1000, "output_tokens": 500},
+        "backend": {"name": "mimo", "model": "mimo-v2.5-pro"},
+    })
+
+    # Subscription record (no backend) -> should be spend
+    append_worker_record(ws.root, plan_id, {
+        "status": "completed",
+        "elapsed_seconds": 90.0,
+        "usage": {"cost_usd": 0.12, "input_tokens": 2000, "output_tokens": 800},
+    })
+
+    data = build_dashboard_data(ws.root)
+    me = data["value"]["mimo_efficiency"]
+
+    assert me["mimo_runs"] == 1
+    assert me["saved_usd"] == 0.05
+    assert me["spent_usd"] == 0.12
+    assert me["saved_minutes"] > 0
+    assert me["efficiency_gain_percent"] > 0
+    assert me["capability_score"] > 0
+    # Labels should be Chinese
+    assert "额度" in me["labels"]["saved_usd"]
+    assert "时间" in me["labels"]["saved_minutes"]
+    assert "效率" in me["labels"]["efficiency_gain_percent"]
+
+
+def test_dashboard_html_contains_efficiency_chinese_labels():
+    """The dashboard HTML must show efficiency metrics in Chinese."""
+    assert "低成本后端效率" in DASHBOARD_HTML
+    assert "额度节省" in DASHBOARD_HTML
+    assert "时间节省" in DASHBOARD_HTML
+    assert "综合效率" in DASHBOARD_HTML

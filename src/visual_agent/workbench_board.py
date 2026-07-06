@@ -1,23 +1,24 @@
 """Kanban board logic for the DevPacer web workbench.
 
 The workbench replicates the UX of Vibe Kanban (BloopAI, Apache-2.0): missions
-flow across four columns — 待办 / 进行中 / 待验收 / 已完成 — and a verified
-mission can be merged from the board with one click. This module holds the
-pure, testable decisions: column classification, merge-state discovery, and the
-late merge itself. The HTTP layer in ``dashboard.py`` stays thin.
+flow across columns — 待办 / 进行中 / 待验收 / 待合并 / 已完成 — and a
+verified mission can be merged from the board with one click. This module holds
+the pure, testable decisions: column classification, merge-state discovery, and
+the late merge itself. The HTTP layer in ``dashboard.py`` stays thin.
 """
 
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .chief_plans_store import load_plan, load_verification
-from .missions import load_mission, mission_dir, save_mission
+from .missions import append_round, load_mission, load_rounds, mission_dir, missions_dir, save_mission
 
 
-BOARD_COLUMNS = ("todo", "in_progress", "in_review", "done")
+BOARD_COLUMNS = ("todo", "in_progress", "in_review", "pending_merge", "done")
 
 _RUNNING_STATUSES = {"running", "preview_running", "starting"}
 _DONE_MERGE_STATES = {"merged", "nothing_to_merge"}
@@ -26,9 +27,11 @@ _DONE_MERGE_STATES = {"merged", "nothing_to_merge"}
 def board_column(status: str, *, merge_state: str = "") -> str:
     """Map a mission status (plus its merge state) onto a board column.
 
-    The review column is deliberately the catch-all: anything that stopped —
-    verified, failed, needs clarification — needs a human decision, which is
-    exactly what "待验收" means on the board.
+    - todo: created/queued/pending
+    - in_progress: running
+    - in_review: stopped/failed/needs_clarification (needs human decision)
+    - pending_merge: verified but not yet merged
+    - done: merged or nothing_to_merge
     """
     text = str(status or "").strip().lower()
     if text in {"created", "queued", "pending"}:
@@ -37,8 +40,11 @@ def board_column(status: str, *, merge_state: str = "") -> str:
         return "in_progress"
     if text == "merged":
         return "done"
-    if text == "verified" and merge_state in _DONE_MERGE_STATES:
-        return "done"
+    if text == "verified":
+        if merge_state in _DONE_MERGE_STATES:
+            return "done"
+        return "pending_merge"
+    # stopped/failed/needs_clarification → needs human review
     return "in_review"
 
 
@@ -156,6 +162,77 @@ def merge_mission_now(workspace_root: str | Path, mission_id: str) -> dict[str, 
         mission["status"] = "merged"
         save_mission(root, mission)
     return {"ok": merged, "merge": result, "mission_status": mission.get("status")}
+
+
+def archive_mission_now(workspace_root: str | Path, mission_id: str) -> dict[str, Any]:
+    """Hide a mission from the board while keeping its local trace on disk."""
+    root = Path(workspace_root).expanduser().resolve()
+    mission = load_mission(root, mission_id)
+    if not mission:
+        return {"ok": False, "error": f"找不到任务：{mission_id}"}
+
+    status = str(mission.get("status") or "")
+    if status in _RUNNING_STATUSES:
+        return {"ok": False, "error": f"运行中的任务不能删除，当前状态：{status or '未知'}。"}
+    if status == "archived" or bool(mission.get("hidden")):
+        return {"ok": False, "error": "该任务已经被删除/归档过了。"}
+
+    round_no = max((int(r.get("round") or 0) for r in load_rounds(root, mission_id)), default=0) + 1
+    append_round(
+        root,
+        mission_id,
+        {
+            "round": round_no,
+            "type": "archive",
+            "status": "archived",
+            "reason": "user_deleted",
+        },
+    )
+    mission["status"] = "archived"
+    mission["stop_reason"] = "archived"
+    mission["hidden"] = True
+    mission["archived_at"] = datetime.now(timezone.utc).isoformat()
+    save_mission(root, mission)
+    try:
+        from .dashboard.data import invalidate_dashboard_data_cache
+
+        invalidate_dashboard_data_cache(root)
+    except Exception:
+        pass
+    return {"ok": True, "mission_status": mission.get("status"), "mission_id": mission_id}
+
+
+def archive_all_missions_now(workspace_root: str | Path) -> dict[str, Any]:
+    """Hide all non-running missions from the board while preserving traces."""
+    root = Path(workspace_root).expanduser().resolve()
+    directory = missions_dir(root)
+    if not directory.exists():
+        return {"ok": True, "archived": 0, "skipped_running": 0, "errors": []}
+
+    archived = 0
+    skipped_running = 0
+    errors: list[dict[str, str]] = []
+    for mission_json in sorted(directory.glob("*/mission.json")):
+        mission_id = mission_json.parent.name
+        mission = load_mission(root, mission_id) or {}
+        status = str(mission.get("status") or "")
+        if status in _RUNNING_STATUSES or status == "background_running":
+            skipped_running += 1
+            continue
+        if status == "archived" or bool(mission.get("hidden")):
+            continue
+        result = archive_mission_now(root, mission_id)
+        if result.get("ok"):
+            archived += 1
+        else:
+            errors.append({"mission_id": mission_id, "error": str(result.get("error") or "unknown")})
+    try:
+        from .dashboard.data import invalidate_dashboard_data_cache
+
+        invalidate_dashboard_data_cache(root)
+    except Exception:
+        pass
+    return {"ok": not errors, "archived": archived, "skipped_running": skipped_running, "errors": errors}
 
 
 def mission_review_payload(workspace_root: str | Path, mission: dict[str, Any]) -> dict[str, Any]:

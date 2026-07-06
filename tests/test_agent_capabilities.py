@@ -7,12 +7,15 @@ from visual_agent.agent_capabilities import (
     load_agent_profile,
     recommend_worker_config,
 )
+from visual_agent.agent_backends import resolve_backend_by_name
 
 
 def test_canonical_agent_name_normalizes_aliases() -> None:
     assert canonical_agent_name("Codex") == "codex"
     assert canonical_agent_name("claude") == "claude-code"
     assert canonical_agent_name("claude_code") == "claude-code"
+    assert canonical_agent_name("bugteam") == "mimo"
+    assert canonical_agent_name("mimo") == "mimo"
     assert canonical_agent_name("gemini-cli") == "gemini"
 
 
@@ -54,3 +57,35 @@ def test_agents_doctor_reports_install_status_and_capabilities() -> None:
     assert item["agent"] == "codex"
     assert "installed" in item
     assert item["capabilities_often_missed"]
+
+
+def test_mimo_backend_reads_ai_model_api_file(tmp_path) -> None:
+    source = tmp_path / "ai模型api.txt"
+    source.write_text(
+        "xiaomimimo专属apitp-cguzfkhr8fvsm83d5xamojm5r5fu6rtkdby69kmcz1zz81ae\n",
+        encoding="utf-8",
+    )
+
+    backend = resolve_backend_by_name("mimo", source=source)
+
+    assert backend is not None
+    assert backend["name"] == "mimo"
+    assert backend["env"]["ANTHROPIC_API_KEY"].startswith("tp-")
+    assert "token-plan-cn.xiaomimimo.com/anthropic" in backend["env"]["ANTHROPIC_BASE_URL"]
+
+
+def test_bugteam_backend_reads_token_base_url_and_model(tmp_path) -> None:
+    source = tmp_path / "model_api_keys.txt"
+    source.write_text(
+        "bugteam api_key=sk-bugteamabcdefghijklmnopqrstuvwxyz base_url=http://127.0.0.1:3000/v1 model=gpt-4.1-mini\n",
+        encoding="utf-8",
+    )
+
+    backend = resolve_backend_by_name("bugteam", source=source)
+
+    assert backend is not None
+    assert backend["name"] == "bugteam"
+    assert backend["provider"] == "openai"
+    assert backend["model"] == "gpt-4.1-mini"
+    assert backend["env"]["ANTHROPIC_API_KEY"].startswith("sk-")
+    assert backend["env"]["ANTHROPIC_BASE_URL"] == "http://127.0.0.1:3000/v1"

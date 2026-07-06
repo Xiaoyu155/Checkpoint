@@ -66,6 +66,7 @@ cloud = [
 ]
 
 [project.scripts]
+pacer = "visual_agent.cli:main"
 checkpoint = "visual_agent.cli:main"
 visual-agent = "visual_agent.cli:main"
 visual-agent-mcp = "visual_agent.mcp_server:main"
@@ -88,7 +89,7 @@ visual_agent = ["agent_profiles/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 cache_dir = ".pytest_cache_local"
 markers = [
     "e2e: end-to-end tests that run real CLI/workflows",

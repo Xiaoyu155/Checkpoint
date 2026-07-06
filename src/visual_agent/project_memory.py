@@ -21,10 +21,12 @@ from .models import to_jsonable
 def build_project_memory(
     *,
     workspace_root: str | Path,
+    repo_root: str | Path | None = None,
     goal: str | None = None,
     limit: int = 8,
 ) -> dict[str, Any]:
     workspace_path = Path(workspace_root).expanduser().resolve()
+    repo_path = Path(repo_root).expanduser().resolve() if repo_root is not None else workspace_path.parent
     summaries = list_missions(workspace_path)
     entries: list[dict[str, Any]] = []
     for summary in summaries:
@@ -47,6 +49,7 @@ def build_project_memory(
         "goal": str(goal or ""),
         "entry_count": len(selected),
         "entries": selected,
+        "instruction_memory": load_instruction_memory(repo_path),
         "patterns": _memory_patterns(entries),
         "recommendations": _memory_recommendations(selected),
     }
@@ -65,6 +68,17 @@ def project_memory_to_markdown(payload: dict[str, Any]) -> str:
     if recommendations:
         lines.extend(["", "### Recommendations", ""])
         lines.extend(f"- {item}" for item in recommendations)
+    instruction_memory = payload.get("instruction_memory") if isinstance(payload.get("instruction_memory"), dict) else {}
+    instruction_files = instruction_memory.get("files") if isinstance(instruction_memory.get("files"), list) else []
+    if instruction_files:
+        lines.extend(["", "### Project Instructions", ""])
+        for item in instruction_files:
+            if not isinstance(item, dict):
+                continue
+            lines.append(f"- `{item.get('path')}`")
+            excerpt = str(item.get("excerpt") or "").strip()
+            if excerpt:
+                lines.append(f"  {excerpt.splitlines()[0][:180]}")
     lines.extend(["", "### Relevant Missions", ""])
     for item in entries:
         stop = f" / {item.get('stop_reason')}" if item.get("stop_reason") else ""
@@ -89,6 +103,16 @@ def project_memory_to_markdown(payload: dict[str, Any]) -> str:
 def project_memory_handoff_notes(payload: dict[str, Any], *, max_items: int = 3) -> list[str]:
     recommendations = payload.get("recommendations") if isinstance(payload.get("recommendations"), list) else []
     notes = [str(item) for item in recommendations[: max(0, max_items)] if str(item).strip()]
+    instruction_memory = payload.get("instruction_memory") if isinstance(payload.get("instruction_memory"), dict) else {}
+    instruction_files = instruction_memory.get("files") if isinstance(instruction_memory.get("files"), list) else []
+    for item in instruction_files:
+        if len(notes) >= max(0, max_items):
+            break
+        if not isinstance(item, dict):
+            continue
+        excerpt = str(item.get("excerpt") or "").strip()
+        if excerpt:
+            notes.append(f"Project instruction `{item.get('path')}`: {excerpt.splitlines()[0][:180]}")
     if notes:
         return notes
     entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
@@ -106,6 +130,35 @@ def project_memory_handoff_notes(payload: dict[str, Any], *, max_items: int = 3)
 
 def payload_to_json(payload: dict[str, Any]) -> str:
     return json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2)
+
+
+def load_instruction_memory(repo_root: str | Path, *, max_files: int = 20, max_file_chars: int = 2000) -> dict[str, Any]:
+    """Load human-authored project instructions for worker handoff."""
+    root = Path(repo_root).expanduser().resolve()
+    files: list[dict[str, Any]] = []
+    for path in _instruction_memory_paths(root)[: max(0, max_files)]:
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except OSError:
+            continue
+        excerpt = text.strip()
+        truncated = len(excerpt) > max_file_chars
+        if truncated:
+            excerpt = excerpt[:max_file_chars].rstrip() + "\n[truncated]"
+        files.append(
+            {
+                "path": path.relative_to(root).as_posix(),
+                "chars": len(text),
+                "truncated": truncated,
+                "excerpt": excerpt,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "repo_root": str(root),
+        "file_count": len(files),
+        "files": files,
+    }
 
 
 def _memory_entry(
@@ -147,6 +200,30 @@ def _memory_entry(
             "verification_statuses": verification_statuses[-3:],
         },
     }
+
+
+def _instruction_memory_paths(root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    for name in ("PACER.md", "CHECKPOINT.md", "AGENTS.md"):
+        path = root / name
+        if path.is_file():
+            candidates.append(path)
+    for name in ("PACER.md", "memory.md"):
+        path = root / ".pacer" / name
+        if path.is_file():
+            candidates.append(path)
+    rules_dir = root / ".pacer" / "rules"
+    if rules_dir.is_dir():
+        candidates.extend(sorted(path for path in rules_dir.glob("*.md") if path.is_file()))
+    seen: set[Path] = set()
+    kept: list[Path] = []
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        kept.append(path)
+    return kept
 
 
 def _memory_patterns(entries: list[dict[str, Any]]) -> dict[str, Any]:

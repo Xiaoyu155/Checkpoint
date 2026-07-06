@@ -138,6 +138,28 @@ def test_successful_interaction_without_operation_receipt_does_not_count_as_real
     assert validate_operation_receipt(click).reason == "missing_operation_receipt"
 
 
+def test_run_command_receipt_counts_as_real_interaction() -> None:
+    command = WorkflowStepResult(
+        id="cmd",
+        action="run_command",
+        status=ActionStatus.SUCCESS,
+        metadata={
+            "operation_receipt": {
+                "schema_version": 1,
+                "engine": "subprocess",
+                "action": "run_command",
+                "live": True,
+                "exit_code": 0,
+                "actionability": {"checked": True, "executable": True},
+            }
+        },
+    )
+
+    assert validate_operation_receipt(command).valid is True
+    grade = grade_run([step("observe", "observe_browser"), step("assert", "assert_text"), command])
+    assert grade.valid_operation_receipts == 1
+
+
 def test_live_receipt_without_actionability_does_not_count_as_real() -> None:
     bad_receipt = WorkflowStepResult(
         id="click",

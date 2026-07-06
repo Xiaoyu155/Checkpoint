@@ -142,6 +142,87 @@ def test_quickstart_cli_prints_same_getting_started(capsys) -> None:
     assert "mission start" in output
 
 
+def test_model_select_cli_uses_configured_pool(tmp_path, capsys) -> None:
+    pool = tmp_path / "model_pool.json"
+    pool.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {"id": "cheap", "provider": "x", "model": "mini", "capability": 0.4, "cost": 0.05, "modes": ["cheap", "standard"]},
+                    {"id": "strong", "provider": "x", "model": "max", "capability": 0.9, "cost": 0.9, "modes": ["strong"]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = main(["model-select", "--goal", "fix typo in title", "--model-pool", str(pool), "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["selected"]["id"] == "cheap"
+
+
+def test_hourly_plan_cli_reads_tasks_file(tmp_path, capsys) -> None:
+    tasks = tmp_path / "tasks.json"
+    tasks.write_text(json.dumps({"tasks": [{"task_id": "t1", "objective": "Update docs", "worker_tier": "cheap"}]}), encoding="utf-8")
+
+    code = main(["hourly-plan", "--tasks-file", str(tasks), "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["scheduled"][0]["task_id"] == "t1"
+
+
+def test_notify_cli_builds_dry_run(tmp_path, capsys) -> None:
+    cfg = tmp_path / "notify.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "smtp_host": "smtp.example.com",
+                "smtp_port": 587,
+                "username": "sender@example.com",
+                "password": "secret",
+                "sender": "sender@example.com",
+                "recipient": "user@example.com",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = main(["notify", "--event", "quota_warning", "--payload", '{"quota":"5h 91%"}', "--config", str(cfg), "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["status"] == "planned"
+    assert payload["to"] == "user@example.com"
+
+
+def test_portfolio_dashboard_cli_invokes_server(tmp_path, monkeypatch) -> None:
+    captured = {}
+
+    def fake_serve(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr("visual_agent.portfolio_dashboard.serve_portfolio_dashboard", fake_serve)
+
+    code = main([
+        "portfolio-dashboard",
+        "--project",
+        str(tmp_path / "a"),
+        "--project",
+        str(tmp_path / "b"),
+        "--port",
+        "9999",
+        "--no-open",
+    ])
+
+    assert code == 0
+    assert captured["project_roots"] == [str(tmp_path / "a"), str(tmp_path / "b")]
+    assert captured["port"] == 9999
+    assert captured["open_browser"] is False
+
+
 def test_codex_check_cli_returns_one_when_any_workflow_fails(tmp_path, capsys, monkeypatch) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -1567,6 +1648,57 @@ def test_env_check_cli_writes_status_file(tmp_path: Path, capsys) -> None:
     text = (root / ".visual-agent-status.md").read_text(encoding="utf-8")
     assert "Environment" in text
     assert "project_type: nextjs" in text
+
+
+def test_test_plan_cli_outputs_focused_pytest_command(tmp_path: Path, capsys, monkeypatch) -> None:
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_security.py").write_text("def test_security():\n    assert True\n", encoding="utf-8")
+    monkeypatch.setattr("visual_agent.verification_profiles._git_changed_paths", lambda root, base: ["tests/test_security.py"])
+
+    code = main(["test-plan", "--repo-root", str(tmp_path), "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["command"] == "python -m pytest -q tests/test_security.py"
+    assert payload["profiles"][0]["name"] == "pytest-focused"
+
+
+def test_permission_plan_cli_outputs_command_risk(tmp_path: Path, capsys) -> None:
+    code = main(
+        [
+            "permission-plan",
+            "--repo-root",
+            str(tmp_path),
+            "--command",
+            "python -m pytest -q",
+            "--command",
+            "npm publish",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["decision"] == "ask"
+    assert payload["checks"][0]["decision"] == "allow"
+    assert payload["checks"][1]["decision"] == "ask"
+
+
+def test_slash_test_dispatches_to_test_plan(tmp_path: Path, capsys, monkeypatch) -> None:
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_security.py").write_text("def test_security():\n    assert True\n", encoding="utf-8")
+    monkeypatch.setattr("visual_agent.verification_profiles._git_changed_paths", lambda root, base: ["tests/test_security.py"])
+
+    code = main(["slash", "test", "--repo-root", str(tmp_path), "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert payload["command"] == "python -m pytest -q tests/test_security.py"
 
 
 def test_generate_fixture_cli_writes_template(tmp_path: Path, capsys) -> None:

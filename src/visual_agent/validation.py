@@ -42,6 +42,7 @@ SUPPORTED_ACTIONS = {
     "assert_response",
     "expect_download",
     "assert_file_exists",
+    "run_command",
     "assert_element_exists",
     "assert_url_contains",
     "assert_count",
@@ -78,6 +79,7 @@ REQUIRED_PARAMS = {
     "wait_for": ("condition",),
     "upload_file": ("path",),
     "drag": ("selector", "to_selector"),
+    "run_command": ("command",),
 }
 
 ASSERTION_ACTIONS = {
@@ -96,6 +98,7 @@ ASSERTION_ACTIONS = {
     "assert_no_layout_overlap",
     "assert_visual_quality",
     "assert_visual_text",
+    "run_command",
 }
 HIGH_RISK_ACTIONS = {"save_storage_state"}
 MUTATING_ACTIONS = {
@@ -112,6 +115,7 @@ MUTATING_ACTIONS = {
     "upload_file",
     "select_option",
     "drag",
+    "run_command",
 }
 SENSITIVE_NAME_HINTS = ("password", "passwd", "pwd", "token", "secret", "key", "cookie", "id_card", "ssn")
 PROHIBITED_COMMAND_FIELDS = {"shell", "command", "script", "cmd", "bash", "powershell", "exec", "execute", "subprocess", "system"}
@@ -158,7 +162,11 @@ def validate_workflow(
             issues.append(ValidationIssue("error", step.id, "Duplicate step id."))
         seen_ids.add(step.id)
 
-        validate_prohibited_shell_fields(step.id, step.params, issues)
+        # run_command legitimately uses a 'command' param — skip the blanket
+        # prohibition for that action; the workflow author is trusted for the
+        # command content (same trust model as URLs/selectors in other actions).
+        if step.action != "run_command":
+            validate_prohibited_shell_fields(step.id, step.params, issues)
 
         if step.action not in SUPPORTED_ACTIONS:
             issues.append(ValidationIssue("error", step.id, f"Unsupported action: {step.action}"))

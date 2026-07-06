@@ -4,7 +4,7 @@ from visual_agent.chief_engineer import build_chief_plan
 from visual_agent.chief_plans_store import save_plan
 from visual_agent.cli import main
 from visual_agent.missions import append_round, create_mission, default_budget_policy, write_final_report
-from visual_agent.project_memory import build_project_memory, project_memory_handoff_notes, project_memory_to_markdown
+from visual_agent.project_memory import build_project_memory, load_instruction_memory, project_memory_handoff_notes, project_memory_to_markdown
 from visual_agent.workspace import init_workspace
 
 
@@ -86,14 +86,44 @@ def test_project_memory_markdown_and_handoff_notes(tmp_path) -> None:
     assert "mission-checkout" in notes[0]
 
 
+def test_instruction_memory_loads_pacer_files(tmp_path) -> None:
+    (tmp_path / "PACER.md").write_text("Use focused tests before full pytest.\n", encoding="utf-8")
+    rules = tmp_path / ".pacer" / "rules"
+    rules.mkdir(parents=True)
+    (rules / "testing.md").write_text("Never claim done without verification evidence.\n", encoding="utf-8")
+
+    payload = load_instruction_memory(tmp_path)
+
+    assert payload["file_count"] == 2
+    paths = [item["path"] for item in payload["files"]]
+    assert paths == ["PACER.md", ".pacer/rules/testing.md"]
+    assert "focused tests" in payload["files"][0]["excerpt"]
+
+
+def test_project_memory_includes_instruction_memory_in_handoff(tmp_path) -> None:
+    workspace = seed_failed_checkout_mission(tmp_path)
+    (tmp_path / "PACER.md").write_text("Prefer smoke tests before full pytest.\n", encoding="utf-8")
+
+    payload = build_project_memory(workspace_root=workspace.root, repo_root=tmp_path, goal="checkout total")
+    text = project_memory_to_markdown(payload)
+    notes = project_memory_handoff_notes(payload, max_items=4)
+
+    assert payload["instruction_memory"]["file_count"] == 1
+    assert "Project Instructions" in text
+    assert any("PACER.md" in note for note in notes)
+
+
 def test_chief_memory_cli_outputs_json(tmp_path, capsys) -> None:
     workspace = seed_failed_checkout_mission(tmp_path)
+    (tmp_path / "PACER.md").write_text("Run the selected acceptance gate.\n", encoding="utf-8")
 
     code = main(
         [
             "chief-memory",
             "--workspace-root",
             str(workspace.root),
+            "--repo-root",
+            str(tmp_path),
             "--goal",
             "checkout total",
             "--format",
@@ -105,10 +135,13 @@ def test_chief_memory_cli_outputs_json(tmp_path, capsys) -> None:
     assert code == 0
     assert '"mission_id": "mission-checkout"' in out
     assert '"recommendations"' in out
+    assert '"instruction_memory"' in out
+    assert '"path": "PACER.md"' in out
 
 
 def test_chief_plan_includes_project_memory_in_worker_prompt(tmp_path, monkeypatch) -> None:
     workspace = seed_failed_checkout_mission(tmp_path)
+    (tmp_path / "PACER.md").write_text("Use focused tests before full pytest.\n", encoding="utf-8")
     write_verification_workflow(workspace, "checkout", affects="src/payment/")
     monkeypatch.setattr("visual_agent.chief_engineer.changed_files", lambda **_kwargs: ["src/payment/checkout.py"])
 
@@ -122,3 +155,4 @@ def test_chief_plan_includes_project_memory_in_worker_prompt(tmp_path, monkeypat
     assert plan.project_memory["entries"][0]["mission_id"] == "mission-checkout"
     assert "Project memory" in plan.worker_tracks[0]["command"]
     assert "Project memory" in plan.handoff_prompt
+    assert "PACER.md" in plan.worker_tracks[0]["command"]
