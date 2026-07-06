@@ -69,6 +69,7 @@ def test_start_background_chief_run_records_process(tmp_path, monkeypatch) -> No
     payload = start_background_chief_run(
         workspace_root=workspace.root,
         mission_id=mission_id,
+        agents=("codex",),
         test_command="python -m pytest -q",
         allow_test_edits=True,
         merge=True,
@@ -79,6 +80,8 @@ def test_start_background_chief_run_records_process(tmp_path, monkeypatch) -> No
     assert "chief-background-worker" in captured["argv"]
     assert "--mission" in captured["argv"]
     assert mission_id in captured["argv"]
+    assert "--agent" in captured["argv"]
+    assert "codex" in captured["argv"]
     assert "--test-command" in captured["argv"]
     assert "python -m pytest -q" in captured["argv"]
     assert "--allow-test-edits" in captured["argv"]
@@ -87,6 +90,7 @@ def test_start_background_chief_run_records_process(tmp_path, monkeypatch) -> No
     saved = json.loads(background_json.read_text(encoding="utf-8"))
     assert saved["pid"] == 43210
     assert saved["status"] == "running"
+    assert saved["agents"] == ["codex"]
     assert saved["test_command"] == "python -m pytest -q"
     assert saved["allow_test_edits"] is True
     assert saved["merge"] is True
@@ -116,12 +120,14 @@ def test_run_background_worker_writes_completion_receipt(tmp_path, monkeypatch) 
     payload = run_background_worker(
         workspace_root=workspace.root,
         mission_id=mission_id,
+        agents=("codex",),
         test_command="python -m pytest -q",
         allow_test_edits=True,
         merge=True,
     )
 
     assert payload["status"] == "verified"
+    assert captured["agents"] == ("codex",)
     assert captured["test_command"] == "python -m pytest -q"
     assert captured["allow_test_edits"] is True
     assert captured["merge"] is True

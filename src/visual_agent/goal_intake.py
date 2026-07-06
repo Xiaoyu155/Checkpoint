@@ -74,12 +74,12 @@ def _credential_candidates() -> list[Path]:
     return unique
 
 
-def resolve_cheap_backend(order: tuple[str, ...] = ()) -> dict[str, Any] | None:
-    """Resolve a configured cheap backend from the credential file.
+def resolve_cheap_backends(order: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+    """All configured cheap backends from the credential file, in rank order.
 
-    ``order`` names backend labels (e.g. ``("mimo", "deepseek")``) to try first;
-    unlisted backends keep their default rank. Returns None when no key is
-    found, so callers degrade to deterministic behavior."""
+    Returning every match (not just the best) lets the caller fail over at
+    call time — a configured key can still be an out-of-balance account
+    (e.g. DeepSeek HTTP 402), and the next backend may work."""
     specs = sorted(
         _INTAKE_BACKENDS,
         key=lambda spec: next(
@@ -87,25 +87,41 @@ def resolve_cheap_backend(order: tuple[str, ...] = ()) -> dict[str, Any] | None:
             len(order),
         ),
     )
+    resolved: list[dict[str, Any]] = []
+    seen_models: set[str] = set()
     for candidate in _credential_candidates():
         try:
             text = candidate.read_text(encoding="utf-8-sig")
         except OSError:
             continue
         for spec in specs:
+            if spec["model_id"] in seen_models:
+                continue
             for line in text.splitlines():
                 low = line.lower()
                 if any(label in low for label in spec["labels"]):
                     match = re.search(spec["key_re"], line)
                     if match:
-                        return {
+                        seen_models.add(spec["model_id"])
+                        resolved.append({
                             "model_id": spec["model_id"],
                             "api_key": match.group(0),
                             "base_url": spec["base_url"],
                             "endpoint": spec["endpoint"],
                             "max_tokens": spec["max_tokens"],
-                        }
-    return None
+                        })
+                        break
+    resolved.sort(key=lambda item: next(
+        (idx for idx, spec in enumerate(specs) if spec["model_id"] == item["model_id"]),
+        len(specs),
+    ))
+    return resolved
+
+
+def resolve_cheap_backend(order: tuple[str, ...] = ()) -> dict[str, Any] | None:
+    """Resolve the single best configured cheap backend (None when no key)."""
+    backends = resolve_cheap_backends(order)
+    return backends[0] if backends else None
 
 
 def auto_intake_backend() -> dict[str, Any] | None:
@@ -159,32 +175,47 @@ def refine_goal(
     if not clean or not enable_model:
         return fallback
 
-    # If the caller did not pin a backend, auto-resolve a cheap one (e.g. the
-    # user's DeepSeek key) so the receptionist just works for a novice.
-    resolved_model = model_id
+    # If the caller did not pin a backend, auto-resolve every configured cheap
+    # backend and fail over at call time: a configured key can still be an
+    # out-of-balance account (DeepSeek HTTP 402), and the next one may work.
+    attempts: list[dict[str, Any]]
     if api_key is None and base_url is None and model_id is None:
-        auto = auto_intake_backend()
-        if auto:
-            resolved_model = auto["model_id"]
-            api_key = auto["api_key"]
-            base_url = auto["base_url"]
-            endpoint = auto["endpoint"]
-            max_tokens = auto["max_tokens"]
+        attempts = [
+            {
+                "model_id": auto["model_id"],
+                "api_key": auto["api_key"],
+                "base_url": auto["base_url"],
+                "endpoint": auto["endpoint"],
+                "max_tokens": auto["max_tokens"],
+            }
+            for auto in resolve_cheap_backends()
+        ] or [{"model_id": model_id, "api_key": api_key, "base_url": base_url, "endpoint": endpoint, "max_tokens": max_tokens}]
+    else:
+        attempts = [{"model_id": model_id, "api_key": api_key, "base_url": base_url, "endpoint": endpoint, "max_tokens": max_tokens}]
 
-    try:
-        text = _call_intake_model(
-            clean,
-            answers=answers,
-            model_id=resolved_model,
-            timeout_seconds=timeout_seconds,
-            api_key=api_key,
-            base_url=base_url,
-            endpoint=endpoint,
-            max_tokens=max_tokens,
-        )
-        parsed = _parse_intake_json(text)
-    except Exception as exc:  # noqa: BLE001 - any failure degrades to deterministic
-        fallback["model_error"] = str(exc)[:200]
+    parsed: dict[str, Any] | None = None
+    resolved_model: str | None = None
+    errors: list[str] = []
+    for attempt in attempts:
+        try:
+            text = _call_intake_model(
+                clean,
+                answers=answers,
+                model_id=attempt["model_id"],
+                timeout_seconds=timeout_seconds,
+                api_key=attempt["api_key"],
+                base_url=attempt["base_url"],
+                endpoint=attempt["endpoint"],
+                max_tokens=attempt["max_tokens"],
+            )
+            parsed = _parse_intake_json(text)
+            resolved_model = attempt["model_id"]
+            break
+        except Exception as exc:  # noqa: BLE001 - try the next configured backend
+            errors.append(f"{attempt['model_id'] or 'default'}: {str(exc)[:120]}")
+    if parsed is None:
+        fallback["model_error"] = "; ".join(errors)[:300]
+        fallback["model_unavailable"] = True
         return fallback
 
     questions = [str(q).strip() for q in (parsed.get("clarifying_questions") or []) if str(q).strip()][:3]
@@ -193,7 +224,7 @@ def refine_goal(
         "source": "model",
         "model_id": resolved_model or DEFAULT_INTAKE_MODEL,
         "input_goal": clean,
-        "already_clear": not questions,
+        "already_clear": bool(clarity["ok"]) and not questions,
         "clarifying_questions": questions,
         "suggested_goal": suggested,
         "acceptance_hint": str(parsed.get("acceptance_hint") or "").strip(),
@@ -250,17 +281,39 @@ def intake_to_markdown(payload: dict[str, Any]) -> str:
     if payload.get("model_error"):
         lines.append(f"（模型调用失败，已回退：{payload['model_error']}）")
     lines.append("")
+    lines.extend(intake_dialogue_lines(payload))
+    return "\n".join(lines)
+
+
+def intake_dialogue_lines(payload: dict[str, Any], *, answers: list[str] | None = None) -> list[str]:
+    """Return the conversational lines the workbench should show.
+
+    The caller can feed the same payload into a Tk transcript, CLI output, or a
+    web panel without hard-coding the phrasing in multiple places."""
+    lines: list[str] = []
+    normalized_answers = [str(item).strip() for item in (answers or []) if str(item).strip()]
+    if normalized_answers:
+        lines.append("你刚才补充了：")
+        lines.extend(f"- {item}" for item in normalized_answers)
+        lines.append("")
     if payload.get("already_clear"):
         lines.append("目标已经足够清晰，可以直接派活。")
     else:
-        lines.append("建议先回答这几个问题：")
-        lines.extend(f"- {q}" for q in payload.get("clarifying_questions") or [])
+        questions = [str(q).strip() for q in (payload.get("clarifying_questions") or []) if str(q).strip()]
+        if questions:
+            lines.append("我还需要确认这些点：")
+            lines.extend(f"- {q}" for q in questions)
+        else:
+            lines.append("目前还缺少足够的细节。")
     lines.append("")
-    if payload.get("suggested_goal") and payload["suggested_goal"] != payload.get("input_goal"):
-        lines.append(f"**建议改写为：** {payload['suggested_goal']}")
-    if payload.get("acceptance_hint"):
-        lines.append(f"**建议验收方式：** {payload['acceptance_hint']}")
-    return "\n".join(lines)
+    suggested = str(payload.get("suggested_goal") or "").strip()
+    input_goal = str(payload.get("input_goal") or "").strip()
+    if suggested and suggested != input_goal:
+        lines.append(f"建议改写：{suggested}")
+    hint = str(payload.get("acceptance_hint") or "").strip()
+    if hint:
+        lines.append(f"建议验收：{hint}")
+    return lines
 
 
 def payload_to_json(payload: dict[str, Any]) -> str:

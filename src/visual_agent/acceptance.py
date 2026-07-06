@@ -8,8 +8,11 @@ from .run_profile import MUTATING_ACTIONS
 
 # Actions that exercise the product the way a user would. A run that executed
 # none of these for real (dry-run skips do not count) can only claim page
-# inspection, never product acceptance.
-INTERACTION_ACTIONS = frozenset(MUTATING_ACTIONS)
+# inspection, never product acceptance.  ``run_command`` is included because
+# executing the project's own test suite is real product verification — it
+# proves the code works, even though it exercises the CLI/API layer rather
+# than a GUI widget.
+INTERACTION_ACTIONS = frozenset(MUTATING_ACTIONS | {"run_command"})
 
 INSPECTION_ONLY_WARNING = (
     "Page inspection only: no real user interaction was executed. "
@@ -111,6 +114,17 @@ def validate_operation_receipt(step: Any) -> OperationReceiptValidation:
     actionability = receipt.get("actionability")
     if not isinstance(actionability, dict) or not bool(actionability.get("checked")):
         return OperationReceiptValidation(False, "missing_actionability", step_id, action)
+
+    # ``run_command`` exercises the product through its CLI/test layer rather
+    # than a GUI widget.  The receipt only needs ``checked``, ``executable``,
+    # and ``live`` — UI-specific fields (count, visible, enabled) do not apply.
+    if action == "run_command":
+        if not bool(actionability.get("executable")):
+            return OperationReceiptValidation(False, "command_not_executable", step_id, action)
+        if not bool(receipt.get("exit_code") == 0):
+            return OperationReceiptValidation(False, "command_failed", step_id, action)
+        return OperationReceiptValidation(True, "", step_id, action)
+
     try:
         count = int(actionability.get("count", 0))
     except (TypeError, ValueError):

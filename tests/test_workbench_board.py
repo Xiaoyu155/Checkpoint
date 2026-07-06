@@ -22,8 +22,8 @@ class TestBoardColumn:
         assert board_column("running") == "in_progress"
         assert board_column("preview_running") == "in_progress"
 
-    def test_verified_unmerged_is_in_review(self):
-        assert board_column("verified") == "in_review"
+    def test_verified_unmerged_is_pending_merge(self):
+        assert board_column("verified") == "pending_merge"
 
     def test_verified_merged_is_done(self):
         assert board_column("verified", merge_state="merged") == "done"
@@ -78,7 +78,7 @@ class TestAttachBoardFields:
             mission_id="m1", status="verified",
         )
         items = attach_board_fields(ws.root, [{"mission_id": "m1", "status": "verified"}])
-        assert items[0]["board_column"] == "in_review"
+        assert items[0]["board_column"] == "pending_merge"
         assert items[0]["can_merge"] is True
 
     def test_already_merged_cannot_merge_again(self, tmp_path):

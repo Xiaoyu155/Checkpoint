@@ -43,7 +43,7 @@ def test_mission_storage_roundtrip(tmp_path) -> None:
     loaded = load_mission(workspace, "mission-1")
     assert loaded is not None
     assert loaded["mission_id"] == mission["mission_id"]
-    assert loaded["product"] == "DevPacer"
+    assert loaded["product"] == "Pacer"
     assert loaded["verification_engine"] == "Checkpoint"
     assert load_rounds(workspace, "mission-1")[0]["type"] == "preview"
     assert report["path"].endswith("final_report.md")

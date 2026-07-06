@@ -24,6 +24,7 @@ MUTATING_ACTIONS = {
     "upload_file",
     "select_option",
     "drag",
+    "run_command",
 }
 
 

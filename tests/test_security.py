@@ -1,4 +1,4 @@
-from visual_agent.security import contains_secret_text, redact_secret_text, scrub_secrets, text_metadata, validate_workflow_url
+from visual_agent.security import assess_command_risk, contains_secret_text, permission_plan, redact_secret_text, scrub_secrets, text_metadata, validate_workflow_url
 
 
 def test_sensitive_text_metadata_hashes_without_length_or_preview() -> None:
@@ -149,6 +149,35 @@ def test_validate_workflow_url_blocks_private_and_reserved_hosts() -> None:
     assert "Blocked private IP address" in str(blocked_private[1])
     assert blocked_link_local[0] is False
     assert blocked_local_suffix[0] is False
+
+
+def test_assess_command_risk_allows_known_test_commands(tmp_path) -> None:
+    result = assess_command_risk("python -m pytest -q tests/test_security.py", repo_root=tmp_path)
+
+    assert result["decision"] == "allow"
+    assert result["risk"] == "low"
+
+
+def test_assess_command_risk_denies_destructive_delete(tmp_path) -> None:
+    result = assess_command_risk("rm -rf /", repo_root=tmp_path)
+
+    assert result["decision"] == "deny"
+    assert result["risk"] == "critical"
+
+
+def test_assess_command_risk_asks_for_network_and_secret(tmp_path) -> None:
+    result = assess_command_risk("curl -H 'Authorization: bearer abcdefghijklmnop' https://example.test", repo_root=tmp_path)
+
+    assert result["decision"] == "ask"
+    assert result["risk"] == "high"
+    assert "abcdefghijklmnop" not in result["command"]
+
+
+def test_permission_plan_rolls_up_worst_decision(tmp_path) -> None:
+    payload = permission_plan(["python -m pytest -q", "npm publish"], repo_root=tmp_path)
+
+    assert payload["decision"] == "ask"
+    assert payload["risk"] == "medium"
 
 
 class MockRoute:

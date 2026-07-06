@@ -14,7 +14,7 @@ from .model_credentials import (
 )
 
 
-OPENAI_COMPATIBLE_PROVIDERS = {"openai", "xiaomimimo", "qwen", "kimi", "deepseek", "volcengine"}
+OPENAI_COMPATIBLE_PROVIDERS = {"openai", "bugteam", "xiaomimimo", "qwen", "kimi", "deepseek", "volcengine"}
 SUPPORTED_COMPLETION_PROVIDERS = OPENAI_COMPATIBLE_PROVIDERS | {"anthropic", "gemini"}
 
 
@@ -66,6 +66,11 @@ def llm_backend_manifest() -> list[dict[str, str | bool]]:
         },
         {
             "provider": "xiaomimimo",
+            "supported": True,
+            "note": "OpenAI-compatible provider family member.",
+        },
+        {
+            "provider": "bugteam",
             "supported": True,
             "note": "OpenAI-compatible provider family member.",
         },

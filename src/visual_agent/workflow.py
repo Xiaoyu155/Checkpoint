@@ -903,6 +903,9 @@ class WorkflowRuntime:
         if action == "assert_file_exists":
             return self._assert_file_exists(step, context)
 
+        if action == "run_command":
+            return self._run_command(step, context, dry_run=step_dry_run)
+
         if action == "assert_element_exists":
             return self._assert_element_exists(step, context)
 
@@ -1390,6 +1393,129 @@ class WorkflowRuntime:
             status=ActionStatus.SUCCESS,
             message="file assertion passed",
             metadata=actual,
+        )
+
+    def _run_command(self, step: WorkflowStep, context: WorkflowContext, *, dry_run: bool) -> WorkflowStepResult:
+        """Execute a shell command and assert exit code 0.
+
+        Params:
+            command (str): the command to run (required).
+            cwd (str): working directory; defaults to the workflow run dir.
+            timeout_seconds (int|float): max wait; default 120.
+            expect_text (str): if set, assert this text appears in combined output.
+            expect_exit_code (int): expected exit code; default 0.
+            description (str): human label for the report.
+
+        This action is assertion-only: it proves a command succeeds, not an
+        arbitrary code-execution escape hatch.  The command string is taken
+        verbatim from the authored workflow YAML — the workflow author is
+        trusted for the command content, same as they are trusted for URLs and
+        selectors in other actions.
+        """
+        import subprocess
+
+        command = str(step.params.get("command") or "").strip()
+        if not command:
+            return self._assertion_failed(
+                step, step.action, "run_command requires 'command'.",
+                soft=bool(step.params.get("soft_assert")),
+            )
+        # Default cwd: explicit param > repo root (workspace parent) > run_dir
+        cwd = str(step.params.get("cwd") or "").strip()
+        if not cwd:
+            ws = str(context.resources.get("workspace_root") or "").strip()
+            if ws:
+                cwd = str(Path(ws).parent)
+            else:
+                cwd = str(context.run_dir)
+        timeout = float(step.params.get("timeout_seconds") or 120.0)
+        expect_exit = int(step.params.get("expect_exit_code") or 0)
+        expect_text = str(step.params.get("expect_text") or "").strip()
+        description = str(step.params.get("description") or command[:80])
+
+        if dry_run:
+            return WorkflowStepResult(
+                id=step.id,
+                action=step.action,
+                status=ActionStatus.DRY_RUN,
+                message=f"command skipped by dry-run: {description}",
+                metadata={
+                    "command": command,
+                    "description": description,
+                    "dry_run": True,
+                },
+            )
+
+        try:
+            completed = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=cwd,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except subprocess.TimeoutExpired:
+            return self._assertion_failed(
+                step, step.action,
+                f"Command timed out after {timeout}s: {description}",
+                soft=bool(step.params.get("soft_assert")),
+                metadata={"command": command, "timeout_seconds": timeout},
+            )
+        except OSError as exc:
+            return self._assertion_failed(
+                step, step.action,
+                f"Command launch failed: {exc}",
+                soft=bool(step.params.get("soft_assert")),
+                metadata={"command": command, "error": str(exc)},
+            )
+
+        combined_output = (completed.stdout or "") + "\n" + (completed.stderr or "")
+        metadata: dict[str, Any] = {
+            "command": command,
+            "exit_code": completed.returncode,
+            "stdout_lines": len((completed.stdout or "").splitlines()),
+            "stderr_lines": len((completed.stderr or "").splitlines()),
+            "description": description,
+        }
+
+        if completed.returncode != expect_exit:
+            tail = combined_output.strip()[-500:]
+            return self._assertion_failed(
+                step, step.action,
+                f"Command exit code {completed.returncode} != {expect_exit}: {description}\n{tail}",
+                soft=bool(step.params.get("soft_assert")),
+                metadata=metadata,
+            )
+
+        if expect_text and expect_text not in combined_output:
+            return self._assertion_failed(
+                step, step.action,
+                f"Expected text not found in output: {expect_text}",
+                soft=bool(step.params.get("soft_assert")),
+                metadata=metadata,
+            )
+
+        return WorkflowStepResult(
+            id=step.id,
+            action=step.action,
+            status=ActionStatus.SUCCESS,
+            message=f"command passed: {description}",
+            metadata={
+                **metadata,
+                "operation_receipt": {
+                    "schema_version": 1,
+                    "engine": "subprocess",
+                    "action": "run_command",
+                    "live": True,
+                    "command": command[:200],
+                    "exit_code": completed.returncode,
+                    "description": description,
+                    "actionability": {"checked": True, "executable": True},
+                },
+            },
         )
 
     def _assert_element_exists(self, step: WorkflowStep, context: WorkflowContext) -> WorkflowStepResult:
@@ -1962,6 +2088,7 @@ def is_retry_safe_action(action: str) -> bool:
         "assert_response",
         "assert_file_exists",
         "assert_visual_quality",
+        "run_command",
     }
 
 

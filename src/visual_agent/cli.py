@@ -50,6 +50,7 @@ from .gui import (
     open_workspace_window,
 )
 from .models import to_jsonable
+from .notifications import build_event_notification, notification_config_template, send_email_notification
 from .playwright_env import PLAYWRIGHT_INSTALL_HINT, playwright_runtime_status
 from .quality import run_release_trial
 from .recorder import record_browser_session
@@ -61,7 +62,9 @@ from .reports import (
     write_run_history_report,
 )
 from .run_profile import RUN_PROFILE_CHOICES, SAFE_RUN_PROFILE_CHOICES
+from .dynamic_model_selector import select_model_for_task, selection_to_dict, selection_to_markdown
 from .vlm import detect_cloud_vision_backend, detect_vlm_backend, public_engine_status, vlm_doctor_summary
+from .workbench_audit import handle_workbench_audit_command
 from .workspace import (
     build_workspace_risk_policy_template,
     build_workspace_risk_policy_apply_plan,
@@ -318,16 +321,39 @@ def write_completion_scripts(output_dir: str | Path = ".") -> dict[str, str]:
     return {"bash": str(bash_path), "zsh": str(zsh_path)}
 
 
+class _CoreHelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Hide the full subcommand wall from --help; the curated list in the
+    description is what new users should see. All commands still work."""
+
+    def _format_action(self, action: argparse.Action) -> str:
+        if action.__class__.__name__ == "_ChoicesPseudoAction":
+            return ""
+        return super()._format_action(action)
+
+
 def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=prog,
+        formatter_class=_CoreHelpFormatter,
         description=(
-            "Checkpoint local verification CLI. The package and legacy command are named visual-agent; "
-            "checkpoint is the preferred brand-aligned alias."
+            "Pacer — 本地 AI 编码任务调度器（旧名 checkpoint / visual-agent，命令仍兼容）。\n"
+            "\n"
+            "常用命令（黄金路径）：\n"
+            "  init          在当前项目初始化工作空间\n"
+            "  dashboard     启动 Web 工作台（浏览器看板）\n"
+            "  app           启动桌面工作台窗口\n"
+            "  mission       派发/管理 AI 编码任务（start/list/queue/worker）\n"
+            "  agents        检测已安装的 AI 工具（agents doctor）\n"
+            "  doctor        全面健康检查\n"
+            "  quickstart    五分钟上手向导\n"
+            "\n"
+            "其余命令为高级/内部用途，用 `<命令> --help` 查看详情。"
         ),
     )
     parser.add_argument("--version", action="store_true", help="Show version and runtime information, then exit.")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    # metavar hides the 200+ subcommand wall from --help; the full list still
+    # works and is discoverable via shell completion.
+    subparsers = parser.add_subparsers(dest="command", required=True, metavar="<command>")
 
     click = subparsers.add_parser("click", help="Locate a target on screen and click it.")
     click.add_argument("--target", required=True, help="Visible UI target name, for example 登录.")
@@ -653,6 +679,10 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
 
     subparsers.add_parser("quickstart", help="Print the shortest Checkpoint getting-started path.")
 
+    slash = subparsers.add_parser("slash", help="Run a slash-style shortcut command, e.g. slash plan --goal ...")
+    slash.add_argument("slash_command", help="Shortcut name: plan, memory, test, risk, verify, status.")
+    slash.add_argument("slash_args", nargs=argparse.REMAINDER, help="Arguments passed to the target command.")
+
     chief_plan = subparsers.add_parser("chief-plan", help="Build a chief-engineer task plan for AI coding agents.")
     chief_plan.add_argument("--goal", required=True, help="User objective to turn into an executable engineering plan.")
     chief_plan.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing Checkpoint workflows.")
@@ -734,6 +764,7 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
 
     chief_memory = subparsers.add_parser("chief-memory", help="Summarize evidence-derived DevPacer project memory.")
     chief_memory.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing missions and plans.")
+    chief_memory.add_argument("--repo-root", default=".", help="Repository root for PACER.md/.pacer instruction memory. Default: current directory.")
     chief_memory.add_argument("--goal", default=None, help="Optional goal to rank relevant previous missions.")
     chief_memory.add_argument("--limit", type=int, default=8, help="Maximum memory entries. Default: 8.")
     chief_memory.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
@@ -756,6 +787,38 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
 
     quota = subparsers.add_parser("quota", help="Show the Claude subscription 5-hour/7-day quota snapshot (not API spend).")
     quota.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    model_select = subparsers.add_parser("model-select", help="Dynamically choose a model from configured candidates for one task.")
+    model_select.add_argument("--goal", required=True, help="Task objective.")
+    model_select.add_argument("--changed-file", action="append", default=[], help="Changed or expected file path. Can be repeated.")
+    model_select.add_argument("--acceptance", action="append", default=[], help="Acceptance criterion. Can be repeated.")
+    model_select.add_argument("--repeated-failure", action="store_true", help="Escalate because a previous attempt failed.")
+    model_select.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing model_pool.json and quota context.")
+    model_select.add_argument("--model-pool", default=None, help="Optional model pool JSON. Default: <workspace-root>/model_pool.json.")
+    model_select.add_argument("--credential-source", default=None, help="Optional credential source for auto-discovered providers.")
+    model_select.add_argument("--quota-file", default=None, help="Optional subscription quota snapshot JSON.")
+    model_select.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    permission_plan_cmd = subparsers.add_parser("permission-plan", help="Assess command risk before an agent or automation run.")
+    permission_plan_cmd.add_argument("--command", dest="assess_command", action="append", required=True, help="Command to assess. Can be repeated.")
+    permission_plan_cmd.add_argument("--repo-root", default=".", help="Repository root for path-safety checks. Default: current directory.")
+    permission_plan_cmd.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    hourly_plan = subparsers.add_parser("hourly-plan", help="Plan ready tasks inside the current subscription quota window.")
+    hourly_plan.add_argument("--tasks-file", required=True, help="JSON file containing a list of tasks or {tasks:[...]}.")
+    hourly_plan.add_argument("--quota-file", default=None, help="Optional subscription quota snapshot JSON.")
+    hourly_plan.add_argument("--hours", type=float, default=5.0, help="Planning window hours. Default: 5.")
+    hourly_plan.add_argument("--reserve-minutes", type=int, default=45, help="Strong-model reserve minutes. Default: 45.")
+    hourly_plan.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    notify = subparsers.add_parser("notify", help="Build or send an email notification for mission/quota events.")
+    notify.add_argument("--event", default="mission_stopped", help="Event name, e.g. mission_verified, quota_warning, worker_error.")
+    notify.add_argument("--payload", default=None, help="Notification payload JSON string.")
+    notify.add_argument("--payload-file", default=None, help="Notification payload JSON file.")
+    notify.add_argument("--config", default=None, help="Notification config JSON. Default: ~/.checkpoint/notifications.json.")
+    notify.add_argument("--send", action="store_true", help="Actually send email. Default is dry-run.")
+    notify.add_argument("--template", action="store_true", help="Print a notification config template.")
+    notify.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
     subparsers.add_parser(
         "quota-statusline",
@@ -869,6 +932,7 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     chief_background_worker = subparsers.add_parser("chief-background-worker", help=argparse.SUPPRESS)
     chief_background_worker.add_argument("--mission", required=True, help=argparse.SUPPRESS)
     chief_background_worker.add_argument("--workspace-root", default=".agent-workspace", help=argparse.SUPPRESS)
+    chief_background_worker.add_argument("--agent", action="append", default=[], help=argparse.SUPPRESS)
     chief_background_worker.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run", help=argparse.SUPPRESS)
     chief_background_worker.add_argument("--include-slow", action="store_true", help=argparse.SUPPRESS)
     chief_background_worker.add_argument("--max-workflows", type=int, default=10, help=argparse.SUPPRESS)
@@ -891,8 +955,25 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     dashboard_cmd.add_argument("--port", type=int, default=8787, help="Bind port. Default: 8787.")
     dashboard_cmd.add_argument("--no-open", action="store_true", help="Do not auto-open the browser.")
 
+    portfolio_cmd = subparsers.add_parser("portfolio-dashboard", help="Serve xiao's multi-project dashboard.")
+    portfolio_cmd.add_argument("--project", action="append", required=True, help="Project root to visualize. Can be repeated.")
+    portfolio_cmd.add_argument("--host", default="127.0.0.1", help="Bind host. Default: 127.0.0.1 (local only).")
+    portfolio_cmd.add_argument("--port", type=int, default=8797, help="Bind port. Default: 8797.")
+    portfolio_cmd.add_argument("--no-open", action="store_true", help="Do not auto-open the browser.")
+
     app_cmd = subparsers.add_parser("app", help="Open the DevPacer desktop workbench (a real window: pick a project, type a goal, run).")
     app_cmd.add_argument("--project", default=None, help="Optional project folder to preselect.")
+
+    workbench_audit = subparsers.add_parser(
+        "workbench-audit",
+        help="Run a 10-round natural-language audit of the workbench entry chain and write a dedicated review document.",
+    )
+    workbench_audit.add_argument("--project-dir", default=".", help="Project directory that the workbench should validate.")
+    workbench_audit.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root used for the audit report.")
+    workbench_audit.add_argument("--output", default=None, help="Output markdown or JSON file. Default: <workspace-root>/reports/workbench_entry_audit_<project>_<timestamp>.md.")
+    workbench_audit.add_argument("--no-model", action="store_true", help="Disable model-assisted intake and use deterministic fallback only.")
+    workbench_audit.add_argument("--backend-order", default="mimo,deepseek", help="Comma-separated backend preference for model-assisted intake.")
+    workbench_audit.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     verify = subparsers.add_parser("verify", help="Run verification-tagged workspace workflows.")
     verify.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing workflows.")
@@ -930,6 +1011,11 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     codex_check.add_argument("--strict", action="store_true", help="Exit non-zero on a coverage gap (uncovered or fallback-only changes), not just on failures.")
     codex_check.add_argument("--from-step", default=None, help="Start each selected workflow from the named step id.")
     codex_check.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    test_plan = subparsers.add_parser("test-plan", help="Print the auto-selected local test command without running it.")
+    test_plan.add_argument("--repo-root", default=".", help="Git repository root. Default: current directory.")
+    test_plan.add_argument("--base", default="HEAD", help="Git base ref for changed-file selection. Default: HEAD.")
+    test_plan.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     connect = subparsers.add_parser("connect", help="Connect Checkpoint to an AI coding platform.")
     connect.add_argument("platform", choices=["claude-code", "cursor", "codex"])
@@ -1640,6 +1726,18 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(to_jsonable(index), ensure_ascii=False, indent=2))
         return 0
+    if args.command == "workbench-audit":
+        return handle_workbench_audit_command(args)
+    if args.command == "portfolio-dashboard":
+        from .portfolio_dashboard import serve_portfolio_dashboard
+
+        serve_portfolio_dashboard(
+            project_roots=list(args.project or []),
+            host=args.host,
+            port=args.port,
+            open_browser=not args.no_open,
+        )
+        return 0
     if args.command in CLOUD_COMMANDS:
         from .cli_cloud import handle_cloud_command
 
@@ -1688,6 +1786,77 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
         return 0 if payload.get("status") == "success" else 1
+    if args.command == "model-select":
+        quota_snapshot = _load_optional_json(args.quota_file)
+        selection = select_model_for_task(
+            objective=args.goal,
+            changed_files=args.changed_file,
+            acceptance_criteria=args.acceptance,
+            repeated_failure=args.repeated_failure,
+            quota_snapshot=quota_snapshot,
+            workspace_root=args.workspace_root,
+            config_path=args.model_pool,
+            credential_source=args.credential_source,
+        )
+        if args.format == "json":
+            print(json.dumps(selection_to_dict(selection), ensure_ascii=False, indent=2))
+        else:
+            print(selection_to_markdown(selection))
+        return 0 if selection.status == "selected" else 1
+    if args.command == "permission-plan":
+        from .security import permission_plan, permission_plan_to_markdown
+
+        payload = permission_plan(list(args.assess_command or []), repo_root=args.repo_root)
+        if args.format == "json":
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        else:
+            print(permission_plan_to_markdown(payload))
+        return 1 if payload.get("decision") == "deny" else 0
+    if args.command == "hourly-plan":
+        from .hourly_budget import build_hourly_plan, hourly_plan_to_markdown
+
+        raw = _load_required_json(args.tasks_file)
+        tasks = raw.get("tasks") if isinstance(raw, dict) else raw
+        if not isinstance(tasks, list):
+            print(json.dumps({"status": "blocked", "reason": "tasks_file_must_contain_list"}, ensure_ascii=False, indent=2))
+            return 1
+        payload = build_hourly_plan(
+            tasks=tasks,
+            quota_snapshot=_load_optional_json(args.quota_file),
+            hours=args.hours,
+            reserve_minutes=args.reserve_minutes,
+        )
+        if args.format == "json":
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        else:
+            print(hourly_plan_to_markdown(payload))
+        return 0
+    if args.command == "notify":
+        if args.template:
+            print(json.dumps(notification_config_template(), ensure_ascii=False, indent=2))
+            return 0
+        payload = {}
+        if args.payload_file:
+            payload = _load_required_json(args.payload_file)
+        elif args.payload:
+            payload = json.loads(args.payload)
+        notification = build_event_notification(args.event, payload if isinstance(payload, dict) else {"message": str(payload)})
+        result = send_email_notification(notification, config_path=args.config, dry_run=not args.send)
+        if args.format == "markdown":
+            print(f"## Notification\n\nStatus: `{result.get('status')}`\n\nSubject: {result.get('subject') or notification.get('subject')}\n")
+            if result.get("body"):
+                print("```text")
+                print(str(result["body"]).rstrip())
+                print("```")
+        else:
+            print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
+        return 0 if result.get("status") in {"planned", "sent", "skipped"} else 1
+    if args.command == "slash":
+        target = slash_command_to_argv(args.slash_command, list(args.slash_args or []))
+        if not target:
+            print(json.dumps({"status": "error", "reason": "unknown_slash_command", "command": args.slash_command}, ensure_ascii=False, indent=2))
+            return 2
+        return main(target)
     if args.command == "quickstart":
         print(build_welcome_message("checkpoint"))
         return 0
@@ -1737,6 +1906,21 @@ def quote_cli_arg(value: str) -> str:
     return text
 
 
+def slash_command_to_argv(name: str, args: list[str]) -> list[str]:
+    normalized = str(name or "").strip().lstrip("/").lower()
+    mapping = {
+        "plan": "chief-plan",
+        "memory": "chief-memory",
+        "test": "test-plan",
+        "risk": "permission-plan",
+        "permission": "permission-plan",
+        "verify": "verify-now",
+        "status": "agent-status",
+    }
+    target = mapping.get(normalized)
+    return [target, *args] if target else []
+
+
 def load_inputs(raw_inputs: str | None, inputs_file: str | None) -> dict:
     if raw_inputs and inputs_file:
         raise ValueError("Use either --inputs or --inputs-file, not both.")
@@ -1745,6 +1929,16 @@ def load_inputs(raw_inputs: str | None, inputs_file: str | None) -> dict:
     if raw_inputs:
         return json.loads(raw_inputs)
     return {}
+
+
+def _load_required_json(path: str | Path) -> Any:
+    return json.loads(Path(path).expanduser().read_text(encoding="utf-8-sig"))
+
+
+def _load_optional_json(path: str | Path | None) -> Any:
+    if not path:
+        return None
+    return _load_required_json(path)
 
 
 def parse_csv_set(value: str | None) -> set[str]:

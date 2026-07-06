@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ def detect_verification_profiles(repo_root: str | Path) -> list[dict[str, Any]]:
     root = Path(repo_root).expanduser().resolve()
     profiles: list[dict[str, Any]] = []
     profiles.extend(_node_profiles(root))
-    profiles.extend(_python_profiles(root))
+    profiles.extend(_python_profiles(root, base="HEAD"))
     profiles.extend(_rust_profiles(root))
     profiles.extend(_go_profiles(root))
     return _dedupe_profiles(profiles)
@@ -30,14 +31,34 @@ def choose_verification_command(repo_root: str | Path) -> str:
     return str(profiles[0]["command"]) if profiles else ""
 
 
+def build_test_plan(repo_root: str | Path, *, base: str = "HEAD") -> dict[str, Any]:
+    root = Path(repo_root).expanduser().resolve()
+    profiles: list[dict[str, Any]] = []
+    profiles.extend(_node_profiles(root))
+    profiles.extend(_python_profiles(root, base=base))
+    profiles.extend(_rust_profiles(root))
+    profiles.extend(_go_profiles(root))
+    profiles = _dedupe_profiles(profiles)
+    command = str(profiles[0]["command"]) if profiles else ""
+    return {
+        "status": "found" if command else "not_found",
+        "command": command,
+        "base": base,
+        "profiles": profiles,
+    }
+
+
 def resolve_test_command(command: str | None, *, repo_root: str | Path) -> tuple[str | None, dict[str, Any] | None]:
     text = str(command or "").strip()
+    if not text:
+        return None, None
     if text and text.lower() != "auto":
         return text, None
-    detected = choose_verification_command(repo_root)
+    plan = build_test_plan(repo_root)
+    detected = str(plan.get("command") or "")
     if not detected:
         return (None if not text else ""), {"source": "auto", "status": "not_found", "profiles": []}
-    return detected, {"source": "auto", "status": "found", "command": detected, "profiles": detect_verification_profiles(repo_root)}
+    return detected, {"source": "auto", **plan}
 
 
 def _node_profiles(root: Path) -> list[dict[str, Any]]:
@@ -77,12 +98,89 @@ def _node_profiles(root: Path) -> list[dict[str, Any]]:
     return profiles
 
 
-def _python_profiles(root: Path) -> list[dict[str, Any]]:
+def _python_profiles(root: Path, *, base: str) -> list[dict[str, Any]]:
     markers = ("pytest.ini", "tox.ini", "pyproject.toml", "setup.cfg")
     has_tests = any((root / name).exists() for name in markers) or any((root / name).is_dir() for name in ("tests", "test"))
     if not has_tests:
         return []
+    focused = _focused_pytest_profile(root, base=base)
+    if focused is not None:
+        return [focused, {"kind": "python", "name": "pytest", "command": "python -m pytest -q", "reason": "python test markers"}]
     return [{"kind": "python", "name": "pytest", "command": "python -m pytest -q", "reason": "python test markers"}]
+
+
+def _focused_pytest_profile(root: Path, *, base: str) -> dict[str, Any] | None:
+    changed = _git_changed_paths(root, base=base)
+    if not changed:
+        return None
+    selected: list[str] = []
+    fallback_to_full = False
+    for rel in changed:
+        path = rel.replace("\\", "/").strip("/")
+        if not path or path.startswith((".agent-workspace/", ".runs/", "runs/")):
+            continue
+        if path.startswith(("tests/", "test/")) and path.endswith(".py"):
+            selected.append(path)
+            continue
+        if path.endswith(".py"):
+            mapped = _candidate_tests_for_python_path(root, path)
+            if mapped:
+                selected.extend(mapped)
+            else:
+                fallback_to_full = True
+        elif path in {"pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg"}:
+            fallback_to_full = True
+    selected = sorted(dict.fromkeys(selected))
+    if not selected or fallback_to_full:
+        return None
+    return {
+        "kind": "python",
+        "name": "pytest-focused",
+        "command": "python -m pytest -q " + " ".join(_quote_arg(item) for item in selected),
+        "reason": "git changed files mapped to pytest targets",
+        "changed_paths": changed,
+        "targets": selected,
+    }
+
+
+def _candidate_tests_for_python_path(root: Path, rel_path: str) -> list[str]:
+    path = Path(rel_path)
+    stem = path.stem
+    if stem == "__init__":
+        return []
+    candidates = [
+        Path("tests") / f"test_{stem}.py",
+        Path("test") / f"test_{stem}.py",
+    ]
+    parts = path.parts
+    if len(parts) >= 3 and parts[0] == "src":
+        package_parts = parts[2:-1]
+        candidates.append(Path("tests").joinpath(*package_parts, f"test_{stem}.py"))
+    return [candidate.as_posix() for candidate in candidates if (root / candidate).exists()]
+
+
+def _git_changed_paths(root: Path, *, base: str) -> list[str]:
+    commands = (
+        ("git", "-C", str(root), "diff", "--name-only", base, "--"),
+        ("git", "-C", str(root), "diff", "--name-only", "--cached", "--"),
+        ("git", "-C", str(root), "ls-files", "--others", "--exclude-standard"),
+    )
+    changed: list[str] = []
+    for command in commands:
+        try:
+            result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode != 0:
+            continue
+        changed.extend(line.strip() for line in result.stdout.splitlines() if line.strip())
+    return sorted(dict.fromkeys(changed))
+
+
+def _quote_arg(value: str) -> str:
+    if not value or any(char.isspace() for char in value):
+        return '"' + value.replace('"', '\\"') + '"'
+    return value
 
 
 def _rust_profiles(root: Path) -> list[dict[str, Any]]:

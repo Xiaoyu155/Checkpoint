@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for the DevPacer / Checkpoint desktop workbench."""
+"""PyInstaller spec for the Pacer desktop workbench."""
 
 import sys
 from pathlib import Path
@@ -10,12 +10,16 @@ repo_root = spec_dir.parent
 src_root = repo_root / "src"
 
 a = Analysis(
-    [str(repo_root / "checkpoint_app.py")],
+    [str(repo_root / "pacer_app.py")],
     pathex=[str(src_root)],
     binaries=[],
     datas=[
         # Agent profile YAMLs read at runtime
         (str(src_root / "visual_agent" / "agent_profiles" / "*.yaml"), "visual_agent/agent_profiles"),
+        # Dashboard static files (HTML, JS, CSS)
+        (str(src_root / "visual_agent" / "dashboard" / "static" / "*.html"), "visual_agent/dashboard/static"),
+        (str(src_root / "visual_agent" / "dashboard" / "static" / "*.js"), "visual_agent/dashboard/static"),
+        (str(src_root / "visual_agent" / "dashboard" / "static" / "*.css"), "visual_agent/dashboard/static"),
     ],
     hiddenimports=[
         # Lazy imports inside visual_agent that PyInstaller can't trace statically
@@ -79,13 +83,13 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="DevPacer",
+    name="Pacer",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     console=False,          # no terminal window — pure GUI
-    icon=str(repo_root / "assets" / "DevPacer.ico"),
+    icon=str(repo_root / "assets" / "Pacer.ico"),
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -101,5 +105,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="DevPacer",
+    name="Pacer",
 )

@@ -28,6 +28,13 @@ AGENT_ALIASES = {
     "claude-code": "claude-code",
     "claudecode": "claude-code",
     "claude_code": "claude-code",
+    # Low-cost hosted backends use the same unattended patch-worker adapter, but
+    # they must not silently map to Claude Code.
+    "bugteam": "mimo",
+    "bug-team": "mimo",
+    "gpt-bug-team": "mimo",
+    "mimo": "mimo",
+    "xiaomimimo": "mimo",
     "gemini": "gemini",
     "gemini-cli": "gemini",
     "google-gemini": "gemini",
