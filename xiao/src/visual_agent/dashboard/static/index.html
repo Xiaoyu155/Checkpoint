@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pacer 工作台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="logo">Pacer <small>现代工作台</small></div>
+  <span class="hdr-sep">/</span>
+  <button class="ghost" onclick="openProjModal()">切换项目</button>
+  <div id="projPath" title="当前工作空间">未选择工作空间</div>
+  <div class="spc"></div>
+  <div id="agentsRow"></div>
+  <button onclick="openChat()">对话</button>
+  <button onclick="openSettings()">设置</button>
+  <div class="worker-ctl">
+    <span id="wDot" class="wdot"></span>
+    <span id="wLabel">Worker 已停止</span>
+    <button id="btnWorker" class="ghost" onclick="toggleWorker()">启动 Worker</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="sidebar">
+    <section class="side-section">
+      <div class="side-title">工作台总览</div>
+      <div class="mini-stats">
+        <div class="mini-stat"><span class="mini-stat-l">验收通过</span><span class="mini-stat-n ok" id="sVerified">0</span></div>
+        <div class="mini-stat"><span class="mini-stat-l">执行中</span><span class="mini-stat-n acc" id="sRunning">0</span></div>
+        <div class="mini-stat"><span class="mini-stat-l">托管队列</span><span class="mini-stat-n warn" id="sQueue">0</span></div>
+        <div class="mini-stat" id="tokenStat" style="display:none;"><span class="mini-stat-l">Tokens</span><span class="mini-stat-n" id="sTokens">0</span></div>
+      </div>
+    </section>
+
+    <section class="side-section">
+      <div class="side-title">任务入口</div>
+      <div class="composer-hint">主区域是任务对话。待执行、执行中、已完成在下方状态区查看。</div>
+    </section>
+
+    <section class="side-section">
+      <div class="side-title">低成本后端效率</div>
+      <div class="mini-stats">
+        <div class="mini-stat"><span class="mini-stat-l">额度节省</span><span class="mini-stat-n ok" id="mSavedUsd">$0.00</span></div>
+        <div class="mini-stat"><span class="mini-stat-l">时间节省</span><span class="mini-stat-n acc" id="mSavedMin">0.0 分钟</span></div>
+        <div class="mini-stat"><span class="mini-stat-l">综合效率</span><span class="mini-stat-n warn" id="mEfficiency">0%</span></div>
+        <div class="mini-stat"><span class="mini-stat-l">能力评分</span><span class="mini-stat-n" id="mCapScore">0</span></div>
+        <div class="mini-stat"><span class="mini-stat-l">后端运行</span><span class="mini-stat-n" id="mMimoRuns">0</span></div>
+      </div>
+    </section>
+  </aside>
+
+  <main class="main">
+    <section class="status-strip" aria-label="工作台总览">
+      <div class="status-left">
+        <span class="status-title">工作台总览</span>
+        <div class="page-meta" id="pageMeta"></div>
+      </div>
+      <div class="status-metrics">
+        <span class="status-metric ok"><b id="kVerified">0</b><small>已验收</small></span>
+        <span class="status-metric acc"><b id="kRunning">0</b><small>执行中</small></span>
+        <span class="status-metric warn"><b id="kQueue">0</b><small>队列</small></span>
+        <span class="status-metric ok"><b id="kSavedUsd">$0.00</b><small>后端节省</small><small id="kSavedMin">0.0 分钟</small></span>
+        <span class="status-metric brand"><b id="kEfficiency">0%</b><small id="kTokens">累计 Tokens 0</small></span>
+      </div>
+    </section>
+
+    <div class="workbench-grid">
+      <section class="main-chat collapsible-panel" data-collapse-key="mission-control">
+        <div class="main-chat-head">
+          <div>
+            <div class="eyebrow">New Mission</div>
+            <h1>新建任务</h1>
+          </div>
+          <div class="panel-head-actions">
+            <button class="panel-toggle" onclick="togglePanel(event,'mission-control')">收起</button>
+          </div>
+        </div>
+        <div class="collapsible-body">
+          <div class="main-chat-input">
+            <label for="fGoal">任务目标</label>
+            <textarea id="fGoal" onkeydown="mainChatKeyDown(event)" placeholder="例如：把已经做好的元思轻语 app 通过数据线安装到我的 Android 手机上"></textarea>
+            <div class="contract-grid">
+              <div>
+                <label for="fRepo">项目目录</label>
+                <input id="fRepo" class="repo-input" placeholder="D:\Projects\my-app">
+              </div>
+              <div>
+                <label for="fTest">验收命令 / 人工验收说明</label>
+                <input id="fTest" class="repo-input" placeholder="python -m pytest -q / npm test / 人工现场验收">
+              </div>
+            </div>
+            <div class="main-chat-toolbar">
+              <select id="fAgent"><option value="codex">codex</option><option value="claude-code">claude-code</option></select>
+              <label><input id="fAutoMerge" type="checkbox"> 自动合并</label>
+              <span id="launchMsg"></span>
+              <button id="btnClarify" onclick="sendMainChat()">收口</button>
+              <button id="btnPreview" onclick="startMission(false)">预览</button>
+              <button id="btnRun" class="primary" onclick="startMission(true)">派发执行</button>
+            </div>
+          </div>
+          <div class="main-chat-actions" id="mainIntakeActions" style="display:none;">
+            <button class="primary" onclick="applyMainDraftToMission()">采用执行稿</button>
+            <button onclick="startMission(false)">预览计划</button>
+            <button onclick="startMission(true)">派发给模型开发</button>
+          </div>
+          <details class="intake-log" id="intakeLog" open>
+            <summary>收口记录</summary>
+            <div class="main-chat-thread" id="mainChatMsgs">
+              <div class="main-chat-empty">等待任务收口。</div>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <section class="desk-panel collapsible-panel" data-collapse-key="mission-desk">
+        <div class="desk-head">
+          <div>
+            <div class="eyebrow">Mission Desk</div>
+            <h2>任务列表</h2>
+          </div>
+          <div class="desk-actions">
+            <div class="mission-filters" id="missionFilters" aria-label="任务状态筛选">
+              <button class="active" data-mission-filter="all" onclick="setMissionFilter('all')">全部 <span>0</span></button>
+              <button data-mission-filter="active" onclick="setMissionFilter('active')">执行中 <span>0</span></button>
+              <button data-mission-filter="review" onclick="setMissionFilter('review')">待处理 <span>0</span></button>
+              <button data-mission-filter="done" onclick="setMissionFilter('done')">完成 <span>0</span></button>
+              <button data-mission-filter="blocked" onclick="setMissionFilter('blocked')">停止 <span>0</span></button>
+            </div>
+            <button class="tiny-danger" onclick="deleteAllMissions(event)">清理非运行任务</button>
+            <button class="panel-toggle" onclick="togglePanel(event,'mission-desk')">收起</button>
+          </div>
+        </div>
+        <div class="collapsible-body">
+          <div class="mission-list-head" aria-hidden="true">
+            <span>任务</span><span>状态 / 更新时间</span><span>操作</span>
+          </div>
+          <div id="missionList" class="mission-list" aria-label="任务列表"></div>
+          <div class="board legacy-board" aria-label="任务看板">
+            <div class="col col-todo">
+              <div class="col-hdr"><span>待办</span><span class="cnt" id="cTodo">0</span></div>
+              <div id="colTodo"></div>
+            </div>
+            <div class="col col-run">
+              <div class="col-hdr"><span>执行中</span><span class="cnt" id="cRun">0</span></div>
+              <div id="colRun"></div>
+            </div>
+            <div class="col col-review">
+              <div class="col-hdr"><span>待验收</span><span class="cnt" id="cReview">0</span></div>
+              <div id="colReview"></div>
+            </div>
+            <div class="col col-done">
+              <div class="col-hdr"><span>已完成</span><span class="cnt" id="cDone">0</span></div>
+              <div id="colDone"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="trace-console collapsible-panel" data-collapse-key="trace-ledger" aria-label="工作痕迹">
+        <div class="trace-head">
+          <span>工作痕迹 / 数据 / 结果</span>
+          <span class="trace-head-actions"><span class="cnt" id="traceCount">0</span><button class="panel-toggle" onclick="togglePanel(event,'trace-ledger')">收起</button></span>
+        </div>
+        <div class="collapsible-body">
+          <div id="traceStream" class="trace-stream">
+            <div class="empty">暂无工作痕迹。创建 mission 后，这里会显示 launch、worker、日志、报告、验收和队列状态。</div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="sec2">
+      <div class="section collapsible-panel is-collapsed" data-collapse-key="queue-panel">
+        <div class="section-title">托管队列 <span class="cnt" id="cQueueSec">0</span><button class="panel-toggle" onclick="togglePanel(event,'queue-panel')">展开</button></div>
+        <div class="collapsible-body"><div id="queue"></div></div>
+      </div>
+      <div class="section collapsible-panel is-collapsed" data-collapse-key="programs-panel">
+        <div class="section-title">项目托管 <button class="panel-toggle" onclick="togglePanel(event,'programs-panel')">展开</button></div>
+        <div class="collapsible-body"><div id="programs"></div></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="drawer">
+  <div class="panel">
+    <div class="panel-top"><button class="close-btn" onclick="closeDrawer()">关闭</button></div>
+    <div id="drawerBody"></div>
+  </div>
+</div>
+
+<div id="chatPanel">
+  <div class="chat-shell">
+    <div class="chat-hdr">
+      <div class="chat-hdr-title">AI 需求架构师</div>
+      <select id="chatAgent" class="chat-agent-sel"></select>
+      <button onclick="clearChat()">清空</button>
+      <button class="close-btn" onclick="closeChat()">关闭</button>
+    </div>
+    <div class="chat-msgs" id="chatMsgs">
+      <div class="chat-empty" id="chatEmpty">对 AI 说点什么吧。<br>对话历史保存在本页面，刷新后清空。</div>
+    </div>
+    <div class="chat-foot">
+      <textarea id="chatInput" onkeydown="chatKeyDown(event)" placeholder="Ctrl+Enter 发送"></textarea>
+      <div class="chat-send-col">
+        <button id="chatSendBtn" class="primary" onclick="sendChat()">发送</button>
+        <span class="chat-thinking" id="chatThinking" style="display:none;">思考中...</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="settingsPanel">
+  <div class="panel settings-panel">
+    <div class="panel-top"><button class="close-btn" onclick="closeSettings()">关闭</button></div>
+    <h2>设置</h2>
+    <p>配置总工作台模型接口、任务完成后的邮件通知，并导出诊断包。</p>
+    <h3>总工作台模型接口</h3>
+    <div class="rowline"><label><input id="cfgPreferSub2api" type="checkbox" checked> 优先使用 sub2api 的额度</label></div>
+    <div class="field"><label for="cfgModelBaseUrl">Base URL</label><input id="cfgModelBaseUrl" placeholder="例如 127.0.0.1:8788/v1"></div>
+    <div class="field"><label for="cfgModelApiKey">API Key</label><input id="cfgModelApiKey" type="password" placeholder="sub2api 后台生成的 key"></div>
+    <div class="field"><label for="cfgModelName">Model</label><input id="cfgModelName" placeholder="gpt-4o-mini"></div>
+    <div class="field"><label for="cfgReasoningEffort">Reasoning</label><select id="cfgReasoningEffort"><option value="">默认</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option></select></div>
+    <div class="btns">
+      <button class="primary" onclick="saveModelConfig()">保存模型接口</button>
+      <button onclick="testModelConfig()">测试模型接口</button>
+    </div>
+    <div id="modelCfgStatus" class="composer-hint">尚未加载模型接口</div>
+    <h3>邮件通知</h3>
+    <div class="field"><label for="cfgSmtpHost">SMTP 服务器</label><input id="cfgSmtpHost" placeholder="smtp.example.com"></div>
+    <div class="field"><label for="cfgSmtpPort">SMTP 端口</label><input id="cfgSmtpPort" type="number" value="587"></div>
+    <div class="rowline"><label><input id="cfgUseTls" type="checkbox" checked> 使用 TLS</label></div>
+    <div class="field"><label for="cfgUsername">用户名</label><input id="cfgUsername"></div>
+    <div class="field"><label for="cfgPassword">密码 / 授权码</label><input id="cfgPassword" type="password"></div>
+    <div class="field"><label for="cfgSender">发件人</label><input id="cfgSender"></div>
+    <div class="field"><label for="cfgRecipient">收件人邮箱</label><input id="cfgRecipient"></div>
+    <div class="btns">
+      <button class="primary" onclick="saveNotifyConfig()">保存通知配置</button>
+      <button onclick="testNotify()">发送测试邮件</button>
+      <button onclick="exportDiagnostic()">导出诊断包</button>
+    </div>
+    <div id="cfgStatus" class="composer-hint">尚未加载配置</div>
+  </div>
+</div>
+
+<div id="projModal">
+  <div class="modal-card">
+    <div class="panel-top"><button class="close-btn" onclick="closeProjModal()">关闭</button></div>
+    <h2>切换项目</h2>
+    <p>输入项目目录或 `.agent-workspace` 目录。</p>
+    <div class="field"><label for="switchPath">路径</label><input id="switchPath" placeholder="D:\Projects\my-app"></div>
+    <div class="btns"><button class="primary" onclick="switchWorkspace()">切换项目</button></div>
+    <div id="switchMsg" class="composer-hint"></div>
+    <h3>已知工作空间</h3>
+    <div id="knownProjects"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>
