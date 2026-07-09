@@ -120,6 +120,69 @@ def changed_test_files(*, repo_root: str | Path, base_ref: str | None = None) ->
     return sorted(path for path in touched if is_test_path(path))
 
 
+def acceptance_chain_files(repo_root: str | Path, command: str) -> list[str]:
+    root = Path(repo_root).expanduser().resolve()
+    text = str(command or "").lower()
+    files: list[str] = []
+    if any(marker in text for marker in ("npm ", "pnpm ", "yarn ")):
+        files.append("package.json")
+    if "pytest" in text or "python -m pytest" in text:
+        for name in ("pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini", "conftest.py"):
+            if (root / name).exists():
+                files.append(name)
+    if "make " in text:
+        files.append("Makefile")
+    if "cargo " in text:
+        files.append("Cargo.toml")
+    deduped: list[str] = []
+    for item in files:
+        normalized = item.replace("\\", "/")
+        if normalized not in deduped:
+            deduped.append(normalized)
+    return deduped
+
+
+def changed_acceptance_chain_files(
+    *,
+    repo_root: str | Path,
+    command: str,
+    base_ref: str | None = None,
+) -> list[str]:
+    chain = set(acceptance_chain_files(repo_root, command))
+    if not chain:
+        return []
+    root = Path(repo_root).expanduser().resolve()
+    touched: set[str] = set()
+    diff_args = ["git", "-C", str(root), "-c", "core.quotePath=false", "diff", "--name-only"]
+    if str(base_ref or "").strip():
+        diff_args.append(str(base_ref).strip())
+    for args in (diff_args, ["git", "-C", str(root), "-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard"]):
+        try:
+            completed = subprocess.run(args, capture_output=True, text=True, timeout=30.0, encoding="utf-8", errors="replace")
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        if completed.returncode != 0:
+            return []
+        touched.update(line.replace("\\", "/").strip() for line in completed.stdout.splitlines() if line.strip())
+    return sorted(path for path in touched if path in chain)
+
+
+def acceptance_chain_repair_brief(tampered: list[str], *, base_ref: str | None = None) -> dict[str, Any]:
+    base = str(base_ref or "").strip() or "the branch base"
+    files = "\n".join(f"- {item}" for item in tampered)
+    return {
+        "status": "found",
+        "source": "acceptance_chain_tampering",
+        "tampered_acceptance_chain_files": tampered,
+        "message": f"Worker modified {len(tampered)} acceptance-chain file(s); the command gate refuses to run.",
+        "repair_prompt": (
+            "You modified files that define the acceptance command, so the verification gate cannot trust the result.\n"
+            f"Revert these files to {base} (e.g. `git checkout {base} -- <path>`):\n{files}\n"
+            "Then fix the production code without changing the test command, package script, or test runner config."
+        ),
+    }
+
+
 def tamper_repair_brief(tampered: list[str], *, base_ref: str | None = None) -> dict[str, Any]:
     base = str(base_ref or "").strip() or "the branch base"
     files = "\n".join(f"- {item}" for item in tampered)
