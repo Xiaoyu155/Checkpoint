@@ -316,7 +316,10 @@ def test_objective_test_edit_inference_handles_qualified_phrases() -> None:
     assert _objective_requests_test_edits("添加对应的单元测试")
     assert _objective_requests_test_edits("补齐必要实现与验收样本")
     assert _objective_requests_test_edits("更新 eval 验收脚本")
+    assert _objective_requests_test_edits("新增验收用例覆盖登录失败")
     assert not _objective_requests_test_edits("审查 eval 脚本但不修改")
+    assert not _objective_requests_test_edits("只改 docs/开发进度.md，保留所有验收配置不变")
+    assert not _objective_requests_test_edits("不要修改测试、pyproject.toml、pytest.ini、conftest.py 或任何验收配置")
     assert _objective_requests_test_edits("write unit tests for the parser")
     assert _objective_requests_test_edits("add integration tests covering login")
     assert _plan_requests_test_edits(

@@ -637,17 +637,24 @@ _TEST_EDIT_REQUEST_PATTERNS = (
     # the cold-start objective said "写 pytest 测试" and the guard then
     # deleted the tests the task explicitly asked for).
     re.compile(r"(写|加|补|改|更新|添加|新增|创建|编写)[^。！？!?；;\n]{0,16}测试"),
-    re.compile(r"(写|加|补|改|更新|添加|新增|创建|编写|补齐)[^。！？!?；;\n]{0,24}(验收|评测|回归|eval)"),
+    re.compile(r"(写|加|补|改|更新|添加|新增|创建|编写|补齐)[^。！？!?；;\n]{0,24}(验收|评测|回归|eval)(样本|用例|脚本|数据|测试|fixture|cases?)"),
     re.compile(r"测试用例"),
     re.compile(r"(验收|评测|回归)(样本|用例)"),
     re.compile(r"\b(add|write|update|create)\b[^.!?\n]{0,40}\btests?\b"),
     re.compile(r"\b(add|write|update|create)\b[^.!?\n]{0,40}\b(eval|acceptance|regression)\b"),
     re.compile(r"\btest cases?\b"),
 )
+_NEGATED_TEST_EDIT_PATTERNS = (
+    re.compile(r"(不要|不许|禁止|不能|勿|不得)[^。！？!?；;\n]{0,20}(改|修改|更新|添加|新增|创建|编写|写|补|补齐)[^。！？!?；;\n]{0,20}(测试|验收|评测|回归|eval)"),
+    re.compile(r"保留[^。！？!?；;\n]{0,20}(测试|验收|评测|回归|eval)[^。！？!?；;\n]{0,20}不变"),
+    re.compile(r"\b(do not|don't|never)\b[^.!?\n]{0,40}\b(modify|change|edit|update|add|write|create)\b[^.!?\n]{0,40}\b(tests?|eval|acceptance|regression)\b"),
+)
 
 
 def _objective_requests_test_edits(objective: str) -> bool:
     text = str(objective or "").lower()
+    for pattern in _NEGATED_TEST_EDIT_PATTERNS:
+        text = pattern.sub(" ", text)
     compact = "".join(text.split())
     return any(p.search(compact) or p.search(text) for p in _TEST_EDIT_REQUEST_PATTERNS)
 
