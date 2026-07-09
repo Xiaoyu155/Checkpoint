@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+import time
 
 from datetime import datetime, timedelta, timezone
 
@@ -140,6 +142,103 @@ def test_run_background_worker_writes_completion_receipt(tmp_path, monkeypatch) 
     assert saved["status"] == "completed"
     assert saved["exit_code"] == 0
     assert saved["result_status"] == "verified"
+
+
+def test_watchdog_writes_heartbeat(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    write_verification_workflow(workspace, "checkout", affects="src/payment/")
+    monkeypatch.setattr("visual_agent.chief_engineer.changed_files", lambda **_kwargs: ["src/payment/checkout.py"])
+    preview = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        dispatch_runner=preview_payload,
+    )
+    mission_id = preview["mission"]["mission_id"]
+    save_background_record(
+        workspace.root,
+        mission_id,
+        {"status": "running", "pid": 123, "started_at": datetime.now(timezone.utc).isoformat()},
+    )
+    progress_path = workspace.root / "missions" / mission_id / "progress.json"
+
+    def fake_run(**_kwargs):
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if progress_path.exists():
+                progress = json.loads(progress_path.read_text(encoding="utf-8"))
+                if progress.get("heartbeat_at"):
+                    break
+            time.sleep(0.02)
+        return {"status": "verified", "stop_reason": "verified", "final_report_path": "report.md"}
+
+    monkeypatch.setattr("visual_agent.chief_background.run_chief_mission", fake_run)
+
+    payload = run_background_worker(
+        workspace_root=workspace.root,
+        mission_id=mission_id,
+        agents=("codex",),
+        watchdog_interval_seconds=0.1,
+    )
+
+    assert payload["status"] == "verified"
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    assert progress["heartbeat_at"]
+
+
+def test_watchdog_marks_timeout_state_before_exit(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    write_verification_workflow(workspace, "checkout", affects="src/payment/")
+    monkeypatch.setattr("visual_agent.chief_engineer.changed_files", lambda **_kwargs: ["src/payment/checkout.py"])
+    preview = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        max_wall_minutes=1,
+        dispatch_runner=preview_payload,
+    )
+    mission_id = preview["mission"]["mission_id"]
+    mission = load_mission(workspace.root, mission_id)
+    assert mission is not None
+    mission["budget_policy"]["max_wall_minutes"] = 1
+    save_mission(workspace.root, mission)
+    old_start = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
+    save_background_record(workspace.root, mission_id, {"status": "running", "pid": 123, "started_at": old_start})
+
+    terminated = []
+    termination_seen = threading.Event()
+
+    def fake_terminator(code: int) -> None:
+        terminated.append(code)
+        termination_seen.set()
+
+    def fake_run(**_kwargs):
+        assert termination_seen.wait(2.0)
+        return {"status": "verified", "stop_reason": "verified", "final_report_path": "report.md"}
+
+    monkeypatch.setattr("visual_agent.chief_background.run_chief_mission", fake_run)
+
+    payload = run_background_worker(
+        workspace_root=workspace.root,
+        mission_id=mission_id,
+        agents=("codex",),
+        watchdog_interval_seconds=0.1,
+        watchdog_terminator=fake_terminator,
+    )
+
+    assert terminated == [124]
+    assert payload["status"] == "timeout"
+    assert payload["stop_reason"] == "budget_exhausted"
+    saved = json.loads((workspace.root / "missions" / mission_id / "background.json").read_text(encoding="utf-8"))
+    assert saved["status"] == "timeout"
+    assert saved["exit_code"] == 124
+    assert saved["budget_exceeded"] is True
+    progress = json.loads((workspace.root / "missions" / mission_id / "progress.json").read_text(encoding="utf-8"))
+    assert progress["status"] == "timeout"
+    assert progress["blocker"] == "budget_exhausted"
+    mission = load_mission(workspace.root, mission_id)
+    assert mission is not None
+    assert mission["stop_reason"] == "budget_exhausted"
 
 
 def test_inspect_background_state_marks_orphaned_process_as_worker_error(tmp_path, monkeypatch) -> None:

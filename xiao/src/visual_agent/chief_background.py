@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -179,6 +180,8 @@ def run_background_worker(
     test_command: str | None = None,
     allow_test_edits: bool = False,
     merge: bool = False,
+    watchdog_interval_seconds: float = 60.0,
+    watchdog_terminator: Any = None,
 ) -> dict[str, Any]:
     """Run a mission in a child process and write a completion receipt."""
     workspace_path = Path(workspace_root).expanduser().resolve()
@@ -201,6 +204,14 @@ def run_background_worker(
         agent=",".join(str(agent) for agent in (agents or tuple(background.get("agents") or ()))),
     )
 
+    watchdog_stop = threading.Event()
+    watchdog_thread = threading.Thread(
+        target=_background_watchdog_loop,
+        name=f"pacer-background-watchdog-{mission_id}",
+        args=(workspace_path, mission_id, watchdog_stop, watchdog_interval_seconds, watchdog_terminator),
+        daemon=True,
+    )
+    watchdog_thread.start()
     try:
         payload = run_chief_mission(
             workspace_root=workspace_path,
@@ -218,6 +229,14 @@ def run_background_worker(
             allow_test_edits=allow_test_edits or bool(background.get("allow_test_edits")),
             merge=merge or bool(background.get("merge")),
         )
+        latest_background = load_background_record(workspace_path, mission_id) or background
+        if str(latest_background.get("status") or "") == "timeout":
+            return {
+                **payload,
+                "status": "timeout",
+                "stop_reason": "budget_exhausted",
+                "background": latest_background,
+            }
         exit_code = 0 if str(payload.get("status") or "") == "verified" else 1
         background.update(
             {
@@ -241,6 +260,14 @@ def run_background_worker(
         )
         return {**payload, "background": background}
     except Exception as exc:
+        latest_background = load_background_record(workspace_path, mission_id) or background
+        if str(latest_background.get("status") or "") == "timeout":
+            return {
+                "schema_version": 1,
+                "status": "timeout",
+                "stop_reason": "budget_exhausted",
+                "background": latest_background,
+            }
         background.update(
             {
                 "status": "failed",
@@ -265,6 +292,9 @@ def run_background_worker(
             mission["stop_reason"] = "worker_error"
             save_mission(workspace_path, mission)
         raise
+    finally:
+        watchdog_stop.set()
+        watchdog_thread.join(timeout=0.2)
 
 
 def inspect_background_state(
@@ -295,37 +325,13 @@ def inspect_background_state(
     if process.get("alive") and budget_exceeded:
         term = terminator or terminate_process
         terminated = term(pid)
-        background.update(
-            {
-                "status": "timeout",
-                "process_state": "timeout",
-                "alive": False,
-                "budget_exceeded": True,
-                "terminated": bool(terminated),
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-                "exit_code": 124,
-            }
+        return _mark_background_timeout_state(
+            workspace_path,
+            mission_id,
+            background,
+            terminated=bool(terminated),
+            update=update,
         )
-        if update:
-            save_background_record(workspace_path, mission_id, background)
-            save_mission_progress(
-                workspace_path,
-                mission_id,
-                stage="blocked",
-                stage_label="Budget exhausted",
-                status="timeout",
-                blocker="budget_exhausted",
-                last_activity_at=background["completed_at"],
-            )
-            _mark_mission_from_background(
-                workspace_path,
-                mission_id,
-                status="stopped",
-                stop_reason="budget_exhausted",
-                round_status="budget_exhausted",
-                background=background,
-            )
-        return background
     if process.get("alive"):
         background.update(
             {
@@ -423,6 +429,90 @@ def save_background_record(workspace_root: str | Path, mission_id: str, record: 
     path = directory / "background.json"
     path.write_text(json.dumps(to_jsonable(record), ensure_ascii=False, indent=2), encoding="utf-8")
     return {"path": str(path), "record": dict(record)}
+
+
+def _background_watchdog_loop(
+    workspace_root: Path,
+    mission_id: str,
+    stop_event: threading.Event,
+    interval_seconds: float,
+    terminator: Any,
+) -> None:
+    try:
+        interval = max(0.01, float(interval_seconds))
+    except (TypeError, ValueError):
+        interval = 60.0
+    while not stop_event.wait(interval):
+        heartbeat_at = datetime.now(timezone.utc).isoformat()
+        background = load_background_record(workspace_root, mission_id) or {}
+        if str(background.get("status") or "") in {"completed", "failed", "timeout", "orphaned"}:
+            return
+        save_mission_progress(
+            workspace_root,
+            mission_id,
+            heartbeat_at=heartbeat_at,
+            last_activity_at=heartbeat_at,
+        )
+        mission = load_mission(workspace_root, mission_id)
+        if mission is None or not mission_wall_budget_exceeded(mission, background):
+            continue
+        background = _mark_background_timeout_state(
+            workspace_root,
+            mission_id,
+            background,
+            terminated=True,
+            heartbeat_at=heartbeat_at,
+            update=True,
+        )
+        term = terminator or os._exit
+        term(124)
+        return
+
+
+def _mark_background_timeout_state(
+    workspace_root: Path,
+    mission_id: str,
+    background: dict[str, Any],
+    *,
+    terminated: bool,
+    update: bool = True,
+    heartbeat_at: str | None = None,
+) -> dict[str, Any]:
+    completed_at = datetime.now(timezone.utc).isoformat()
+    background.update(
+        {
+            "status": "timeout",
+            "process_state": "timeout",
+            "alive": False,
+            "budget_exceeded": True,
+            "terminated": bool(terminated),
+            "completed_at": completed_at,
+            "exit_code": 124,
+        }
+    )
+    if heartbeat_at:
+        background["heartbeat_at"] = heartbeat_at
+    if update:
+        save_background_record(workspace_root, mission_id, background)
+        save_mission_progress(
+            workspace_root,
+            mission_id,
+            stage="blocked",
+            stage_label="Budget exhausted",
+            status="timeout",
+            blocker="budget_exhausted",
+            last_activity_at=background["completed_at"],
+            heartbeat_at=heartbeat_at,
+        )
+        _mark_mission_from_background(
+            workspace_root,
+            mission_id,
+            status="stopped",
+            stop_reason="budget_exhausted",
+            round_status="budget_exhausted",
+            background=background,
+        )
+    return background
 
 
 def mission_wall_budget_exceeded(mission: dict[str, Any], background: dict[str, Any]) -> bool:
