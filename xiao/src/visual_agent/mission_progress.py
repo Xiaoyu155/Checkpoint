@@ -24,6 +24,13 @@ _TERMINAL_STAGES = {
     "post_merge_verification_passed",
     "post_merge_verification_failed",
 }
+_LIVE_ACTIVITY_STAGES = {
+    "background_started",
+    "worker_started",
+    "worker_starting",
+    "worker_running",
+    "verification_running",
+}
 
 
 def progress_path(workspace_root: str | Path, mission_id: str) -> Path:
@@ -389,11 +396,13 @@ def _stage_label(stage: str) -> str:
 
 
 def _infer_activity(*, stage: str, saved: dict[str, Any], latest_worker: dict[str, Any], latest_log: dict[str, str]) -> str:
+    if stage not in _LIVE_ACTIVITY_STAGES:
+        return ""
     reported_activity = str(saved.get("activity") or "")
     if reported_activity and _reported_activity_is_fresh(saved):
         return reported_activity
     worker_status = str(latest_worker.get("status") or "")
-    if stage.startswith("verification"):
+    if stage == "verification_running":
         return "verification"
     if worker_status == "completed":
         return "worker_completed"

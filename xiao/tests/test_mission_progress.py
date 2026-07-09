@@ -405,6 +405,63 @@ def test_stale_reported_activity_falls_back(tmp_path) -> None:
     assert progress["activity_started_at"] == ""
 
 
+def test_blocked_progress_does_not_report_stale_activity(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    mission = {
+        "mission_id": "m1",
+        "plan_id": "p1",
+        "objective": "fix app",
+        "status": "stopped",
+        "stop_reason": "verification_environment_missing",
+    }
+    save_mission_progress(
+        workspace,
+        "m1",
+        stage="worker_running",
+        activity="worker_output",
+        activity_started_at=datetime.now(timezone.utc).isoformat(),
+        last_output_tail="preflight blocked before worker start",
+    )
+
+    progress = build_mission_progress(
+        workspace_root=workspace,
+        mission=mission,
+        background={},
+        worker_records=[],
+        verification={},
+        rounds=[{"type": "dispatch_preview", "status": "preflight_blocked"}],
+    )
+
+    assert progress["stage"] == "blocked"
+    assert progress["activity"] == ""
+    assert progress["activity_label"] == ""
+    assert progress["activity_elapsed_seconds"] is None
+
+
+def test_verification_failed_does_not_report_running_verification(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    mission = {
+        "mission_id": "m1",
+        "plan_id": "p1",
+        "objective": "fix app",
+        "status": "running",
+        "stop_reason": "",
+    }
+
+    progress = build_mission_progress(
+        workspace_root=workspace,
+        mission=mission,
+        background={},
+        worker_records=[{"status": "completed", "exit_code": 0}],
+        verification={"verdict": "fail"},
+        rounds=[{"type": "verification", "status": "fail"}],
+    )
+
+    assert progress["stage"] == "verification_failed"
+    assert progress["activity"] == ""
+    assert progress["activity_label"] == ""
+
+
 def test_blank_worker_output_does_not_replace_last_meaningful_tail(tmp_path) -> None:
     workspace = tmp_path / ".agent-workspace"
     record_worker_output(workspace, "m1", stream="stderr", chunk="npm ci --prefer-offline")
