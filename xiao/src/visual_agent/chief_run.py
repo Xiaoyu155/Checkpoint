@@ -122,8 +122,10 @@ def run_chief_mission(
     if contract_goal:
         goal = contract_goal
     planning_answers = _planning_answers(answers, contract_payload)
+    raw_test_command = str(test_command or "").strip()
     resolved_test_command, verification_profile = resolve_test_command(test_command, repo_root=repo_path)
-    test_command = resolved_test_command
+    test_command_unresolved = bool(raw_test_command) and not str(resolved_test_command or "").strip()
+    test_command = raw_test_command if test_command_unresolved else resolved_test_command
     if test_command and not workspace_path.exists():
         init_workspace(workspace_path, with_demo=False)
     budget = default_budget_policy(
@@ -535,14 +537,14 @@ def run_chief_mission(
         plan_id=str(plan_id or ""),
         worktree=str(preview_worktree.get("path") or ""),
     )
-    if str(preview.get("status") or "") == "blocked":
+    if str(preview.get("status") or "") in {"blocked", "preflight_blocked"}:
         return _finish(
             workspace_root=workspace_path,
             mission=mission,
             plan=plan_payload,
             status="stopped",
             stop_reason=_dispatch_stop_reason(preview),
-            message=str(preview.get("reason") or "Dispatch preview was blocked."),
+            message=str(preview.get("message") or preview.get("reason") or "Dispatch preview was blocked."),
             started=started,
             dispatch_payload=preview,
         )
@@ -816,7 +818,7 @@ def _next_round_number(workspace_root: Path, mission_id: str) -> int:
 
 def _stop_reason_from_dispatch(dispatch: dict[str, Any], budget: dict[str, Any]) -> str:
     status = str(dispatch.get("status") or "")
-    if status == "blocked":
+    if status in {"blocked", "preflight_blocked"}:
         return _dispatch_stop_reason(dispatch)
     if dispatch.get("quota_exhausted"):
         # The worker never got to do the task; a gate failure here is noise.
@@ -857,6 +859,10 @@ def _stop_reason_from_dispatch(dispatch: dict[str, Any], budget: dict[str, Any])
 
 
 def _dispatch_stop_reason(dispatch: dict[str, Any]) -> str:
+    status = str(dispatch.get("status") or "")
+    reason_raw = str(dispatch.get("reason") or "")
+    if status == "preflight_blocked" and reason_raw in {"test_command_unresolved", "verification_environment_missing"}:
+        return reason_raw
     reason = str(dispatch.get("reason") or "").lower()
     if "coverage" in reason:
         return "coverage_gap"
@@ -903,6 +909,8 @@ def _compact_dispatch(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": payload.get("status"),
         "reason": payload.get("reason"),
+        "message": payload.get("message"),
+        "preflight": payload.get("preflight"),
         "diagnosis_report": payload.get("diagnosis_report"),
         "review_plan_report": payload.get("review_plan_report"),
         "worker": payload.get("worker"),
@@ -966,6 +974,10 @@ def _message_for_stop(stop_reason: str) -> str:
         "verification_environment_missing": (
             "任务停止：验证环境缺少必需的外部服务或密钥。"
             "修复：配置验收所需环境变量/API key 后重试；不要让 worker 修改产品代码、测试或 eval 脚本来绕过。"
+        ),
+        "test_command_unresolved": (
+            "任务停止：无法解析验收命令。"
+            "修复：传入明确的 --test-command，或添加 package.json/pytest/go/cargo 等可检测的测试配置后重试。"
         ),
         "merged_verification_failed": (
             "任务停止：worktree 验收通过并已合并，但目标分支合并后复验失败。"
@@ -1498,6 +1510,8 @@ def _status_next_action(mission: dict[str, Any]) -> str:
         return "Run `checkpoint agents doctor` to confirm the agent is installed, then resume the mission."
     if stop_reason == "verification_environment_missing":
         return "Configure the required verification environment or API key, then resume the mission without changing tests or eval scripts."
+    if stop_reason == "test_command_unresolved":
+        return "Pass an explicit --test-command, or add a detectable project test configuration, then start the mission again."
     if stop_reason in ("budget_exhausted", "command_timeout"):
         return "Resume with a larger --max-rounds or narrower --goal to reduce scope."
     return "Run `checkpoint mission list` and open final_report.md for the next action."

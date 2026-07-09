@@ -28,6 +28,7 @@ from .command_verification import (
     changed_acceptance_chain_files,
     command_repair_brief,
     is_test_path,
+    normalize_verification_env,
     run_command_verification,
     tamper_repair_brief,
 )
@@ -35,12 +36,13 @@ from .chief_plans_store import append_worker_record, load_plan, plan_dir, save_v
 from .codex_check import codex_check_to_markdown, is_runtime_changed_file, run_codex_check
 from .diff_summary import build_diff_summary
 from .mission_progress import record_worker_output, save_mission_progress
+from .preflight import dependency_preflight
 from .subprocess_window import hidden_subprocess_kwargs
 from .git_diff import changed_files
 from .llm_providers import LLMBackend, run_llm_completion
 from .models import to_jsonable
 from .repo_map import build_repo_map, render_repo_map, repo_map_cache_path
-from .verification_profiles import estimate_verification_timeout, verification_timeout_reason
+from .verification_profiles import estimate_verification_timeout, resolve_test_command, verification_timeout_reason
 from .workspace import open_workspace
 
 
@@ -164,6 +166,10 @@ def dispatch_chief_plan(
         return _blocked(plan_id=plan_id, reason="No matching worker track found in the saved plan.", plan=plan)
 
     repo_root = Path(str(plan.get("repo_root") or ".")).expanduser().resolve()
+    raw_test_command = str(test_command or "").strip()
+    resolved_test_command, verification_profile = resolve_test_command(test_command, repo_root=repo_root)
+    test_command_unresolved = bool(raw_test_command) and not str(resolved_test_command or "").strip()
+    test_command = str(resolved_test_command or "").strip() or None
     track_token = str(selected_track.get("id") or "track_1_codex")
     worktree = default_worktree_path(repo_root=repo_root, plan_id=plan_id, track_id=track_token)
     branch = default_branch_name(plan_id=plan_id, track_id=track_token)
@@ -178,7 +184,26 @@ def dispatch_chief_plan(
         run_profile=run_profile,
         include_slow=include_slow,
     )
-    effective_verification_command = str(test_command or "").strip() or verification_command
+    command_mode = bool(str(test_command or "").strip() or test_command_unresolved)
+    effective_verification_command = str(test_command or "").strip() or (raw_test_command if test_command_unresolved else verification_command)
+    dependency_check = dependency_preflight(repo_root, str(test_command or raw_test_command or ""))
+    timeout_info = (
+        _verification_timeout_info(repo_root=repo_root, command=effective_verification_command, base_timeout=timeout_seconds)
+        if command_mode
+        else {"base_timeout_seconds": float(timeout_seconds), "timeout_seconds": float(timeout_seconds), "reason": "workflow_mode"}
+    )
+    verification_env_normalized = normalize_verification_env(verification_env)
+    missing_env = _missing_declared_verification_env(verification_env_normalized)
+    preflight = _dispatch_preflight_payload(
+        raw_test_command=raw_test_command,
+        resolved_test_command=str(test_command or ""),
+        verification_profile=verification_profile,
+        test_command_unresolved=test_command_unresolved,
+        verification_env=verification_env_normalized,
+        missing_env=missing_env,
+        dependency_check=dependency_check,
+        timeout_info=timeout_info,
+    )
     # Zero-token architecture memory: refresh the local index (only files that
     # changed since the last dispatch are re-parsed) and hand every worker
     # attempt a budgeted excerpt. The memory layer must never block dispatch.
@@ -268,14 +293,18 @@ def dispatch_chief_plan(
         },
         "verification": {
             "command": effective_verification_command,
-            "checkpoint_command": verification_command if str(test_command or "").strip() else "",
-            "mode": "command" if str(test_command or "").strip() else "workflow",
+            "checkpoint_command": verification_command if command_mode else "",
+            "mode": "command" if command_mode else "workflow",
             "workspace_root": str(verification_workspace),
             "records_workspace_root": str(workspace_path),
             "run_profile": run_profile,
             "include_slow": bool(include_slow),
             "max_workflows": int(max_workflows),
+            "timeout_seconds": timeout_info["timeout_seconds"],
+            "base_timeout_seconds": timeout_info["base_timeout_seconds"],
+            "timeout_reason": timeout_info["reason"],
         },
+        "preflight": preflight,
         "repo_map": repo_map_stats,
         "toolchain_policy": toolchain_policy,
         "subscription_quota": _quota_preview(),
@@ -307,6 +336,22 @@ def dispatch_chief_plan(
         worktree=str(worktree),
         verification_command=effective_verification_command,
     )
+    preflight_block = _dispatch_preflight_block(preflight)
+    if preflight_block:
+        save_mission_progress(
+            workspace_path,
+            progress_mission_id,
+            stage="blocked",
+            stage_label="Preflight blocked",
+            status="preflight_blocked",
+            blocker=str(preflight_block.get("reason") or "preflight_blocked"),
+        )
+        return {
+            **preview,
+            "status": "preflight_blocked",
+            "reason": str(preflight_block.get("reason") or "preflight_blocked"),
+            "message": str(preflight_block.get("message") or "Preflight blocked dispatch."),
+        }
     if blocked_reason:
         save_mission_progress(
             workspace_path,
@@ -857,6 +902,71 @@ def _verification_timeout_info(*, repo_root: Path, command: str, base_timeout: f
         "timeout_seconds": effective,
         "reason": reason,
     }
+
+
+def _dispatch_preflight_payload(
+    *,
+    raw_test_command: str,
+    resolved_test_command: str,
+    verification_profile: dict[str, Any] | None,
+    test_command_unresolved: bool,
+    verification_env: list[dict[str, Any]],
+    missing_env: list[str],
+    dependency_check: dict[str, Any],
+    timeout_info: dict[str, Any],
+) -> dict[str, Any]:
+    dependency_warnings = dependency_check.get("warnings") if isinstance(dependency_check.get("warnings"), list) else []
+    status = "blocked" if test_command_unresolved or missing_env else ("warning" if dependency_warnings else "ok")
+    return {
+        "schema_version": 1,
+        "status": status,
+        "test_command": {
+            "status": "unresolved" if test_command_unresolved else ("resolved" if resolved_test_command else "not_requested"),
+            "requested": raw_test_command,
+            "resolved": resolved_test_command,
+            "profile": verification_profile or {},
+        },
+        "verification_env": {
+            "status": "missing" if missing_env else "ok",
+            "declared": verification_env,
+            "missing_env_vars": missing_env,
+        },
+        "dependency": dependency_check,
+        "verification_timeout": timeout_info,
+    }
+
+
+def _dispatch_preflight_block(preflight: dict[str, Any]) -> dict[str, str] | None:
+    test_command = preflight.get("test_command") if isinstance(preflight.get("test_command"), dict) else {}
+    if str(test_command.get("status") or "") == "unresolved":
+        requested = str(test_command.get("requested") or "auto")
+        return {
+            "reason": "test_command_unresolved",
+            "message": (
+                f"Test command `{requested}` could not be resolved. "
+                "Pass an explicit --test-command or add a package/test config that Pacer can detect."
+            ),
+        }
+    verification_env = preflight.get("verification_env") if isinstance(preflight.get("verification_env"), dict) else {}
+    missing = verification_env.get("missing_env_vars") if isinstance(verification_env.get("missing_env_vars"), list) else []
+    if missing:
+        names = ", ".join(str(item) for item in missing)
+        return {
+            "reason": "verification_environment_missing",
+            "message": f"设置环境变量 {names} 后重试；不要修改产品代码、测试或 eval 脚本来绕过验收环境。",
+        }
+    return None
+
+
+def _missing_declared_verification_env(verification_env: list[dict[str, Any]]) -> list[str]:
+    missing: list[str] = []
+    for item in verification_env:
+        if item.get("kind") != "env_var":
+            continue
+        name = str(item.get("name") or "").strip()
+        if name and not os.environ.get(name):
+            missing.append(name)
+    return missing
 
 
 def _verification_is_repairable(verification: dict[str, Any]) -> bool:
