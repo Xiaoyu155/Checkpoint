@@ -15,6 +15,7 @@ from visual_agent.chief_dispatch import (
     _write_worktree_gitignore,
     build_verification_command,
     build_worker_command,
+    chief_dispatch_to_markdown,
     dispatch_chief_plan,
     git_dirty_files,
     run_dispatch_verification,
@@ -165,6 +166,35 @@ def test_chief_dispatch_inspection_only_verdict_is_not_verified(tmp_path, monkey
     # Inspection-only proves rendering, not product behavior; it must never be
     # reported as verified.
     assert payload["status"] == "inspection_only"
+
+
+def test_chief_dispatch_markdown_includes_preflight() -> None:
+    markdown = chief_dispatch_to_markdown(
+        {
+            "status": "preview",
+            "plan_id": "p1",
+            "verification": {"command": "npm test"},
+            "preflight": {
+                "status": "warning",
+                "test_command": {"status": "resolved", "requested": "auto", "resolved": "npm test"},
+                "verification_env": {"status": "ok", "missing_env_vars": []},
+                "dependency": {
+                    "package_manager": "npm",
+                    "lockfile": "package-lock.json",
+                    "deps_installed": False,
+                    "cache_available": False,
+                    "native_install_risk": False,
+                    "estimated_install_minutes": 9,
+                    "warnings": ["node_dependencies_not_installed"],
+                },
+                "verification_timeout": {"base_timeout_seconds": 900.0, "timeout_seconds": 2100.0, "reason": "missing_node_modules"},
+            },
+        }
+    )
+
+    assert "### Preflight" in markdown
+    assert "| dependency | `warning` |" in markdown
+    assert "reason=missing_node_modules" in markdown
 
 
 def _codex_track() -> dict:

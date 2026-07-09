@@ -14,7 +14,7 @@ from time import monotonic
 from typing import Any, Callable
 
 from .agent_capabilities import canonical_agent_name, load_agent_profile, recommend_worker_config
-from .chief_dispatch import dispatch_chief_plan
+from .chief_dispatch import dispatch_chief_plan, preflight_to_markdown
 from .chief_engineer import build_chief_plan, chief_plan_to_dict
 from .chief_plans_store import load_plan, save_plan
 from .command_verification import (
@@ -1267,6 +1267,9 @@ def chief_run_to_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- Verification verdict: `{progress.get('verification_verdict')}`")
         if progress.get("blocker"):
             lines.append(f"- Blocker: `{progress.get('blocker')}`")
+    preflight_markdown = preflight_to_markdown(dispatch_payload.get("preflight"), heading="## Preflight")
+    if preflight_markdown:
+        lines.extend(["", preflight_markdown])
     diagnosis_report = str(dispatch_payload.get("diagnosis_report") or "")
     if diagnosis_report:
         lines.extend(["", "### 诊断报告", "", diagnosis_report])

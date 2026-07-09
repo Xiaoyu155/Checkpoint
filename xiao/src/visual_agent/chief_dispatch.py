@@ -3465,6 +3465,9 @@ def chief_dispatch_to_markdown(payload: dict[str, Any]) -> str:
     verification = payload.get("verification") if isinstance(payload.get("verification"), dict) else {}
     if verification:
         lines.extend(["", "### Verification", "", f"```powershell\n{verification.get('command')}\n```"])
+    preflight_markdown = preflight_to_markdown(payload.get("preflight"), heading="### Preflight")
+    if preflight_markdown:
+        lines.extend(["", preflight_markdown])
     warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
     if warnings:
         lines.extend(["", "### Warnings", ""])
@@ -3507,6 +3510,67 @@ def chief_dispatch_to_markdown(payload: dict[str, Any]) -> str:
         for key, value in records.items():
             lines.append(f"- {key}: `{value}`")
     return "\n".join(lines).rstrip()
+
+
+def preflight_to_markdown(preflight: Any, *, heading: str = "## Preflight") -> str:
+    if not isinstance(preflight, dict) or not preflight:
+        return ""
+    lines = [heading, ""]
+    lines.append(f"Status: `{preflight.get('status') or ''}`")
+    lines.extend(["", "| Check | Status | Detail |", "| --- | --- | --- |"])
+    test_command = preflight.get("test_command") if isinstance(preflight.get("test_command"), dict) else {}
+    if test_command:
+        detail = _join_non_empty(
+            [
+                f"requested={test_command.get('requested') or ''}",
+                f"resolved={test_command.get('resolved') or ''}",
+            ]
+        )
+        lines.append(_preflight_table_row("test_command", str(test_command.get("status") or ""), detail))
+    verification_env = preflight.get("verification_env") if isinstance(preflight.get("verification_env"), dict) else {}
+    if verification_env:
+        missing = verification_env.get("missing_env_vars") if isinstance(verification_env.get("missing_env_vars"), list) else []
+        detail = "missing=" + ", ".join(str(item) for item in missing) if missing else "all declared env vars present"
+        lines.append(_preflight_table_row("verification_env", str(verification_env.get("status") or ""), detail))
+    dependency = preflight.get("dependency") if isinstance(preflight.get("dependency"), dict) else {}
+    if dependency:
+        warnings = dependency.get("warnings") if isinstance(dependency.get("warnings"), list) else []
+        status = "ok" if bool(dependency.get("deps_installed")) and not warnings else "warning"
+        detail = _join_non_empty(
+            [
+                f"manager={dependency.get('package_manager') or 'none'}",
+                f"lockfile={dependency.get('lockfile') or ''}",
+                f"deps_installed={bool(dependency.get('deps_installed'))}",
+                f"cache_available={bool(dependency.get('cache_available'))}",
+                f"native_install_risk={bool(dependency.get('native_install_risk'))}",
+                f"estimated_install_minutes={dependency.get('estimated_install_minutes')}",
+                "warnings=" + ", ".join(str(item) for item in warnings) if warnings else "",
+            ]
+        )
+        lines.append(_preflight_table_row("dependency", status, detail))
+    timeout_info = preflight.get("verification_timeout") if isinstance(preflight.get("verification_timeout"), dict) else {}
+    if timeout_info:
+        detail = _join_non_empty(
+            [
+                f"base={timeout_info.get('base_timeout_seconds')}s",
+                f"effective={timeout_info.get('timeout_seconds')}s",
+                f"reason={timeout_info.get('reason') or ''}",
+            ]
+        )
+        lines.append(_preflight_table_row("verification_timeout", "ok", detail))
+    return "\n".join(lines).rstrip()
+
+
+def _preflight_table_row(name: str, status: str, detail: str) -> str:
+    return f"| {_markdown_cell(name)} | `{_markdown_cell(status)}` | {_markdown_cell(detail)} |"
+
+
+def _markdown_cell(value: Any) -> str:
+    return str(value or "").replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _join_non_empty(items: list[str]) -> str:
+    return "; ".join(str(item).strip() for item in items if str(item).strip())
 
 
 def format_argv(argv: list[str]) -> str:

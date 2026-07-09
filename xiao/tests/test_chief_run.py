@@ -338,6 +338,21 @@ def test_chief_run_report_marks_command_verification_mode() -> None:
             "plan": {"status": "needs_workflow_coverage", "selected_workflows": ["checkout_verification"]},
             "rounds": [],
             "dispatch": {
+                "preflight": {
+                    "status": "warning",
+                    "test_command": {"status": "resolved", "requested": "auto", "resolved": "npm test"},
+                    "verification_env": {"status": "ok", "missing_env_vars": []},
+                    "dependency": {
+                        "package_manager": "npm",
+                        "lockfile": "package-lock.json",
+                        "deps_installed": False,
+                        "cache_available": False,
+                        "native_install_risk": False,
+                        "estimated_install_minutes": 9,
+                        "warnings": ["node_dependencies_not_installed"],
+                    },
+                    "verification_timeout": {"base_timeout_seconds": 900.0, "timeout_seconds": 2100.0, "reason": "missing_node_modules"},
+                },
                 "latest_verification": {
                     "verdict": "pass",
                     "command_verification": {
@@ -354,6 +369,9 @@ def test_chief_run_report_marks_command_verification_mode() -> None:
     assert "- Workflow coverage status: `needs_workflow_coverage` (superseded by explicit test command)" in report
     assert "- Verification mode: `command`" in report
     assert "- Selected workflows: not used (explicit test command)" in report
+    assert "## Preflight" in report
+    assert "| dependency | `warning` |" in report
+    assert "reason=missing_node_modules" in report
     assert "- Command: `npm ci && npm test`" in report
     assert "Selected workflows: checkout_verification" not in report
 
