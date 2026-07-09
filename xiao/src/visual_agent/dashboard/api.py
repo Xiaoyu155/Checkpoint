@@ -852,6 +852,8 @@ def build_mission_detail(workspace_root: str | Path, mission_id: str) -> dict[st
         pacer_evidence["progress"] = progress
         pacer_evidence["stage"] = progress.get("stage", "")
         pacer_evidence["changed_product_file_count"] = progress.get("changed_product_file_count", 0)
+        for key in ("activity", "activity_label", "activity_command", "activity_elapsed_seconds"):
+            pacer_evidence[key] = progress.get(key)
     return {
         "mission": mission,
         "rounds": rounds,
@@ -864,6 +866,10 @@ def build_mission_detail(workspace_root: str | Path, mission_id: str) -> dict[st
         "verification": verification,
         "progress": progress,
         "pacer_evidence": pacer_evidence,
+        "activity": pacer_evidence.get("activity", ""),
+        "activity_label": pacer_evidence.get("activity_label", ""),
+        "activity_command": pacer_evidence.get("activity_command", ""),
+        "activity_elapsed_seconds": pacer_evidence.get("activity_elapsed_seconds"),
     }
 
 

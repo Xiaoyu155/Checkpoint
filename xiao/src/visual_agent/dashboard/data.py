@@ -147,6 +147,8 @@ def _build_dashboard_data_uncached(root: Path) -> dict[str, Any]:
         mission["efficiency"] = _mission_efficiency(root, mission)
         mission["pacer_evidence"] = _mission_pacer_evidence(root, mission)
         mission["verification_mode"] = str(mission["pacer_evidence"].get("verification_mode") or mission.get("verification_mode") or "")
+        for key in ("activity", "activity_label", "activity_command", "activity_elapsed_seconds"):
+            mission[key] = mission["pacer_evidence"].get(key)
     plans = list_plans(root)
 
     try:
@@ -653,6 +655,10 @@ def _mission_pacer_evidence(root: Path, mission: dict[str, Any]) -> dict[str, An
         "merge_state": str(mission.get("merge_state") or ""),
         "final_report": str(report_path) if report_path else "",
         "stage": progress.get("stage", ""),
+        "activity": progress.get("activity", ""),
+        "activity_label": progress.get("activity_label", ""),
+        "activity_command": progress.get("activity_command", ""),
+        "activity_elapsed_seconds": progress.get("activity_elapsed_seconds"),
         "progress": progress,
         "changed_product_file_count": progress.get("changed_product_file_count", 0),
     }

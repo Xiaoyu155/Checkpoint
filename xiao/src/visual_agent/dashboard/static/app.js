@@ -778,6 +778,7 @@ function missionCard(m){
   const commandMode = String(m.verification_mode || ev.verification_mode || '').toLowerCase() === 'command';
   const hasStop = m.stop_reason && m.stop_reason!=='verified' && !(commandMode && m.stop_reason==='coverage_gap');
   const effLine = _efficiencyLine(eff);
+  const activity = _activityBlock(m);
   const mergeBtn = m.can_merge
     ? `<button class="act-merge" onclick="mergeMission(event,'${esc(m.mission_id)}')">✓ 合并</button>` : '';
   const retryBtn = isStopped && hasStop
@@ -814,6 +815,7 @@ function missionCard(m){
       ${agent}${stopTag}
       <span class="tcard-actions">${mergeBtn}${clarifyBtn}${retryBtn}${loadBtn}${deleteBtn}</span>
     </div>
+    ${activity}
     <div class="tcard-meta">
       <span>${esc((m.mission_id||'').slice(0,17))}</span>
       ${cardTime?`<span>更新 ${esc(cardTime)}</span>`:''}
@@ -832,6 +834,7 @@ function missionRow(m){
   const commandMode = String(m.verification_mode || ev.verification_mode || '').toLowerCase() === 'command';
   const hasStop = m.stop_reason && m.stop_reason!=='verified' && !(commandMode && m.stop_reason==='coverage_gap');
   const effLine = _efficiencyLine(eff);
+  const activity = _activityBlock(m);
   const mergeBtn = m.can_merge ? `<button class="act-merge" onclick="mergeMission(event,'${esc(m.mission_id)}')">合并</button>` : '';
   const retryBtn = isStopped && hasStop ? `<button class="act-retry" onclick="retryMission(event,'${esc(m.mission_id)}')">重试</button>` : '';
   const loadBtn = !['running','preview_running','starting','merged','archived'].includes(status)
@@ -858,6 +861,7 @@ function missionRow(m){
   return `<div class="mission-row ${stClass(status)}" onclick="detail('${esc(m.mission_id)}')">
     <div class="mission-row-main">
       <div class="mission-row-title">${esc(m.objective||'（无目标）')}</div>
+      ${activity}
       ${folded}
     </div>
     <div class="mission-row-state">
@@ -871,6 +875,22 @@ function missionRow(m){
     </div>
     <div class="mission-row-actions">${mergeBtn}${clarifyBtn}${retryBtn}${loadBtn}${deleteBtn}</div>
   </div>`;
+}
+
+function _activityBlock(m){
+  const ev = (m && m.pacer_evidence && typeof m.pacer_evidence === 'object') ? m.pacer_evidence : {};
+  const progress = (ev.progress && typeof ev.progress === 'object') ? ev.progress : {};
+  const activity = String(m?.activity || ev.activity || progress.activity || '').trim();
+  const label = String(m?.activity_label || ev.activity_label || progress.activity_label || '').trim();
+  if(!activity && !label) return '';
+  const elapsedSource = [m?.activity_elapsed_seconds, ev.activity_elapsed_seconds, progress.activity_elapsed_seconds]
+    .find(v => v !== undefined && v !== null && v !== '');
+  const elapsed = Number(elapsedSource);
+  const hasElapsed = Number.isFinite(elapsed);
+  const command = String(m?.activity_command || ev.activity_command || progress.activity_command || '').trim();
+  const risk = hasElapsed && elapsed >= 600 && (activity === 'dependency_install' || activity === 'tests_running');
+  const title = command ? ` title="${esc(command)}"` : '';
+  return `<div class="activity-line${risk?' risk':''}"${title}><span>当前动作</span><b>${esc(label||activity)}</b>${hasElapsed?`<code>${esc(_fmtSeconds(elapsed))}</code>`:''}</div>`;
 }
 
 function _efficiencyLine(eff){

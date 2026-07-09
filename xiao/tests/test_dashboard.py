@@ -4,12 +4,14 @@ import json
 import threading
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 from visual_agent.chief_plans_store import append_worker_record, save_plan, save_verification
 from visual_agent.commercial_config import CommercialConfig
 from visual_agent.dashboard.api import refine_goal_intake, run_chat
 from visual_agent.dashboard import DASHBOARD_HTML, _bind_dashboard_server, build_dashboard_data, build_mission_detail, start_worker, stop_worker
+from visual_agent.mission_progress import save_mission_progress
 from visual_agent.missions import missions_dir, save_mission
 from visual_agent.user_profile import LocalUserProfile
 from visual_agent.workbench_model_config import WorkbenchModelConfig
@@ -472,6 +474,42 @@ def test_dashboard_data_propagates_command_verification_mode(tmp_path) -> None:
     assert mission_payload["pacer_evidence"]["verification_mode"] == "command"
 
 
+def test_dashboard_data_and_detail_propagate_activity_fields(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    workspace.mkdir()
+    mission = {
+        "mission_id": "m1",
+        "plan_id": "p1",
+        "objective": "run tests",
+        "status": "running",
+        "stop_reason": "",
+    }
+    save_mission(workspace, mission)
+    started_at = datetime.now(timezone.utc).isoformat()
+    save_mission_progress(
+        workspace,
+        "m1",
+        stage="worker_running",
+        activity="tests_running",
+        activity_command="python -m pytest tests/test_dashboard.py -q",
+        activity_started_at=started_at,
+    )
+
+    data = build_dashboard_data(workspace)
+    mission_payload = data["missions"][0]
+    detail = build_mission_detail(workspace, "m1")
+
+    assert mission_payload["activity"] == "tests_running"
+    assert mission_payload["activity_label"] == "Running tests"
+    assert mission_payload["activity_command"] == "python -m pytest tests/test_dashboard.py -q"
+    assert isinstance(mission_payload["activity_elapsed_seconds"], int)
+    assert mission_payload["pacer_evidence"]["activity_label"] == "Running tests"
+    assert detail["activity_label"] == "Running tests"
+    assert detail["activity_command"] == "python -m pytest tests/test_dashboard.py -q"
+    assert isinstance(detail["activity_elapsed_seconds"], int)
+    assert detail["pacer_evidence"]["activity"] == "tests_running"
+
+
 def test_start_worker_uses_cli_module_entrypoint(tmp_path, monkeypatch) -> None:
     captured = {}
 
@@ -564,7 +602,9 @@ def test_dashboard_html_has_professional_overview_strip() -> None:
 
 def test_dashboard_app_js_exposes_execution_evidence_surface() -> None:
     app_js = Path(__file__).resolve().parents[1] / "src" / "visual_agent" / "dashboard" / "static" / "app.js"
+    style_css = Path(__file__).resolve().parents[1] / "src" / "visual_agent" / "dashboard" / "static" / "style.css"
     text = app_js.read_text(encoding="utf-8")
+    css = style_css.read_text(encoding="utf-8")
     assert "执行证据" in text
     assert "Worker 日志尾部" in text
     assert "verification_command" in text
@@ -587,6 +627,12 @@ def test_dashboard_app_js_exposes_execution_evidence_surface() -> None:
     assert "verification_mode" in text
     assert "commandMode && m.stop_reason==='coverage_gap'" in text
     assert "commandMode&&m.stop_reason==='coverage_gap'" in text
+    assert "_activityBlock" in text
+    assert "activity_elapsed_seconds" in text
+    assert "activity-line${risk?' risk':''}" in text
+    assert ".activity-line.risk" in css
+    assert "dependency_install" in text
+    assert "tests_running" in text
 
 
 def test_dashboard_goal_intake_refines_goal_into_dialogue(tmp_path, monkeypatch) -> None:
