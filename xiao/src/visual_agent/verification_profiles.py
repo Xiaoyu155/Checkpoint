@@ -85,6 +85,36 @@ def verification_timeout_reason(repo_root: str | Path, command: str) -> str:
     return ""
 
 
+def conditional_test_command_short_circuit(repo_root: str | Path, command: str) -> dict[str, Any]:
+    root = Path(repo_root).expanduser().resolve()
+    text = _normalize_windows_command_operators(str(command or ""))
+    marker = _conditional_node_dependency_marker(text)
+    if marker is None or not (root / marker).exists():
+        return {}
+    if not re.search(
+        r"\bif\s+not\s+exist\s+"
+        + re.escape(marker.as_posix()).replace("/", r"[\\/]")
+        + r"\s+npm\s+(ci|install)\b(?:(?!&&).)*&&\s*\S+",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        return {}
+    return {
+        "status": "blocked",
+        "reason": "conditional_test_command_short_circuit",
+        "marker": marker.as_posix(),
+        "message": (
+            "The verification command uses `if not exist <node_modules marker> npm ci ... && <tests>`. "
+            "Because the marker already exists, Windows cmd skips the test command and can return exit 0 "
+            "without running acceptance. Use a command that always runs the tests after the optional install."
+        ),
+    }
+
+
+def _normalize_windows_command_operators(command: str) -> str:
+    return str(command or "").replace("^&^&", "&&").replace("^&", "&")
+
+
 def _conditional_node_dependency_marker(command: str) -> Path | None:
     match = re.search(
         r"if\s+not\s+exist\s+(?P<path>node_modules[\\/][^\s&|]+[\\/]package\.json)\s+npm\s+(ci|install)\b",

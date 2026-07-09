@@ -3,6 +3,7 @@ from __future__ import annotations
 from visual_agent.verification_profiles import (
     build_test_plan,
     choose_verification_command,
+    conditional_test_command_short_circuit,
     detect_verification_profiles,
     estimate_verification_timeout,
     resolve_test_command,
@@ -93,6 +94,47 @@ def test_timeout_unchanged_when_conditional_npm_ci_marker_present(tmp_path) -> N
     timeout = estimate_verification_timeout(tmp_path, command, 60.0)
 
     assert timeout == 60.0
+
+
+def test_conditional_npm_ci_command_blocks_when_marker_present(tmp_path) -> None:
+    marker = tmp_path / "node_modules" / "express" / "package.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"name":"express"}\n', encoding="utf-8")
+    command = (
+        "cmd /d /s /c if not exist node_modules\\express\\package.json "
+        "npm ci --cache .npm-cache --prefer-offline ^&^& node --test"
+    )
+
+    result = conditional_test_command_short_circuit(tmp_path, command)
+
+    assert result["status"] == "blocked"
+    assert result["reason"] == "conditional_test_command_short_circuit"
+    assert result["marker"] == "node_modules/express/package.json"
+
+
+def test_conditional_npm_ci_command_allows_missing_marker(tmp_path) -> None:
+    command = (
+        "cmd /d /s /c if not exist node_modules\\express\\package.json "
+        "npm ci --cache .npm-cache --prefer-offline ^&^& node --test"
+    )
+
+    result = conditional_test_command_short_circuit(tmp_path, command)
+
+    assert result == {}
+
+
+def test_conditional_npm_ci_command_allows_non_short_circuit_form(tmp_path) -> None:
+    marker = tmp_path / "node_modules" / "express" / "package.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"name":"express"}\n', encoding="utf-8")
+    command = (
+        "cmd /d /s /c if not exist node_modules\\express\\package.json "
+        "(npm ci --cache .npm-cache --prefer-offline || exit /b 1) ^& node --test"
+    )
+
+    result = conditional_test_command_short_circuit(tmp_path, command)
+
+    assert result == {}
 
 
 def test_build_test_plan_focuses_pytest_for_changed_source(tmp_path, monkeypatch) -> None:

@@ -1299,6 +1299,34 @@ def test_chief_dispatch_dry_run_previews_worktree_and_commands(tmp_path, monkeyp
     assert payload["worktree"]["path"].endswith("track-1-codex")
 
 
+def test_chief_dispatch_blocks_conditional_npm_ci_short_circuit(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    marker = tmp_path / "node_modules" / "express" / "package.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"name":"express"}\n', encoding="utf-8")
+
+    def should_not_create_worktree(**_kwargs):
+        raise AssertionError("preflight should block before creating a worktree")
+
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", should_not_create_worktree)
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        test_command=(
+            "cmd /d /s /c if not exist node_modules\\express\\package.json "
+            "npm ci --cache .npm-cache --prefer-offline ^&^& node --test"
+        ),
+    )
+
+    assert payload["status"] == "preflight_blocked"
+    assert payload["reason"] == "conditional_test_command_short_circuit"
+    assert payload["preflight"]["status"] == "blocked"
+    assert payload["preflight"]["command_safety"]["marker"] == "node_modules/express/package.json"
+
+
 def test_chief_dispatch_review_plan_uses_report_as_acceptance(tmp_path, monkeypatch) -> None:
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     plan_id = "20260706-150000-review-plan"

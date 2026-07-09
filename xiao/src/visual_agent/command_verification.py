@@ -21,6 +21,7 @@ from time import monotonic
 from typing import Any
 
 from .subprocess_window import hidden_subprocess_kwargs
+from .verification_profiles import conditional_test_command_short_circuit
 
 # The command gate is only trustworthy while the tests themselves are what the
 # user wrote. A worker that edits tests can turn any failure green, so test
@@ -34,6 +35,7 @@ NON_REPAIRABLE_COMMAND_FAILURE_KINDS = frozenset(
         "command_launch_error",
         "command_timeout",
         "verification_environment_missing",
+        "conditional_test_command_short_circuit",
     }
 )
 
@@ -215,6 +217,18 @@ def run_command_verification(
     cmd = str(command or "").strip()
     if not cmd:
         return {"verdict": "skipped", "command": "", "reason": "no test command provided"}
+    short_circuit = conditional_test_command_short_circuit(root, cmd)
+    if short_circuit:
+        return {
+            "verdict": "fail",
+            "command": cmd,
+            "exit_code": None,
+            "output_tail": "",
+            "reason": str(short_circuit.get("message") or "conditional test command would skip acceptance"),
+            "failure_kind": str(short_circuit.get("reason") or "conditional_test_command_short_circuit"),
+            "classification_confidence": "definitive",
+            "short_circuit_marker": str(short_circuit.get("marker") or ""),
+        }
     verification_env = normalize_verification_env(verification_env)
     missing_env = _missing_declared_env_vars(verification_env)
     if missing_env:

@@ -42,7 +42,12 @@ from .git_diff import changed_files
 from .llm_providers import LLMBackend, run_llm_completion
 from .models import to_jsonable
 from .repo_map import build_repo_map, render_repo_map, repo_map_cache_path
-from .verification_profiles import estimate_verification_timeout, resolve_test_command, verification_timeout_reason
+from .verification_profiles import (
+    conditional_test_command_short_circuit,
+    estimate_verification_timeout,
+    resolve_test_command,
+    verification_timeout_reason,
+)
 from .workspace import open_workspace
 
 
@@ -193,6 +198,11 @@ def dispatch_chief_plan(
         if command_mode
         else {"base_timeout_seconds": float(timeout_seconds), "timeout_seconds": float(timeout_seconds), "reason": "workflow_mode"}
     )
+    command_safety = (
+        conditional_test_command_short_circuit(repo_root, effective_verification_command)
+        if command_mode
+        else {}
+    )
     verification_env_normalized = normalize_verification_env(verification_env)
     missing_env = _missing_declared_verification_env(verification_env_normalized)
     preflight = _dispatch_preflight_payload(
@@ -204,6 +214,7 @@ def dispatch_chief_plan(
         missing_env=missing_env,
         dependency_check=dependency_check,
         timeout_info=timeout_info,
+        command_safety=command_safety,
     )
     # Zero-token architecture memory: refresh the local index (only files that
     # changed since the last dispatch are re-parsed) and hand every worker
@@ -916,9 +927,11 @@ def _dispatch_preflight_payload(
     missing_env: list[str],
     dependency_check: dict[str, Any],
     timeout_info: dict[str, Any],
+    command_safety: dict[str, Any],
 ) -> dict[str, Any]:
     dependency_warnings = dependency_check.get("warnings") if isinstance(dependency_check.get("warnings"), list) else []
-    status = "blocked" if test_command_unresolved or missing_env else ("warning" if dependency_warnings else "ok")
+    command_safety_blocked = str(command_safety.get("status") or "") == "blocked"
+    status = "blocked" if test_command_unresolved or missing_env or command_safety_blocked else ("warning" if dependency_warnings else "ok")
     return {
         "schema_version": 1,
         "status": status,
@@ -935,6 +948,7 @@ def _dispatch_preflight_payload(
         },
         "dependency": dependency_check,
         "verification_timeout": timeout_info,
+        "command_safety": command_safety,
     }
 
 
@@ -956,6 +970,12 @@ def _dispatch_preflight_block(preflight: dict[str, Any]) -> dict[str, str] | Non
         return {
             "reason": "verification_environment_missing",
             "message": f"设置环境变量 {names} 后重试；不要修改产品代码、测试或 eval 脚本来绕过验收环境。",
+        }
+    command_safety = preflight.get("command_safety") if isinstance(preflight.get("command_safety"), dict) else {}
+    if str(command_safety.get("status") or "") == "blocked":
+        return {
+            "reason": str(command_safety.get("reason") or "command_safety_blocked"),
+            "message": str(command_safety.get("message") or "Verification command safety check blocked dispatch."),
         }
     return None
 
@@ -3628,6 +3648,16 @@ def preflight_to_markdown(preflight: Any, *, heading: str = "## Preflight") -> s
             ]
         )
         lines.append(_preflight_table_row("verification_timeout", "ok", detail))
+    command_safety = preflight.get("command_safety") if isinstance(preflight.get("command_safety"), dict) else {}
+    if command_safety:
+        detail = _join_non_empty(
+            [
+                f"reason={command_safety.get('reason') or ''}",
+                f"marker={command_safety.get('marker') or ''}",
+                str(command_safety.get("message") or ""),
+            ]
+        )
+        lines.append(_preflight_table_row("command_safety", str(command_safety.get("status") or ""), detail))
     return "\n".join(lines).rstrip()
 
 

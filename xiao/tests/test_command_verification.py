@@ -140,6 +140,31 @@ def test_declared_env_var_missing_blocks_before_run(tmp_path, monkeypatch) -> No
     assert r["missing_env_vars"] == ["QWEN_API_KEY"]
 
 
+def test_conditional_npm_ci_short_circuit_blocks_before_run(tmp_path, monkeypatch) -> None:
+    marker = tmp_path / "node_modules" / "express" / "package.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"name":"express"}\n', encoding="utf-8")
+
+    def should_not_run(*_args, **_kwargs):
+        raise AssertionError("short-circuiting command should block before subprocess.run")
+
+    monkeypatch.setattr("visual_agent.command_verification.subprocess.run", should_not_run)
+
+    r = run_command_verification(
+        command=(
+            "cmd /d /s /c if not exist node_modules\\express\\package.json "
+            "npm ci --cache .npm-cache --prefer-offline ^&^& node --test"
+        ),
+        repo_root=tmp_path,
+    )
+
+    assert r["verdict"] == "fail"
+    assert r["failure_kind"] == "conditional_test_command_short_circuit"
+    assert r["classification_confidence"] == "definitive"
+    assert r["exit_code"] is None
+    assert r["short_circuit_marker"] == "node_modules/express/package.json"
+
+
 def test_declared_marker_match(tmp_path, monkeypatch) -> None:
     class Completed:
         returncode = 1
