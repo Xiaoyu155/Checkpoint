@@ -61,6 +61,32 @@ def test_selects_low_cost_model_for_mechanical_task_under_quota_pressure(tmp_pat
     assert selection.selected.id == "cheap"
 
 
+def test_selects_low_cost_model_from_provider_quota_snapshot(tmp_path) -> None:
+    cfg = tmp_path / "model_pool.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "models": [
+                    {"id": "expensive", "provider": "x", "model": "max", "capability": 0.95, "cost": 0.95, "modes": ["cheap", "standard", "strong"]},
+                    {"id": "cheap", "provider": "x", "model": "mini", "capability": 0.40, "cost": 0.08, "modes": ["cheap", "standard"]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    selection = select_model_for_task(
+        objective="fix typo in button label",
+        changed_files=["src/button.tsx"],
+        quota_snapshot={"providers": {"codex": {"rate_limits": {"five_hour": {"used_percentage": 92}}}}},
+        config_path=cfg,
+    )
+
+    assert selection.status == "selected"
+    assert selection.selected is not None
+    assert selection.selected.id == "cheap"
+
+
 def test_strong_task_requires_capability_even_when_quota_is_hot(tmp_path) -> None:
     cfg = tmp_path / "model_pool.json"
     cfg.write_text(

@@ -27,6 +27,7 @@ from .models import (
     to_jsonable,
 )
 from .providers import ProviderContext, ProviderRegistry, default_provider_registry
+from .subprocess_window import hidden_subprocess_kwargs
 from .product_state import (
     ai_quality_failure_message,
     browser_readiness_failure_message,
@@ -1456,6 +1457,7 @@ class WorkflowRuntime:
                 cwd=cwd,
                 encoding="utf-8",
                 errors="replace",
+                **hidden_subprocess_kwargs(),
             )
         except subprocess.TimeoutExpired:
             return self._assertion_failed(

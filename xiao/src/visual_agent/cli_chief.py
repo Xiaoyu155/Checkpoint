@@ -165,7 +165,7 @@ def _handle_chief_dispatch(args: Any) -> int:
         print(payload_to_json(payload))
     else:
         print(chief_dispatch_to_markdown(payload))
-    return 1 if str(payload.get("status") or "") in {"blocked", "worker_failed", "verification_failed"} else 0
+    return 1 if str(payload.get("status") or "") in {"blocked", "worker_failed", "worker_toolchain_violation", "verification_failed"} else 0
 
 
 # ── chief-run ─────────────────────────────────────────────────────────────────
@@ -323,10 +323,22 @@ def _handle_refine_goal(args: Any) -> int:
 
 
 def _handle_quota(args: Any) -> int:
-    from .subscription_quota import load_quota_snapshot, payload_to_json, quota_status, quota_to_markdown
+    from .subscription_quota import (
+        load_quota_snapshot,
+        payload_to_json,
+        quota_status,
+        quota_to_markdown,
+        refresh_codex_quota_snapshot,
+    )
 
+    refresh = None
+    if bool(getattr(args, "refresh_codex", False)):
+        refresh = refresh_codex_quota_snapshot(command=getattr(args, "codex_command", None))
     snapshot = load_quota_snapshot()
-    print(payload_to_json({"snapshot": snapshot, "status": quota_status(snapshot)}) if args.format == "json" else quota_to_markdown(snapshot))
+    payload = {"snapshot": snapshot, "status": quota_status(snapshot)}
+    if refresh is not None:
+        payload["refresh"] = refresh
+    print(payload_to_json(payload) if args.format == "json" else quota_to_markdown(snapshot))
     return 0
 
 

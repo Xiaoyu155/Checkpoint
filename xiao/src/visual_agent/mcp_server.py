@@ -1,7 +1,9 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import argparse
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -1609,9 +1611,19 @@ def _ok_json(payload: dict[str, Any]) -> list[TextContent]:
 
 
 def main() -> None:
+    _apply_startup_args()
     if server is None or stdio_server is None:
         raise RuntimeError("MCP support is not installed. Run: pip install -e .[mcp]")
     asyncio.run(_run())
+
+
+def _apply_startup_args(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--workspace-root", default=None)
+    namespace, _ = parser.parse_known_args(argv)
+    workspace_root = str(namespace.workspace_root or "").strip()
+    if workspace_root:
+        os.environ["VISUAL_AGENT_WORKSPACE"] = workspace_root
 
 
 async def _run() -> None:

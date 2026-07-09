@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import to_jsonable
+from .mcp_doctor import build_mcp_startup_doctor, mcp_startup_doctor_to_markdown
 from .quality import (
     build_coding_agent_brief,
     build_install_check_plan,
@@ -43,6 +44,7 @@ QUALITY_COMMANDS = {
     "release-smoke",
     "release-trial",
     "install-check",
+    "mcp-doctor",
     "mcp-client-config",
     "coding-agent-brief",
     "mcp-smoke",
@@ -121,15 +123,22 @@ def add_quality_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
     mcp_client_config = subparsers.add_parser("mcp-client-config", help="Generate MCP client configuration for this checkout.")
     mcp_client_config.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root passed to the MCP server.")
     mcp_client_config.add_argument("--client", choices=["cursor", "claude-desktop", "vscode"], default="cursor", help="Client config shape to generate.")
-    mcp_client_config.add_argument("--python", default=".\\.venv\\Scripts\\python.exe", help="Python executable used by the MCP client.")
+    mcp_client_config.add_argument("--python", default=None, help="Python executable used by the MCP client. Default: current Python.")
     mcp_client_config.add_argument("--repo-root", default=".", help="Repository root used for cwd and PYTHONPATH.")
     mcp_client_config.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    mcp_doctor = subparsers.add_parser("mcp-doctor", help="Diagnose MCP startup paths, Python, PYTHONPATH, and package imports.")
+    mcp_doctor.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root expected by MCP tools.")
+    mcp_doctor.add_argument("--repo-root", default=".", help="Repository root used for cwd and PYTHONPATH.")
+    mcp_doctor.add_argument("--python", default=None, help="Python executable used by the MCP client. Default: current Python.")
+    mcp_doctor.add_argument("--client", default="codex", help="Client label for the diagnostic report.")
+    mcp_doctor.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
     coding_agent_brief = subparsers.add_parser("coding-agent-brief", help="Generate a Codex/Claude Code/Cursor/VS Code onboarding brief.")
     coding_agent_brief.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root passed to the MCP server.")
     coding_agent_brief.add_argument("--repo-root", default=".", help="Repository root used for cwd and PYTHONPATH.")
     coding_agent_brief.add_argument("--client", choices=["codex", "claude-code", "cursor", "vscode"], default="codex", help="Coding agent target.")
-    coding_agent_brief.add_argument("--python", default=".\\.venv\\Scripts\\python.exe", help="Python executable used by the MCP client.")
+    coding_agent_brief.add_argument("--python", default=None, help="Python executable used by the MCP client. Default: current Python.")
     coding_agent_brief.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     mcp_smoke = subparsers.add_parser("mcp-smoke", help="Run local MCP tool smoke checks through the in-process MCP adapter.")
@@ -254,6 +263,18 @@ def handle_quality_command(args: Any, *, release_trial_runner: Any = None) -> in
         else:
             print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
         return 0
+    if args.command == "mcp-doctor":
+        payload = build_mcp_startup_doctor(
+            workspace_root=args.workspace_root,
+            repo_root=args.repo_root,
+            python=args.python,
+            client=args.client,
+        )
+        if args.format == "markdown":
+            print(mcp_startup_doctor_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0 if payload.get("status") in {"success", "warning"} else 1
     if args.command == "coding-agent-brief":
         payload = build_coding_agent_brief(
             workspace_root=args.workspace_root,

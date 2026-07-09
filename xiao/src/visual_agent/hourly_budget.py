@@ -7,26 +7,24 @@ from typing import Any
 DEFAULT_WINDOW_MINUTES = 300
 DEFAULT_RESERVE_MINUTES = 45
 DEFAULT_PAUSE_AT_USED = 82.0
+MIN_STRONG_WORKER_MINUTES = 20
 
 
 def estimate_remaining_window_minutes(snapshot: dict[str, Any] | None, *, window_minutes: int = DEFAULT_WINDOW_MINUTES) -> int:
     """Approximate remaining 5h-window headroom from the latest quota snapshot."""
     if not isinstance(snapshot, dict):
         return int(window_minutes)
-    five_hour = (snapshot.get("rate_limits") or {}).get("five_hour") if isinstance(snapshot.get("rate_limits"), dict) else None
-    if not isinstance(five_hour, dict):
+    used = _window_used_percentage(snapshot, "five_hour")
+    if used is None:
         return int(window_minutes)
-    used = max(0.0, min(100.0, float(five_hour.get("used_percentage") or 0.0)))
     return max(0, int(round(float(window_minutes) * (100.0 - used) / 100.0)))
 
 
 def quota_used_percentage(snapshot: dict[str, Any] | None) -> float:
     if not isinstance(snapshot, dict):
         return 0.0
-    five_hour = (snapshot.get("rate_limits") or {}).get("five_hour") if isinstance(snapshot.get("rate_limits"), dict) else None
-    if not isinstance(five_hour, dict):
-        return 0.0
-    return max(0.0, min(100.0, float(five_hour.get("used_percentage") or 0.0)))
+    used = _window_used_percentage(snapshot, "five_hour")
+    return 0.0 if used is None else used
 
 
 def build_hourly_plan(
@@ -45,8 +43,10 @@ def build_hourly_plan(
     window_minutes = max(30, int(float(hours) * 60))
     remaining = min(window_minutes, estimate_remaining_window_minutes(quota_snapshot, window_minutes=DEFAULT_WINDOW_MINUTES))
     used = quota_used_percentage(quota_snapshot)
-    usable_strong = max(0, remaining - max(0, int(reserve_minutes)))
-    strong_allowed = used < float(pause_at_used_percentage) and usable_strong >= 20
+    requested_reserve = max(0, int(reserve_minutes))
+    effective_reserve = effective_reserve_minutes(remaining, requested_reserve)
+    usable_strong = max(0, remaining - effective_reserve)
+    strong_allowed = used < float(pause_at_used_percentage) and usable_strong >= MIN_STRONG_WORKER_MINUTES
     scheduled: list[dict[str, Any]] = []
     deferred: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
@@ -70,7 +70,7 @@ def build_hourly_plan(
         if strong_allowed and estimate <= usable_strong:
             scheduled.append(_slot(task, mode="strong_worker", minutes=estimate))
             usable_strong -= estimate
-            strong_allowed = usable_strong >= 20 and used < float(pause_at_used_percentage)
+            strong_allowed = usable_strong >= MIN_STRONG_WORKER_MINUTES and used < float(pause_at_used_percentage)
             continue
         deferred.append({**task, "reason": "not enough safe 5h-window headroom for a strong worker"})
 
@@ -78,7 +78,8 @@ def build_hourly_plan(
         "schema_version": 1,
         "window_minutes": window_minutes,
         "remaining_window_minutes": remaining,
-        "reserve_minutes": int(reserve_minutes),
+        "reserve_minutes": effective_reserve,
+        "requested_reserve_minutes": requested_reserve,
         "usable_strong_minutes": usable_strong,
         "pause_at_used_percentage": float(pause_at_used_percentage),
         "quota_used_percentage": used,
@@ -113,6 +114,22 @@ def payload_to_json(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def effective_reserve_minutes(available_minutes: int, requested_reserve_minutes: int) -> int:
+    """Scale the reserve to the actual supervision window.
+
+    The default 45 minute reserve is appropriate for a 5h quota window, but it
+    makes 1h dogfood/autopilot runs unable to start normal 45 minute tasks.
+    Keep the requested reserve for large windows and cap it to one sixth of
+    the available time for shorter windows.
+    """
+    available = max(0, int(available_minutes))
+    requested = max(0, int(requested_reserve_minutes))
+    if available <= 0 or requested <= 0:
+        return 0
+    scaled = max(0, available // 6)
+    return min(requested, scaled)
+
+
 def _slot(task: dict[str, Any], *, mode: str, minutes: int) -> dict[str, Any]:
     return {
         "task_id": task.get("task_id"),
@@ -129,3 +146,36 @@ def _summary(scheduled: list[dict[str, Any]], deferred: list[dict[str, Any]], bl
     cheap = sum(1 for item in scheduled if item.get("mode") == "cheap_worker")
     research = sum(1 for item in scheduled if item.get("mode") == "research_or_doc")
     return f"{len(scheduled)} scheduled ({strong} strong, {cheap} cheap, {research} research/doc), {len(deferred)} deferred, {len(blocked)} blocked"
+
+
+def _window_used_percentage(snapshot: dict[str, Any], window_name: str) -> float | None:
+    blocks: list[dict[str, Any]] = []
+    rate_limits = snapshot.get("rate_limits") if isinstance(snapshot.get("rate_limits"), dict) else {}
+    block = rate_limits.get(window_name) if isinstance(rate_limits, dict) else None
+    if isinstance(block, dict):
+        blocks.append(block)
+    providers = snapshot.get("providers") if isinstance(snapshot.get("providers"), dict) else {}
+    for provider in providers.values():
+        if not isinstance(provider, dict):
+            continue
+        limits = provider.get("rate_limits") if isinstance(provider.get("rate_limits"), dict) else {}
+        provider_block = limits.get(window_name) if isinstance(limits, dict) else None
+        if isinstance(provider_block, dict):
+            blocks.append(provider_block)
+    used_values = [_used_percentage(block) for block in blocks]
+    used_values = [value for value in used_values if value is not None]
+    if not used_values:
+        return None
+    # The scheduler is provider-agnostic today, so use the hottest matching
+    # window as a conservative global signal.
+    return max(used_values)
+
+
+def _used_percentage(block: dict[str, Any]) -> float | None:
+    used = block.get("used_percentage")
+    if isinstance(used, (int, float)):
+        return max(0.0, min(100.0, float(used)))
+    remaining = block.get("remaining_percentage")
+    if isinstance(remaining, (int, float)):
+        return max(0.0, min(100.0, 100.0 - float(remaining)))
+    return None

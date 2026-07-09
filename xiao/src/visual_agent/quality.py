@@ -62,6 +62,7 @@ def build_quality_gate_plan(
                     "-q",
                     "tests/test_security.py",
                     "tests/test_dashboard.py",
+                    "tests/test_dashboard_static_acceptance.py",
                     "tests/test_cloud_api.py",
                 ),
             ),
@@ -856,7 +857,7 @@ def markdown_cell(value: Any) -> str:
 
 
 def build_release_check_plan(*, workspace_root: str | Path = ".agent-workspace") -> dict[str, Any]:
-    python = ".\\.venv\\Scripts\\python.exe"
+    python = sys.executable
     workspace = str(workspace_root)
     checks = [
         {"id": "install_check", "command": f"{python} -m visual_agent.cli install-check --format markdown", "required": True},
@@ -868,6 +869,7 @@ def build_release_check_plan(*, workspace_root: str | Path = ".agent-workspace")
         {"id": "release_trial", "command": f"{python} -m visual_agent.cli release-trial --workspace-root {workspace} --format markdown", "required": True},
         {"id": "demo_run", "command": f"{python} -m visual_agent.cli workspace-run --root {workspace} --workflow local_html_form_workflow --inputs-file demo_login.json", "required": True},
         {"id": "report_index", "command": f"{python} -m visual_agent.cli workspace-report-index --root {workspace} --rebuild", "required": True},
+        {"id": "mcp_doctor", "command": f"{python} -m visual_agent.cli mcp-doctor --workspace-root {workspace} --format markdown", "required": True},
         {"id": "mcp_client_config", "command": f"{python} -m visual_agent.cli mcp-client-config --workspace-root {workspace} --client cursor --format json", "required": True},
         {"id": "mcp_smoke_cli", "command": f"{python} -m visual_agent.cli mcp-smoke --workspace-root {workspace} --workflow local_html_form_workflow --inputs-file demo_login.json --format markdown", "required": True},
         {"id": "smoke_quality_gate", "command": f"{python} -m visual_agent.cli quality-gate --profile smoke --workspace-root {workspace} --run --fail-on-secret-leak", "required": True},
@@ -953,6 +955,26 @@ def build_release_smoke_plan(
             "cwd": ".",
             "required": True,
             "purpose": "Confirm the first demo reaches L3+ product acceptance with real interaction.",
+        },
+        {
+            "id": "pacer_workbench_static_acceptance",
+            "command": [
+                python,
+                "-m",
+                "visual_agent.cli",
+                "workspace-run",
+                "--root",
+                workspace,
+                "--workflow",
+                "pacer_workbench_static_acceptance",
+                "--run-profile",
+                "supervised",
+                "--format",
+                "json",
+            ],
+            "cwd": ".",
+            "required": True,
+            "purpose": "Confirm the Pacer workbench exposes intake, value metrics, and requirement-contract evidence.",
         },
         {
             "id": "mcp_smoke",
@@ -1149,13 +1171,14 @@ def release_smoke_to_markdown(result: dict[str, Any]) -> str:
 
 
 def build_install_check_plan() -> dict[str, Any]:
-    python = ".\\.venv\\Scripts\\python.exe"
+    python = sys.executable
     checks = [
-        {"id": "python", "command": f"{python} --version", "required": True, "purpose": "Confirm the project virtualenv is callable."},
+        {"id": "python", "command": f"{python} --version", "required": True, "purpose": "Confirm the selected Python is callable."},
         {"id": "editable_install_web", "command": f"{python} -m pip install -e .[web]", "required": True, "purpose": "Install browser automation dependencies."},
         {"id": "editable_install_mcp", "command": f"{python} -m pip install -e .[mcp]", "required": True, "purpose": "Install MCP server dependencies."},
         {"id": "playwright_browser", "command": f"{python} -m playwright install chromium", "required": False, "purpose": "Install browser binaries for live browser runs."},
         {"id": "doctor", "command": f"{python} -m visual_agent.cli doctor", "required": True, "purpose": "Check local capability availability without leaking secrets."},
+        {"id": "mcp_doctor", "command": f"{python} -m visual_agent.cli mcp-doctor --format markdown", "required": True, "purpose": "Check MCP startup paths, PYTHONPATH, and import readiness."},
         {"id": "atomic_capabilities", "command": f"{python} -m visual_agent.cli atomic-capabilities", "required": True, "purpose": "Confirm planner-visible capabilities are importable."},
     ]
     return {
@@ -1202,13 +1225,14 @@ def build_mcp_client_config(
     *,
     workspace_root: str | Path = ".agent-workspace",
     client: str = "cursor",
-    python: str = ".\\.venv\\Scripts\\python.exe",
+    python: str | None = None,
     repo_root: str | Path = ".",
 ) -> dict[str, Any]:
     workspace = str(workspace_root)
     cwd = str(Path(repo_root).resolve())
+    python_command = str(python or sys.executable)
     server = {
-        "command": python,
+        "command": python_command,
         "args": ["-m", "visual_agent.mcp_server", "--workspace-root", workspace],
         "cwd": cwd,
         "env": {"PYTHONPATH": str((Path(repo_root).resolve() / "src"))},
@@ -1264,7 +1288,7 @@ def build_coding_agent_brief(
     workspace_root: str | Path = ".agent-workspace",
     repo_root: str | Path = ".",
     client: str = "codex",
-    python: str = ".\\.venv\\Scripts\\python.exe",
+    python: str | None = None,
 ) -> dict[str, Any]:
     workspace = str(workspace_root)
     repo = str(Path(repo_root).resolve())

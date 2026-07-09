@@ -86,6 +86,17 @@ def test_parse_development_plan_skips_question_bullets() -> None:
     ]
 
 
+def test_parse_development_plan_preserves_long_task_objectives() -> None:
+    long_tail = " ".join(f"criterion-{index}" for index in range(80))
+    text = f"# Long Plan\n\n- [ ] Implement checkout reliability with acceptance details {long_tail}\n"
+
+    parsed = parse_development_plan(text)
+
+    objective = parsed["drafts"][0]["objective"]
+    assert "criterion-79" in objective
+    assert len(objective) > 260
+
+
 def test_import_development_plan_saves_draft_record(tmp_path) -> None:
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("- [ ] Fix checkout total display\n- [ ] Add login error state\n", encoding="utf-8")

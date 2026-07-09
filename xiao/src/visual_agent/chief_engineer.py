@@ -9,7 +9,7 @@ from typing import Any
 from .agent_capabilities import load_agent_profile, recommend_worker_config
 from .dynamic_model_selector import select_model_for_task, selection_to_dict
 from .model_router import route_task, tier_task_kind
-from .codex_check import codex_coverage_summary
+from .codex_check import codex_coverage_summary, is_runtime_changed_file
 from .git_diff import affected_workflows, changed_files
 from .models import to_jsonable
 from .mission_pipeline import plan_status_to_pipeline_state
@@ -19,7 +19,7 @@ from .workspace import WorkflowRef, discover_workflows, open_workspace
 
 
 _CHECKPOINT_ARTIFACT_BASENAMES = {".visual-agent-status.md", "强制测试记录.md"}
-_CHECKPOINT_ARTIFACT_DIR_PREFIXES = (".agent-workspace/", ".pw-browsers/")
+_CHECKPOINT_ARTIFACT_DIR_PREFIXES = (".agent-workspace/", ".pw-browsers/", "artifacts/")
 _NON_PRODUCT_DIR_PREFIXES = ("_graveyard_", "graveyard/", "archive/", "archives/", "_open_source_cases/")
 
 
@@ -234,6 +234,8 @@ def _product_changed_files(paths: list[str], *, repo_root: Path | None = None) -
         if basename in _CHECKPOINT_ARTIFACT_BASENAMES:
             continue
         if normalized == ".gitignore" and repo_root is not None and _gitignore_change_is_only_checkpoint_runtime(repo_root):
+            continue
+        if is_runtime_changed_file(normalized, repo_root=repo_root):
             continue
         if any(normalized == prefix.rstrip("/") or normalized.startswith(prefix) for prefix in _CHECKPOINT_ARTIFACT_DIR_PREFIXES):
             continue

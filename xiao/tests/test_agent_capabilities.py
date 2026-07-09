@@ -62,7 +62,7 @@ def test_agents_doctor_reports_install_status_and_capabilities() -> None:
 def test_mimo_backend_reads_ai_model_api_file(tmp_path) -> None:
     source = tmp_path / "ai模型api.txt"
     source.write_text(
-        "xiaomimimo专属apitp-cguzfkhr8fvsm83d5xamojm5r5fu6rtkdby69kmcz1zz81ae\n",
+        "xiaomimimo专属apitp-abcdefghijklmnopqrstuvwxyz1234567890ABCDEFG\n",
         encoding="utf-8",
     )
 

@@ -32,6 +32,7 @@ EFFICIENCY_LABELS = {
     "mimo_runs": "MiMo 完成次数",
     "backend_runs": "其他后端次数",
     "saved_usd": "额度节省 (USD)",
+    "saved_quota_percent": "套餐额度节省比例 (%)",
     "spent_usd": "实际花费 (USD)",
     "saved_minutes": "时间节省 (分钟)",
     "efficiency_gain_percent": "综合效率提升 (%)",
@@ -104,6 +105,7 @@ def compute_mimo_efficiency(worker_records: list[dict[str, Any] | None]) -> dict
     denominator = max(spent_usd + mimo_reported_cost, 0.01)
     raw_efficiency = (saved_usd + saved_minutes * _VALUE_PER_MINUTE_USD) / denominator * 100.0
     efficiency_gain_percent = max(_EFFICIENCY_MIN, min(_EFFICIENCY_MAX, round(raw_efficiency, 1)))
+    saved_quota_percent = round(saved_usd / max(saved_usd + spent_usd, 0.01) * 100.0, 1) if (saved_usd > 0 or spent_usd > 0) else 0.0
 
     # Capability score: start at 50 (neutral), adjust by completion rate,
     # output volume, and savings.  Conservative — never exceeds 100.
@@ -128,6 +130,7 @@ def compute_mimo_efficiency(worker_records: list[dict[str, Any] | None]) -> dict
         "mimo_runs": mimo_runs,
         "backend_runs": backend_runs,
         "saved_usd": round(saved_usd, 4),
+        "saved_quota_percent": saved_quota_percent,
         "spent_usd": round(spent_usd, 4),
         "saved_minutes": round(saved_minutes, 2),
         "efficiency_gain_percent": efficiency_gain_percent,

@@ -10,6 +10,7 @@ def test_compute_mimo_efficiency_empty_records():
     assert result["mimo_runs"] == 0
     assert result["backend_runs"] == 0
     assert result["saved_usd"] == 0.0
+    assert result["saved_quota_percent"] == 0.0
     assert result["spent_usd"] == 0.0
     assert result["saved_minutes"] == 0.0
     assert result["efficiency_gain_percent"] == 0
@@ -33,6 +34,7 @@ def test_compute_mimo_efficiency_mimo_backend_is_savings():
     result = compute_mimo_efficiency(records)
     assert result["mimo_runs"] == 1
     assert result["saved_usd"] == 0.05
+    assert result["saved_quota_percent"] == 100.0
     assert result["spent_usd"] == 0.0
     # 120s * 0.35 / 60 = 0.7 minutes
     assert abs(result["saved_minutes"] - 0.7) < 0.01
@@ -71,6 +73,7 @@ def test_compute_mimo_efficiency_subscription_run_is_spent():
     assert result["backend_runs"] == 0
     assert result["spent_usd"] == 0.10
     assert result["saved_usd"] == 0.0
+    assert result["saved_quota_percent"] == 0.0
 
 
 def test_compute_mimo_efficiency_other_backend_is_spent():
@@ -142,11 +145,13 @@ def test_compute_mimo_efficiency_labels_present():
     labels = result["labels"]
     assert "mimo_runs" in labels
     assert "saved_usd" in labels
+    assert "saved_quota_percent" in labels
     assert "saved_minutes" in labels
     assert "efficiency_gain_percent" in labels
     assert "capability_score" in labels
     # All labels should be Chinese
     assert "MiMo" in labels["mimo_runs"]
     assert "额度" in labels["saved_usd"]
+    assert "套餐额度" in labels["saved_quota_percent"]
     assert "时间" in labels["saved_minutes"]
     assert "效率" in labels["efficiency_gain_percent"]

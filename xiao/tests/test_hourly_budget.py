@@ -1,12 +1,19 @@
 from __future__ import annotations
 
-from visual_agent.hourly_budget import build_hourly_plan, estimate_remaining_window_minutes
+from visual_agent.hourly_budget import build_hourly_plan, effective_reserve_minutes, estimate_remaining_window_minutes, quota_used_percentage
 
 
 def test_estimate_remaining_window_minutes_from_quota_snapshot() -> None:
     snapshot = {"rate_limits": {"five_hour": {"used_percentage": 50}}}
 
     assert estimate_remaining_window_minutes(snapshot) == 150
+
+
+def test_estimate_remaining_window_minutes_from_provider_snapshot() -> None:
+    snapshot = {"providers": {"codex": {"rate_limits": {"five_hour": {"used_percentage": 60}}}}}
+
+    assert estimate_remaining_window_minutes(snapshot) == 120
+    assert quota_used_percentage(snapshot) == 60.0
 
 
 def test_hourly_plan_preserves_reserve_and_defers_strong_when_hot() -> None:
@@ -27,4 +34,16 @@ def test_hourly_plan_schedules_strong_inside_safe_window() -> None:
 
     plan = build_hourly_plan(tasks=tasks, quota_snapshot={"rate_limits": {"five_hour": {"used_percentage": 10}}}, hours=5)
 
+    assert plan["scheduled"][0]["mode"] == "strong_worker"
+
+
+def test_hourly_plan_scales_reserve_for_one_hour_supervision() -> None:
+    tasks = [{"task_id": "task-001", "objective": "Implement discovery page polish", "worker_tier": "strong", "estimated_strong_minutes": 45}]
+
+    plan = build_hourly_plan(tasks=tasks, quota_snapshot={"rate_limits": {"five_hour": {"used_percentage": 0}}}, hours=1, reserve_minutes=45)
+
+    assert effective_reserve_minutes(60, 45) == 10
+    assert plan["reserve_minutes"] == 10
+    assert plan["requested_reserve_minutes"] == 45
+    assert plan["scheduled"][0]["task_id"] == "task-001"
     assert plan["scheduled"][0]["mode"] == "strong_worker"

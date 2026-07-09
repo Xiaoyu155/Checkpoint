@@ -1,7 +1,9 @@
 ﻿import json
+import sys
 from os import utime
 from pathlib import Path
 
+from visual_agent.mcp_doctor import build_mcp_startup_doctor, mcp_startup_doctor_to_markdown
 from visual_agent.quality import (
     QualityGateStep,
     QualityGateResult,
@@ -58,6 +60,7 @@ def test_quality_gate_smoke_profile_is_fast_and_focused() -> None:
     assert [step.name for step in steps] == ["smoke_tests"]
     command = " ".join(steps[0].command)
     assert "tests/test_dashboard.py" in command
+    assert "tests/test_dashboard_static_acceptance.py" in command
     assert "tests/test_cloud_api.py" in command
     assert "tests/e2e" not in command
 
@@ -85,8 +88,9 @@ def test_release_smoke_plan_includes_product_and_extension_gates() -> None:
     markdown = release_smoke_to_markdown(plan)
     ids = {check["id"] for check in plan["checks"]}
 
-    assert {"quickstart", "checkout_l4_demo", "mcp_smoke", "brand_scan", "vscode_extension_tests"} <= ids
+    assert {"quickstart", "checkout_l4_demo", "pacer_workbench_static_acceptance", "mcp_smoke", "brand_scan", "vscode_extension_tests"} <= ids
     assert plan["status"] == "planned"
+    assert "pacer_workbench_static_acceptance" in markdown
     assert "verify-now" in markdown
     assert "npm" in markdown and "test" in markdown
 
@@ -105,6 +109,7 @@ def test_release_smoke_run_uses_runner_and_reports_success() -> None:
     assert result["failed_count"] == 0
     assert len(calls) == result["check_count"]
     assert any(command[2:4] == ["visual_agent.cli", "verify-now"] for command, _ in calls)
+    assert any("pacer_workbench_static_acceptance" in command for command, _ in calls)
     assert any(command[-1] == "test" and command[0].startswith("npm") and cwd == "vscode-extension" for command, cwd in calls)
     assert "Release Smoke" in markdown
 
@@ -129,8 +134,17 @@ def test_install_check_plan_lists_dependency_steps() -> None:
     markdown = install_check_plan_to_markdown(plan)
 
     ids = {check["id"] for check in plan["checks"]}
-    assert {"python", "editable_install_web", "editable_install_mcp", "doctor"} <= ids
+    assert {"python", "editable_install_web", "editable_install_mcp", "doctor", "mcp_doctor"} <= ids
+    assert ".venv" not in next(check["command"] for check in plan["checks"] if check["id"] == "python")
     assert "playwright install chromium" in markdown
+
+
+def test_mcp_client_config_defaults_to_current_python() -> None:
+    payload = build_mcp_client_config(workspace_root=".agent-workspace", client="cursor", repo_root=".")
+
+    server = payload["config"]["mcpServers"]["visual-agent"]
+    assert server["command"] == sys.executable
+    assert ".venv" not in server["command"]
 
 
 def test_mcp_client_config_generates_local_python_server() -> None:
@@ -150,6 +164,22 @@ def test_mcp_client_config_generates_vscode_shape() -> None:
 
     assert payload["target_filename"] == ".vscode/mcp.json"
     assert payload["config"]["servers"]["visual-agent"]["command"] == "python"
+
+
+def test_mcp_startup_doctor_checks_imports(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    payload = build_mcp_startup_doctor(
+        workspace_root=workspace,
+        repo_root=Path.cwd(),
+        python=sys.executable,
+    )
+    markdown = mcp_startup_doctor_to_markdown(payload)
+
+    assert payload["status"] == "success"
+    assert {check["id"] for check in payload["checks"]} >= {"python_command", "pythonpath_src", "workspace_root", "mcp_import"}
+    assert "MCP Startup Doctor" in markdown
 
 
 def test_coding_agent_brief_targets_codex_claude_code_and_cursor(tmp_path) -> None:

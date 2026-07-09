@@ -70,12 +70,17 @@ def test_build_chief_plan_reports_coverage_gap(tmp_path, monkeypatch) -> None:
 
 
 def test_build_chief_plan_filters_checkpoint_runtime_artifacts(tmp_path, monkeypatch) -> None:
-    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    repo = tmp_path / "xiao"
+    workspace = init_workspace(repo / ".agent-workspace", with_demo=False)
     write_verification_workflow(workspace, "checkout", affects="src/payment/")
     monkeypatch.setattr(
         "visual_agent.chief_engineer.changed_files",
         lambda **_kwargs: [
             ".agent-workspace/runs/latest/report.json",
+            "artifacts/pacer-dogfood/latest/report.json",
+            "artifacts/random-dashboard/screenshot.png",
+            "xiao/artifacts/pacer-dogfood/latest/report.json",
+            "xiao/.agent-workspace/runs/latest/report.json",
             ".visual-agent-status.md",
             "强制测试记录.md",
             "src/payment/checkout.py",
@@ -85,7 +90,7 @@ def test_build_chief_plan_filters_checkpoint_runtime_artifacts(tmp_path, monkeyp
     plan = build_chief_plan(
         goal="Fix checkout total display",
         workspace_root=workspace.root,
-        repo_root=tmp_path,
+        repo_root=repo,
     )
 
     assert plan.changed_files == ["src/payment/checkout.py"]

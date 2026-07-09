@@ -125,6 +125,8 @@ def mission_result_to_pipeline_state(status: str, stop_reason: str = "") -> str:
     reason = str(stop_reason or "")
     if state == "verified" or reason == "verified":
         return PIPELINE_VERIFIED
+    if state == "verified_blocked":
+        return PIPELINE_BLOCKED
     if state in {"background_started", "running"}:
         return PIPELINE_EXECUTING
     if state in {"preview", "created"} or reason == "preview_only":

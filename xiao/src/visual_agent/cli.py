@@ -785,7 +785,9 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     refine_goal_cmd.add_argument("--no-model", action="store_true", help="Skip the model; use deterministic rules only.")
     refine_goal_cmd.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
-    quota = subparsers.add_parser("quota", help="Show the Claude subscription 5-hour/7-day quota snapshot (not API spend).")
+    quota = subparsers.add_parser("quota", help="Show subscription quota snapshots for Codex/Claude (not API spend).")
+    quota.add_argument("--refresh-codex", action="store_true", help="Run PACER_CODEX_STATUS_COMMAND and parse Codex /usage or /status output.")
+    quota.add_argument("--codex-command", default=None, help="Command that prints Codex /usage or /status output. Overrides PACER_CODEX_STATUS_COMMAND.")
     quota.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     model_select = subparsers.add_parser("model-select", help="Dynamically choose a model from configured candidates for one task.")
@@ -961,6 +963,16 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     portfolio_cmd.add_argument("--port", type=int, default=8797, help="Bind port. Default: 8797.")
     portfolio_cmd.add_argument("--no-open", action="store_true", help="Do not auto-open the browser.")
 
+    portfolio_worker = subparsers.add_parser("portfolio-worker", help="Run queued DevPacer missions across multiple projects concurrently.")
+    portfolio_worker.add_argument("--project", action="append", required=True, help="Project root whose .agent-workspace mission queue should be processed. Can be repeated.")
+    portfolio_worker.add_argument("--workspace-name", default=".agent-workspace", help="Workspace directory name inside each project. Default: .agent-workspace.")
+    portfolio_worker.add_argument("--max-workers", type=int, default=2, help="Maximum projects to process concurrently. Default: 2.")
+    portfolio_worker.add_argument("--max-items-per-project", type=int, default=None, help="Maximum queued missions to process per project. Default: 1 per project, or unlimited with --watch.")
+    portfolio_worker.add_argument("--poll-seconds", type=float, default=0.5, help="Idle poll delay used inside each project worker. Default: 0.5.")
+    portfolio_worker.add_argument("--watch", action="store_true", help="Keep polling each project queue until stopped, --max-seconds is reached, or --max-items-per-project is reached.")
+    portfolio_worker.add_argument("--max-seconds", type=float, default=None, help="Optional portfolio worker wall-clock cap, e.g. 3600 for one hour.")
+    portfolio_worker.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
     app_cmd = subparsers.add_parser("app", help="Open the DevPacer desktop workbench (a real window: pick a project, type a goal, run).")
     app_cmd.add_argument("--project", default=None, help="Optional project folder to preselect.")
 
@@ -1006,7 +1018,7 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     codex_check.add_argument("--base", default="HEAD", help="Git base ref for diff. Default: HEAD.")
     codex_check.add_argument("--tags", default="verification", help="Comma-separated workflow tags to run. Default: verification.")
     codex_check.add_argument("--max-workflows", type=int, default=10, help="Maximum workflows to run. Default: 10.")
-    codex_check.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="dry-run")
+    codex_check.add_argument("--run-profile", choices=SAFE_RUN_PROFILE_CHOICES, default="supervised")
     codex_check.add_argument("--include-slow", action="store_true", help="Include workflows tagged 'slow'. Default: skipped.")
     codex_check.add_argument("--strict", action="store_true", help="Exit non-zero on a coverage gap (uncovered or fallback-only changes), not just on failures.")
     codex_check.add_argument("--from-step", default=None, help="Start each selected workflow from the named step id.")
@@ -1738,6 +1750,23 @@ def main(argv: list[str] | None = None) -> int:
             open_browser=not args.no_open,
         )
         return 0
+    if args.command == "portfolio-worker":
+        from .portfolio_worker import portfolio_mission_worker_to_markdown, run_portfolio_mission_worker
+
+        payload = run_portfolio_mission_worker(
+            project_roots=list(args.project or []),
+            workspace_name=args.workspace_name,
+            max_workers=args.max_workers,
+            max_items_per_project=args.max_items_per_project,
+            poll_seconds=args.poll_seconds,
+            watch=args.watch,
+            max_seconds=args.max_seconds,
+        )
+        if args.format == "json":
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        else:
+            print(portfolio_mission_worker_to_markdown(payload))
+        return 0 if str(payload.get("status") or "") in {"completed", "idle", "max_items_reached", "max_seconds_reached"} else 1
     if args.command in CLOUD_COMMANDS:
         from .cli_cloud import handle_cloud_command
 

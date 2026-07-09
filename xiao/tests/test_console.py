@@ -102,6 +102,17 @@ def test_mcp_client_config_cli_outputs_json(capsys) -> None:
     assert output["config"]["mcpServers"]["visual-agent"]["args"][1] == "visual_agent.mcp_server"
 
 
+def test_mcp_doctor_cli_outputs_json(tmp_path, capsys) -> None:
+    workspace = init_workspace(tmp_path / "workspace")
+
+    exit_code = main(["mcp-doctor", "--workspace-root", str(workspace.root), "--repo-root", ".", "--format", "json"])
+    output = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert output["status"] == "success"
+    assert {check["id"] for check in output["checks"]} >= {"python_command", "pythonpath_src", "workspace_root", "mcp_import"}
+
+
 def test_demo_workspace_check_cli_outputs_markdown(tmp_path, capsys) -> None:
     exit_code = main(["demo-workspace-check", "--root", str(tmp_path / "workspace"), "--overwrite", "--format", "markdown"])
     output = capsys.readouterr().out

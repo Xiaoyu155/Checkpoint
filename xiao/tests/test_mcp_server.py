@@ -10,6 +10,7 @@ from time import time
 import pytest
 
 from visual_agent.mcp_server import (
+    _apply_startup_args,
     call_tool,
     list_run_artifacts_payload,
     list_workflows_payload,
@@ -2018,6 +2019,24 @@ def test_mcp_list_workflows_skips_slow_by_default_and_includes_when_requested(tm
 def test_mcp_workspace_root_rejects_path_traversal(tmp_path) -> None:
     with pytest.raises(ValueError):
         require_workspace({"workspace_root": str(tmp_path / ".." / "workspace")})
+
+
+def test_mcp_workspace_root_uses_environment_default(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace")
+    monkeypatch.setenv("VISUAL_AGENT_WORKSPACE", str(workspace.root))
+
+    resolved = require_workspace({})
+
+    assert resolved.root == workspace.root
+
+
+def test_mcp_startup_args_set_workspace_environment(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace")
+    monkeypatch.delenv("VISUAL_AGENT_WORKSPACE", raising=False)
+
+    _apply_startup_args(["--workspace-root", str(workspace.root)])
+
+    assert os.environ["VISUAL_AGENT_WORKSPACE"] == str(workspace.root)
 
 
 def test_mcp_workspace_root_rejects_system_path_with_structured_error() -> None:

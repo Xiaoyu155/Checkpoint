@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -137,6 +138,40 @@ def run_steps(tmp_path, steps, *, run_profile="supervised"):
     )
     result = WorkflowRuntime(output_dir=tmp_path, providers=providers).run(workflow, run_profile=run_profile)
     return result, page
+
+
+def test_run_command_uses_hidden_launch_kwargs(tmp_path, monkeypatch) -> None:
+    captured = {}
+
+    class Completed:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return Completed()
+
+    monkeypatch.setattr("visual_agent.workflow.hidden_subprocess_kwargs", lambda: {"creationflags": 12345})
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result, _page = run_steps(
+        tmp_path,
+        [
+            {
+                "id": "cmd",
+                "action": "run_command",
+                "command": "npm test",
+                "expect_text": "ok",
+            }
+        ],
+    )
+
+    step = next(item for item in result.steps if item.id == "cmd")
+    assert step.status == ActionStatus.SUCCESS
+    assert captured["kwargs"]["creationflags"] == 12345
+    assert captured["kwargs"]["shell"] is True
 
 
 def test_upload_file_sets_input_files(tmp_path) -> None:

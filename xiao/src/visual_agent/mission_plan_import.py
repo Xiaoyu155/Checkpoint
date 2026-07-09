@@ -348,7 +348,7 @@ def _append_task_candidate(
         objective = f"{section}: {objective}"
     candidates.append(
         {
-            "objective": objective[:260].strip(),
+            "objective": objective.strip(),
             "source_line": source_line,
             "source_type": source_type,
             "section": section,

@@ -25,7 +25,10 @@ def test_codex_check_cli_returns_zero_when_all_selected_workflows_pass(tmp_path,
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
-    def fake_run_codex_check(*_args, **_kwargs):
+    calls = []
+
+    def fake_run_codex_check(*_args, **kwargs):
+        calls.append(kwargs)
         return CodexCheckResult(
             changed_files=["src/payment/checkout.py"],
             selected_workflows=["checkout"],
@@ -41,6 +44,7 @@ def test_codex_check_cli_returns_zero_when_all_selected_workflows_pass(tmp_path,
     assert code == 0
     assert payload["selected_workflows"] == ["checkout"]
     assert payload["results"][0]["status"] == "passed"
+    assert calls[0]["run_profile"] == "supervised"
     # machine-readable verdict must be present so AI callers cannot misread the result
     assert payload["verdict"] == "pass"
     assert payload["passed"] == 1

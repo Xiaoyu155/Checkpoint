@@ -70,6 +70,7 @@ def create_mission(
     budget_policy: dict[str, Any],
     mission_id: str | None = None,
     status: str = "created",
+    requirement_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     mid = mission_id or make_mission_id(objective)
     now = datetime.now(timezone.utc).isoformat()
@@ -89,6 +90,8 @@ def create_mission(
         "current_round": 0,
         "budget_policy": dict(budget_policy),
     }
+    if isinstance(requirement_contract, dict) and requirement_contract:
+        record["requirement_contract"] = dict(requirement_contract)
     save_mission(workspace_root, record)
     save_budget(workspace_root, mid, budget_policy)
     return record
@@ -185,6 +188,7 @@ def list_missions(workspace_root: str | Path) -> list[dict[str, Any]]:
                 "test_command": str(payload.get("test_command") or ""),
                 "agent": str(payload.get("agent") or ""),
                 "merge_policy": str(payload.get("merge_policy") or ""),
+                "requirement_contract": payload.get("requirement_contract") if isinstance(payload.get("requirement_contract"), dict) else {},
             }
         )
     summaries.sort(key=lambda item: item["mission_id"], reverse=True)

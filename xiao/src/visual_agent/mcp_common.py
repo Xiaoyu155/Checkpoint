@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -129,7 +130,9 @@ def budget_mcp_report_dict(report: dict[str, Any]) -> tuple[dict[str, Any], bool
 
 
 def require_workspace(args: dict[str, Any]) -> Workspace:
-    root = require_str(args, "workspace_root")
+    root = str(args.get("workspace_root") or os.environ.get("VISUAL_AGENT_WORKSPACE") or "").strip()
+    if not root:
+        raise ValueError("workspace_root is required")
     raw = Path(root)
     if any(part == ".." for part in raw.parts):
         raise ValueError("workspace_root must not contain '..'")
