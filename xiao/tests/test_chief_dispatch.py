@@ -1448,6 +1448,71 @@ def test_chief_dispatch_execute_records_worker_and_verification(tmp_path, monkey
     assert verification["verdict"] == "pass"
 
 
+def test_chief_dispatch_nested_tracked_repo_root_runs_inside_worktree_subdir(tmp_path, monkeypatch) -> None:
+    parent = tmp_path / "parent"
+    project = parent / "pkg"
+    project.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=parent, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "devpacer@example.local"], cwd=parent, check=True)
+    subprocess.run(["git", "config", "user.name", "DevPacer"], cwd=parent, check=True)
+    (project / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+    (project / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "pkg"], cwd=parent, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=parent, check=True, capture_output=True, text=True)
+
+    workspace = init_workspace(project / ".agent-workspace", with_demo=False)
+    saved = save_plan(
+        {
+            "schema_version": 1,
+            "status": "ready",
+            "objective": "Update app.py value from 1 to 2",
+            "workspace_root": str(workspace.root),
+            "repo_root": str(project),
+            "changed_files": ["app.py"],
+            "selected_workflows": [],
+            "coverage": {"status": "covered"},
+            "worker_tracks": [
+                {
+                    "id": "track_1_codex",
+                    "agent": "codex",
+                    "track_kind": "implementation",
+                    "sandbox": {"flag": "--sandbox workspace-write"},
+                }
+            ],
+        },
+        workspace_root=workspace.root,
+        plan_id="nested-subdir-plan",
+    )
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    captured: dict[str, Path] = {}
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, **_kwargs):
+        captured["worker_cwd"] = Path(cwd).resolve()
+        log_path.write_text("worker done", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
+
+    def fake_command_verification(**kwargs):
+        captured["verification_repo_root"] = Path(kwargs["repo_root"]).resolve()
+        return {"verdict": "pass", "command": kwargs["command"], "exit_code": 0, "failure_kind": ""}
+
+    monkeypatch.setattr("visual_agent.chief_dispatch.run_command_verification", fake_command_verification)
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=saved["plan_id"],
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        test_command="python -m pytest tests/test_app.py",
+    )
+
+    expected_project_root = (Path(payload["worktree"]["path"]) / "pkg").resolve()
+    assert payload["worktree"]["project_root"] == str(expected_project_root)
+    assert captured["worker_cwd"] == expected_project_root
+    assert captured["verification_repo_root"] == expected_project_root
+    assert payload["verification"]["workspace_root"] == str(expected_project_root / ".agent-workspace")
+
+
 def test_chief_dispatch_reuses_clean_existing_worktree_on_resume(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
     monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})

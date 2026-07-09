@@ -172,15 +172,16 @@ def dispatch_chief_plan(
     test_command = str(resolved_test_command or "").strip() or None
     track_token = str(selected_track.get("id") or "track_1_codex")
     worktree = default_worktree_path(repo_root=repo_root, plan_id=plan_id, track_id=track_token)
+    worktree_project_root = _worktree_project_root(repo_root=repo_root, worktree=worktree)
     branch = default_branch_name(plan_id=plan_id, track_id=track_token)
     verification_workspace = default_worktree_workspace_path(
         source_workspace=workspace_path,
         repo_root=repo_root,
-        worktree=worktree,
+        worktree=worktree_project_root,
     )
     verification_command = build_verification_command(
         workspace_root=verification_workspace,
-        repo_root=worktree,
+        repo_root=worktree_project_root,
         run_profile=run_profile,
         include_slow=include_slow,
     )
@@ -261,7 +262,7 @@ def dispatch_chief_plan(
     worker_command = build_worker_command(
         plan=plan,
         track=selected_track,
-        worktree=worktree,
+        worktree=worktree_project_root,
         verification_command=effective_verification_command,
         phase="implementation",
         model_policy=model_policy,
@@ -288,6 +289,7 @@ def dispatch_chief_plan(
         },
         "worktree": {
             "path": str(worktree),
+            "project_root": str(worktree_project_root),
             "branch": branch,
             "created": False,
         },
@@ -333,7 +335,7 @@ def dispatch_chief_plan(
         status="preview",
         plan_id=plan_id,
         agent=str(selected_track.get("agent") or ""),
-        worktree=str(worktree),
+        worktree=str(worktree_project_root),
         verification_command=effective_verification_command,
     )
     preflight_block = _dispatch_preflight_block(preflight)
@@ -425,7 +427,7 @@ def dispatch_chief_plan(
         status="running",
         plan_id=plan_id,
         agent=str(selected_track.get("agent") or ""),
-        worktree=str(worktree),
+        worktree=str(worktree_project_root),
     )
     # The commit the worker branched from: the tamper guard diffs against it, so
     # test edits are caught even when the worker commits inside the worktree.
@@ -499,7 +501,7 @@ def dispatch_chief_plan(
             attempt="initial",
             track=selected_track,
             plan=plan,
-            cwd=worktree,
+            cwd=worktree_project_root,
             timeout_seconds=timeout_seconds,
             log_path=logs_dir / f"{track_token}-initial.log",
             backend=worker_backend,
@@ -517,7 +519,7 @@ def dispatch_chief_plan(
             track=selected_track,
             argv=initial_argv,
             stdin_text=worker_command.get("stdin"),
-            cwd=worktree,
+            cwd=worktree_project_root,
             timeout_seconds=timeout_seconds,
             log_path=logs_dir / f"{track_token}-initial.log",
             runner=runner,
@@ -567,7 +569,7 @@ def dispatch_chief_plan(
                 attempt=f"quota_failover_{failover_name}",
                 track=failover_track,
                 plan=plan,
-                cwd=worktree,
+                cwd=worktree_project_root,
                 timeout_seconds=timeout_seconds,
                 log_path=logs_dir / f"{track_token}-quota-failover-{failover_name}.log",
                 backend=failover_backend,
@@ -586,14 +588,14 @@ def dispatch_chief_plan(
     if diagnosis_mode or review_plan_mode:
         # The deliverable IS the report; running seeded demo workflows against a
         # report mission produces irrelevant failures (V7 dogfood finding).
-        verification = _diagnosis_verification(worktree) if diagnosis_mode else _review_plan_verification(worktree)
+        verification = _diagnosis_verification(worktree_project_root) if diagnosis_mode else _review_plan_verification(worktree_project_root)
     else:
         verification = run_dispatch_verification(
             workspace_root=workspace_path,
             verification_workspace_root=verification_workspace,
             plan_id=plan_id,
             mission_id=progress_mission_id,
-            repo_root=worktree,
+            repo_root=worktree_project_root,
             run_profile=run_profile,
             include_slow=include_slow,
             max_workflows=max_workflows,
@@ -620,7 +622,7 @@ def dispatch_chief_plan(
                     attempt="auto_repair_once",
                     track=repair_track,
                     plan=plan,
-                    cwd=worktree,
+                    cwd=worktree_project_root,
                     timeout_seconds=timeout_seconds,
                     log_path=logs_dir / f"{track_token}-auto-repair-once.log",
                     backend=repair_backend or resolve_failover_backend(),
@@ -632,7 +634,7 @@ def dispatch_chief_plan(
                 repair_command = build_worker_command(
                     plan=plan,
                     track=repair_track,
-                    worktree=worktree,
+                    worktree=worktree_project_root,
                     verification_command=effective_verification_command,
                     prompt_override=repair_prompt_full,
                     phase="repair",
@@ -653,7 +655,7 @@ def dispatch_chief_plan(
                     track=repair_track,
                     argv=repair_argv,
                     stdin_text=repair_command.get("stdin"),
-                    cwd=worktree,
+                    cwd=worktree_project_root,
                     timeout_seconds=timeout_seconds,
                     log_path=logs_dir / f"{track_token}-auto-repair-once.log",
                     runner=runner,
@@ -666,7 +668,7 @@ def dispatch_chief_plan(
                     verification_workspace_root=verification_workspace,
                     plan_id=plan_id,
                     mission_id=progress_mission_id,
-                    repo_root=worktree,
+                    repo_root=worktree_project_root,
                     run_profile=run_profile,
                     include_slow=include_slow,
                     max_workflows=max_workflows,
@@ -697,7 +699,7 @@ def dispatch_chief_plan(
         and looks_like_quota_exhaustion(failover_record.get("stdout_tail"), failover_record.get("stderr_tail"))
     )
     quota_exhausted = not worker_completed and (primary_quota or failover_quota)
-    has_product_changes = _worktree_has_product_changes(worktree)
+    has_product_changes = _worktree_has_product_changes(worktree_project_root)
     has_prior_verified = bool(
         allow_prior_verified_evidence and _mission_has_prior_verified_evidence(workspace_path, plan_id)
     )
@@ -3331,18 +3333,29 @@ def git_dirty_files(repo_root: Path, *, ignored_prefixes: tuple[str, ...] = ()) 
 
 
 def workspace_record_dirty_prefixes(*, repo_root: Path, workspace_root: Path) -> tuple[str, ...]:
+    prefixes: list[str] = []
     try:
         workspace_relative = workspace_root.resolve().relative_to(repo_root.resolve()).as_posix().rstrip("/")
     except ValueError:
-        return ()
-    if not workspace_relative:
+        workspace_relative = ""
+    if workspace_relative:
+        prefixes.append(f"{workspace_relative}/")
+    git_root = _git_toplevel(repo_root)
+    if git_root is not None:
+        try:
+            git_relative = workspace_root.resolve().relative_to(git_root).as_posix().rstrip("/")
+        except ValueError:
+            git_relative = ""
+        if git_relative:
+            prefixes.append(f"{git_relative}/")
+    if not prefixes:
         return ()
     # The whole workspace is DevPacer's runtime dir (plans, missions, runs,
     # repo_map.json, ...), never user source. Ignoring the root prefix keeps the
     # dirty-tree gate from tripping on the tool's own files — including a fresh
     # project where git collapses the entire untracked ".agent-workspace/" into
     # one porcelain entry.
-    return (f"{workspace_relative}/", "强制测试记录.md")
+    return (*dict.fromkeys(prefixes), "强制测试记录.md")
 
 
 # Derived tool caches are never user source. They appear the moment a user runs
@@ -3417,6 +3430,63 @@ def _check_repo(repo_root: Path) -> dict[str, Any]:
     if completed.returncode != 0 or "true" not in completed.stdout.lower():
         return {"status": "blocked", "reason": f"Not a git work tree: {repo_root}"}
     return {"status": "ok"}
+
+
+def _worktree_project_root(*, repo_root: Path, worktree: Path) -> Path:
+    """Map a requested repo subdirectory to the same subdirectory in a worktree."""
+    source = Path(repo_root).expanduser().resolve()
+    target = Path(worktree).expanduser().resolve()
+    git_root = _git_toplevel(source)
+    if git_root is None or source == git_root:
+        return target
+    try:
+        relative = source.relative_to(git_root)
+    except ValueError:
+        return target
+    if _git_tracks_relative_path(git_root, relative):
+        return (target / relative).resolve()
+    # Untracked nested project roots are overlaid at the worktree root.
+    return target
+
+
+def _git_toplevel(path: Path) -> Path | None:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10.0,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0 or not completed.stdout.strip():
+        return None
+    return Path(completed.stdout.strip()).expanduser().resolve()
+
+
+def _git_tracks_relative_path(git_root: Path, relative: Path) -> bool:
+    rel = relative.as_posix().strip("/")
+    if not rel:
+        return False
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(git_root), "-c", "core.quotePath=false", "ls-files", "--", rel],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10.0,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if completed.returncode != 0:
+        return False
+    prefix = rel.rstrip("/") + "/"
+    return any(line.strip() == rel or line.strip().startswith(prefix) for line in completed.stdout.splitlines())
 
 
 def default_worktree_path(*, repo_root: Path, plan_id: str, track_id: str) -> Path:
