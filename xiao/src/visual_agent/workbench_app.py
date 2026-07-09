@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_capabilities import agents_doctor
+from .subprocess_window import hidden_subprocess_kwargs
 
 
 def workbench_agents() -> list[str]:
@@ -76,7 +77,11 @@ def start_dashboard_process(workspace_root: str | Path) -> int:
         "--workspace-root",
         str(workspace_root),
     ]
-    proc = subprocess.Popen(cmd, cwd=str(Path(workspace_root).expanduser().resolve().parent))
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(Path(workspace_root).expanduser().resolve().parent),
+        **hidden_subprocess_kwargs(detached=True),
+    )
     return int(proc.pid)
 
 
@@ -107,7 +112,7 @@ def start_portfolio_dashboard_process(project_roots: list[str | Path]) -> int:
     cmd = [sys.executable, "-m", "visual_agent.cli", "portfolio-dashboard"]
     for root in roots:
         cmd.extend(["--project", root])
-    proc = subprocess.Popen(cmd, cwd=str(Path(roots[0]).parent))
+    proc = subprocess.Popen(cmd, cwd=str(Path(roots[0]).parent), **hidden_subprocess_kwargs(detached=True))
     return int(proc.pid)
 
 
@@ -613,6 +618,8 @@ def launch_desktop_app(project_dir: str | Path | None = None) -> int:
                     agent=agent_var.get(),
                     execute=execute,
                     merge_policy="auto" if auto_merge_var.get() else "manual",
+                    intake=state.get("intake_payload") if isinstance(state.get("intake_payload"), dict) else None,
+                    answers=list(state.get("intake_answers") or []),
                 )
                 events.put(("launched", {"result": result, "workspace_root": str(workspace_root)}))
             except Exception as exc:  # noqa: BLE001 - surface to the window

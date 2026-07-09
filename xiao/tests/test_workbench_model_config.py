@@ -17,6 +17,9 @@ def test_workbench_model_config_round_trips_to_bugteam_backend(tmp_path) -> None
         api_key="sk-sub2apiabcdefghijklmnopqrstuvwxyz",
         model="gpt-4o-mini",
         reasoning_effort="xhigh",
+        monthly_budget_usd=20.0,
+        per_mission_budget_usd=1.5,
+        auto_switch_quota_percent=76.0,
     )
 
     save_workbench_model_config(config, source)
@@ -29,6 +32,9 @@ def test_workbench_model_config_round_trips_to_bugteam_backend(tmp_path) -> None
     assert backend["env"]["ANTHROPIC_API_KEY"] == "sk-sub2apiabcdefghijklmnopqrstuvwxyz"
     assert backend["model"] == "gpt-4o-mini"
     assert backend["reasoning_effort"] == "xhigh"
+    assert loaded.monthly_budget_usd == 20.0
+    assert loaded.per_mission_budget_usd == 1.5
+    assert loaded.auto_switch_quota_percent == 76.0
 
 
 def test_workbench_model_config_replaces_existing_bugteam_line(tmp_path) -> None:
@@ -61,3 +67,4 @@ def test_workbench_model_config_defaults_and_redaction(tmp_path) -> None:
     assert loaded.base_url == DEFAULT_SUB2API_BASE_URL
     assert loaded.api_key == ""
     assert "未配置" in redacted_config_summary(loaded)
+    assert loaded.auto_switch_quota_percent == 80.0

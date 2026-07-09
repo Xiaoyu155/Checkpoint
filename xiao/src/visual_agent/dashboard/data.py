@@ -16,11 +16,17 @@ from typing import Any
 
 from ..agent_capabilities import agents_doctor
 from ..chief_plans_store import list_plans, load_plan, load_verification, load_worker_records, plan_dir
+from ..commercial_config import CommercialConfig, load_commercial_config
 from ..chief_queue import list_mission_queue_items
+from ..mission_progress import build_mission_progress
 from ..missions import list_missions
 from ..mimo_efficiency import compute_mimo_efficiency
+from ..notifications import load_notification_config
 from ..programs import list_programs
+from ..subscription_quota import load_quota_snapshot, quota_status, quota_summary
+from ..user_profile import load_user_profile
 from ..workbench_board import attach_board_fields
+from ..workbench_model_config import load_workbench_model_config
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +168,12 @@ def _build_dashboard_data_uncached(root: Path) -> dict[str, Any]:
         programs = []
 
     agents = get_agents_cached()
+    subscription_snapshot = load_quota_snapshot()
+    subscription_summary = quota_summary(subscription_snapshot)
+    commercial_config = load_commercial_config()
+    status = _read_status(root)
+    worker = worker_status()
+    value = _build_value(root, missions, plans)
 
     counts: dict[str, int] = {}
     for mission in missions:
@@ -186,10 +198,17 @@ def _build_dashboard_data_uncached(root: Path) -> dict[str, Any]:
         "engine": "Checkpoint",
         "workspace_root": str(root),
         "repo_root": str(root.parent),
-        "status": _read_status(root),
-        "value": _build_value(root, missions, plans),
+        "status": status,
+        "value": value,
+        "subscription_quota": {
+            "snapshot": subscription_snapshot,
+            "status": quota_status(subscription_snapshot),
+            "summary": subscription_summary,
+        },
         "agents": agents,
         "installed_agents": installed_agents,
+        "user_profile": load_user_profile().to_public_dict(),
+        "commercial_config": commercial_config.to_dict(redact=True),
         "missions": missions,
         "mission_counts": counts,
         "plans": plans,
@@ -197,9 +216,353 @@ def _build_dashboard_data_uncached(root: Path) -> dict[str, Any]:
         "programs": programs,
         "launches": _launch_snapshot(),
         "work_traces": _build_work_traces(root, missions=missions, plans=plans, queue=queue, programs=programs),
-        "worker": worker_status(),
+        "worker": worker,
+        "core_readiness": _build_core_readiness(
+            root,
+            status=status,
+            agents=agents,
+            installed_agents=installed_agents,
+            missions=missions,
+            queue=queue,
+            programs=programs,
+            subscription_snapshot=subscription_snapshot,
+            subscription_summary=subscription_summary,
+            value=value,
+            worker=worker,
+        ),
+        "promotion_readiness": _build_promotion_readiness(
+            root,
+            status=status,
+            agents=agents,
+            installed_agents=installed_agents,
+            missions=missions,
+            subscription_snapshot=subscription_snapshot,
+            subscription_summary=subscription_summary,
+            commercial_config=commercial_config,
+            worker=worker,
+        ),
     }
 
+
+def _build_core_readiness(
+    root: Path,
+    *,
+    status: dict[str, Any],
+    agents: list[dict[str, Any]],
+    installed_agents: list[str],
+    missions: list[dict[str, Any]],
+    queue: list[dict[str, Any]],
+    programs: list[dict[str, Any]],
+    subscription_snapshot: dict[str, Any] | None,
+    subscription_summary: dict[str, Any],
+    value: dict[str, Any],
+    worker: dict[str, Any],
+) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+
+    def add(check_id: str, label: str, state: str, detail: str, action: str = "") -> None:
+        checks.append(
+            {
+                "id": check_id,
+                "label": label,
+                "status": state,
+                "detail": detail,
+                "action": action,
+            }
+        )
+
+    if root.exists() and (root / "missions").exists():
+        add("workspace", "本地工作空间", "success", str(root))
+    else:
+        add("workspace", "本地工作空间", "failed", "工作空间未初始化", "初始化 .agent-workspace。")
+
+    if installed_agents:
+        add("agents", "编码 Agent", "success", "已发现 " + "、".join(installed_agents[:4]))
+        add("intake", "需求收口", "success", "可用本地规则和已安装 Agent 把自然语言收口成任务合同")
+    else:
+        known = [str(item.get("agent")) for item in agents if isinstance(item, dict) and item.get("agent")]
+        detail = "未发现可用编码 Agent"
+        if known:
+            detail += "；已知配置：" + "、".join(known[:4])
+        add("agents", "编码 Agent", "failed", detail, "安装并登录 Codex、Claude Code 或 Gemini。")
+        add("intake", "需求收口", "warning", "只能使用本地规则追问，无法调用用户已订阅的编码 Agent", "先让至少一个编码 Agent 可用。")
+
+    q_len = len(queue)
+    if worker.get("running") and q_len:
+        add("worker", "托管 Worker", "success", f"Worker 正在运行，队列中 {q_len} 个任务")
+    elif worker.get("running"):
+        add("worker", "托管 Worker", "success", f"Worker 正在运行并待命，pid={worker.get('pid')}")
+    elif q_len:
+        add("worker", "托管 Worker", "warning", f"队列中有 {q_len} 个任务，但 Worker 未运行", "点击启动 Worker。")
+    else:
+        add("worker", "托管 Worker", "warning", "Worker 未运行；可以创建任务，但不会自动消费队列", "推广演示或托管开发前启动 Worker。")
+
+    verified = [m for m in missions if str(m.get("status") or "") == "verified"]
+    evidenced = [
+        m for m in missions
+        if isinstance(m.get("pacer_evidence"), dict)
+        and (m["pacer_evidence"].get("worker_status") or m["pacer_evidence"].get("verification_verdict"))
+    ]
+    if verified and evidenced:
+        add("closed_loop", "开发-验收闭环", "success", f"{len(verified)} 个已验收任务，{len(evidenced)} 个带 Worker/验收证据")
+    elif verified:
+        add("closed_loop", "开发-验收闭环", "warning", f"{len(verified)} 个已验收任务，但证据链还不完整", "再跑一次带 Worker 记录和验收命令的真实样例。")
+    else:
+        add("closed_loop", "开发-验收闭环", "warning", "还没有可证明闭环的已验收任务", "准备一个小任务，从收口、开发、验收跑完整。")
+
+    if str(status.get("state") or "").upper() == "PASSING":
+        add("acceptance", "本地验收状态", "success", "当前状态文件显示 PASSING")
+    else:
+        add("acceptance", "本地验收状态", "warning", f"当前状态：{status.get('state') or 'unknown'}", "跑 dashboard/browser 测试并更新状态。")
+
+    windows = list(subscription_summary.get("windows") or [])
+    max_used = float(subscription_summary.get("max_used_percentage") or 0.0)
+    provider_count = int(subscription_summary.get("provider_count") or 0)
+    snapshot_age = _freshest_quota_age_minutes(subscription_snapshot)
+    if not windows:
+        add("quota", "订阅额度感知", "warning", "还没有 Codex / Claude 额度窗口数据", "配置 Claude statusLine 或 Codex 状态命令。")
+    elif snapshot_age is not None and snapshot_age > 360:
+        add("quota", "订阅额度感知", "warning", f"已采集 {provider_count} 个来源，但最新数据约 {snapshot_age / 60.0:.1f} 小时前", "刷新额度快照。")
+    else:
+        add("quota", "订阅额度感知", "success", f"已采集 {provider_count} 个来源，最高使用 {max_used:.0f}%")
+
+    model_config = load_workbench_model_config()
+    if model_config.configured and model_config.budget_guard_configured:
+        add("relay_budget", "额度耗尽兜底", "success", f"中转站和预算护栏已配置，{model_config.auto_switch_quota_percent:.0f}% 后可切换")
+    elif model_config.configured:
+        add("relay_budget", "额度耗尽兜底", "warning", "中转站可用，但缺少月预算或单任务上限", "设置月预算和单任务上限。")
+    else:
+        add("relay_budget", "额度耗尽兜底", "warning", "未配置中转站，订阅额度耗尽后不能自动续跑", "配置 OpenAI-compatible 中转站。")
+
+    me = value.get("mimo_efficiency") if isinstance(value.get("mimo_efficiency"), dict) else {}
+    saved_usd = float(me.get("saved_usd") or 0.0)
+    saved_minutes = float(me.get("saved_minutes") or 0.0)
+    saved_quota = float(me.get("saved_quota_percent") or 0.0)
+    if saved_usd > 0 or saved_minutes > 0 or saved_quota > 0:
+        add("value_metrics", "节省可见", "success", f"已记录节省 ${saved_usd:.2f} / {saved_minutes:.1f} 分钟 / 套餐额度 {saved_quota:.1f}%")
+    else:
+        add("value_metrics", "节省可见", "warning", "暂无真实节省样本；指标位置已就绪", "跑 1-2 个带 Worker 记录的真实任务。")
+
+    if programs:
+        add("multi_project", "多项目托管", "success", f"已发现 {len(programs)} 个项目托管计划")
+    else:
+        add("multi_project", "多项目托管", "warning", "当前没有项目托管计划样本", "用开发计划导入或创建多项目队列样本。")
+
+    weights = {"success": 1.0, "warning": 0.5, "failed": 0.0}
+    score = round(sum(weights.get(str(item["status"]), 0.0) for item in checks) / max(len(checks), 1) * 100)
+    failed = sum(1 for item in checks if item["status"] == "failed")
+    warnings = sum(1 for item in checks if item["status"] == "warning")
+    if failed:
+        level = "blocked"
+        headline = "核心闭环有阻断项"
+    elif score >= 85:
+        level = "usable"
+        headline = "核心托管开发可用"
+    else:
+        level = "needs_evidence"
+        headline = "核心闭环还需要样本或配置"
+    actions: list[str] = []
+    seen: set[str] = set()
+    for item in checks:
+        action = str(item.get("action") or "").strip()
+        if action and action not in seen:
+            seen.add(action)
+            actions.append(action)
+    return {
+        "schema_version": 1,
+        "level": level,
+        "score": score,
+        "headline": headline,
+        "failed": failed,
+        "warnings": warnings,
+        "checks": checks,
+        "operator_actions": actions,
+    }
+
+
+def _build_promotion_readiness(
+    root: Path,
+    *,
+    status: dict[str, Any],
+    agents: list[dict[str, Any]],
+    installed_agents: list[str],
+    missions: list[dict[str, Any]],
+    subscription_snapshot: dict[str, Any] | None,
+    subscription_summary: dict[str, Any],
+    commercial_config: CommercialConfig,
+    worker: dict[str, Any],
+) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+
+    def add(check_id: str, label: str, state: str, detail: str, user_required: str = "") -> None:
+        checks.append(
+            {
+                "id": check_id,
+                "label": label,
+                "status": state,
+                "detail": detail,
+                "user_required": user_required,
+            }
+        )
+
+    profile = load_user_profile()
+    if profile.configured:
+        add("profile", "邮箱身份", "success", f"已保存 {profile.email}")
+    else:
+        add("profile", "邮箱身份", "warning", "尚未保存本地联系邮箱", "你的常用邮箱，用于登录身份和通知收件人。")
+
+    notification = load_notification_config()
+    if notification is not None:
+        add("notification", "邮件通知", "success", f"已配置通知到 {notification.recipient}")
+    else:
+        add("notification", "邮件通知", "warning", "未配置 SMTP，任务完成/额度耗尽时不能主动提醒", "SMTP 服务器、端口、用户名、授权码、发件人和收件人。")
+
+    if commercial_config.auth_provider == "supabase" and commercial_config.supabase_url and commercial_config.supabase_anon_key:
+        add("auth_supabase", "Supabase Auth", "success", f"已配置 {commercial_config.supabase_url}")
+    else:
+        add("auth_supabase", "Supabase Auth", "warning", "未配置 Supabase 项目登录参数", "Supabase Project URL 和 anon public key。")
+
+    if commercial_config.google_oauth_configured:
+        detail = "已确认 Google OAuth 通过 Supabase 登录"
+        if commercial_config.google_client_id:
+            detail += f"，client={commercial_config.google_client_id}"
+        add("google_oauth", "Google OAuth", "success", detail)
+    else:
+        add("google_oauth", "Google OAuth", "warning", "未确认 Supabase 的 Google 登录 Provider", "在 Supabase Auth 里开启 Google Provider，并填入 Google OAuth Client ID/Secret。")
+
+    if commercial_config.billing_configured:
+        add("stripe_billing", "Stripe Billing", "success", f"已配置订阅价格 {commercial_config.stripe_price_id}")
+    else:
+        add("stripe_billing", "Stripe Billing", "warning", "未配置 Stripe 订阅收费参数", "Stripe publishable key、secret key、webhook signing secret、recurring Price ID。")
+
+    if commercial_config.portal_configured:
+        add("stripe_portal", "Stripe Customer Portal", "success", "已配置客户自助账单入口")
+    else:
+        add("stripe_portal", "Stripe Customer Portal", "warning", "未配置客户自助账单入口", "Stripe Customer Portal 配置或可打开的 portal 链接。")
+
+    if commercial_config.usage_meter_configured:
+        add("stripe_usage_meter", "Stripe Usage Meter", "success", f"已预留计量事件：{commercial_config.stripe_usage_meter_event}")
+    else:
+        add("stripe_usage_meter", "Stripe Usage Meter", "warning", "未配置用量计量事件，当前可先按订阅收费")
+
+    model_config = load_workbench_model_config()
+    if model_config.configured:
+        add("relay", "中转站接口", "success", f"已配置 {model_config.model} @ {model_config.base_url}")
+        if model_config.budget_guard_configured:
+            add(
+                "relay_budget",
+                "中转站预算护栏",
+                "success",
+                f"月预算 ${model_config.monthly_budget_usd:.2f} / 单任务 ${model_config.per_mission_budget_usd:.2f} / {model_config.auto_switch_quota_percent:.0f}% 额度自动切换",
+            )
+        else:
+            add("relay_budget", "中转站预算护栏", "warning", "中转站可用，但还没有配置月预算或单任务上限", "可接受的月预算和单任务最高花费。")
+    else:
+        add("relay", "中转站接口", "warning", "未配置可续跑的 OpenAI-compatible 中转站", "中转站 Base URL、API Key、模型名。")
+        add("relay_budget", "中转站预算护栏", "warning", "未配置付费续跑预算", "月预算、单任务上限、额度阈值。")
+
+    windows = list(subscription_summary.get("windows") or [])
+    max_used = float(subscription_summary.get("max_used_percentage") or 0.0)
+    provider_count = int(subscription_summary.get("provider_count") or 0)
+    snapshot_age = _freshest_quota_age_minutes(subscription_snapshot)
+    if not windows:
+        add(
+            "quota",
+            "订阅额度采集",
+            "warning",
+            "还没有 Codex / Claude 额度窗口数据",
+            "Claude statusLine 配置，或 PACER_CODEX_STATUS_COMMAND 命令。"
+        )
+    elif snapshot_age is not None and snapshot_age > 360:
+        add(
+            "quota",
+            "订阅额度采集",
+            "warning",
+            f"已采集 {provider_count} 个来源，但最新数据约 {snapshot_age / 60.0:.1f} 小时前",
+            "刷新 Codex/Claude 额度快照。"
+        )
+    elif max_used >= 95:
+        add("quota", "订阅额度采集", "warning", f"额度已用 {max_used:.0f}%，应优先走中转站或暂停低优先级任务")
+    else:
+        add("quota", "订阅额度采集", "success", f"已采集 {provider_count} 个来源，最高使用 {max_used:.0f}%")
+
+    if installed_agents:
+        add("agents", "编码 Agent", "success", "已发现 " + "、".join(installed_agents[:4]))
+    else:
+        known = [str(item.get("agent")) for item in agents if isinstance(item, dict) and item.get("agent")]
+        add("agents", "编码 Agent", "failed", "没有发现可用编码 Agent", "至少安装并登录 Codex、Claude Code 或 Gemini 其中一个。")
+
+    if worker.get("running"):
+        add("worker", "托管 Worker", "success", f"Worker 正在运行，pid={worker.get('pid')}")
+    else:
+        add("worker", "托管 Worker", "warning", "Worker 未运行，无法自动消费托管队列", "推广演示前在工作台启动 Worker。")
+
+    verified = [m for m in missions if str(m.get("status") or "") == "verified"]
+    evidenced = [
+        m for m in missions
+        if isinstance(m.get("pacer_evidence"), dict)
+        and (m["pacer_evidence"].get("worker_status") or m["pacer_evidence"].get("verification_verdict"))
+    ]
+    if verified and evidenced:
+        add("evidence", "验收证据", "success", f"{len(verified)} 个已验收任务，{len(evidenced)} 个带 Worker/验收证据")
+    elif verified:
+        add("evidence", "验收证据", "warning", f"{len(verified)} 个已验收任务，但证据字段还不完整")
+    else:
+        add("evidence", "验收证据", "warning", "还没有已验收任务作为推广样例", "准备 1-2 个真实成功案例。")
+
+    if str(status.get("state") or "").upper() == "PASSING":
+        add("acceptance", "本地验收状态", "success", "当前状态文件显示 PASSING")
+    else:
+        add("acceptance", "本地验收状态", "warning", f"当前状态：{status.get('state') or 'unknown'}", "推广前跑一次 dashboard/browser 测试并更新状态。")
+
+    if root.exists() and (root / "missions").exists():
+        add("workspace", "本地工作空间", "success", str(root))
+    else:
+        add("workspace", "本地工作空间", "failed", "工作空间不完整", "初始化 .agent-workspace。")
+
+    weights = {"success": 1.0, "warning": 0.5, "failed": 0.0}
+    score = round(sum(weights.get(str(item["status"]), 0.0) for item in checks) / max(len(checks), 1) * 100)
+    failed = sum(1 for item in checks if item["status"] == "failed")
+    warnings = sum(1 for item in checks if item["status"] == "warning")
+    if failed:
+        level = "blocked"
+        headline = "推广前有阻断项"
+    elif score >= 85 and warnings <= 2:
+        level = "ready"
+        headline = "可以小范围推广"
+    else:
+        level = "needs_config"
+        headline = "还需要补配置"
+    user_required = []
+    seen: set[str] = set()
+    for item in checks:
+        required = str(item.get("user_required") or "").strip()
+        if required and required not in seen:
+            seen.add(required)
+            user_required.append(required)
+    return {
+        "schema_version": 1,
+        "level": level,
+        "score": score,
+        "headline": headline,
+        "failed": failed,
+        "warnings": warnings,
+        "checks": checks,
+        "user_required": user_required,
+    }
+
+
+def _freshest_quota_age_minutes(snapshot: dict[str, Any] | None) -> float | None:
+    if not isinstance(snapshot, dict):
+        return None
+    ages: list[float] = []
+    top = snapshot.get("age_minutes")
+    if isinstance(top, (int, float)):
+        ages.append(float(top))
+    for provider in dict(snapshot.get("providers") or {}).values():
+        if isinstance(provider, dict) and isinstance(provider.get("age_minutes"), (int, float)):
+            ages.append(float(provider["age_minutes"]))
+    return min(ages) if ages else None
 
 def _read_status(root: Path) -> dict[str, Any]:
     candidates = [
@@ -259,6 +622,12 @@ def _mission_pacer_evidence(root: Path, mission: dict[str, Any]) -> dict[str, An
         command = str(verification["command_verification"].get("command") or "").strip()
     if not command:
         command = str(verification.get("command") or "").strip()
+    progress = build_mission_progress(
+        workspace_root=root,
+        mission=mission,
+        worker_records=records,
+        verification=verification,
+    )
     return {
         "worker_status": str(latest_worker.get("status") or ""),
         "worker_command": str(latest_worker.get("command") or ""),
@@ -276,6 +645,9 @@ def _mission_pacer_evidence(root: Path, mission: dict[str, Any]) -> dict[str, An
         "verification_path": str(plan_dir(root, plan_id) / "verification.json") if plan_id else "",
         "merge_state": str(mission.get("merge_state") or ""),
         "final_report": str(report_path) if report_path else "",
+        "stage": progress.get("stage", ""),
+        "progress": progress,
+        "changed_product_file_count": progress.get("changed_product_file_count", 0),
     }
 
 

@@ -21,10 +21,17 @@ class WorkbenchModelConfig:
     api_key: str = ""
     model: str = DEFAULT_SUB2API_MODEL
     reasoning_effort: str = ""
+    monthly_budget_usd: float = 0.0
+    per_mission_budget_usd: float = 0.0
+    auto_switch_quota_percent: float = 80.0
 
     @property
     def configured(self) -> bool:
         return bool(self.base_url.strip() and self.api_key.strip() and self.model.strip())
+
+    @property
+    def budget_guard_configured(self) -> bool:
+        return self.monthly_budget_usd > 0 or self.per_mission_budget_usd > 0
 
 
 def default_credentials_path(root: str | Path | None = None) -> Path:
@@ -43,6 +50,9 @@ def load_workbench_model_config(path: str | Path | None = None) -> WorkbenchMode
             api_key=_token(line),
             model=_option(line, "model") or DEFAULT_SUB2API_MODEL,
             reasoning_effort=_option(line, "reasoning_effort"),
+            monthly_budget_usd=_float_option(line, "monthly_budget_usd", 0.0),
+            per_mission_budget_usd=_float_option(line, "per_mission_budget_usd", 0.0),
+            auto_switch_quota_percent=_float_option(line, "auto_switch_quota_percent", 80.0),
         )
     return WorkbenchModelConfig()
 
@@ -54,6 +64,12 @@ def save_workbench_model_config(config: WorkbenchModelConfig, path: str | Path |
         raise ValueError("api_key 不能为空")
     if not config.model.strip():
         raise ValueError("model 不能为空")
+    if config.monthly_budget_usd < 0:
+        raise ValueError("monthly_budget_usd 不能为负数")
+    if config.per_mission_budget_usd < 0:
+        raise ValueError("per_mission_budget_usd 不能为负数")
+    if not 0 <= config.auto_switch_quota_percent <= 100:
+        raise ValueError("auto_switch_quota_percent 必须在 0 到 100 之间")
 
     source = Path(path or default_credentials_path())
     source.parent.mkdir(parents=True, exist_ok=True)
@@ -83,7 +99,11 @@ def redacted_config_summary(config: WorkbenchModelConfig) -> str:
     else:
         redacted = f"{key[:4]}...{key[-4:]}"
     effort = config.reasoning_effort.strip() or "默认"
-    return f"base_url={config.base_url.strip() or '-'} model={config.model.strip() or '-'} effort={effort} api_key={redacted}"
+    budget = (
+        f"monthly=${config.monthly_budget_usd:.2f} mission=${config.per_mission_budget_usd:.2f} "
+        f"switch_at={config.auto_switch_quota_percent:.0f}%"
+    )
+    return f"base_url={config.base_url.strip() or '-'} model={config.model.strip() or '-'} effort={effort} {budget} api_key={redacted}"
 
 
 def probe_workbench_model_config(config: WorkbenchModelConfig, *, timeout_seconds: int = 12) -> dict[str, Any]:
@@ -118,11 +138,28 @@ def _option(line: str, option: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _float_option(line: str, option: str, default: float) -> float:
+    raw = _option(line, option)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def _format_config_line(config: WorkbenchModelConfig) -> str:
-    return (
+    line = (
         f"{WORKBENCH_BACKEND_NAME} "
         f"api_key={config.api_key.strip()} "
         f"base_url={config.base_url.rstrip('/')} "
         f"model={config.model.strip()}"
         + (f" reasoning_effort={config.reasoning_effort.strip()}" if config.reasoning_effort.strip() else "")
     )
+    if config.monthly_budget_usd > 0:
+        line += f" monthly_budget_usd={config.monthly_budget_usd:.4f}".rstrip("0").rstrip(".")
+    if config.per_mission_budget_usd > 0:
+        line += f" per_mission_budget_usd={config.per_mission_budget_usd:.4f}".rstrip("0").rstrip(".")
+    if config.auto_switch_quota_percent != 80.0:
+        line += f" auto_switch_quota_percent={config.auto_switch_quota_percent:.2f}".rstrip("0").rstrip(".")
+    return line

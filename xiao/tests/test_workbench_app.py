@@ -76,11 +76,13 @@ def test_start_dashboard_process_launches_independent_cli(tmp_path, monkeypatch)
     class FakeProc:
         pid = 4321
 
-    def fake_popen(cmd, cwd):
+    def fake_popen(cmd, cwd, **kwargs):
         captured["cmd"] = cmd
         captured["cwd"] = cwd
+        captured["kwargs"] = kwargs
         return FakeProc()
 
+    monkeypatch.setattr("visual_agent.workbench_app.hidden_subprocess_kwargs", lambda *, detached=False: {"creationflags": 12345})
     monkeypatch.setattr("subprocess.Popen", fake_popen)
 
     pid = start_dashboard_process(tmp_path / ".agent-workspace")
@@ -89,6 +91,7 @@ def test_start_dashboard_process_launches_independent_cli(tmp_path, monkeypatch)
     assert captured["cmd"][1:4] == ["-m", "visual_agent.cli", "dashboard"]
     assert captured["cmd"][-2:] == ["--workspace-root", str(tmp_path / ".agent-workspace")]
     assert captured["cwd"] == str(tmp_path)
+    assert captured["kwargs"]["creationflags"] == 12345
 
 
 def test_start_portfolio_dashboard_process_launches_independent_cli(tmp_path, monkeypatch):
@@ -97,11 +100,13 @@ def test_start_portfolio_dashboard_process_launches_independent_cli(tmp_path, mo
     class FakeProc:
         pid = 9876
 
-    def fake_popen(cmd, cwd):
+    def fake_popen(cmd, cwd, **kwargs):
         captured["cmd"] = cmd
         captured["cwd"] = cwd
+        captured["kwargs"] = kwargs
         return FakeProc()
 
+    monkeypatch.setattr("visual_agent.workbench_app.hidden_subprocess_kwargs", lambda *, detached=False: {"creationflags": 12345})
     monkeypatch.setattr("subprocess.Popen", fake_popen)
 
     a = tmp_path / "a"
@@ -114,6 +119,7 @@ def test_start_portfolio_dashboard_process_launches_independent_cli(tmp_path, mo
     assert captured["cmd"][1:4] == ["-m", "visual_agent.cli", "portfolio-dashboard"]
     assert captured["cmd"].count("--project") == 2
     assert captured["cwd"] == str(tmp_path)
+    assert captured["kwargs"]["creationflags"] == 12345
 
 
 def test_validate_launch_requires_project_goal():

@@ -7,6 +7,8 @@ The HTTP layer in server.py delegates here.
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import sys
 import subprocess
 import threading
@@ -21,13 +23,19 @@ from .data import (
     _WORKER_PROC,
     _launch_snapshot,
     build_dashboard_data_cached,
+    invalidate_dashboard_data_cache,
     worker_status,
 )
 from ..chief_plans_store import list_plans, load_plan, load_worker_records, plan_dir
+from ..commercial_config import commercial_config_from_payload, load_commercial_config, save_commercial_config as save_commercial_config_file
 from ..chief_queue import list_mission_queue_items
 from ..goal_intake import intake_dialogue_lines, refine_goal
+from ..mission_contract import normalize_requirement_contract
+from ..mission_progress import build_mission_progress
 from ..missions import list_missions, load_mission, save_mission
 from ..programs import list_programs
+from ..subprocess_window import hidden_subprocess_kwargs
+from ..user_profile import load_user_profile, profile_from_payload, save_user_profile
 from ..workbench_board import attach_board_fields, archive_mission_now, merge_mission_now, mission_review_payload
 from ..workbench_model_config import (
     WorkbenchModelConfig,
@@ -129,7 +137,13 @@ def start_worker(workspace_root: Path) -> dict[str, Any]:
             str(workspace_root),
         ]
         try:
-            _data_mod._WORKER_PROC = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _data_mod._WORKER_PROC = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                **hidden_subprocess_kwargs(detached=True),
+            )
         except OSError as exc:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "pid": _data_mod._WORKER_PROC.pid}
@@ -173,6 +187,7 @@ def retry_mission(workspace_root: Path, mission_id: str) -> dict[str, Any]:
         test_command=test_command,
         agent=agent,
         execute=True,
+        intake=mission.get("requirement_contract") if isinstance(mission.get("requirement_contract"), dict) else None,
     )
 
 
@@ -278,6 +293,8 @@ def refine_goal_intake(payload: dict[str, Any]) -> dict[str, Any]:
     agent = str(payload.get("agent") or "").strip()
     llm = _resolve_agent_llm(agent) if use_model and agent else None
     kwargs: dict[str, Any] = {}
+    effective_use_model = use_model
+    intake_policy = "local_rules"
     if llm:
         kwargs = {
             "model_id": f"{llm['provider']}:{llm['model']}",
@@ -286,11 +303,214 @@ def refine_goal_intake(payload: dict[str, Any]) -> dict[str, Any]:
             "endpoint": "/chat/completions",
             "max_tokens": 800,
         }
-    result = refine_goal(goal, answers=answers, enable_model=use_model, **kwargs)
+        intake_policy = "selected_agent_model"
+    elif use_model and agent:
+        # Product rule: if the user selected a coding agent, do not silently
+        # substitute another cheap backend for requirement intake.
+        cli_result = _refine_goal_with_selected_agent_cli(
+            goal,
+            answers=answers,
+            agent=agent,
+            repo_root=str(payload.get("repo_root") or ""),
+            test_command=str(payload.get("test_command") or ""),
+        )
+        if cli_result.get("ok"):
+            result = dict(cli_result["result"])
+            result["answers"] = answers
+            result["agent"] = agent
+            result["intake_policy"] = "selected_agent_cli"
+            result["dialogue_lines"] = intake_dialogue_lines(result, answers=answers)
+            result["ok"] = True
+            return result
+        effective_use_model = False
+        intake_policy = "selected_agent_unavailable"
+    elif use_model:
+        intake_policy = "auto_backend"
+    result = refine_goal(goal, answers=answers, enable_model=effective_use_model, **kwargs)
+    if intake_policy == "selected_agent_unavailable":
+        result["model_unavailable"] = True
+        result["model_error"] = f"selected_agent_unavailable_for_intake:{agent}"
     result["answers"] = answers
-    result["dialogue_lines"] = intake_dialogue_lines(result, answers=answers)
+    result["agent"] = agent
+    result["intake_policy"] = intake_policy
+    dialogue_lines = intake_dialogue_lines(result, answers=answers)
+    if intake_policy == "selected_agent_unavailable":
+        dialogue_lines.append(f"当前选择的编码 Agent `{agent}` 暂不能用于目标收口；本轮只用本地规则整理问题，未切换到其他模型。")
+    result["dialogue_lines"] = dialogue_lines
     result["ok"] = True
     return result
+
+
+def _refine_goal_with_selected_agent_cli(
+    goal: str,
+    *,
+    answers: list[str],
+    agent: str,
+    repo_root: str = "",
+    test_command: str = "",
+    timeout_seconds: float = 90.0,
+) -> dict[str, Any]:
+    from ..agent_capabilities import canonical_agent_name
+    from ..chief_engineer import assess_goal_clarity
+
+    canonical = canonical_agent_name(agent)
+    command = _selected_agent_intake_command(canonical)
+    if command is None:
+        return {"ok": False, "reason": "selected_agent_cli_unsupported", "agent": agent}
+    prompt = _selected_agent_intake_prompt(
+        goal,
+        answers=answers,
+        agent=agent,
+        repo_root=repo_root,
+        test_command=test_command,
+    )
+    argv = list(command["argv"])
+    stdin_text = command.get("stdin_text")
+    if stdin_text == "<prompt>":
+        stdin_text = prompt
+    else:
+        argv = [prompt if item == "<prompt>" else item for item in argv]
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            input=stdin_text,
+            text=True,
+            timeout=timeout_seconds,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "selected_agent_intake_timeout", "agent": agent}
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "reason": "selected_agent_intake_launch_error", "agent": agent, "error": str(exc)}
+    output = (completed.stdout or completed.stderr or "").strip()
+    if completed.returncode != 0:
+        return {
+            "ok": False,
+            "reason": "selected_agent_intake_failed",
+            "agent": agent,
+            "exit_code": completed.returncode,
+            "output_tail": output[-500:],
+        }
+    try:
+        parsed = _parse_selected_agent_intake_json(output)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "reason": "selected_agent_intake_invalid_json",
+            "agent": agent,
+            "error": str(exc),
+            "output_tail": output[-500:],
+        }
+    clarity = assess_goal_clarity(goal, answers=answers)
+    questions = [str(q).strip() for q in (parsed.get("clarifying_questions") or []) if str(q).strip()][:3]
+    suggested = str(parsed.get("suggested_goal") or "").strip() or goal
+    return {
+        "ok": True,
+        "result": {
+            "source": "selected_agent_cli",
+            "model_id": f"{canonical}:cli",
+            "input_goal": goal,
+            "already_clear": bool(clarity["ok"]) and not questions,
+            "clarifying_questions": questions,
+            "suggested_goal": suggested,
+            "acceptance_hint": str(parsed.get("acceptance_hint") or "").strip(),
+            "clarity": clarity,
+        },
+    }
+
+
+def _selected_agent_intake_command(canonical: str) -> dict[str, Any] | None:
+    if canonical == "codex":
+        found = shutil.which("codex")
+        if not found:
+            return None
+        argv = [found, "exec", "--sandbox", "read-only", "-"]
+        if found.lower().endswith((".cmd", ".bat")):
+            argv = ["cmd", "/c", found, "exec", "--sandbox", "read-only", "-"]
+        return {"argv": argv, "stdin_text": "<prompt>"}
+    if canonical == "claude-code":
+        found = shutil.which("claude")
+        if not found:
+            return None
+        argv = [found, "-p", "<prompt>", "--permission-mode", "plan"]
+        if found.lower().endswith((".cmd", ".bat")):
+            argv = ["cmd", "/c", found, "-p", "<prompt>", "--permission-mode", "plan"]
+        return {"argv": argv}
+    if canonical == "gemini":
+        found = shutil.which("gemini")
+        if not found:
+            return None
+        argv = [found, "-p", "<prompt>"]
+        if found.lower().endswith((".cmd", ".bat")):
+            argv = ["cmd", "/c", found, "-p", "<prompt>"]
+        return {"argv": argv}
+    return None
+
+
+def _selected_agent_intake_prompt(
+    goal: str,
+    *,
+    answers: list[str],
+    agent: str,
+    repo_root: str,
+    test_command: str,
+) -> str:
+    lines = [
+        "You are the selected coding agent inside Pacer, but this turn is intake only.",
+        "Do not edit files, do not run commands, and do not change the workspace.",
+        "Your job is to clarify the user's development request enough for an autonomous coding mission.",
+        "Return STRICT JSON only, no Markdown, with keys:",
+        '- "clarifying_questions": array of at most 3 short questions; empty if clear.',
+        '- "suggested_goal": one precise, self-contained rewrite in the user language.',
+        '- "acceptance_hint": one short sentence describing how Pacer should verify completion.',
+        "",
+        f"Selected agent: {agent}",
+        f"Project directory: {repo_root or '(not specified)'}",
+        f"Known verification command: {test_command or '(not specified)'}",
+        "",
+        "Rough goal:",
+        goal,
+    ]
+    if answers:
+        lines.extend(["", "User already answered:"])
+        lines.extend(f"- {item}" for item in answers if str(item).strip())
+    return "\n".join(lines)
+
+
+def _parse_selected_agent_intake_json(output: str) -> dict[str, Any]:
+    raw = str(output or "").strip()
+    if not raw:
+        raise ValueError("empty agent output")
+    candidates = [raw]
+    try:
+        outer = json.loads(raw)
+        if isinstance(outer, dict):
+            if _looks_like_intake_payload(outer):
+                return outer
+            for key in ("result", "reply", "text", "content", "message", "output"):
+                value = outer.get(key)
+                if isinstance(value, str) and value.strip():
+                    candidates.append(value.strip())
+    except ValueError:
+        pass
+    for candidate in candidates:
+        match = re.search(r"\{.*\}", candidate, re.DOTALL)
+        if not match:
+            continue
+        try:
+            parsed = json.loads(match.group(0))
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and _looks_like_intake_payload(parsed):
+            return parsed
+    raise ValueError("agent output did not contain an intake JSON object")
+
+
+def _looks_like_intake_payload(payload: dict[str, Any]) -> bool:
+    return any(key in payload for key in ("clarifying_questions", "suggested_goal", "acceptance_hint"))
 
 
 def _resolve_agent_llm(agent: str) -> dict[str, str] | None:
@@ -375,6 +595,7 @@ def save_notifications_config(payload: dict[str, Any]) -> dict[str, Any]:
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    invalidate_dashboard_data_cache()
     return {"ok": True, "message": "配置已保存"}
 
 
@@ -398,6 +619,55 @@ def test_notification() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Local user profile
+# ---------------------------------------------------------------------------
+
+def get_user_profile() -> dict[str, Any]:
+    return {"ok": True, **load_user_profile().to_public_dict()}
+
+
+def save_profile_config(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        profile = profile_from_payload(payload)
+        path = save_user_profile(profile)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except OSError as exc:
+        return {"ok": False, "error": f"保存失败：{exc}"}
+    invalidate_dashboard_data_cache()
+    return {
+        "ok": True,
+        "message": "本地邮箱身份已保存",
+        "path": str(path),
+        **profile.to_public_dict(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Commercial auth and billing configuration
+# ---------------------------------------------------------------------------
+
+def get_commercial_config() -> dict[str, Any]:
+    return {"ok": True, **load_commercial_config().to_dict(redact=True)}
+
+
+def save_commercial_config(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        existing = load_commercial_config()
+        config = commercial_config_from_payload(payload, existing=existing)
+        path = save_commercial_config_file(config, existing=existing)
+    except OSError as exc:
+        return {"ok": False, "error": f"保存失败：{exc}"}
+    invalidate_dashboard_data_cache()
+    return {
+        "ok": True,
+        "message": "登录与付费配置已保存",
+        "path": str(path),
+        **config.to_dict(redact=True),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Workbench model API configuration
 # ---------------------------------------------------------------------------
 
@@ -410,6 +680,10 @@ def get_model_config() -> dict[str, Any]:
         "api_key": config.api_key,
         "model": config.model,
         "reasoning_effort": config.reasoning_effort,
+        "monthly_budget_usd": config.monthly_budget_usd,
+        "per_mission_budget_usd": config.per_mission_budget_usd,
+        "auto_switch_quota_percent": config.auto_switch_quota_percent,
+        "budget_guard_configured": config.budget_guard_configured,
         "configured": config.configured,
         "summary": redacted_config_summary(config),
     }
@@ -422,6 +696,9 @@ def save_model_config(payload: dict[str, Any]) -> dict[str, Any]:
         api_key=str(payload.get("api_key") or "").strip(),
         model=str(payload.get("model") or "").strip(),
         reasoning_effort=str(payload.get("reasoning_effort") or "").strip(),
+        monthly_budget_usd=_float_payload(payload, "monthly_budget_usd", 0.0),
+        per_mission_budget_usd=_float_payload(payload, "per_mission_budget_usd", 0.0),
+        auto_switch_quota_percent=_float_payload(payload, "auto_switch_quota_percent", 80.0),
     )
     if not enabled:
         return {"ok": False, "error": "关闭优先使用 sub2api 后不会删除已有配置；如需停用，请在 Agent 下拉框选择 codex 或 claude-code。"}
@@ -429,6 +706,7 @@ def save_model_config(payload: dict[str, Any]) -> dict[str, Any]:
         path = save_workbench_model_config(config)
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+    invalidate_dashboard_data_cache()
     return {
         "ok": True,
         "message": "总工作台模型接口已保存，新的任务会优先显示 bugteam（低成本）。",
@@ -443,9 +721,22 @@ def test_model_config(payload: dict[str, Any]) -> dict[str, Any]:
         api_key=str(payload.get("api_key") or "").strip(),
         model=str(payload.get("model") or "").strip(),
         reasoning_effort=str(payload.get("reasoning_effort") or "").strip(),
+        monthly_budget_usd=_float_payload(payload, "monthly_budget_usd", 0.0),
+        per_mission_budget_usd=_float_payload(payload, "per_mission_budget_usd", 0.0),
+        auto_switch_quota_percent=_float_payload(payload, "auto_switch_quota_percent", 80.0),
     )
     result = probe_workbench_model_config(config)
     return {"ok": bool(result.get("ok")), **result}
+
+
+def _float_payload(payload: dict[str, Any], key: str, default: float) -> float:
+    raw = payload.get(key)
+    if raw in (None, ""):
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +840,18 @@ def build_mission_detail(workspace_root: str | Path, mission_id: str) -> dict[st
     live_logs = _mission_live_logs(root, mission)
     worker_records = load_worker_records(root, plan_id) if plan_id else []
     verification = _load_verification_payload(root, plan_id) if plan_id else {}
+    progress = build_mission_progress(
+        workspace_root=root,
+        mission=mission,
+        rounds=rounds,
+        worker_records=worker_records,
+        verification=verification,
+    ) if mission else {}
     pacer_evidence = _build_pacer_evidence(root, mission, worker_records=worker_records, verification=verification)
+    if progress:
+        pacer_evidence["progress"] = progress
+        pacer_evidence["stage"] = progress.get("stage", "")
+        pacer_evidence["changed_product_file_count"] = progress.get("changed_product_file_count", 0)
     return {
         "mission": mission,
         "rounds": rounds,
@@ -560,6 +862,7 @@ def build_mission_detail(workspace_root: str | Path, mission_id: str) -> dict[st
         "live_logs": live_logs,
         "worker_records": worker_records,
         "verification": verification,
+        "progress": progress,
         "pacer_evidence": pacer_evidence,
     }
 
@@ -668,6 +971,8 @@ def start_workbench_mission(
     merge_policy: str = "manual",
     allow_dirty: bool = False,
     spec: dict[str, Any] | None = None,
+    intake: dict[str, Any] | None = None,
+    answers: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     goal = str(goal or "").strip()
     if not goal:
@@ -704,6 +1009,14 @@ def start_workbench_mission(
             ),
             "verification_profile": verification_profile or {"source": "auto", "status": "not_found", "profiles": []},
         }
+    requirement_contract = normalize_requirement_contract(
+        intake,
+        goal=goal,
+        answers=answers or (),
+        repo_root=repo_root or ".",
+        test_command=resolved_test_command or requested_test_command,
+        agent=agent,
+    )
     validator = SpecValidator()
     normalized_spec = validator.validate(spec) if spec is not None else validator.derive_request_spec(
         goal=goal,
@@ -712,6 +1025,8 @@ def start_workbench_mission(
         agent=agent,
         execute=bool(execute),
     )
+    if requirement_contract:
+        normalized_spec["requirement_contract"] = requirement_contract
     launch_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     pipeline = MissionPipeline(workspace_root, launch_id=launch_id)
     pipeline_state = pipeline.begin(
@@ -723,6 +1038,7 @@ def start_workbench_mission(
             "test_command": resolved_test_command or "",
             "agent": str(agent or ""),
             "merge_policy": str(merge_policy or "manual"),
+            "requirement_contract": requirement_contract,
         },
     )
     record_launch(
@@ -731,6 +1047,7 @@ def start_workbench_mission(
         execute=bool(execute),
         test_command=resolved_test_command or "",
         verification_profile=verification_profile or {},
+        requirement_contract=requirement_contract,
         state="starting",
         state_path=str(pipeline.path),
         started_at=datetime.now(timezone.utc).isoformat(),
@@ -757,6 +1074,7 @@ def start_workbench_mission(
                 allow_coverage_gap=manual_verification or review_plan,
                 allow_dirty=bool(allow_dirty),
                 merge=False,
+                requirement_contract=requirement_contract,
             )
             mission = result.get("mission") if isinstance(result, dict) else {}
             status = str((result or {}).get("status") or "")
@@ -768,6 +1086,8 @@ def start_workbench_mission(
                     saved_mission["test_command"] = resolved_test_command or requested_test_command or ""
                     saved_mission["agent"] = str(agent or "")
                     saved_mission["merge_policy"] = str(merge_policy or "manual")
+                    if requirement_contract:
+                        saved_mission["requirement_contract"] = requirement_contract
                     save_mission(workspace_root, saved_mission)
                 pipeline.attach_mission(pipeline_state, mission_id)
             background = None
@@ -776,6 +1096,8 @@ def start_workbench_mission(
                 background = start_background_chief_run(
                     workspace_root=workspace_root,
                     mission_id=mission_id,
+                    agents=((agent,) if agent else ()),
+                    run_profile="supervised",
                     test_command=(resolved_test_command or None),
                     allow_dirty=bool(allow_dirty),
                     allow_coverage_gap=manual_verification or review_plan,
@@ -814,6 +1136,7 @@ def start_workbench_mission(
         "manual_verification": manual_verification,
         "review_plan": review_plan,
         "allow_dirty": bool(allow_dirty),
+        "requirement_contract": requirement_contract,
         "state_path": str(pipeline.path),
         "spec": normalized_spec,
     }

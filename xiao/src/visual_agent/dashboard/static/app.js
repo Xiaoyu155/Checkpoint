@@ -25,7 +25,8 @@ const STOP_REASON = {
   same_failure_repeated:{ zh:'同一错误修复两次仍然失败', fix:'打开最终报告看具体报错，把目标改得更精确再重试' },
   budget_exhausted:    { zh:'超出轮次预算', fix:'目标拆得更小，或命令行加 --max-rounds 参数再续跑' },
   worker_error:        { zh:'AI Worker 进程异常退出', fix:'运行 checkpoint agents doctor 确认 Agent 可用，再恢复任务' },
-  quota_exhausted:     { zh:'AI 额度已用完', fix:'等额度恢复（Codex 每周 / Claude 每 5 小时），或切换编码 AI' },
+  worker_toolchain_violation:{ zh:'验收通过但工具链违规', fix:'检查 worker 日志中的 Dart/Flutter 路径，必须使用任务指定的 SDK 可执行文件' },
+  quota_exhausted:     { zh:'AI 额度已用完', fix:'打开右侧中转站继续付费开发，或等额度恢复后再恢复任务' },
   needs_clarification: { zh:'目标不够具体无法执行', fix:'把目标改写为：做什么 + 改哪里 + 什么叫完成' },
   verification_failed: { zh:'验收命令仍然失败', fix:'打开最终报告看具体报错，重新创建更精确的任务' },
   command_timeout:     { zh:'验收命令超时', fix:'加快测试速度，或先跑部分测试验证思路' },
@@ -37,11 +38,19 @@ function srInfo(code){ return STOP_REASON[code] || { zh: code||'', fix:'' }; }
 
 const STATUS_ZH = {
   created:'待执行', running:'执行中', preview_running:'预览中', preview:'预览完成',
-  verified:'验收通过', merged:'已合并', archived:'已删除', stopped:'已停止', failed:'失败',
+  verified:'验收通过', verified_blocked:'验收通过但阻断', merged:'已合并', archived:'已删除', stopped:'已停止', failed:'失败',
 };
 const zh = s => STATUS_ZH[s] || s;
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const jsq = s => String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\n/g,'\\n').replace(/\r/g,'');
+function setText(id, value){
+  const el = document.getElementById(id);
+  if(el) el.textContent = String(value);
+}
+function setDisplay(id, value){
+  const el = document.getElementById(id);
+  if(el) el.style.display = value;
+}
 function fmtTime(value){
   const raw = String(value || '').trim();
   if(!raw) return '';
@@ -58,6 +67,7 @@ function fmtTime(value){
 function stClass(s){
   const t=(s||'').toLowerCase();
   if(t==='verified') return 'st-verified';
+  if(t==='verified_blocked') return 'st-stopped';
   if(t==='running'||t==='preview_running') return 'st-running';
   if(t==='stopped'||t==='failed') return 'st-stopped';
   if(t==='merged') return 'st-merged';
@@ -66,6 +76,7 @@ function stClass(s){
 }
 function pc(s){
   const t=(s||'').toLowerCase();
+  if(t.includes('verified_blocked')||t.includes('toolchain')) return 'warn';
   if(t.includes('pass')||t.includes('verified')||t.includes('merged')) return 'ok';
   if(t.includes('fail')||t.includes('error')||t.includes('conflict')) return 'fail';
   if(t.includes('clarif')||t.includes('coverage')||t.includes('budget')||
@@ -76,6 +87,8 @@ function pc(s){
 
 // ---------- Toast ----------
 let _toastTimer;
+const PANEL_STATE_PREFIX = 'pacer.panel.focus.';
+const WORKBENCH_VIEW_KEY = 'pacer.workbench.activeView';
 function toast(msg, ok=true){
   const el=document.getElementById('toast');
   el.textContent=msg;
@@ -90,15 +103,74 @@ function togglePanel(ev, key){
   const panel = document.querySelector(`[data-collapse-key="${key}"]`);
   if(!panel) return;
   panel.classList.toggle('is-collapsed');
-  try{ localStorage.setItem('pacer.panel.'+key, panel.classList.contains('is-collapsed') ? 'collapsed' : 'open'); }catch(e){}
+  try{ localStorage.setItem(PANEL_STATE_PREFIX+key, panel.classList.contains('is-collapsed') ? 'collapsed' : 'open'); }catch(e){}
   _syncPanelToggle(panel);
+}
+
+function focusWorkbenchPanel(key, focusSelector=''){
+  switchWorkbenchView(key, focusSelector);
+  const panel = document.querySelector(`[data-collapse-key="${key}"]`);
+  if(!panel) return;
+  if(panel.classList.contains('is-collapsed')){
+    panel.classList.remove('is-collapsed');
+    try{ localStorage.setItem(PANEL_STATE_PREFIX+key, 'open'); }catch(e){}
+    _syncPanelToggle(panel);
+  }
+}
+
+function switchWorkbenchView(key, focusSelector=''){
+  const target = document.querySelector(`[data-workbench-view="${key}"]`);
+  if(!target) return;
+  const alreadyActive = target.classList.contains('is-active-view');
+  document.querySelectorAll('[data-workbench-view]').forEach(view=>{
+    const active = view === target;
+    view.classList.toggle('is-active-view', active);
+    view.setAttribute('aria-hidden', active ? 'false' : 'true');
+  });
+  document.querySelectorAll('[data-nav-view]').forEach(btn=>{
+    btn.classList.toggle('active', btn.getAttribute('data-nav-view') === key);
+  });
+  const mobileNav = document.getElementById('mobileViewNav');
+  if(mobileNav && mobileNav.value !== key) mobileNav.value = key;
+  if(target.classList.contains('is-collapsed')){
+    target.classList.remove('is-collapsed');
+    _syncPanelToggle(target);
+    try{ localStorage.setItem(PANEL_STATE_PREFIX+key, 'open'); }catch(e){}
+  }
+  try{ localStorage.setItem(WORKBENCH_VIEW_KEY, key); }catch(e){}
+  if(!alreadyActive || focusSelector) _scrollViewTarget(target);
+  _focusViewTarget(focusSelector);
+}
+
+function _prefersReducedMotion(){
+  return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+}
+
+function _scrollViewTarget(target){
+  if(!target || typeof target.scrollIntoView !== 'function') return;
+  setTimeout(()=>target.scrollIntoView({behavior:_prefersReducedMotion()?'auto':'smooth', block:'start'}), 0);
+}
+
+function _focusViewTarget(focusSelector=''){
+  if(!focusSelector) return;
+  setTimeout(()=>{
+    const target = document.querySelector(focusSelector);
+    if(target && typeof target.focus === 'function') target.focus();
+  }, 180);
+}
+
+function initWorkbenchViews(){
+  let saved = '';
+  try{ saved = localStorage.getItem(WORKBENCH_VIEW_KEY) || ''; }catch(e){}
+  const first = document.querySelector(`[data-workbench-view="${saved}"]`) ? saved : 'mission-control';
+  switchWorkbenchView(first);
 }
 
 function initCollapsiblePanels(){
   document.querySelectorAll('[data-collapse-key]').forEach(panel=>{
     const key = panel.getAttribute('data-collapse-key');
     let saved = '';
-    try{ saved = localStorage.getItem('pacer.panel.'+key) || ''; }catch(e){}
+    try{ saved = localStorage.getItem(PANEL_STATE_PREFIX+key) || ''; }catch(e){}
     if(saved === 'collapsed') panel.classList.add('is-collapsed');
     if(saved === 'open') panel.classList.remove('is-collapsed');
     _syncPanelToggle(panel);
@@ -221,6 +293,8 @@ async function startMission(execute){
   const repoRoot = document.getElementById('fRepo').value.trim() || _inferRepoFromGoal(goal) || '';
   const testCommand = document.getElementById('fTest').value.trim();
   const agent = document.getElementById('fAgent').value;
+  const intakeAnswers = (_mainIntakeState.answers || []).filter(Boolean);
+  const intakeContract = intake ? {...intake, answers: intakeAnswers} : null;
   if(execute && !testCommand && !_isFieldVerificationGoal(goal) && !/review|plan|审查|计划/i.test(goal)){
     const fallbackQuestions = [
       '我还缺验收方案，不能直接派发。请直接补一条测试命令，比如 `python -m pytest -q`、`npm test`，或者说这是人工验收。',
@@ -238,6 +312,8 @@ async function startMission(execute){
     agent,
     merge_policy: document.getElementById('fAutoMerge').checked ? 'auto' : 'manual',
     execute: !!execute,
+    intake: intakeContract,
+    answers: intakeAnswers,
     spec: {
       schema_version: 1,
       goal,
@@ -245,7 +321,8 @@ async function startMission(execute){
       plan: [goal],
       test: [testCommand || 'auto-detect verification command'],
       risk: ['Workbench-generated spec; human review is required before merge.'],
-      rollback: ['Keep merge policy manual unless explicitly approved.']
+      rollback: ['Keep merge policy manual unless explicitly approved.'],
+      requirement_contract: intakeContract
     }
   };
   document.getElementById('btnPreview').disabled = true;
@@ -285,6 +362,7 @@ let _intakeDraft = '';
 let _mainIntakeState = { goal:'', answers:[], payload:null };
 
 function openTaskIntake(seedGoal){
+  switchWorkbenchView('mission-control', '#fGoal');
   const goal = String(seedGoal || document.getElementById('fGoal').value || '').trim();
   _intakeSeed = {
     goal,
@@ -445,6 +523,11 @@ function _isFieldVerificationGoal(goal){
   return /livekit|真机|弱网|户外|噪声|语音通话|通话|生产主链路|人工验收|现场/i.test(String(goal||''));
 }
 
+function _shouldUseLocalIntake(goal){
+  const text = String(goal || '').toLowerCase();
+  return _isFieldVerificationGoal(goal) || /手机|数据线|adb|apk|flutter|android|ios|安装|传输/.test(text);
+}
+
 function mainChatKeyDown(e){
   if(e.key==='Enter' && (e.ctrlKey || e.metaKey)){ e.preventDefault(); sendMainChat(); }
 }
@@ -491,9 +574,13 @@ async function sendMainChat(){
   const hasOpenIntake = !!(_mainIntakeState.goal && _mainIntakeState.payload && !_mainIntakeState.payload.already_clear);
   const activeGoal = hasOpenIntake ? _mainIntakeState.goal : msg;
   const answers = hasOpenIntake ? [...(_mainIntakeState.answers || []), msg] : [];
+  if(!hasOpenIntake && _shouldUseLocalIntake(msg)){
+    openTaskIntake(msg);
+    return;
+  }
   _appendMainChat('user', msg);
   input.value = '';
-  _appendMainChat('assistant', '我先把目标整理一下，马上追问关键点。');
+  _appendMainChat('assistant', `我先用当前选择的 ${agent} 做目标收口；如果它不可用，本轮只做本地问题整理。`);
   const btns = document.getElementById('mainIntakeActions');
   btns.style.display='none';
   try{
@@ -588,7 +675,7 @@ async function loadMissionToComposer(ev, id){
     document.getElementById('fTest').value = _userFacingTestCommand(m.test_command || evd.verification_command || '');
     if(m.agent) document.getElementById('fAgent').value = m.agent;
     closeDrawer();
-    document.querySelector('.main-chat')?.scrollIntoView({behavior:'smooth', block:'start'});
+    switchWorkbenchView('mission-control', '#fGoal');
     toast('已填回任务合同，可以补验收命令后预览或派发');
   }catch(e){
     toast('填回失败：'+e, false);
@@ -704,10 +791,7 @@ function missionCard(m){
     ? `<span class="stop-tag">${esc(sr.zh)}</span>` : '';
   const agent = m.agent ? `<span class="pill mut" style="font-size:10px;">${esc(m.agent)}</span>` : '';
   const cardTime = fmtTime(m.updated_at || m.created_at);
-  const contract = (m.repo_root || m.test_command) ? `<div class="tcard-contract">
-      ${m.repo_root?`<div><span>目录</span><code title="${esc(m.repo_root)}">${esc(m.repo_root)}</code></div>`:''}
-      ${m.test_command?`<div><span>验收</span><code title="${esc(m.test_command)}">${esc(m.test_command)}</code></div>`:''}
-    </div>` : '';
+  const contract = _requirementContractBlock(m);
   const evidence = (ev.worker_status||ev.verification_verdict||ev.backend||ev.log_path)?`
     <div class="tcard-evidence">
       <div class="evi"><span>Worker</span><code>${esc(ev.worker_status||'-')}${ev.worker_exit_code!==undefined&&ev.worker_exit_code!==null?` exit ${esc(ev.worker_exit_code)}`:''}</code></div>
@@ -754,10 +838,7 @@ function missionRow(m){
   const clarifyBtn = (m.stop_reason==='needs_clarification' || m.stop_reason==='coverage_gap')
     ? `<button class="act-retry" onclick="event.stopPropagation();openTaskIntake('${jsq(m.objective||'')}')">继续确认</button>` : '';
   const stopTag = hasStop && !m.can_merge ? `<span class="stop-tag">${esc(sr.zh)}</span>` : '';
-  const contract = (m.repo_root || m.test_command) ? `<div class="tcard-contract">
-      ${m.repo_root?`<div><span>目录</span><code title="${esc(m.repo_root)}">${esc(m.repo_root)}</code></div>`:''}
-      ${m.test_command?`<div><span>验收</span><code title="${esc(m.test_command)}">${esc(m.test_command)}</code></div>`:''}
-    </div>` : '';
+  const contract = _requirementContractBlock(m);
   const evidence = (ev.worker_status||ev.verification_verdict||ev.backend||ev.log_path)?`
     <div class="tcard-evidence">
       <div class="evi"><span>Worker</span><code>${esc(ev.worker_status||'-')}${ev.worker_exit_code!==undefined&&ev.worker_exit_code!==null?` exit ${esc(ev.worker_exit_code)}`:''}</code></div>
@@ -795,13 +876,80 @@ function _efficiencyLine(eff){
   const taskSec = Number(eff.actual_task_seconds || 0);
   const workerSec = Number(eff.actual_worker_seconds || 0);
   const cost = eff.actual_cost_available ? ('$'+Number(eff.actual_cost_usd || 0).toFixed(4)) : '未回传';
+  const quota = _quotaSavedPercent(eff);
   if(!runs && !taskSec && !workerSec) return '';
   return [
     `<span>后端 ${runs}</span>`,
+    `<span>套餐额度 ${quota.toFixed(1)}%</span>`,
     `<span>实际额度 ${cost}</span>`,
     `<span>任务耗时 ${_fmtSeconds(taskSec)}</span>`,
     `<span>Worker ${_fmtSeconds(workerSec)}</span>`
   ].join('');
+}
+
+function _requirementContractBlock(m){
+  const rc = (m && m.requirement_contract && typeof m.requirement_contract === 'object') ? m.requirement_contract : {};
+  const finalGoal = String(rc.final_goal || rc.suggested_goal || '').trim();
+  const inputGoal = String(rc.input_goal || '').trim();
+  const acceptance = String(rc.acceptance_hint || '').trim();
+  const policy = _intakePolicyLabel(rc);
+  const answers = Array.isArray(rc.answers) ? rc.answers.map(x=>String(x||'').trim()).filter(Boolean).slice(0,3).join('；') : '';
+  const rows = [];
+  if(inputGoal && inputGoal !== finalGoal) rows.push(['原始', inputGoal]);
+  if(finalGoal && finalGoal !== String(m.objective||'').trim()) rows.push(['目标', finalGoal]);
+  if(acceptance) rows.push(['验收', acceptance]);
+  if(policy) rows.push(['收口', policy]);
+  if(answers) rows.push(['补充', answers]);
+  if(m.repo_root) rows.push(['目录', m.repo_root]);
+  if(m.test_command) rows.push(['命令', m.test_command]);
+  if(!rows.length) return '';
+  return `<div class="tcard-contract">${rows.map(([label,value])=>
+    `<div><span>${esc(label)}</span><code title="${esc(value)}">${esc(value)}</code></div>`
+  ).join('')}</div>`;
+}
+
+function _requirementContractDetail(m){
+  const rc = (m && m.requirement_contract && typeof m.requirement_contract === 'object') ? m.requirement_contract : {};
+  const rows = [];
+  const inputGoal = String(rc.input_goal || '').trim();
+  const finalGoal = String(rc.final_goal || rc.suggested_goal || '').trim();
+  const acceptance = String(rc.acceptance_hint || '').trim();
+  const policy = _intakePolicyLabel(rc);
+  const model = String(rc.model_id || '').trim();
+  const answers = Array.isArray(rc.answers) ? rc.answers.map(x=>String(x||'').trim()).filter(Boolean).slice(0,8) : [];
+  const questions = Array.isArray(rc.clarifying_questions) ? rc.clarifying_questions.map(x=>String(x||'').trim()).filter(Boolean).slice(0,6) : [];
+  if(inputGoal) rows.push(['原始输入', inputGoal]);
+  if(finalGoal) rows.push(['最终目标', finalGoal]);
+  if(acceptance) rows.push(['验收提示', acceptance]);
+  if(policy) rows.push(['收口方式', policy]);
+  if(model) rows.push(['模型/Agent', model]);
+  if(answers.length) rows.push(['用户补充', answers.join('\n')]);
+  if(questions.length) rows.push(['澄清问题', questions.join('\n')]);
+  if(m.repo_root) rows.push(['项目目录', m.repo_root]);
+  if(m.test_command) rows.push(['验收命令', m.test_command]);
+  if(!rows.length) return '';
+  return `<h3>需求合同</h3><div class="detail-contract">${rows.map(([label,value])=>
+    `<div class="detail-contract-row"><span>${esc(label)}</span><code>${esc(value)}</code></div>`
+  ).join('')}</div>`;
+}
+
+function _intakePolicyLabel(rc){
+  if(!rc || typeof rc !== 'object') return '';
+  const policy = String(rc.intake_policy || '').trim();
+  const source = String(rc.source || '').trim();
+  const labels = {
+    selected_agent_cli: '选中 Agent CLI 收口',
+    selected_agent_model: '选中 Agent 模型收口',
+    selected_agent_unavailable: '选中 Agent 不可用，本地整理',
+    auto_backend: '自动后端收口',
+    local_rules: '本地规则收口'
+  };
+  if(policy && labels[policy]) return labels[policy];
+  if(policy) return policy;
+  if(source === 'selected_agent_cli') return labels.selected_agent_cli;
+  if(source === 'deterministic') return labels.local_rules;
+  if(source) return source;
+  return '';
 }
 
 function _fmtSeconds(seconds){
@@ -809,6 +957,15 @@ function _fmtSeconds(seconds){
   if(!n) return '0s';
   if(n < 60) return n.toFixed(n < 10 ? 1 : 0) + 's';
   return (n/60).toFixed(1) + 'm';
+}
+
+function _quotaSavedPercent(eff){
+  const direct = Number(eff?.saved_quota_percent);
+  if(Number.isFinite(direct) && direct > 0) return direct;
+  const saved = Number(eff?.saved_usd || 0);
+  const spent = Number(eff?.spent_usd || 0);
+  if(saved <= 0 && spent <= 0) return 0;
+  return Math.round((saved / Math.max(saved + spent, 0.01) * 100) * 10) / 10;
 }
 
 function renderTrace(d){
@@ -839,6 +996,42 @@ function renderTrace(d){
   }).join('');
 }
 
+let _eventSource = null;
+let _streamReloadTimer = null;
+function setStreamState(text, level='mut'){
+  const el = document.getElementById('streamState');
+  if(!el) return;
+  el.textContent = text;
+  el.className = 'stream-state ' + level;
+}
+function scheduleStreamLoad(){
+  clearTimeout(_streamReloadTimer);
+  _streamReloadTimer = setTimeout(()=>load(), 180);
+}
+function connectEventStream(){
+  if(!window.EventSource){
+    setStreamState('轮询备份', 'warn');
+    return;
+  }
+  try{
+    if(_eventSource) _eventSource.close();
+    _eventSource = new EventSource('/api/events');
+    _eventSource.onopen = () => setStreamState('实时连接', 'ok');
+    _eventSource.addEventListener('snapshot', ev => {
+      setStreamState('实时更新', 'ok');
+      scheduleStreamLoad();
+    });
+    _eventSource.addEventListener('heartbeat', ev => {
+      setStreamState('实时连接', 'ok');
+    });
+    _eventSource.onerror = () => {
+      setStreamState('轮询备份', 'warn');
+    };
+  }catch(e){
+    setStreamState('轮询备份', 'warn');
+  }
+}
+
 function launchCard(l){
   const p = l.state==='error'?'fail':'acc';
   const txt = l.state==='error'?'启动失败':(l.execute?'派发中…':'预览中…');
@@ -847,15 +1040,18 @@ function launchCard(l){
     <div class="tcard-foot"><span class="pill ${p}">${txt}</span></div>${extra}</div>`;
 }
 function renderBoard(d){
-  const cols={todo:[],in_progress:[],in_review:[],done:[]};
+  const cols={todo:0,in_progress:0,in_review:0,done:0};
   const missions = d.missions||[];
   const launches = d.launches||[];
   const runObjs = new Set(missions.filter(m=>m.board_column==='in_progress').map(m=>m.objective));
   launches.forEach(l=>{
-    if(l.state==='starting'&&!runObjs.has(l.goal)) cols.in_progress.push(launchCard(l));
-    else if(l.state==='error') cols.in_review.push(launchCard(l));
+    if(l.state==='starting'&&!runObjs.has(l.goal)) cols.in_progress += 1;
+    else if(l.state==='error') cols.in_review += 1;
   });
-  missions.forEach(m=>{ (cols[m.board_column]||cols.in_review).push(missionCard(m)); });
+  missions.forEach(m=>{
+    const col = cols[m.board_column] !== undefined ? m.board_column : 'in_review';
+    cols[col] += 1;
+  });
   const emp=t=>`<div class="empty">${t}</div>`;
   _updateMissionFilters(missions, launches);
   const launchItems = launches
@@ -866,34 +1062,146 @@ function renderBoard(d){
   const listItems = [...launchItems, ...filteredMissions.map(missionRow)];
   const listEl = document.getElementById('missionList');
   if(listEl) listEl.innerHTML = listItems.join('') || emp(_missionFilter==='all' ? '暂无任务。先在左侧新建任务。' : '当前筛选下没有任务。');
-  document.getElementById('colTodo').innerHTML=cols.todo.join('')||emp('暂无待办');
-  document.getElementById('colRun').innerHTML=cols.in_progress.join('')||emp('无执行中的任务');
-  document.getElementById('colReview').innerHTML=cols.in_review.join('')||emp('没有等待合并的任务');
-  document.getElementById('colDone').innerHTML=cols.done.join('')||emp('还没有完成的任务');
-  document.getElementById('cTodo').textContent=cols.todo.length;
-  document.getElementById('cRun').textContent=cols.in_progress.length;
-  document.getElementById('cReview').textContent=cols.in_review.length;
-  document.getElementById('cDone').textContent=cols.done.length;
-  document.getElementById('sRunning').textContent=cols.in_progress.length;
+  setText('cTodo', cols.todo);
+  setText('cRun', cols.in_progress);
+  setText('cReview', cols.in_review);
+  setText('cDone', cols.done);
+  setText('sRunning', cols.in_progress);
 
   const worker=d.worker||{};
   const status=d.status||{};
   const meta=document.getElementById('pageMeta');
   const agents=(d.installed_agents||[]).slice(0,4);
+  const quotaPills = _subscriptionQuotaPills(d.subscription_quota);
   meta.innerHTML=[
     `<span class="pill ${worker.running?'ok':'mut'}">${worker.running?'Worker 运行中':'Worker 空闲'}</span>`,
     `<span class="pill acc">${esc(status.state||'unknown')}</span>`,
-    agents.length?`<span class="pill mut">${agents.map(esc).join(' · ')}</span>`:''
+    agents.length?`<span class="pill mut">${agents.map(esc).join(' · ')}</span>`:'',
+    ...quotaPills
   ].filter(Boolean).join('');
 
   const totalTokens=((d.value?.input_tokens||0)+(d.value?.output_tokens||0));
-  document.getElementById('kVerified').textContent=String(d.value?.verified||0);
-  document.getElementById('kRunning').textContent=String(cols.in_progress.length);
-  document.getElementById('kQueue').textContent=String((d.queue||[]).length);
-  document.getElementById('kSavedUsd').textContent='$'+Number(d.value?.mimo_efficiency?.saved_usd||0).toFixed(2);
-  document.getElementById('kSavedMin').textContent=Number(d.value?.mimo_efficiency?.saved_minutes||0).toFixed(1)+' 分钟';
-  document.getElementById('kEfficiency').textContent=String(d.value?.mimo_efficiency?.efficiency_gain_percent||0)+'%';
-  document.getElementById('kTokens').textContent='累计 Tokens '+totalTokens.toLocaleString();
+  setText('kVerified', d.value?.verified||0);
+  setText('kRunning', cols.in_progress);
+  setText('kQueue', (d.queue||[]).length);
+  const globalEff=d.value?.mimo_efficiency||{};
+  setText('kSavedUsd', '$'+Number(globalEff.saved_usd||0).toFixed(2));
+  setText('kSavedMin', Number(globalEff.saved_minutes||0).toFixed(1)+' 分钟');
+  setText('kQuotaSave', _quotaSavedPercent(globalEff).toFixed(1)+'%');
+  setText('kSubQuota', _subscriptionQuotaHeadline(d.subscription_quota));
+  setText('kEfficiency', String(globalEff.efficiency_gain_percent||0)+'%');
+  setText('kTokens', '累计 Tokens '+totalTokens.toLocaleString());
+}
+
+function _subscriptionQuotaHeadline(q){
+  const summary = q?.summary || {};
+  const windows = Array.isArray(summary.windows) ? summary.windows : [];
+  if(!windows.length) return '未采集';
+  const maxUsed = Number(summary.max_used_percentage || 0);
+  return `${maxUsed.toFixed(0)}% 已用`;
+}
+
+function _subscriptionQuotaPills(q){
+  const summary = q?.summary || {};
+  const windows = Array.isArray(summary.windows) ? summary.windows.slice(0,3) : [];
+  if(!windows.length) return [`<span class="pill warn">订阅额度未采集</span>`];
+  return windows.map(w=>{
+    const provider = String(w.provider || '').replace('claude-code','Claude').replace('codex','Codex');
+    const used = Number(w.used_percentage || 0);
+    return `<span class="pill ${used>=80?'warn':'ok'}">${esc(provider)} ${esc(w.label||'窗口')} ${used.toFixed(0)}%</span>`;
+  });
+}
+
+function renderSubscriptionQuotaPanel(q){
+  const summary = q?.summary || {};
+  const windows = Array.isArray(summary.windows) ? summary.windows : [];
+  const maxUsed = Number(summary.max_used_percentage || 0);
+  const stateEl = document.getElementById('quotaRailState');
+  const headEl = document.getElementById('quotaRailHeadline');
+  const listEl = document.getElementById('quotaRailList');
+  if(!stateEl || !headEl || !listEl) return;
+  stateEl.className = 'ops-badge';
+  if(!windows.length){
+    stateEl.textContent = '未采集';
+    stateEl.classList.add('warn');
+    headEl.textContent = '未采集';
+    listEl.innerHTML = '<div class="rail-note">配置 Claude statusLine 或 Codex 状态命令后，这里会显示真实 5h / 周额度。</div>';
+    return;
+  }
+  stateEl.textContent = maxUsed >= 90 ? '额度紧张' : (maxUsed >= 75 ? '注意用量' : '可用');
+  stateEl.classList.add(maxUsed >= 90 ? 'fail' : (maxUsed >= 75 ? 'warn' : 'ok'));
+  headEl.textContent = `${maxUsed.toFixed(0)}% 已用`;
+  listEl.innerHTML = windows.map(w=>{
+    const provider = String(w.provider || '').replace('claude-code','Claude').replace('codex','Codex');
+    const used = Math.max(0, Math.min(100, Number(w.used_percentage || 0)));
+    const cls = used >= 90 ? 'danger' : (used >= 75 ? 'hot' : '');
+    return `<div class="quota-window ${cls}">
+      <span>${esc(provider)} · ${esc(w.label || '窗口')}</span>
+      <b>${used.toFixed(0)}%</b>
+      <div class="quota-window-bar"><i style="width:${used.toFixed(0)}%"></i></div>
+    </div>`;
+  }).join('');
+}
+
+function renderPromotionReadinessPanel(readiness){
+  const r = readiness || {};
+  const badge = document.getElementById('readinessBadge');
+  const score = document.getElementById('readinessScore');
+  const headline = document.getElementById('readinessHeadline');
+  const checksEl = document.getElementById('readinessChecks');
+  const needsEl = document.getElementById('readinessNeeds');
+  if(!badge || !score || !headline || !checksEl || !needsEl) return;
+  const level = String(r.level || 'needs_config');
+  const scoreValue = Number(r.score || 0);
+  badge.className = 'ops-badge ' + (level === 'ready' ? 'ok' : (level === 'blocked' ? 'fail' : 'warn'));
+  badge.textContent = level === 'ready' ? '可推广' : (level === 'blocked' ? '有阻断' : '需补配置');
+  score.textContent = String(scoreValue);
+  headline.textContent = r.headline || '等待数据';
+  const checks = Array.isArray(r.checks) ? r.checks : [];
+  checksEl.innerHTML = checks.length ? checks.map(item=>{
+    const status = String(item.status || 'warning');
+    const cls = status === 'success' ? 'ok' : (status === 'failed' ? 'fail' : 'warn');
+    return `<div class="readiness-check ${cls}">
+      <span class="readiness-dot"></span>
+      <div><b>${esc(item.label || item.id || '检查项')}</b><small>${esc(item.detail || '')}</small></div>
+    </div>`;
+  }).join('') : '<div class="empty">暂无推广检查数据。</div>';
+  const needs = Array.isArray(r.user_required) ? r.user_required.filter(Boolean) : [];
+  needsEl.textContent = needs.length ? ('还需要你提供：' + needs.join('；')) : '当前没有必须由你补充的外部信息。';
+}
+
+function renderCoreReadinessPanel(readiness){
+  const r = readiness || {};
+  const badge = document.getElementById('coreReadinessBadge');
+  const score = document.getElementById('coreReadinessScore');
+  const headline = document.getElementById('coreReadinessHeadline');
+  const checksEl = document.getElementById('coreReadinessChecks');
+  const actionsEl = document.getElementById('coreReadinessActions');
+  if(!badge || !score || !headline || !checksEl || !actionsEl) return;
+  const level = String(r.level || 'needs_evidence');
+  const scoreValue = Number(r.score || 0);
+  badge.className = 'ops-badge ' + (level === 'usable' ? 'ok' : (level === 'blocked' ? 'fail' : 'warn'));
+  badge.textContent = level === 'usable' ? '可用' : (level === 'blocked' ? '有阻断' : '需样本');
+  score.textContent = String(scoreValue);
+  headline.textContent = r.headline || '等待数据';
+  const checks = Array.isArray(r.checks) ? r.checks : [];
+  checksEl.innerHTML = checks.length ? checks.map(item=>{
+    const status = String(item.status || 'warning');
+    const cls = status === 'success' ? 'ok' : (status === 'failed' ? 'fail' : 'warn');
+    return `<div class="readiness-check ${cls}">
+      <span class="readiness-dot"></span>
+      <div><b>${esc(item.label || item.id || '检查项')}</b><small>${esc(item.detail || '')}</small></div>
+    </div>`;
+  }).join('') : '<div class="empty">暂无产品可用度检查数据。</div>';
+  const actions = Array.isArray(r.operator_actions) ? r.operator_actions.filter(Boolean) : [];
+  actionsEl.textContent = actions.length ? ('下一步：' + actions.join('；')) : '核心闭环没有必须立即处理的本地动作。';
+}
+
+function updateRailMetrics(eff){
+  setText('rSavedUsd', '$'+Number(eff?.saved_usd||0).toFixed(2));
+  setText('rQuotaSave', _quotaSavedPercent(eff||{}).toFixed(1)+'%');
+  setText('rSavedMin', Number(eff?.saved_minutes||0).toFixed(1)+' 分钟');
+  setText('rEfficiency', String(eff?.efficiency_gain_percent||0)+'%');
 }
 
 // ---------- 主加载（带 AbortController + 缓存控制）----------
@@ -923,20 +1231,26 @@ async function load(){
     updateWorker(d.worker||{});
 
     const v=d.value||{};
-    document.getElementById('sVerified').textContent=v.verified||0;
+    setText('sVerified', v.verified||0);
     const totalTok=(v.input_tokens||0)+(v.output_tokens||0);
     if(totalTok>0){
-      document.getElementById('sTokens').textContent=totalTok.toLocaleString();
-      document.getElementById('tokenStat').style.display='flex';
+      setText('sTokens', totalTok.toLocaleString());
+      setDisplay('tokenStat', 'flex');
     }
 
     // MiMo efficiency metrics
     const me=v.mimo_efficiency||{};
-    document.getElementById('mSavedUsd').textContent='$'+(me.saved_usd||0).toFixed(2);
-    document.getElementById('mSavedMin').textContent=(me.saved_minutes||0).toFixed(1)+' 分钟';
-    document.getElementById('mEfficiency').textContent=(me.efficiency_gain_percent||0)+'%';
-    document.getElementById('mCapScore').textContent=(me.capability_score||0);
-    document.getElementById('mMimoRuns').textContent=me.mimo_runs||0;
+    setText('mSavedUsd', '$'+Number(me.saved_usd||0).toFixed(2));
+    setText('mQuotaSave', _quotaSavedPercent(me).toFixed(1)+'%');
+    setText('mSavedMin', Number(me.saved_minutes||0).toFixed(1)+' 分钟');
+    setText('mEfficiency', (me.efficiency_gain_percent||0)+'%');
+    setText('mCapScore', me.capability_score||0);
+    setText('mMimoRuns', me.mimo_runs||0);
+    updateRailMetrics(me);
+    renderSubscriptionQuotaPanel(d.subscription_quota);
+    renderCoreReadinessPanel(d.core_readiness);
+    renderPromotionReadinessPanel(d.promotion_readiness);
+    refreshRelayPanel(false);
 
     renderBoard(d);
     renderTrace(d);
@@ -944,8 +1258,8 @@ async function load(){
     // 队列
     const qEl=document.getElementById('queue');
     const qLen=(d.queue||[]).length;
-    document.getElementById('sQueue').textContent=qLen;
-    document.getElementById('cQueueSec').textContent=qLen;
+    setText('sQueue', qLen);
+    setText('cQueueSec', qLen);
     if(qLen){
       qEl.innerHTML=(d.queue||[]).map(q=>{
         const sr=srInfo(q.stop_reason);
@@ -1016,6 +1330,7 @@ async function detail(id){
 
   const mergeBtn=d.can_merge?`<button class="act-merge" style="padding:6px 14px;font-size:12px;" onclick="mergeMission(event,'${esc(m.mission_id)}')">✓ 合并到主分支</button>`:'';
   const clarifyBtn=(m.stop_reason==='needs_clarification'||m.stop_reason==='coverage_gap')?`<button class="act-retry" style="padding:6px 14px;font-size:12px;" onclick="openTaskIntake('${jsq(m.objective||'')}')">继续确认任务</button>`:'';
+  const relayBtn=m.stop_reason==='quota_exhausted'?`<button class="act-retry" style="padding:6px 14px;font-size:12px;" onclick="closeDrawer();focusWorkbenchPanel('relay-panel','#relayBaseUrl')">打开中转站</button>`:'';
   const retryBtn=canRetry?`<button class="act-retry" style="padding:6px 14px;font-size:12px;" onclick="retryMission(event,'${esc(m.mission_id)}')">↺ 用相同目标重试</button>`:'';
   const deleteBtn=canDelete?`<button class="act-delete" style="padding:6px 14px;font-size:12px;" onclick="deleteMission(event,'${esc(m.mission_id)}')">删除任务</button>`:'';
   const createdAt = fmtTime(m.created_at);
@@ -1036,6 +1351,7 @@ async function detail(id){
   const live=d.live_logs||{};
   const liveBlock=live.latest_tail?`<h3>实时执行日志</h3><pre>${esc(live.latest_tail)}</pre>`:'';
   const finalReportHtml = d.final_report ? _renderMarkdown(d.final_report) : '<div class="empty">暂无报告</div>';
+  const contractBlock = _requirementContractDetail(m);
   const evidenceBlock = (ev.worker_status||ev.verification_verdict||ev.backend||ev.log_path||ev.worktree||ev.verification_command)
     ? `<h3>执行证据</h3><div class="detail-evidence">
         <div class="evi"><span>Worker</span><code>${esc(ev.worker_status||'-')}${ev.worker_exit_code!==undefined&&ev.worker_exit_code!==null?` exit ${esc(ev.worker_exit_code)}`:''}</code></div>
@@ -1054,7 +1370,8 @@ async function detail(id){
      ${d.merge_state?' · 合并：'+esc(d.merge_state):''}</p>
      ${missionTimeLine}
      ${stopHint}
-     <div class="action-row">${mergeBtn}${clarifyBtn}${retryBtn}${deleteBtn}</div>
+     <div class="action-row">${mergeBtn}${clarifyBtn}${relayBtn}${retryBtn}${deleteBtn}</div>
+     ${contractBlock}
      ${_efficiencyDetail(eff)}
      ${rv.verdict?`<p>验收命令：<code>${esc(rv.command||'工作流验收')}</code> · 结论：<span class="pill ${pc(rv.verdict)}">${esc(rv.verdict)}</span></p>`:''}
      ${evidenceBlock}
@@ -1073,13 +1390,15 @@ function _efficiencyDetail(eff){
   const actualCost = eff.actual_cost_available ? ('$'+Number(eff.actual_cost_usd || 0).toFixed(4)) : '未回传';
   const savedUsd = Number(eff.saved_usd || 0);
   const savedMin = Number(eff.saved_minutes || 0);
+  const quota = _quotaSavedPercent(eff);
   if(!runs && !taskSec && !workerSec && !savedUsd && !savedMin) return '';
   return `<h3>本任务实际消耗</h3><div class="metric-row">
     <span class="pill acc">后端运行 ${runs}</span>
+    <span class="pill ok">套餐额度节省 ${quota.toFixed(1)}%</span>
     <span class="pill ${eff.actual_cost_available?'ok':'warn'}">实际额度 ${actualCost}</span>
     <span class="pill acc">任务耗时 ${_fmtSeconds(taskSec)}</span>
     <span class="pill acc">Worker耗时 ${_fmtSeconds(workerSec)}</span>
-  </div><div class="muts">估算节省：$${savedUsd.toFixed(4)} / ${savedMin.toFixed(2)} 分钟，仅作参考，不等同实际消耗。</div>`;
+  </div><div class="muts">估算节省：$${savedUsd.toFixed(4)} / ${savedMin.toFixed(2)} 分钟 / 套餐额度 ${quota.toFixed(1)}%，仅作参考，不等同实际消耗。</div>`;
 }
 
 function _renderMarkdown(md){
@@ -1133,14 +1452,36 @@ function closeChat(){ document.getElementById('chatPanel').style.display='none';
 async function openSettings(){
   document.getElementById('settingsPanel').style.display='block';
   try{
+    const p = await (await fetch('/api/profile')).json();
+    document.getElementById('cfgProfileEmail').value = p.email || '';
+    document.getElementById('cfgProfileName').value = p.display_name || '';
+    document.getElementById('cfgProfileOrg').value = p.organization || '';
+    document.getElementById('profileCfgStatus').textContent = p.configured ? '已保存本地邮箱身份：'+(p.email||'') : '尚未保存邮箱身份';
+    document.getElementById('profileCfgStatus').style.color = p.configured ? 'var(--ok)' : 'var(--mut)';
+  }catch(e){
+    document.getElementById('profileCfgStatus').textContent='加载邮箱身份失败：'+e.message;
+    document.getElementById('profileCfgStatus').style.color='var(--fail)';
+  }
+  try{
+    const c = await (await fetch('/api/commercial-config')).json();
+    _syncCommercialConfig(c);
+  }catch(e){
+    const el=document.getElementById('commercialCfgStatus');
+    if(el){ el.textContent='加载登录与付费失败：'+e.message; el.style.color='var(--fail)'; }
+  }
+  try{
     const m = await (await fetch('/api/model-config')).json();
     document.getElementById('cfgPreferSub2api').checked = m.enabled !== false;
     document.getElementById('cfgModelBaseUrl').value = m.base_url || 'http://174.138.75.136:8080/v1';
     document.getElementById('cfgModelApiKey').value = m.api_key || '';
     document.getElementById('cfgModelName').value = m.model || 'gpt-4o-mini';
     document.getElementById('cfgReasoningEffort').value = m.reasoning_effort || '';
+    document.getElementById('cfgMonthlyBudget').value = _budgetInputValue(m.monthly_budget_usd);
+    document.getElementById('cfgMissionBudget').value = _budgetInputValue(m.per_mission_budget_usd);
+    document.getElementById('cfgQuotaThreshold').value = _budgetInputValue(m.auto_switch_quota_percent || 80);
     document.getElementById('modelCfgStatus').textContent = m.configured ? '已配置：'+(m.summary||'') : '尚未配置 sub2api 接口';
     document.getElementById('modelCfgStatus').style.color = m.configured ? 'var(--ok)' : 'var(--mut)';
+    _syncRelayPanel(m, true);
   }catch(e){
     document.getElementById('modelCfgStatus').textContent='加载模型接口失败：'+e.message;
     document.getElementById('modelCfgStatus').style.color='var(--fail)';
@@ -1159,14 +1500,162 @@ async function openSettings(){
   }catch(e){ document.getElementById('cfgStatus').textContent='加载配置失败：'+e.message; }
 }
 function closeSettings(){ document.getElementById('settingsPanel').style.display='none'; }
-function _modelConfigBody(){
+function _budgetInputValue(value){
+  const n = Number(value || 0);
+  return Number.isFinite(n) && n > 0 ? String(n) : '';
+}
+function _numberFromInput(id, fallback=0){
+  const el = document.getElementById(id);
+  if(!el) return fallback;
+  const raw = String(el.value || '').trim();
+  if(raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+function _modelConfigBody(source='settings'){
+  const relay = source === 'relay';
   return {
-    enabled: document.getElementById('cfgPreferSub2api').checked,
-    base_url: document.getElementById('cfgModelBaseUrl').value.trim(),
-    api_key: document.getElementById('cfgModelApiKey').value.trim(),
-    model: document.getElementById('cfgModelName').value.trim(),
-    reasoning_effort: document.getElementById('cfgReasoningEffort').value
+    enabled: relay ? true : document.getElementById('cfgPreferSub2api').checked,
+    base_url: document.getElementById(relay ? 'relayBaseUrl' : 'cfgModelBaseUrl').value.trim(),
+    api_key: document.getElementById(relay ? 'relayApiKey' : 'cfgModelApiKey').value.trim(),
+    model: document.getElementById(relay ? 'relayModel' : 'cfgModelName').value.trim(),
+    reasoning_effort: document.getElementById(relay ? 'relayReasoning' : 'cfgReasoningEffort').value,
+    monthly_budget_usd: _numberFromInput(relay ? 'relayMonthlyBudget' : 'cfgMonthlyBudget', 0),
+    per_mission_budget_usd: _numberFromInput(relay ? 'relayMissionBudget' : 'cfgMissionBudget', 0),
+    auto_switch_quota_percent: _numberFromInput(relay ? 'relayQuotaThreshold' : 'cfgQuotaThreshold', 80)
   };
+}
+function _setValue(id, value){
+  const el=document.getElementById(id);
+  if(el) el.value = value || '';
+}
+function _setChecked(id, value){
+  const el=document.getElementById(id);
+  if(el) el.checked = !!value;
+}
+function _fieldValue(id){
+  const el=document.getElementById(id);
+  return el ? String(el.value || '').trim() : '';
+}
+function _syncCommercialConfig(c){
+  _setValue('cfgSupabaseUrl', c.supabase_url || '');
+  _setValue('cfgSupabaseAnonKey', c.supabase_anon_key || '');
+  _setValue('cfgSupabaseServiceRoleKey', c.supabase_service_role_key || '');
+  _setChecked('cfgGoogleOauthConfigured', c.google_oauth_configured);
+  _setValue('cfgGoogleClientId', c.google_client_id || '');
+  _setValue('cfgGoogleClientSecret', c.google_client_secret || '');
+  _setValue('cfgStripePublishableKey', c.stripe_publishable_key || '');
+  _setValue('cfgStripeSecretKey', c.stripe_secret_key || '');
+  _setValue('cfgStripeWebhookSecret', c.stripe_webhook_secret || '');
+  _setValue('cfgStripePriceId', c.stripe_price_id || '');
+  _setValue('cfgStripePortalUrl', c.stripe_customer_portal_url || '');
+  _setValue('cfgStripeUsageMeterEvent', c.stripe_usage_meter_event || 'pacer_managed_minutes');
+  const el=document.getElementById('commercialCfgStatus');
+  if(!el) return;
+  const parts=[];
+  parts.push(c.auth_configured ? 'Supabase/Google 登录已配置' : '登录未完整配置');
+  parts.push(c.billing_configured ? 'Stripe Billing 已配置' : 'Stripe Billing 未完整配置');
+  parts.push(c.portal_configured ? 'Customer Portal 已配置' : 'Customer Portal 未配置');
+  el.textContent = parts.join('；');
+  el.style.color = c.auth_configured && c.billing_configured && c.portal_configured ? 'var(--ok)' : 'var(--mut)';
+}
+function _commercialConfigBody(){
+  return {
+    auth_provider:'supabase',
+    login_provider:'google',
+    supabase_url:_fieldValue('cfgSupabaseUrl'),
+    supabase_anon_key:_fieldValue('cfgSupabaseAnonKey'),
+    supabase_service_role_key:_fieldValue('cfgSupabaseServiceRoleKey'),
+    google_oauth_configured:!!document.getElementById('cfgGoogleOauthConfigured')?.checked,
+    google_client_id:_fieldValue('cfgGoogleClientId'),
+    google_client_secret:_fieldValue('cfgGoogleClientSecret'),
+    billing_provider:'stripe',
+    billing_mode:'subscriptions_with_portal',
+    stripe_publishable_key:_fieldValue('cfgStripePublishableKey'),
+    stripe_secret_key:_fieldValue('cfgStripeSecretKey'),
+    stripe_webhook_secret:_fieldValue('cfgStripeWebhookSecret'),
+    stripe_price_id:_fieldValue('cfgStripePriceId'),
+    stripe_customer_portal_url:_fieldValue('cfgStripePortalUrl'),
+    stripe_usage_meter_event:_fieldValue('cfgStripeUsageMeterEvent') || 'pacer_managed_minutes'
+  };
+}
+function _syncRelayPanel(m, force=false){
+  const ids = ['relayBaseUrl','relayApiKey','relayModel','relayReasoning','relayMonthlyBudget','relayMissionBudget','relayQuotaThreshold'];
+  const active = document.activeElement && ids.includes(document.activeElement.id);
+  if(active && !force) return;
+  const base = document.getElementById('relayBaseUrl');
+  if(!base) return;
+  base.value = m.base_url || 'http://127.0.0.1:8788/v1';
+  document.getElementById('relayApiKey').value = m.api_key || '';
+  document.getElementById('relayModel').value = m.model || 'gpt-4o-mini';
+  document.getElementById('relayReasoning').value = m.reasoning_effort || '';
+  document.getElementById('relayMonthlyBudget').value = _budgetInputValue(m.monthly_budget_usd);
+  document.getElementById('relayMissionBudget').value = _budgetInputValue(m.per_mission_budget_usd);
+  document.getElementById('relayQuotaThreshold').value = _budgetInputValue(m.auto_switch_quota_percent || 80);
+  _setRelayStatus(m.configured ? '已配置：'+(m.summary||'') : '未配置中转站', m.configured ? 'ok' : 'warn');
+  _setRelayBudgetHint(m);
+}
+function _setRelayStatus(text, level='warn'){
+  const status = document.getElementById('relayStatus');
+  const badge = document.getElementById('relayConfigured');
+  if(status){
+    status.textContent = text || '';
+    status.style.color = level === 'ok' ? 'var(--ok)' : (level === 'fail' ? 'var(--fail)' : 'var(--mut)');
+  }
+  if(badge){
+    badge.className = 'ops-badge ' + (level === 'ok' ? 'ok' : (level === 'fail' ? 'fail' : 'warn'));
+    badge.textContent = level === 'ok' ? '已配置' : (level === 'fail' ? '异常' : '未配置');
+  }
+}
+function _setRelayBudgetHint(m){
+  const el = document.getElementById('relayBudgetHint');
+  if(!el) return;
+  const monthly = Number(m.monthly_budget_usd || 0);
+  const mission = Number(m.per_mission_budget_usd || 0);
+  const threshold = Number(m.auto_switch_quota_percent || 80);
+  if(monthly > 0 || mission > 0){
+    el.textContent = `预算护栏：月预算 $${monthly.toFixed(2)}，单任务 $${mission.toFixed(2)}，订阅额度 ${threshold.toFixed(0)}% 后优先切换。`;
+    el.style.color = 'var(--ok)';
+  }else{
+    el.textContent = '预算护栏未配置：推广前建议设置月预算和单任务上限。';
+    el.style.color = 'var(--warn)';
+  }
+}
+let _relayLastRefresh = 0;
+async function refreshRelayPanel(force=false){
+  const panel = document.getElementById('relayBaseUrl');
+  if(!panel) return;
+  const now = Date.now();
+  if(!force && now - _relayLastRefresh < 15000) return;
+  _relayLastRefresh = now;
+  try{
+    const m = await (await fetch('/api/model-config')).json();
+    _syncRelayPanel(m, force);
+  }catch(e){
+    _setRelayStatus('读取中转站配置失败：'+e.message, 'fail');
+  }
+}
+async function saveRelayConfig(){
+  const el=document.getElementById('relayStatus');
+  if(el){ el.textContent='保存中…'; el.style.color='var(--mut)'; }
+  try{
+    const r=await (await fetch('/api/model-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(_modelConfigBody('relay'))})).json();
+    _setRelayStatus(r.ok ? '✓ '+r.message : '✗ '+r.error, r.ok ? 'ok' : 'fail');
+    if(r.ok){
+      toast('中转站已保存，低成本后端会优先进入候选');
+      _relayLastRefresh = 0;
+      await refreshRelayPanel(true);
+      await load();
+    }
+  }catch(e){ _setRelayStatus('保存失败：'+e.message, 'fail'); }
+}
+async function testRelayConfig(){
+  const el=document.getElementById('relayStatus');
+  if(el){ el.textContent='测试 /v1/models 中…'; el.style.color='var(--mut)'; }
+  try{
+    const r=await (await fetch('/api/model-config/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(_modelConfigBody('relay'))})).json();
+    _setRelayStatus(r.ok ? '✓ 中转站可用：HTTP '+r.status : '✗ 中转站测试失败：'+(r.error||r.status||'unknown'), r.ok ? 'ok' : 'fail');
+  }catch(e){ _setRelayStatus('测试失败：'+e.message, 'fail'); }
 }
 async function saveModelConfig(){
   const el=document.getElementById('modelCfgStatus');
@@ -1177,6 +1666,8 @@ async function saveModelConfig(){
     el.style.color = r.ok ? 'var(--ok)' : 'var(--fail)';
     if(r.ok){
       toast('已优先使用 sub2api 额度');
+      _relayLastRefresh = 0;
+      await refreshRelayPanel(true);
       await load();
     }
   }catch(e){ el.textContent='保存失败：'+e.message; el.style.color='var(--fail)'; }
@@ -1189,6 +1680,42 @@ async function testModelConfig(){
     el.textContent = r.ok ? '✓ 接口可用：HTTP '+r.status : '✗ 接口测试失败：'+(r.error||r.status||'unknown');
     el.style.color = r.ok ? 'var(--ok)' : 'var(--fail)';
   }catch(e){ el.textContent='测试失败：'+e.message; el.style.color='var(--fail)'; }
+}
+async function saveProfileConfig(){
+  const el=document.getElementById('profileCfgStatus');
+  const body={
+    email:document.getElementById('cfgProfileEmail').value.trim(),
+    display_name:document.getElementById('cfgProfileName').value.trim(),
+    organization:document.getElementById('cfgProfileOrg').value.trim(),
+  };
+  el.textContent='保存中…'; el.style.color='var(--mut)';
+  try{
+    const r=await (await fetch('/api/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+    el.textContent = r.ok ? '✓ '+r.message : '✗ '+r.error;
+    el.style.color = r.ok ? 'var(--ok)' : 'var(--fail)';
+    if(r.ok){
+      toast('邮箱身份已保存');
+      await load();
+    }
+  }catch(e){ el.textContent='保存失败：'+e.message; el.style.color='var(--fail)'; }
+}
+async function saveCommercialConfig(){
+  const el=document.getElementById('commercialCfgStatus');
+  if(el){ el.textContent='保存中…'; el.style.color='var(--mut)'; }
+  try{
+    const r=await (await fetch('/api/commercial-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(_commercialConfigBody())})).json();
+    if(r.ok) _syncCommercialConfig(r);
+    if(el){
+      el.textContent = r.ok ? '✓ '+r.message : '✗ '+r.error;
+      el.style.color = r.ok ? 'var(--ok)' : 'var(--fail)';
+    }
+    if(r.ok){
+      toast('登录与付费配置已保存');
+      await load();
+    }
+  }catch(e){
+    if(el){ el.textContent='保存失败：'+e.message; el.style.color='var(--fail)'; }
+  }
 }
 async function saveNotifyConfig(){
   const body={
@@ -1301,5 +1828,7 @@ async function sendChat(){
 }
 
 initCollapsiblePanels();
+initWorkbenchViews();
+connectEventStream();
 load();
-setInterval(load, 4000);
+setInterval(load, 10000);

@@ -60,6 +60,9 @@ def test_workbench_page_loads_and_panels_open_without_js_errors(dashboard_url) -
 
         assert "Pacer" in page.title()
         assert page.locator("header .logo").inner_text().startswith("Pacer")
+        assert page.locator(".sidebar").is_visible()
+        assert page.locator(".side-nav").is_visible()
+        assert page.locator("#kRunning").inner_text() != "undefined"
 
         # 对话 panel opens and closes.
         page.click("text=对话")
@@ -69,7 +72,16 @@ def test_workbench_page_loads_and_panels_open_without_js_errors(dashboard_url) -
         # 设置 panel opens, form fields render, and closes.
         page.click("text=设置")
         assert page.locator("#settingsPanel").is_visible()
-        for field in ("cfgSmtpHost", "cfgRecipient", "cfgStatus"):
+        for field in (
+            "cfgSupabaseUrl",
+            "cfgGoogleOauthConfigured",
+            "cfgStripePublishableKey",
+            "cfgStripePriceId",
+            "commercialCfgStatus",
+            "cfgSmtpHost",
+            "cfgRecipient",
+            "cfgStatus",
+        ):
             assert page.locator(f"#{field}").count() == 1
         page.click("#settingsPanel .close-btn")
 
@@ -83,10 +95,22 @@ def test_workbench_page_loads_and_panels_open_without_js_errors(dashboard_url) -
         for field in ("fGoal", "fTest", "fRepo", "fAgent"):
             assert page.locator(f"#{field}").count() == 1, f"missing form field #{field}"
         assert page.locator("#fTest").is_visible()
-        page.click("[data-collapse-key='trace-ledger'] .panel-toggle")
         assert page.locator("#traceStream").is_hidden()
-        page.click("[data-collapse-key='trace-ledger'] .panel-toggle")
+        page.click(".side-group button:text('任务列表')")
+        assert page.locator("#missionList").is_visible()
+        assert page.locator("#fGoal").is_hidden()
+        page.click(".side-group button:text('流式工作任务')")
         assert page.locator("#traceStream").is_visible()
+        assert page.locator("#missionList").is_hidden()
+        page.click(".side-group button:text('中转站')")
+        assert page.locator("#relayBaseUrl").is_visible()
+        assert page.locator("#traceStream").is_hidden()
+        page.click(".side-group button:text('产品可用度')")
+        assert page.locator("#coreReadinessScore").is_visible()
+        assert page.locator("#coreReadinessChecks").is_visible()
+        page.click(".side-group button:text('推广就绪')")
+        assert page.locator("#readinessScore").is_visible()
+        assert page.locator("#readinessChecks").is_visible()
 
         browser.close()
 
@@ -145,6 +169,7 @@ def test_workbench_renders_worker_exit_code_without_js_error(tmp_path) -> None:
             page.on("console", lambda msg: js_errors.append(msg.text) if msg.type == "error" else None)
 
             page.goto(f"http://127.0.0.1:{server.server_address[1]}/")
+            page.click(".side-group button:text('任务列表')")
             page.wait_for_function(
                 "() => document.querySelector('#missionList')?.innerText.includes('展示带 worker exit code 的任务')",
                 timeout=5000,
@@ -376,6 +401,7 @@ def test_delete_button_hides_review_mission_from_board(tmp_path) -> None:
             page.on("console", lambda msg: js_errors.append(msg.text) if msg.type == "error" else None)
 
             page.goto(f"http://127.0.0.1:{server.server_address[1]}/")
+            page.click(".side-group button:text('任务列表')")
             page.wait_for_selector("#missionList", state="attached")
             page.wait_for_function(
                 "() => document.querySelector('#missionList')?.innerText.includes('清理待验收任务')",

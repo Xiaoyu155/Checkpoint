@@ -129,6 +129,70 @@ def test_workbench_launch_persists_task_contract(tmp_path, monkeypatch):
     assert summary["repo_root"] == str(tmp_path.resolve())
 
 
+def test_workbench_launch_carries_requirement_contract(tmp_path, monkeypatch):
+    ws = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    captured = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        create_mission(
+            workspace_root=ws.root,
+            objective=str(kwargs["goal"]),
+            repo_root=tmp_path,
+            plan_id="requirement-plan",
+            budget_policy=default_budget_policy(),
+            mission_id="requirement-mission",
+            status="preview",
+        )
+        return {
+            "status": "preview",
+            "stop_reason": "preview_only",
+            "mission": {"mission_id": "requirement-mission"},
+        }
+
+    monkeypatch.setattr("visual_agent.chief_run.run_chief_mission", fake_run)
+
+    result = start_workbench_mission(
+        workspace_root=ws.root,
+        repo_root=str(tmp_path),
+        goal="修复结算页 checkout 金额显示",
+        test_command="pytest -q",
+        agent="codex",
+        execute=False,
+        intake={
+            "source": "goal_intake",
+            "input_goal": "改一下",
+            "suggested_goal": "修复结算页 checkout 金额显示",
+            "acceptance_hint": "金额必须等于行项目之和",
+            "clarifying_questions": ["完成后用户看到什么？"],
+            "answers": ["保留现有优惠展示"],
+            "model_id": "codex:cli",
+            "intake_policy": "selected_agent_cli",
+        },
+        answers=["金额必须等于行项目之和", "保留现有优惠展示"],
+    )
+
+    assert result["ok"] is True
+    final = _wait_launch(result["launch_id"])
+    assert final["mission_id"] == "requirement-mission"
+    contract = result["requirement_contract"]
+    assert contract["input_goal"] == "改一下"
+    assert contract["final_goal"] == "修复结算页 checkout 金额显示"
+    assert contract["model_id"] == "codex:cli"
+    assert contract["intake_policy"] == "selected_agent_cli"
+    assert contract["answers"] == ["保留现有优惠展示", "金额必须等于行项目之和"]
+    assert captured["requirement_contract"] == contract
+    assert result["spec"]["requirement_contract"] == contract
+
+    pipeline = json.loads(Path(result["state_path"]).read_text(encoding="utf-8"))
+    assert pipeline["context"]["request"]["requirement_contract"] == contract
+    mission = load_mission(ws.root, "requirement-mission") or {}
+    assert mission["requirement_contract"] == contract
+    data = build_dashboard_data(ws.root)
+    summary = next(item for item in data["missions"] if item["mission_id"] == "requirement-mission")
+    assert summary["requirement_contract"] == contract
+
+
 def test_workbench_auto_detects_test_command_when_empty(tmp_path, monkeypatch):
     (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}', encoding="utf-8")
     ws = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
@@ -271,6 +335,8 @@ def test_workbench_execute_starts_background_worker(tmp_path, monkeypatch):
     assert captured["run"]["execute"] is False
     assert captured["run"]["dry_run"] is True
     assert captured["background"]["mission_id"] == mission_id
+    assert captured["background"]["agents"] == ("mimo",)
+    assert captured["background"]["run_profile"] == "supervised"
     assert captured["background"]["merge"] is True
 
 
@@ -496,15 +562,16 @@ def test_dashboard_html_has_workbench_form():
     assert "startMission" in DASHBOARD_HTML
 
 
-def test_dashboard_html_has_kanban_board():
-    # The workbench is a kanban board (Vibe Kanban-style): four columns and a
-    # one-click merge for verified missions.
-    for column in ("待办", "执行中", "待验收", "已完成"):
-        assert column in DASHBOARD_HTML
+def test_dashboard_html_has_mission_desk_and_relay_rail():
+    # The workbench is now a cockpit: a mission desk plus a right-side resource rail,
+    # not the old four-column kanban spread.
+    for text in ("任务列表", "missionList", "待处理", "停止", "中转站", "订阅额度"):
+        assert text in DASHBOARD_HTML
+    assert "legacy-board" not in DASHBOARD_HTML
     assert "/api/mission/merge" in DASHBOARD_HTML
     assert "/api/mission/delete-all" in DASHBOARD_HTML
     assert "deleteAllMissions" in DASHBOARD_HTML
-    assert "全部删除" in DASHBOARD_HTML
+    assert "清理非运行任务" in DASHBOARD_HTML
     assert "mergeMission" in DASHBOARD_HTML
     assert "diffSection" in DASHBOARD_HTML
 
@@ -564,11 +631,13 @@ def test_dashboard_mimo_efficiency_from_worker_records(tmp_path):
     assert me["mimo_runs"] == 1
     assert me["saved_usd"] == 0.05
     assert me["spent_usd"] == 0.12
+    assert me["saved_quota_percent"] == 29.4
     assert me["saved_minutes"] > 0
     assert me["efficiency_gain_percent"] > 0
     assert me["capability_score"] > 0
     # Labels should be Chinese
     assert "额度" in me["labels"]["saved_usd"]
+    assert "套餐额度" in me["labels"]["saved_quota_percent"]
     assert "时间" in me["labels"]["saved_minutes"]
 
 
@@ -607,6 +676,7 @@ def test_dashboard_mission_carries_own_efficiency_metrics(tmp_path):
     assert item["efficiency"]["mimo_runs"] == 1
     assert item["efficiency"]["saved_minutes"] > 0
     assert item["efficiency"]["saved_usd"] > 0
+    assert item["efficiency"]["saved_quota_percent"] == 100.0
     assert item["efficiency"]["actual_worker_seconds"] == 120
     assert item["efficiency"]["actual_cost_available"] is False
     assert item["efficiency"]["actual_cost_label"] == "未回传"
@@ -616,7 +686,7 @@ def test_dashboard_mission_carries_own_efficiency_metrics(tmp_path):
 def test_dashboard_html_contains_efficiency_chinese_labels():
     """The dashboard HTML must show efficiency metrics in Chinese."""
     assert "低成本后端效率" in DASHBOARD_HTML
-    assert "额度节省" in DASHBOARD_HTML
+    assert "套餐额度" in DASHBOARD_HTML
     assert "时间节省" in DASHBOARD_HTML
     assert "综合效率" in DASHBOARD_HTML
     assert "本任务实际消耗" in DASHBOARD_HTML

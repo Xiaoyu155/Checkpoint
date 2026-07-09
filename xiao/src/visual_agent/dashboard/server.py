@@ -12,6 +12,7 @@ import sys
 import webbrowser
 import threading
 import ipaddress
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -22,8 +23,10 @@ from .api import (
     build_dashboard_data_cached,
     build_mission_detail,
     get_active_workspace,
+    get_commercial_config,
     get_model_config,
     get_notifications_config,
+    get_user_profile,
     list_known_workspaces,
     log_error,
     retry_mission,
@@ -31,6 +34,8 @@ from .api import (
     run_chat,
     save_model_config,
     save_notifications_config,
+    save_commercial_config,
+    save_profile_config,
     set_active_workspace,
     start_workbench_mission,
     start_worker,
@@ -149,6 +154,9 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/data":
             self._send_json(build_dashboard_data_cached(root))
             return
+        if path == "/api/events":
+            self._stream_events(root)
+            return
         if path == "/api/diagnostic":
             self._send_json(build_diagnostic_bundle(root))
             return
@@ -166,12 +174,63 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/notifications/config":
             self._send_json(get_notifications_config())
             return
+        if path == "/api/profile":
+            self._send_json(get_user_profile())
+            return
+        if path == "/api/commercial-config":
+            self._send_json(get_commercial_config())
+            return
         if path == "/api/model-config":
             self._send_json(get_model_config())
             return
 
         self.send_response(404)
         self.end_headers()
+
+    def _stream_events(self, root: Path) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        origin = self._allowed_cors_origin()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        self.end_headers()
+
+        last_signature = ""
+        last_heartbeat = 0.0
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            try:
+                data = build_dashboard_data_cached(root)
+                signature = _dashboard_event_signature(data)
+                now = time.time()
+                if signature != last_signature:
+                    last_signature = signature
+                    self._write_sse(
+                        "snapshot",
+                        {
+                            "type": "snapshot_changed",
+                            "signature": signature,
+                            "trace_count": len(data.get("work_traces") or []),
+                            "mission_count": len(data.get("missions") or []),
+                            "queue_count": len(data.get("queue") or []),
+                        },
+                    )
+                    last_heartbeat = now
+                elif now - last_heartbeat >= 15:
+                    self._write_sse("heartbeat", {"type": "heartbeat", "signature": signature})
+                    last_heartbeat = now
+                time.sleep(1.0)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return
+
+    def _write_sse(self, event: str, data: dict[str, Any]) -> None:
+        payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        self.wfile.write(f"event: {event}\n".encode("utf-8"))
+        self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+        self.wfile.flush()
 
     def _read_body(self) -> dict[str, Any]:
         try:
@@ -220,6 +279,8 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 merge_policy=str(payload.get("merge_policy") or "manual"),
                 allow_dirty=bool(payload.get("allow_dirty")),
                 spec=spec,
+                intake=payload.get("intake") if isinstance(payload.get("intake"), dict) else None,
+                answers=payload.get("answers") if isinstance(payload.get("answers"), list) else None,
             )
             self._send_json(result)
         elif path == "/api/mission/merge":
@@ -249,6 +310,10 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(refine_goal_intake(payload))
         elif path == "/api/notifications/config":
             self._send_json(save_notifications_config(payload))
+        elif path == "/api/profile":
+            self._send_json(save_profile_config(payload))
+        elif path == "/api/commercial-config":
+            self._send_json(save_commercial_config(payload))
         elif path == "/api/notifications/test":
             self._send_json(test_notification())
         elif path == "/api/model-config":
@@ -311,10 +376,61 @@ class _DashboardHandler(BaseHTTPRequestHandler):
 
 
 class _DashboardServer(ThreadingHTTPServer):
+    daemon_threads = True
+
     def __init__(self, address: tuple[str, int], workspace_root: Path):
         super().__init__(address, _DashboardHandler)
         self.workspace_root = workspace_root
         set_active_workspace(workspace_root)
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
+
+
+def _dashboard_event_signature(data: dict[str, Any]) -> str:
+    relevant = {
+        "missions": [
+            {
+                "id": item.get("mission_id"),
+                "status": item.get("status"),
+                "stop": item.get("stop_reason"),
+                "updated": item.get("updated_at") or item.get("created_at"),
+            }
+            for item in data.get("missions", [])[:80]
+        ],
+        "launches": [
+            {
+                "id": item.get("launch_id"),
+                "state": item.get("state"),
+                "mission": item.get("mission_id"),
+                "error": item.get("error"),
+            }
+            for item in data.get("launches", [])[:30]
+        ],
+        "queue": [
+            {
+                "id": item.get("mission_id"),
+                "status": item.get("status"),
+                "stop": item.get("stop_reason"),
+            }
+            for item in data.get("queue", [])[:80]
+        ],
+        "traces": [
+            {
+                "kind": item.get("kind"),
+                "status": item.get("status"),
+                "title": item.get("title"),
+                "timestamp": item.get("timestamp"),
+            }
+            for item in data.get("work_traces", [])[:40]
+        ],
+        "worker": data.get("worker") or {},
+        "quota": (data.get("subscription_quota") or {}).get("summary") or {},
+    }
+    return str(abs(hash(json.dumps(relevant, ensure_ascii=False, sort_keys=True, default=str))))
 
 
 def _bind_dashboard_server(host: str, port: int, root: Path) -> _DashboardServer:
