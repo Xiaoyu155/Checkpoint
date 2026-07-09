@@ -17,6 +17,7 @@ import re
 import os
 import subprocess
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from .subprocess_window import hidden_subprocess_kwargs
@@ -207,6 +208,8 @@ def run_command_verification(
     timeout_seconds: float = 900.0,
     env: dict[str, str] | None = None,
     verification_env: list[dict[str, Any]] | None = None,
+    timeout_reason: str | None = None,
+    base_timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     root = Path(repo_root).expanduser().resolve()
     cmd = str(command or "").strip()
@@ -226,6 +229,7 @@ def run_command_verification(
             "missing_env_vars": missing_env,
         }
     prepared_command, shell = _prepare_command(cmd)
+    started = monotonic()
     try:
         completed = subprocess.run(
             prepared_command,
@@ -241,14 +245,23 @@ def run_command_verification(
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
     except subprocess.TimeoutExpired as exc:
+        elapsed_seconds = max(0.0, monotonic() - started)
+        effective_timeout = float(timeout_seconds)
+        reason = str(timeout_reason or "").strip()
         return {
             "verdict": "fail",
             "command": cmd,
             "exit_code": 124,
             "output_tail": (_decode(exc.stdout) + "\n" + _decode(exc.stderr))[-4000:],
-            "reason": f"test command timed out after {timeout_seconds:.0f}s",
+            "reason": f"test command timed out after {effective_timeout:.0f}s",
             "failure_kind": "command_timeout",
             "classification_confidence": "definitive",
+            "timeout_seconds": effective_timeout,
+            "base_timeout_seconds": float(base_timeout_seconds) if base_timeout_seconds is not None else effective_timeout,
+            "elapsed_seconds": round(elapsed_seconds, 3),
+            "timeout_reason": reason,
+            "dependency_bootstrap": reason in {"missing_node_modules", "missing_python_venv"},
+            "suggested_timeout_seconds": _suggested_timeout_seconds(effective_timeout, elapsed_seconds),
         }
     except OSError as exc:
         return {
@@ -336,6 +349,20 @@ def command_repair_brief(result: dict[str, Any]) -> dict[str, Any]:
             "Report the missing external service/key setup and ask the operator to configure the verification "
             f"environment before retrying.{confidence_note} Command output (tail):\n\n{output[-2500:]}"
         )
+    elif failure_kind == "command_timeout":
+        timeout_text = _format_seconds(result.get("timeout_seconds"))
+        elapsed_text = _format_seconds(result.get("elapsed_seconds"))
+        suggested = _format_seconds(result.get("suggested_timeout_seconds"))
+        dependency_text = "yes" if bool(result.get("dependency_bootstrap")) else "no"
+        reason = str(result.get("timeout_reason") or "base_timeout")
+        repair_prompt = (
+            f"The verification command `{result.get('command')}` timed out "
+            f"({failure_kind}, exit {result.get('exit_code')}). Actual elapsed time: {elapsed_text}; "
+            f"effective timeout: {timeout_text}; first dependency install likely: {dependency_text} "
+            f"({reason}). Do not guess at code changes from a timeout alone. Report the timeout and "
+            f"suggest retrying with `--timeout-seconds {suggested}` after confirming dependencies are installed. "
+            f"Command output (tail):\n\n{output[-2500:]}"
+        )
     elif failure_kind in NON_REPAIRABLE_COMMAND_FAILURE_KINDS:
         repair_prompt = (
             f"The verification command `{result.get('command')}` could not be trusted "
@@ -360,7 +387,23 @@ def command_repair_brief(result: dict[str, Any]) -> dict[str, Any]:
     }
     if classification_confidence:
         brief["classification_confidence"] = classification_confidence
+    for key in ("timeout_seconds", "elapsed_seconds", "dependency_bootstrap", "suggested_timeout_seconds", "timeout_reason"):
+        if key in result:
+            brief[key] = result[key]
     return brief
+
+
+def _suggested_timeout_seconds(timeout_seconds: float, elapsed_seconds: float) -> float:
+    target = max(float(timeout_seconds), float(elapsed_seconds)) + 600.0
+    return float(int((target + 59.0) // 60.0) * 60)
+
+
+def _format_seconds(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "unknown"
+    return f"{number:.0f}s"
 
 
 def classify_command_failure(*, exit_code: int, output: str) -> str:

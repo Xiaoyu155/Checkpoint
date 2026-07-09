@@ -4,6 +4,7 @@ from visual_agent.verification_profiles import (
     build_test_plan,
     choose_verification_command,
     detect_verification_profiles,
+    estimate_verification_timeout,
     resolve_test_command,
 )
 
@@ -47,6 +48,23 @@ def test_resolve_test_command_keeps_explicit_command(tmp_path) -> None:
 
     assert command == "npm run check"
     assert profile is None
+
+
+def test_timeout_extended_when_node_modules_missing(tmp_path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}', encoding="utf-8")
+
+    timeout = estimate_verification_timeout(tmp_path, "npm test", 900.0)
+
+    assert timeout == 2100.0
+
+
+def test_timeout_unchanged_when_deps_present(tmp_path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest run"}}', encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+
+    timeout = estimate_verification_timeout(tmp_path, "npm test", 900.0)
+
+    assert timeout == 900.0
 
 
 def test_build_test_plan_focuses_pytest_for_changed_source(tmp_path, monkeypatch) -> None:

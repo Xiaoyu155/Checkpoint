@@ -40,6 +40,7 @@ from .git_diff import changed_files
 from .llm_providers import LLMBackend, run_llm_completion
 from .models import to_jsonable
 from .repo_map import build_repo_map, render_repo_map, repo_map_cache_path
+from .verification_profiles import estimate_verification_timeout, verification_timeout_reason
 from .workspace import open_workspace
 
 
@@ -557,6 +558,7 @@ def dispatch_chief_plan(
             verification_env=verification_env,
             worktree_base=worktree_base,
             allow_test_edits=allow_test_edits,
+            timeout_seconds=timeout_seconds,
         )
     verification_attempts.append(verification)
 
@@ -727,6 +729,7 @@ def dispatch_chief_plan(
                 repo_root=repo_root,
                 command=effective_verification_command,
                 verification_env=verification_env,
+                timeout_seconds=timeout_seconds,
             )
             merge_result["post_merge_verification"] = {
                 "verdict": post_merge_verification.get("verdict"),
@@ -784,6 +787,7 @@ def _run_post_merge_command_verification(
     repo_root: Path,
     command: str,
     verification_env: list[dict[str, Any]] | None = None,
+    timeout_seconds: float = 900.0,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     save_mission_progress(
@@ -796,10 +800,14 @@ def _run_post_merge_command_verification(
         activity_command=command,
         activity_started_at=now,
     )
+    timeout_info = _verification_timeout_info(repo_root=repo_root, command=command, base_timeout=timeout_seconds)
     command_result = run_command_verification(
         command=command,
         repo_root=repo_root,
+        timeout_seconds=timeout_info["timeout_seconds"],
         verification_env=verification_env,
+        timeout_reason=str(timeout_info.get("reason") or ""),
+        base_timeout_seconds=timeout_info["base_timeout_seconds"],
     )
     verdict = "pass" if command_result.get("verdict") == "pass" else "fail"
     payload: dict[str, Any] = {
@@ -813,6 +821,7 @@ def _run_post_merge_command_verification(
         "total": 1,
         "verdict": verdict,
         "command_verification": command_result,
+        "verification_timeout": timeout_info,
         "markdown": (
             f"Post-merge test command `{command}` passed (exit 0)."
             if verdict == "pass"
@@ -837,6 +846,17 @@ def _run_post_merge_command_verification(
         activity_started_at="",
     )
     return payload
+
+
+def _verification_timeout_info(*, repo_root: Path, command: str, base_timeout: float) -> dict[str, Any]:
+    base = float(base_timeout)
+    effective = estimate_verification_timeout(repo_root, command, base)
+    reason = verification_timeout_reason(repo_root, command) or "base_timeout"
+    return {
+        "base_timeout_seconds": base,
+        "timeout_seconds": effective,
+        "reason": reason,
+    }
 
 
 def _verification_is_repairable(verification: dict[str, Any]) -> bool:
@@ -1359,6 +1379,7 @@ def run_dispatch_verification(
     verification_env: list[dict[str, Any]] | None = None,
     worktree_base: str | None = None,
     allow_test_edits: bool = False,
+    timeout_seconds: float = 900.0,
 ) -> dict[str, Any]:
     verification_workspace_path = (verification_workspace_root or workspace_root).expanduser().resolve()
     progress_mission_id = str(mission_id or plan_id)
@@ -1461,10 +1482,14 @@ def run_dispatch_verification(
                 activity_started_at="",
             )
             return payload
+        timeout_info = _verification_timeout_info(repo_root=Path(repo_root), command=test_command, base_timeout=timeout_seconds)
         command_result = run_command_verification(
             command=test_command,
             repo_root=Path(repo_root),
+            timeout_seconds=timeout_info["timeout_seconds"],
             verification_env=verification_env,
+            timeout_reason=str(timeout_info.get("reason") or ""),
+            base_timeout_seconds=timeout_info["base_timeout_seconds"],
         )
         verdict = "pass" if command_result.get("verdict") == "pass" else "fail"
         passed = 1 if verdict == "pass" else 0
@@ -1482,6 +1507,7 @@ def run_dispatch_verification(
             "test_files_changed": tampered,
             "acceptance_chain_files_changed": chain_tampered,
             "command_verification": command_result,
+            "verification_timeout": timeout_info,
             "markdown": (
                 f"Test command `{test_command}` passed (exit 0)."
                 if verdict == "pass"

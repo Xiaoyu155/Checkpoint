@@ -61,6 +61,23 @@ def resolve_test_command(command: str | None, *, repo_root: str | Path) -> tuple
     return detected, {"source": "auto", **plan}
 
 
+def estimate_verification_timeout(repo_root: str | Path, command: str, base_timeout: float) -> float:
+    timeout = float(base_timeout)
+    if verification_timeout_reason(repo_root, command):
+        return timeout + 1200.0
+    return timeout
+
+
+def verification_timeout_reason(repo_root: str | Path, command: str) -> str:
+    root = Path(repo_root).expanduser().resolve()
+    text = str(command or "").lower()
+    if _is_node_project(root) and not (root / "node_modules").exists():
+        return "missing_node_modules"
+    if "pytest" in text and _is_python_project(root) and not (root / ".venv").exists():
+        return "missing_python_venv"
+    return ""
+
+
 def _node_profiles(root: Path) -> list[dict[str, Any]]:
     package_json = root / "package.json"
     if not package_json.exists():
@@ -201,6 +218,15 @@ def _node_package_manager(root: Path) -> str:
     if (root / "yarn.lock").exists():
         return "yarn"
     return "npm"
+
+
+def _is_node_project(root: Path) -> bool:
+    return (root / "package.json").exists()
+
+
+def _is_python_project(root: Path) -> bool:
+    markers = ("pyproject.toml", "pytest.ini", "tox.ini", "setup.cfg", "setup.py", "requirements.txt")
+    return any((root / name).exists() for name in markers) or any((root / name).is_dir() for name in ("tests", "test"))
 
 
 def _dedupe_profiles(profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
