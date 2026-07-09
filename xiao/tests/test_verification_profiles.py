@@ -67,6 +67,34 @@ def test_timeout_unchanged_when_deps_present(tmp_path) -> None:
     assert timeout == 900.0
 
 
+def test_timeout_extended_when_conditional_npm_ci_marker_missing(tmp_path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"test":"node --test"}}', encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+    command = (
+        "cmd /d /s /c if not exist node_modules\\express\\package.json "
+        "npm ci --cache .npm-cache --prefer-offline ^&^& node --test"
+    )
+
+    timeout = estimate_verification_timeout(tmp_path, command, 60.0)
+
+    assert timeout == 1260.0
+
+
+def test_timeout_unchanged_when_conditional_npm_ci_marker_present(tmp_path) -> None:
+    (tmp_path / "package.json").write_text('{"scripts":{"test":"node --test"}}', encoding="utf-8")
+    marker = tmp_path / "node_modules" / "express" / "package.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"name":"express"}\n', encoding="utf-8")
+    command = (
+        "cmd /d /s /c if not exist node_modules\\express\\package.json "
+        "npm ci --cache .npm-cache --prefer-offline ^&^& node --test"
+    )
+
+    timeout = estimate_verification_timeout(tmp_path, command, 60.0)
+
+    assert timeout == 60.0
+
+
 def test_build_test_plan_focuses_pytest_for_changed_source(tmp_path, monkeypatch) -> None:
     (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
     source = tmp_path / "src" / "visual_agent"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -71,11 +72,32 @@ def estimate_verification_timeout(repo_root: str | Path, command: str, base_time
 def verification_timeout_reason(repo_root: str | Path, command: str) -> str:
     root = Path(repo_root).expanduser().resolve()
     text = str(command or "").lower()
-    if _is_node_project(root) and not (root / "node_modules").exists():
-        return "missing_node_modules"
+    if _is_node_project(root):
+        marker = _conditional_node_dependency_marker(text)
+        if marker and not (root / marker).exists():
+            return "missing_node_dependency_marker"
+        if not (root / "node_modules").exists():
+            return "missing_node_modules"
+        if not marker and _contains_node_install_command(text):
+            return "node_dependency_bootstrap"
     if "pytest" in text and _is_python_project(root) and not (root / ".venv").exists():
         return "missing_python_venv"
     return ""
+
+
+def _conditional_node_dependency_marker(command: str) -> Path | None:
+    match = re.search(
+        r"if\s+not\s+exist\s+(?P<path>node_modules[\\/][^\s&|]+[\\/]package\.json)\s+npm\s+(ci|install)\b",
+        command,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return Path(match.group("path").replace("\\", "/"))
+
+
+def _contains_node_install_command(command: str) -> bool:
+    return bool(re.search(r"\b(npm|pnpm|yarn)\s+(ci|install)\b", command, re.IGNORECASE))
 
 
 def _node_profiles(root: Path) -> list[dict[str, Any]]:
