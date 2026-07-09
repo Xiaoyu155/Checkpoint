@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import socket
+import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -278,6 +282,164 @@ def inspect_environment(
         "warnings": [warning for warning in warnings if warning],
         "recommendations": environment_recommendations(project_type, port_check, build_checks),
     }
+
+
+def dependency_preflight(repo_root: str | Path, test_command: str | None) -> dict[str, Any]:
+    root = Path(repo_root).expanduser().resolve()
+    command = str(test_command or "")
+    if _command_mentions_pytest(command) or (_is_python_project(root) and not (root / "package.json").exists()):
+        return _python_dependency_preflight(root, command)
+    if (root / "package.json").exists():
+        return _node_dependency_preflight(root)
+    if (root / "Cargo.toml").exists():
+        return _basic_dependency_preflight(package_manager="cargo", lockfile="Cargo.lock" if (root / "Cargo.lock").exists() else "")
+    if (root / "go.mod").exists():
+        return _basic_dependency_preflight(package_manager="go", lockfile="go.sum" if (root / "go.sum").exists() else "")
+    return _basic_dependency_preflight(package_manager="none", lockfile="")
+
+
+def _node_dependency_preflight(root: Path) -> dict[str, Any]:
+    package = _read_package_json(root)
+    package_manager, lockfile = _node_package_manager_and_lockfile(root)
+    installed_lock = root / "node_modules" / ".package-lock.json"
+    deps_installed = bool(lockfile and installed_lock.exists())
+    native_install_risk = _node_native_install_risk(package)
+    warnings: list[str] = []
+    if not lockfile:
+        warnings.append("node_lockfile_missing")
+    if not deps_installed:
+        warnings.append("node_dependencies_not_installed")
+    if native_install_risk:
+        warnings.append("native_dependency_risk")
+    return {
+        "package_manager": package_manager,
+        "lockfile": lockfile,
+        "deps_installed": deps_installed,
+        "cache_available": _node_cache_available(root),
+        "native_install_risk": native_install_risk,
+        "estimated_install_minutes": 0 if deps_installed else (12 if native_install_risk else 9),
+        "warnings": warnings,
+    }
+
+
+def _python_dependency_preflight(root: Path, command: str) -> dict[str, Any]:
+    deps_installed = _python_pytest_importable(command)
+    warnings = [] if deps_installed else ["pytest_not_importable"]
+    return {
+        "package_manager": "pip",
+        "lockfile": "requirements.txt" if (root / "requirements.txt").exists() else "",
+        "deps_installed": deps_installed,
+        "cache_available": _python_cache_available(root),
+        "native_install_risk": False,
+        "estimated_install_minutes": 0 if deps_installed else 5,
+        "warnings": warnings,
+    }
+
+
+def _basic_dependency_preflight(*, package_manager: str, lockfile: str) -> dict[str, Any]:
+    return {
+        "package_manager": package_manager,
+        "lockfile": lockfile,
+        "deps_installed": True,
+        "cache_available": False,
+        "native_install_risk": False,
+        "estimated_install_minutes": 0,
+        "warnings": [],
+    }
+
+
+def _read_package_json(root: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _node_package_manager_and_lockfile(root: Path) -> tuple[str, str]:
+    if (root / "pnpm-lock.yaml").exists():
+        return "pnpm", "pnpm-lock.yaml"
+    if (root / "package-lock.json").exists():
+        return "npm", "package-lock.json"
+    if (root / "yarn.lock").exists():
+        return "npm", "yarn.lock"
+    return "npm", ""
+
+
+def _node_native_install_risk(package: dict[str, Any]) -> bool:
+    risky = {"node-gyp", "sharp", "canvas", "sqlite3", "bcrypt"}
+    deps = package.get("dependencies") if isinstance(package.get("dependencies"), dict) else {}
+    return any(str(name) in risky for name in deps)
+
+
+def _node_cache_available(root: Path) -> bool:
+    return any((root / path).exists() for path in (".npm-cache", "node_modules/.cache"))
+
+
+def _python_cache_available(root: Path) -> bool:
+    return any((root / path).exists() for path in (".pip-cache", ".cache/pip"))
+
+
+def _is_python_project(root: Path) -> bool:
+    markers = ("pyproject.toml", "setup.py", "setup.cfg", "tox.ini", "requirements.txt")
+    return any((root / name).exists() for name in markers) or any((root / name).is_dir() for name in ("tests", "test"))
+
+
+def _command_mentions_pytest(command: str) -> bool:
+    return "pytest" in str(command or "").lower()
+
+
+def _python_pytest_importable(command: str) -> bool:
+    argv = _python_interpreter_argv(command)
+    try:
+        completed = subprocess.run(
+            [*argv, "-c", "import pytest"],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            check=False,
+            **_python_subprocess_kwargs(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def _python_interpreter_argv(command: str) -> list[str]:
+    try:
+        tokens = shlex.split(str(command or ""), posix=os.name != "nt")
+    except ValueError:
+        tokens = []
+    if not tokens:
+        return [sys.executable]
+    tokens = [_strip_outer_quotes(token) for token in tokens]
+    executable = Path(tokens[0]).name.lower()
+    if executable == "py" or executable.startswith("py."):
+        argv = [tokens[0]]
+        for token in tokens[1:]:
+            if token.startswith("-") and len(token) > 1 and token[1].isdigit():
+                argv.append(token)
+                continue
+            break
+        return argv
+    if executable.startswith("python"):
+        return [tokens[0]]
+    return [sys.executable]
+
+
+def _strip_outer_quotes(value: str) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1]
+    return text
+
+
+def _python_subprocess_kwargs() -> dict[str, Any]:
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    return {"startupinfo": startupinfo, "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
 
 
 def candidate_build_dirs(project_root: Path, project_type: str | None, *, dist_dir: str | Path | None = None) -> list[Path]:
