@@ -1331,6 +1331,23 @@ def chief_run_to_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- Classification confidence: `{confidence}`")
             if confidence == "heuristic":
                 lines.append("- Classification note: heuristic判定，建议人工确认。")
+    merge = dispatch_payload.get("merge") if isinstance(dispatch_payload.get("merge"), dict) else {}
+    if merge:
+        lines.extend(["", "### Merge", ""])
+        lines.append(f"- Status: `{merge.get('status') or ''}`")
+        if merge.get("target"):
+            lines.append(f"- Target: `{merge.get('target')}`")
+        if merge.get("branch"):
+            lines.append(f"- Branch: `{merge.get('branch')}`")
+        if merge.get("commit"):
+            lines.append(f"- Commit: `{merge.get('commit')}`")
+        if merge.get("reason"):
+            lines.append(f"- Reason: {merge.get('reason')}")
+        if (
+            str(payload.get("stop_reason") or "") == "merged_verification_failed"
+            or str(dispatch_payload.get("status") or "") == "merged_verification_failed"
+        ) and merge.get("commit"):
+            lines.append(f"- Revert hint: `git revert -m 1 {merge.get('commit')}`")
     toolchain_violation = (
         dispatch_payload.get("toolchain_violation")
         if isinstance(dispatch_payload.get("toolchain_violation"), dict)

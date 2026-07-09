@@ -702,13 +702,18 @@ def dispatch_chief_plan(
     # anything that did not pass, and abort on any conflict rather than force it.
     merge_result: dict[str, Any] | None = None
     if merge:
-        if status == "verified":
+        if status == "verified" and worker_completed:
             merge_result = merge_worktree_branch(
                 repo_root=repo_root,
                 worktree=worktree,
                 branch=branch,
                 message=f"{plan.get('objective') or 'DevPacer change'} [plan {plan_id}]",
             )
+        elif status == "verified":
+            merge_result = {
+                "status": "skipped",
+                "reason": "not merged: worker did not complete normally, so verified evidence requires manual review.",
+            }
         else:
             merge_result = {"status": "skipped", "reason": f"not merged: status is {status}, not verified."}
         if (
@@ -2512,10 +2517,10 @@ def merge_worktree_branch(*, repo_root: Path, worktree: Path, branch: str, messa
     # only. Pacer's own runtime artifacts (workspace dir, generated .gitignore,
     # mandatory record, tool caches) must never ride along: committing them makes
     # the merge collide with the main repo's untracked copies of the same files.
+    drop_gitignore = _gitignore_change_is_only_devpacer_block(worktree)
     g(worktree, "add", "-A")
     for artifact in (
         ".agent-workspace",
-        ".gitignore",
         ".npm-cache",
         ".dart-home",
         ".dart_tool",
@@ -2524,6 +2529,8 @@ def merge_worktree_branch(*, repo_root: Path, worktree: Path, branch: str, messa
         "*.pytest_cache*",
     ):
         g(worktree, "reset", "-q", "HEAD", "--", artifact)
+    if drop_gitignore:
+        g(worktree, "reset", "-q", "HEAD", "--", ".gitignore")
     wt_status = g(worktree, "status", "--porcelain")
     staged = g(worktree, "diff", "--cached", "--name-only")
     if wt_status.stdout.strip() and staged.stdout.strip():
