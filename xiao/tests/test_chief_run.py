@@ -369,11 +369,37 @@ def test_chief_run_report_marks_command_verification_mode() -> None:
     assert "- Workflow coverage status: `needs_workflow_coverage` (superseded by explicit test command)" in report
     assert "- Verification mode: `command`" in report
     assert "- Selected workflows: not used (explicit test command)" in report
-    assert "## Preflight" in report
+    assert "Preflight" in report
     assert "| dependency | `warning` |" in report
     assert "reason=missing_node_modules" in report
     assert "- Command: `npm ci && npm test`" in report
     assert "Selected workflows: checkout_verification" not in report
+
+
+def test_final_report_has_three_sections() -> None:
+    report = chief_run_to_markdown(
+        {
+            "status": "verified",
+            "stop_reason": "verified",
+            "message": "任务已通过验收。",
+            "mission": {"mission_id": "m1", "objective": "Fix checkout", "plan_id": "p1", "repo_root": r"D:\repo"},
+            "plan": {"status": "ready"},
+            "rounds": [],
+            "progress": {"changed_product_file_count": 1, "changed_product_files": ["src/结算.py"]},
+            "dispatch": {
+                "worktree": {"path": r"D:\repo.checkpoint-worktrees\p1\track", "branch": "checkpoint/p1/track"},
+                "latest_verification": {
+                    "verdict": "pass",
+                    "command_verification": {"command": "python -m pytest -q", "verdict": "pass", "exit_code": 0},
+                },
+            },
+        }
+    )
+
+    conclusion = report.index("## 结论")
+    evidence = report.index("## 证据")
+    next_step = report.index("## 下一步")
+    assert conclusion < evidence < next_step
 
 
 def test_chief_run_report_explains_toolchain_violation_gate() -> None:
@@ -402,7 +428,7 @@ def test_chief_run_report_explains_toolchain_violation_gate() -> None:
         }
     )
 
-    assert "### Gate Decision" in report
+    assert "Gate Decision" in report
     assert "- Verified: `false`" in report
     assert r"D:\Projects\flutter_stable\bin\cache\dart-sdk\bin\dart.exe" in report
     assert r"D:\Projects\flutter_stable\bin\dart.bat" in report
@@ -535,7 +561,7 @@ def test_chief_run_dispatches_vague_goal_with_requirement_contract(tmp_path, mon
     assert contract_round["payload"]["intake_policy"] == "selected_agent_cli"
     assert contract_round["payload"]["model_id"] == "codex:cli"
     report = Path(payload["final_report_path"]).read_text(encoding="utf-8")
-    assert "### Requirement Contract" in report
+    assert "Requirement Contract" in report
     assert "policy=selected_agent_cli" in report
     assert "model=codex:cli" in report
     assert "原始目标：改一下" in report

@@ -1246,178 +1246,278 @@ def chief_run_to_markdown(payload: dict[str, Any]) -> str:
         if isinstance(latest_verification.get("command_verification"), dict)
         else {}
     )
-    lines = ["## Pacer Mission", ""]
-    lines.append(f"Status: `{payload.get('status')}`")
-    lines.append(f"Stop reason: `{payload.get('stop_reason')}`")
-    if payload.get("message"):
-        lines.append(f"Message: {payload['message']}")
+    return _chief_run_three_section_markdown(
+        payload=payload,
+        mission=mission,
+        plan=plan,
+        rounds=rounds,
+        dispatch_payload=dispatch_payload,
+        latest_verification=latest_verification,
+        command_verification=command_verification,
+    )
+
+
+def _chief_run_three_section_markdown(
+    *,
+    payload: dict[str, Any],
+    mission: dict[str, Any],
+    plan: dict[str, Any],
+    rounds: list[dict[str, Any]],
+    dispatch_payload: dict[str, Any],
+    latest_verification: dict[str, Any],
+    command_verification: dict[str, Any],
+) -> str:
+    status = str(payload.get("status") or "")
+    stop_reason = str(payload.get("stop_reason") or "")
     progress = payload.get("progress") if isinstance(payload.get("progress"), dict) else {}
-    if progress:
-        lines.extend(["", "### Progress", ""])
-        lines.append(f"- Stage: `{progress.get('stage') or ''}`")
-        if progress.get("stage_label"):
-            lines.append(f"- Stage label: {progress.get('stage_label')}")
-        if progress.get("last_activity_at"):
-            lines.append(f"- Last activity: `{progress.get('last_activity_at')}`")
-        lines.append(f"- Product files changed: `{progress.get('changed_product_file_count', 0)}`")
-        changed_product = progress.get("changed_product_files") if isinstance(progress.get("changed_product_files"), list) else []
-        if changed_product:
-            lines.append("- Changed product files: " + ", ".join(f"`{item}`" for item in changed_product[:8]))
-        if progress.get("verification_verdict"):
-            lines.append(f"- Verification verdict: `{progress.get('verification_verdict')}`")
-        if progress.get("blocker"):
-            lines.append(f"- Blocker: `{progress.get('blocker')}`")
-    preflight_markdown = preflight_to_markdown(dispatch_payload.get("preflight"), heading="## Preflight")
-    if preflight_markdown:
-        lines.extend(["", preflight_markdown])
-    diagnosis_report = str(dispatch_payload.get("diagnosis_report") or "")
-    if diagnosis_report:
-        lines.extend(["", "### 诊断报告", "", diagnosis_report])
-    review_plan_report = str(dispatch_payload.get("review_plan_report") or "")
-    if review_plan_report:
-        lines.extend(["", "### 审查与开发计划", "", review_plan_report])
-    if mission:
-        lines.extend(
-            [
-                "",
-                "### Mission",
-                "",
-                f"- Mission id: `{mission.get('mission_id')}`",
-                f"- Objective: {mission.get('objective')}",
-                f"- Plan id: `{mission.get('plan_id')}`",
-                f"- Product: `{mission.get('product')}`",
-                f"- Verification engine: `{mission.get('verification_engine')}`",
-            ]
-        )
-        budget = mission.get("budget_policy") if isinstance(mission.get("budget_policy"), dict) else {}
-        if budget:
-            lines.append(
-                f"- Budget: max_rounds={budget.get('max_rounds')}, "
-                f"max_wall_minutes={budget.get('max_wall_minutes')}, "
-                f"max_worker_minutes={budget.get('max_worker_minutes')}"
-            )
-        contract = mission.get("requirement_contract") if isinstance(mission.get("requirement_contract"), dict) else {}
-        if contract:
-            lines.extend(["", "### Requirement Contract", ""])
-            audit_parts = []
-            if contract.get("source"):
-                audit_parts.append(f"source={contract.get('source')}")
-            if contract.get("intake_policy"):
-                audit_parts.append(f"policy={contract.get('intake_policy')}")
-            if contract.get("model_id"):
-                audit_parts.append(f"model={contract.get('model_id')}")
-            if audit_parts:
-                lines.append(f"- 收口来源：`{', '.join(audit_parts)}`")
-            if contract.get("model_unavailable"):
-                lines.append("- 收口降级：选中的 Agent 不可用，未静默切换到其他模型。")
-            if contract.get("input_goal") and contract.get("input_goal") != contract.get("final_goal"):
-                lines.append(f"- 原始目标：{contract.get('input_goal')}")
-            if contract.get("final_goal"):
-                lines.append(f"- 收口目标：{contract.get('final_goal')}")
-            if contract.get("acceptance_hint"):
-                lines.append(f"- 验收提示：{contract.get('acceptance_hint')}")
-            answers = contract.get("answers") if isinstance(contract.get("answers"), list) else []
-            for item in answers[:8]:
-                lines.append(f"- 用户补充：{item}")
-    if plan:
-        lines.extend(["", "### Plan", ""])
-        if command_verification:
-            original_status = str(plan.get("status") or "")
-            lines.append("- Status: `command_gate`")
-            if original_status and original_status != "ready":
-                lines.append(f"- Workflow coverage status: `{original_status}` (superseded by explicit test command)")
-            lines.append("- Verification mode: `command`")
-            lines.append("- Selected workflows: not used (explicit test command)")
-        else:
-            lines.append(f"- Status: `{plan.get('status')}`")
-            workflows = ", ".join(plan.get("selected_workflows") or []) or "none"
-            lines.append(f"- Selected workflows: {workflows}")
-    if command_verification:
-        lines.extend(["", "### Verification", ""])
-        lines.append("- Mode: `command`")
-        lines.append(f"- Command: `{command_verification.get('command') or ''}`")
-        lines.append(f"- Verdict: `{latest_verification.get('verdict') or command_verification.get('verdict') or ''}`")
-        if command_verification.get("exit_code") is not None:
-            lines.append(f"- Exit code: `{command_verification.get('exit_code')}`")
-        if command_verification.get("failure_kind"):
-            lines.append(f"- Failure kind: `{command_verification.get('failure_kind')}`")
-        confidence = str(command_verification.get("classification_confidence") or "")
-        if confidence:
-            lines.append(f"- Classification confidence: `{confidence}`")
-            if confidence == "heuristic":
-                lines.append("- Classification note: heuristic判定，建议人工确认。")
     merge = dispatch_payload.get("merge") if isinstance(dispatch_payload.get("merge"), dict) else {}
+    worktree = dispatch_payload.get("worktree") if isinstance(dispatch_payload.get("worktree"), dict) else {}
+    changed_product = progress.get("changed_product_files") if isinstance(progress.get("changed_product_files"), list) else []
+    product_count = int(progress.get("changed_product_file_count") or len(changed_product))
+    verified = status in {"verified", "merged"} and stop_reason == "verified"
+    merged = str(merge.get("status") or "") in {"merged", "nothing_to_merge"} or str(dispatch_payload.get("status") or "") == "merged"
+
+    lines = ["## 结论", ""]
+    lines.append(f"- 结论：{payload.get('message') or _message_for_stop(stop_reason)}")
+    lines.append(f"- status / stop_reason：`{status}` / `{stop_reason}`")
+    lines.append(f"- Verified: `{str(verified).lower()}`")
+    lines.append(f"- Merged: `{str(merged).lower()}`")
+    lines.append(f"- 产品改动文件数：`{product_count}`")
+
+    lines.extend(["", "## 证据", ""])
+    _append_plan_evidence(lines, plan=plan, command_verification=command_verification)
+    _append_verification_evidence(lines, latest_verification=latest_verification, command_verification=command_verification)
+    _append_product_change_evidence(lines, changed_product=changed_product, product_count=product_count)
+    _append_worktree_evidence(lines, mission=mission, worktree=worktree, merge=merge)
+    _append_preflight_evidence(lines, dispatch_payload=dispatch_payload)
+    _append_policy_evidence(lines, payload=payload, dispatch_payload=dispatch_payload)
+    _append_context_evidence(lines, mission=mission, plan=plan, dispatch_payload=dispatch_payload, rounds=rounds)
+
+    lines.extend(["", "## 下一步", ""])
+    next_commands = _next_step_commands(
+        payload=payload,
+        mission=mission,
+        dispatch_payload=dispatch_payload,
+        command_verification=command_verification,
+    )
+    for label, command in next_commands:
+        lines.append(f"- {label}: `{command}`")
+    return "\n".join(lines).rstrip()
+
+
+def _append_plan_evidence(lines: list[str], *, plan: dict[str, Any], command_verification: dict[str, Any]) -> None:
+    if not plan:
+        return
+    if command_verification:
+        original_status = str(plan.get("status") or "")
+        lines.append("- Status: `command_gate`")
+        if original_status and original_status != "ready":
+            lines.append(f"- Workflow coverage status: `{original_status}` (superseded by explicit test command)")
+        lines.append("- Verification mode: `command`")
+        lines.append("- Selected workflows: not used (explicit test command)")
+        return
+    workflows = ", ".join(plan.get("selected_workflows") or []) or "none"
+    lines.append(f"- Plan status: `{plan.get('status')}`")
+    lines.append(f"- Selected workflows: {workflows}")
+
+
+def _append_verification_evidence(
+    lines: list[str],
+    *,
+    latest_verification: dict[str, Any],
+    command_verification: dict[str, Any],
+) -> None:
+    if not command_verification:
+        verdict = str(latest_verification.get("verdict") or "")
+        if verdict:
+            lines.append(f"- Verification verdict: `{verdict}`")
+        return
+    lines.append("- Mode: `command`")
+    lines.append(f"- Command: `{command_verification.get('command') or ''}`")
+    lines.append(f"- Verdict: `{latest_verification.get('verdict') or command_verification.get('verdict') or ''}`")
+    if command_verification.get("exit_code") is not None:
+        lines.append(f"- Exit code: `{command_verification.get('exit_code')}`")
+    if command_verification.get("elapsed_seconds") is not None:
+        lines.append(f"- Elapsed seconds: `{command_verification.get('elapsed_seconds')}`")
+    if command_verification.get("failure_kind"):
+        lines.append(f"- Failure kind: `{command_verification.get('failure_kind')}`")
+    confidence = str(command_verification.get("classification_confidence") or "")
+    if confidence:
+        lines.append(f"- Classification confidence: `{confidence}`")
+        if confidence == "heuristic":
+            lines.append("- Classification note: heuristic判定，建议人工确认。")
+
+
+def _append_product_change_evidence(lines: list[str], *, changed_product: list[Any], product_count: int) -> None:
+    lines.append(f"- Changed product file count: `{product_count}`")
+    if changed_product:
+        lines.append("- Changed product files: " + ", ".join(str(item) for item in changed_product[:12]))
+    else:
+        lines.append("- Changed product files: none recorded")
+
+
+def _append_worktree_evidence(
+    lines: list[str],
+    *,
+    mission: dict[str, Any],
+    worktree: dict[str, Any],
+    merge: dict[str, Any],
+) -> None:
+    repo_root = str(mission.get("repo_root") or "")
+    if repo_root:
+        lines.append(f"- Repo root: `{repo_root}`")
+    if worktree.get("path"):
+        lines.append(f"- Worktree path: `{worktree.get('path')}`")
+    if worktree.get("branch"):
+        lines.append(f"- Worktree branch: `{worktree.get('branch')}`")
     if merge:
-        lines.extend(["", "### Merge", ""])
-        lines.append(f"- Status: `{merge.get('status') or ''}`")
+        lines.append(f"- Merge status: `{merge.get('status') or ''}`")
         if merge.get("target"):
-            lines.append(f"- Target: `{merge.get('target')}`")
-        if merge.get("branch"):
-            lines.append(f"- Branch: `{merge.get('branch')}`")
+            lines.append(f"- Merge target: `{merge.get('target')}`")
         if merge.get("commit"):
-            lines.append(f"- Commit: `{merge.get('commit')}`")
-        if merge.get("reason"):
-            lines.append(f"- Reason: {merge.get('reason')}")
-        if (
-            str(payload.get("stop_reason") or "") == "merged_verification_failed"
-            or str(dispatch_payload.get("status") or "") == "merged_verification_failed"
-        ) and merge.get("commit"):
-            lines.append(f"- Revert hint: `git revert -m 1 {merge.get('commit')}`")
+            lines.append(f"- Merge commit: `{merge.get('commit')}`")
+
+
+def _append_preflight_evidence(lines: list[str], *, dispatch_payload: dict[str, Any]) -> None:
+    preflight_text = preflight_to_markdown(dispatch_payload.get("preflight"), heading="Preflight")
+    if preflight_text:
+        lines.extend(["", preflight_text])
+
+
+def _append_policy_evidence(lines: list[str], *, payload: dict[str, Any], dispatch_payload: dict[str, Any]) -> None:
     toolchain_violation = (
         dispatch_payload.get("toolchain_violation")
         if isinstance(dispatch_payload.get("toolchain_violation"), dict)
         else {}
     )
     if toolchain_violation:
-        lines.extend(["", "### Gate Decision", ""])
+        lines.append("- Gate Decision: worker used a forbidden sibling SDK wrapper/path.")
         lines.append("- Verified: `false`")
-        lines.append("- Reason: worker used a forbidden sibling SDK wrapper/path.")
         if toolchain_violation.get("expected_executable"):
             lines.append(f"- Expected executable: `{toolchain_violation.get('expected_executable')}`")
         if toolchain_violation.get("forbidden_path"):
             lines.append(f"- Forbidden path: `{toolchain_violation.get('forbidden_path')}`")
         if toolchain_violation.get("log_path"):
             lines.append(f"- Worker log: `{toolchain_violation.get('log_path')}`")
+    merge = dispatch_payload.get("merge") if isinstance(dispatch_payload.get("merge"), dict) else {}
+    if (
+        str(payload.get("stop_reason") or "") == "merged_verification_failed"
+        or str(dispatch_payload.get("status") or "") == "merged_verification_failed"
+    ) and merge.get("commit"):
+        lines.append(f"- Revert command: `git revert -m 1 {merge.get('commit')}`")
+
+
+def _append_context_evidence(
+    lines: list[str],
+    *,
+    mission: dict[str, Any],
+    plan: dict[str, Any],
+    dispatch_payload: dict[str, Any],
+    rounds: list[dict[str, Any]],
+) -> None:
+    diagnosis_report = str(dispatch_payload.get("diagnosis_report") or "").strip()
+    if diagnosis_report:
+        _append_text_block(lines, "诊断报告", diagnosis_report)
+    review_plan_report = str(dispatch_payload.get("review_plan_report") or "").strip()
+    if review_plan_report:
+        _append_text_block(lines, "审查与开发计划", review_plan_report)
+    contract = mission.get("requirement_contract") if isinstance(mission.get("requirement_contract"), dict) else {}
+    if contract:
+        lines.append("- Requirement Contract:")
+        audit_parts = []
+        if contract.get("source"):
+            audit_parts.append(f"source={contract.get('source')}")
+        if contract.get("intake_policy"):
+            audit_parts.append(f"policy={contract.get('intake_policy')}")
+        if contract.get("model_id"):
+            audit_parts.append(f"model={contract.get('model_id')}")
+        if audit_parts:
+            lines.append(f"  - 收口来源：`{', '.join(audit_parts)}`")
+        if contract.get("model_unavailable"):
+            lines.append("  - 收口降级：选中的 Agent 不可用，未静默切换到其他模型。")
+        if contract.get("input_goal") and contract.get("input_goal") != contract.get("final_goal"):
+            lines.append(f"  - 原始目标：{contract.get('input_goal')}")
+        if contract.get("final_goal"):
+            lines.append(f"  - 收口目标：{contract.get('final_goal')}")
+        if contract.get("acceptance_hint"):
+            lines.append(f"  - 验收提示：{contract.get('acceptance_hint')}")
+        answers = contract.get("answers") if isinstance(contract.get("answers"), list) else []
+        for item in answers[:8]:
+            lines.append(f"  - 用户补充：{item}")
     grounding = plan.get("grounding") if isinstance(plan.get("grounding"), dict) else None
     if grounding:
-        lines.extend(["", grounding_to_markdown(grounding)])
+        _append_text_block(lines, "计划审查", grounding_to_markdown(grounding))
     if rounds:
-        lines.extend(["", "### Rounds", ""])
-        for item in rounds:
-            if item.get("type") == "merge":
-                merge_detail = str(item.get("reason") or item.get("commit") or "").strip()[:80]
-                suffix = f" - {merge_detail}" if merge_detail else ""
-            else:
-                detail = str(item.get("failed_signature") or item.get("stop_reason") or "").strip()
-                suffix = f" - {detail}" if detail else ""
-            lines.append(f"- Round {item.get('round')}: `{item.get('type')}` -> `{item.get('status')}`{suffix}")
-    usage_round = next((item for item in reversed(rounds) if str(item.get("type")) == "usage"), None)
-    if usage_round:
-        usage = usage_round.get("usage_summary") if isinstance(usage_round.get("usage_summary"), dict) else {}
-        lines.extend(["", "### 用量 Tokens & Cost", ""])
-        cache_read = int(usage.get("cache_read_tokens") or 0)
-        cache_create = int(usage.get("cache_creation_tokens") or 0)
-        token_detail = f"新输入 {usage.get('input_tokens', 0)} / 输出 {usage.get('output_tokens', 0)}"
-        if cache_read or cache_create:
-            token_detail += f" / 缓存读 {cache_read} / 缓存写 {cache_create}"
-        lines.append(f"- Tokens: {usage.get('total_tokens', 0)} ({token_detail})")
-        lines.append(f"- 订阅真实花费: ${usage.get('spent_usd', 0)}")
-        if float(usage.get("saved_usd") or 0) > 0:
-            lines.append(f"- 走便宜后端省下(按 Claude 价估): ${usage.get('saved_usd', 0)}")
-        if usage_round.get("failover_backend"):
-            lines.append(f"- ⚡ 额度失败转移到便宜后端: `{usage_round.get('failover_backend')}`")
-    background = payload.get("background") if isinstance(payload.get("background"), dict) else {}
-    if background:
-        lines.extend(["", "### Background", ""])
-        if background.get("pid"):
-            lines.append(f"- PID: `{background.get('pid')}`")
-        if background.get("stdout_log"):
-            lines.append(f"- Stdout: `{background.get('stdout_log')}`")
-        if background.get("stderr_log"):
-            lines.append(f"- Stderr: `{background.get('stderr_log')}`")
-    if payload.get("final_report_path"):
-        lines.extend(["", "### Records", "", f"- Final report: `{payload['final_report_path']}`"])
-    return "\n".join(lines).rstrip()
+        summary = []
+        for item in rounds[-8:]:
+            summary.append(f"{item.get('round')}: {item.get('type')} -> {item.get('status')}")
+        lines.append("- Rounds: " + "; ".join(summary))
+
+
+def _append_text_block(lines: list[str], label: str, text: str) -> None:
+    if not text:
+        return
+    lines.extend([f"- {label}:", "```markdown", text.strip(), "```"])
+
+
+def _next_step_commands(
+    *,
+    payload: dict[str, Any],
+    mission: dict[str, Any],
+    dispatch_payload: dict[str, Any],
+    command_verification: dict[str, Any],
+) -> list[tuple[str, str]]:
+    mission_id = str((mission or {}).get("mission_id") or "")
+    repo_root = str((mission or {}).get("repo_root") or "")
+    stop_reason = str(payload.get("stop_reason") or "")
+    merge = dispatch_payload.get("merge") if isinstance(dispatch_payload.get("merge"), dict) else {}
+    worktree = dispatch_payload.get("worktree") if isinstance(dispatch_payload.get("worktree"), dict) else {}
+    commands: list[tuple[str, str]] = []
+    if stop_reason == "merged_verification_failed" and merge.get("commit"):
+        commands.append(("回滚合并", f"git -C {_ps_quote(repo_root or '.')} revert -m 1 {merge.get('commit')}"))
+    elif stop_reason == "verification_environment_missing":
+        for name in _missing_env_names(dispatch_payload, command_verification) or ["QWEN_API_KEY"]:
+            commands.append((f"设置环境变量 {name}", f"$env:{name} = \"<value>\""))
+        if mission_id:
+            commands.append(("重试任务", f"checkpoint mission start --resume {_ps_quote(mission_id)} --execute"))
+    elif stop_reason == "test_command_unresolved":
+        if mission_id:
+            commands.append(("带明确验收命令重试", f"checkpoint mission start --resume {_ps_quote(mission_id)} --execute --test-command \"<your test command>\""))
+    elif stop_reason == "command_timeout":
+        suggested = command_verification.get("suggested_timeout_seconds") or 1800
+        if mission_id:
+            commands.append(("增加超时后重试", f"checkpoint mission start --resume {_ps_quote(mission_id)} --execute --timeout-seconds {suggested:g}"))
+    elif stop_reason == "verified":
+        branch = str(merge.get("branch") or worktree.get("branch") or "")
+        if str(merge.get("status") or "") in {"merged", "nothing_to_merge"}:
+            commands.append(("查看合并结果", f"git -C {_ps_quote(repo_root or '.')} log -1 --oneline"))
+        elif branch:
+            commands.append(("合并 worktree 分支", f"git -C {_ps_quote(repo_root or '.')} merge --no-ff {branch}"))
+        command = str(command_verification.get("command") or "").strip()
+        if command:
+            commands.append(("复跑验收命令", f"Set-Location {_ps_quote(repo_root or '.')}; {command}"))
+    else:
+        if mission_id:
+            commands.append(("查看任务状态", f"checkpoint mission status --mission {_ps_quote(mission_id)}"))
+            commands.append(("按原任务重试", f"checkpoint mission start --resume {_ps_quote(mission_id)} --execute"))
+    if not commands:
+        commands.append(("列出任务", "checkpoint mission list"))
+    return commands
+
+
+def _missing_env_names(dispatch_payload: dict[str, Any], command_verification: dict[str, Any]) -> list[str]:
+    preflight = dispatch_payload.get("preflight") if isinstance(dispatch_payload.get("preflight"), dict) else {}
+    verification_env = preflight.get("verification_env") if isinstance(preflight.get("verification_env"), dict) else {}
+    missing = verification_env.get("missing_env_vars") if isinstance(verification_env.get("missing_env_vars"), list) else []
+    if missing:
+        return [str(item) for item in missing if str(item)]
+    values = command_verification.get("missing_env_vars") if isinstance(command_verification.get("missing_env_vars"), list) else []
+    return [str(item) for item in values if str(item)]
+
+
+def _ps_quote(value: str) -> str:
+    text = str(value or "")
+    return "'" + text.replace("'", "''") + "'"
 
 
 def mission_status_payload(*, workspace_root: str | Path, mission_id: str) -> dict[str, Any]:
