@@ -71,6 +71,7 @@ def create_mission(
     mission_id: str | None = None,
     status: str = "created",
     requirement_contract: dict[str, Any] | None = None,
+    verification_env: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     mid = mission_id or make_mission_id(objective)
     now = datetime.now(timezone.utc).isoformat()
@@ -92,6 +93,8 @@ def create_mission(
     }
     if isinstance(requirement_contract, dict) and requirement_contract:
         record["requirement_contract"] = dict(requirement_contract)
+    if isinstance(verification_env, list) and verification_env:
+        record["verification_env"] = list(verification_env)
     save_mission(workspace_root, record)
     save_budget(workspace_root, mid, budget_policy)
     return record

@@ -176,6 +176,7 @@ def _run_chief_mission_args(args: Any, *, execute: bool, dry_run: bool, resume_m
         test_command=getattr(args, "test_command", None),
         allow_test_edits=getattr(args, "allow_test_edits", False),
         merge=getattr(args, "merge", False),
+        require_env=tuple(getattr(args, "require_env", []) or ()),
         goal=args.goal,
         workspace_root=args.workspace_root,
         repo_root=args.repo_root,

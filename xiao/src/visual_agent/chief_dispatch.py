@@ -142,6 +142,7 @@ def dispatch_chief_plan(
     codex_runner: Any = None,
     failure_evidence_builder: Any = None,
     allow_prior_verified_evidence: bool = False,
+    verification_env: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Preview or execute one chief-engineer worker dispatch.
 
@@ -551,6 +552,7 @@ def dispatch_chief_plan(
             codex_runner=codex_runner,
             failure_evidence_builder=failure_evidence_builder,
             test_command=test_command,
+            verification_env=verification_env,
             worktree_base=worktree_base,
             allow_test_edits=allow_test_edits,
         )
@@ -622,6 +624,7 @@ def dispatch_chief_plan(
                     codex_runner=codex_runner,
                     failure_evidence_builder=failure_evidence_builder,
                     test_command=test_command,
+                    verification_env=verification_env,
                     worktree_base=worktree_base,
                     allow_test_edits=allow_test_edits,
                 )
@@ -716,6 +719,7 @@ def dispatch_chief_plan(
                 mission_id=progress_mission_id,
                 repo_root=repo_root,
                 command=effective_verification_command,
+                verification_env=verification_env,
             )
             merge_result["post_merge_verification"] = {
                 "verdict": post_merge_verification.get("verdict"),
@@ -772,9 +776,14 @@ def _run_post_merge_command_verification(
     mission_id: str,
     repo_root: Path,
     command: str,
+    verification_env: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
-    command_result = run_command_verification(command=command, repo_root=repo_root)
+    command_result = run_command_verification(
+        command=command,
+        repo_root=repo_root,
+        verification_env=verification_env,
+    )
     verdict = "pass" if command_result.get("verdict") == "pass" else "fail"
     payload: dict[str, Any] = {
         "plan_id": plan_id,
@@ -1327,6 +1336,7 @@ def run_dispatch_verification(
     codex_runner: Any = None,
     failure_evidence_builder: Any = None,
     test_command: str | None = None,
+    verification_env: list[dict[str, Any]] | None = None,
     worktree_base: str | None = None,
     allow_test_edits: bool = False,
 ) -> dict[str, Any]:
@@ -1383,7 +1393,11 @@ def run_dispatch_verification(
                 blocker="test_tampering",
             )
             return payload
-        command_result = run_command_verification(command=test_command, repo_root=Path(repo_root))
+        command_result = run_command_verification(
+            command=test_command,
+            repo_root=Path(repo_root),
+            verification_env=verification_env,
+        )
         verdict = "pass" if command_result.get("verdict") == "pass" else "fail"
         passed = 1 if verdict == "pass" else 0
         payload = {
@@ -3234,6 +3248,17 @@ def chief_dispatch_to_markdown(payload: dict[str, Any]) -> str:
         lines.append(f"- Passed: `{latest.get('passed')}` · Inspection-only: `{latest.get('inspection_only')}` · Failed: `{latest.get('failed')}`")
         if latest.get("saved_path"):
             lines.append(f"- Saved: `{latest['saved_path']}`")
+        command_verification = (
+            latest.get("command_verification")
+            if isinstance(latest.get("command_verification"), dict)
+            else {}
+        )
+        if command_verification:
+            lines.append(f"- Failure kind: `{command_verification.get('failure_kind') or ''}`")
+            if command_verification.get("classification_confidence"):
+                lines.append(f"- Classification confidence: `{command_verification.get('classification_confidence')}`")
+                if command_verification.get("classification_confidence") == "heuristic":
+                    lines.append("- Classification note: heuristic判定，建议人工确认。")
         repair = latest.get("repair_brief") if isinstance(latest.get("repair_brief"), dict) else {}
         if repair:
             lines.extend(["", "### Repair Brief", ""])

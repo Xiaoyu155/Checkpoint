@@ -189,11 +189,13 @@ def missing_verification_environment_payload(**kwargs):
             "verdict": "fail",
             "exit_code": 1,
             "failure_kind": "verification_environment_missing",
+            "classification_confidence": "heuristic",
             "output_tail": "QWEN_API_KEY missing",
         },
         "repair_brief": {
             "source": "test_command",
             "failure_kind": "verification_environment_missing",
+            "classification_confidence": "heuristic",
         },
     }
     return {
@@ -258,6 +260,29 @@ def test_chief_run_with_test_command_bootstraps_missing_workspace(tmp_path, monk
     assert workspace_root.exists()
     assert captured["test_command"] == "python -m pytest -q"
     assert captured["allow_test_edits"] is False
+
+
+def test_chief_run_records_required_verification_env(tmp_path, monkeypatch) -> None:
+    workspace = ready_workspace(tmp_path, monkeypatch)
+    captured: dict[str, object] = {}
+
+    def fake_dispatch(**kwargs):
+        captured.update(kwargs)
+        return preview_payload(**kwargs)
+
+    payload = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        test_command="npm run eval:acceptance",
+        require_env=("QWEN_API_KEY",),
+        dispatch_runner=fake_dispatch,
+    )
+
+    expected = [{"kind": "env_var", "name": "QWEN_API_KEY"}]
+    assert payload["status"] == "preview"
+    assert payload["mission"]["verification_env"] == expected
+    assert captured["verification_env"] == expected
 
 
 def test_chief_run_allows_test_edits_when_objective_requests_tests(tmp_path, monkeypatch) -> None:
@@ -818,6 +843,8 @@ def test_chief_run_stops_on_missing_verification_environment(tmp_path, monkeypat
     assert "验证环境" in payload["message"]
     report = Path(payload["final_report_path"]).read_text(encoding="utf-8")
     assert "verification_environment_missing" in report
+    assert "Classification confidence: `heuristic`" in report
+    assert "建议人工确认" in report
 
 
 def test_chief_run_reports_post_merge_verification_failure() -> None:

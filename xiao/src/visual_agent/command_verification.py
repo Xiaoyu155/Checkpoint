@@ -46,6 +46,48 @@ _ENVIRONMENT_MISSING_MARKERS = (
 )
 
 
+def verification_env_from_required_names(names: list[str] | tuple[str, ...] | None) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in names or ():
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        entries.append({"kind": "env_var", "name": name})
+    return entries
+
+
+def normalize_verification_env(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip()
+        if kind == "env_var":
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            key = (kind, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append({"kind": kind, "name": name})
+        elif kind == "marker":
+            pattern = str(item.get("pattern") or "").strip()
+            if not pattern:
+                continue
+            key = (kind, pattern)
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append({"kind": kind, "pattern": pattern})
+    return normalized
+
+
 def is_test_path(path: str) -> bool:
     normalized = str(path).replace("\\", "/").strip()
     if not normalized:
@@ -101,11 +143,25 @@ def run_command_verification(
     repo_root: str | Path,
     timeout_seconds: float = 900.0,
     env: dict[str, str] | None = None,
+    verification_env: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     root = Path(repo_root).expanduser().resolve()
     cmd = str(command or "").strip()
     if not cmd:
         return {"verdict": "skipped", "command": "", "reason": "no test command provided"}
+    verification_env = normalize_verification_env(verification_env)
+    missing_env = _missing_declared_env_vars(verification_env)
+    if missing_env:
+        return {
+            "verdict": "fail",
+            "command": cmd,
+            "exit_code": None,
+            "output_tail": "",
+            "reason": "missing declared verification environment variable(s): " + ", ".join(missing_env),
+            "failure_kind": "verification_environment_missing",
+            "classification_confidence": "definitive",
+            "missing_env_vars": missing_env,
+        }
     prepared_command, shell = _prepare_command(cmd)
     try:
         completed = subprocess.run(
@@ -129,6 +185,7 @@ def run_command_verification(
             "output_tail": (_decode(exc.stdout) + "\n" + _decode(exc.stderr))[-4000:],
             "reason": f"test command timed out after {timeout_seconds:.0f}s",
             "failure_kind": "command_timeout",
+            "classification_confidence": "definitive",
         }
     except OSError as exc:
         return {
@@ -138,19 +195,33 @@ def run_command_verification(
             "output_tail": str(exc)[:2000],
             "reason": "could not launch test command",
             "failure_kind": "command_launch_error",
+            "classification_confidence": "definitive",
         }
 
     combined = (stdout + ("\n" if stdout and stderr else "") + stderr).strip()
     if exit_code != 0:
         combined = _append_referenced_log_tails(combined, root)
-    failure_kind = "" if exit_code == 0 else classify_command_failure(exit_code=exit_code, output=combined)
-    return {
+    classification = (
+        {"failure_kind": "", "classification_confidence": ""}
+        if exit_code == 0
+        else classify_command_failure_detail(
+            exit_code=exit_code,
+            output=combined,
+            verification_env=verification_env,
+        )
+    )
+    result = {
         "verdict": "pass" if exit_code == 0 else "fail",
         "command": cmd,
         "exit_code": exit_code,
         "output_tail": combined[-4000:],
-        "failure_kind": failure_kind,
+        "failure_kind": classification.get("failure_kind") or "",
     }
+    if classification.get("classification_confidence"):
+        result["classification_confidence"] = classification["classification_confidence"]
+    if classification.get("matched_marker"):
+        result["matched_marker"] = classification["matched_marker"]
+    return result
 
 
 def _prepare_command(command: str) -> tuple[str | list[str], bool]:
@@ -188,13 +259,19 @@ def command_repair_brief(result: dict[str, Any]) -> dict[str, Any]:
     """Turn a failed command result into a repair brief for the worker."""
     output = str(result.get("output_tail") or "")
     failure_kind = str(result.get("failure_kind") or "command_failed")
+    classification_confidence = str(result.get("classification_confidence") or "")
+    confidence_note = (
+        " This was a heuristic classification; ask the operator to confirm the environment before taking action."
+        if classification_confidence == "heuristic"
+        else ""
+    )
     if failure_kind == "verification_environment_missing":
         repair_prompt = (
             f"The verification command `{result.get('command')}` failed because its required "
             f"verification environment is missing ({failure_kind}, exit {result.get('exit_code')}). "
             "Do not change product code, tests, eval scripts, or acceptance thresholds to work around this. "
             "Report the missing external service/key setup and ask the operator to configure the verification "
-            f"environment before retrying. Command output (tail):\n\n{output[-2500:]}"
+            f"environment before retrying.{confidence_note} Command output (tail):\n\n{output[-2500:]}"
         )
     elif failure_kind in NON_REPAIRABLE_COMMAND_FAILURE_KINDS:
         repair_prompt = (
@@ -209,7 +286,7 @@ def command_repair_brief(result: dict[str, Any]) -> dict[str, Any]:
             f"{result.get('exit_code')}. Fix the code so it passes. Do not change the test "
             f"command or weaken the tests. Command output (tail):\n\n{output[-2500:]}"
         )
-    return {
+    brief = {
         "status": "found",
         "source": "test_command",
         "command": result.get("command"),
@@ -218,26 +295,77 @@ def command_repair_brief(result: dict[str, Any]) -> dict[str, Any]:
         "message": f"Test command failed (exit {result.get('exit_code')}): {result.get('command')}",
         "repair_prompt": repair_prompt,
     }
+    if classification_confidence:
+        brief["classification_confidence"] = classification_confidence
+    return brief
 
 
 def classify_command_failure(*, exit_code: int, output: str) -> str:
+    return classify_command_failure_detail(exit_code=exit_code, output=output).get("failure_kind", "command_failed")
+
+
+def classify_command_failure_detail(
+    *,
+    exit_code: int,
+    output: str,
+    verification_env: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
     text = str(output or "").lower()
-    if any(marker in text for marker in _ENVIRONMENT_MISSING_MARKERS):
-        return "verification_environment_missing"
-    invalid_markers = (
+    if int(exit_code) in {127, 9009}:
+        return {"failure_kind": "test_command_invalid", "classification_confidence": "definitive"}
+    shell_error_markers = (
         "is not recognized as an internal or external command",
-        "command not found",
         "not recognized as the name of a cmdlet",
-        "the term ",
-        "no such file or directory",
-        "cannot find the path",
-        "could not find a part of the path",
         "missing script:",
-        "enoent",
     )
-    if int(exit_code) in {127, 9009} or any(marker in text for marker in invalid_markers):
-        return "test_command_invalid"
-    return "command_failed"
+    head = "\n".join(text.splitlines()[:10])
+    if any(marker in head for marker in shell_error_markers):
+        return {"failure_kind": "test_command_invalid", "classification_confidence": "definitive"}
+    declared_marker = _declared_marker_match(str(output or ""), normalize_verification_env(verification_env))
+    if declared_marker:
+        return {
+            "failure_kind": "verification_environment_missing",
+            "classification_confidence": "definitive",
+            "matched_marker": declared_marker,
+        }
+    for marker in _ENVIRONMENT_MISSING_MARKERS:
+        if marker in text:
+            return {
+                "failure_kind": "verification_environment_missing",
+                "classification_confidence": "heuristic",
+                "matched_marker": marker,
+            }
+    return {"failure_kind": "command_failed", "classification_confidence": "definitive"}
+
+
+def _missing_declared_env_vars(verification_env: list[dict[str, str]]) -> list[str]:
+    missing: list[str] = []
+    environ = os.environ
+    for item in verification_env:
+        if item.get("kind") != "env_var":
+            continue
+        name = str(item.get("name") or "").strip()
+        if name and not str(environ.get(name) or "").strip():
+            missing.append(name)
+    return missing
+
+
+def _declared_marker_match(output: str, verification_env: list[dict[str, str]]) -> str:
+    text = str(output or "")
+    lowered = text.lower()
+    for item in verification_env:
+        if item.get("kind") != "marker":
+            continue
+        pattern = str(item.get("pattern") or "").strip()
+        if not pattern:
+            continue
+        try:
+            if re.search(pattern, text, re.IGNORECASE):
+                return pattern
+        except re.error:
+            if pattern.lower() in lowered:
+                return pattern
+    return ""
 
 
 def _os_environ() -> dict[str, str]:

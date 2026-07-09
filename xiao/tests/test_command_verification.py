@@ -74,10 +74,105 @@ def test_command_verification_fail_keeps_output(tmp_path) -> None:
     assert "failed" in brief["message"].lower()
 
 
+def test_enoent_in_test_output_is_repairable_code_failure() -> None:
+    kind = classify_command_failure(
+        exit_code=1,
+        output="Error: ENOENT: no such file or directory, open 'fixtures/a.json'",
+    )
+
+    assert kind == "command_failed"
+
+
+def test_powershell_the_term_in_assertion_text_not_invalid() -> None:
+    kind = classify_command_failure(
+        exit_code=1,
+        output="AssertionError: the term used in the generated explanation is wrong",
+    )
+
+    assert kind == "command_failed"
+
+
+def test_exit_9009_is_invalid() -> None:
+    kind = classify_command_failure(exit_code=9009, output="anything")
+
+    assert kind == "test_command_invalid"
+
+
+def test_shell_error_in_head_is_invalid() -> None:
+    kind = classify_command_failure(
+        exit_code=1,
+        output="\n".join(
+            [
+                "npm ERR! Missing script: \"acceptance\"",
+                "npm ERR!",
+                "npm ERR! To see a list of scripts, run:",
+            ]
+        ),
+    )
+
+    assert kind == "test_command_invalid"
+
+
 def test_command_verification_classifies_invalid_command(tmp_path) -> None:
     r = run_command_verification(command="definitely-not-a-real-devpacer-command-xyz", repo_root=tmp_path)
     assert r["verdict"] == "fail"
     assert r["failure_kind"] == "test_command_invalid"
+
+
+def test_declared_env_var_missing_blocks_before_run(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("QWEN_API_KEY", raising=False)
+
+    def should_not_run(*_args, **_kwargs):
+        raise AssertionError("declared env var check should block before subprocess.run")
+
+    monkeypatch.setattr("visual_agent.command_verification.subprocess.run", should_not_run)
+
+    r = run_command_verification(
+        command="npm run eval:acceptance",
+        repo_root=tmp_path,
+        verification_env=[{"kind": "env_var", "name": "QWEN_API_KEY"}],
+    )
+
+    assert r["verdict"] == "fail"
+    assert r["failure_kind"] == "verification_environment_missing"
+    assert r["classification_confidence"] == "definitive"
+    assert r["exit_code"] is None
+    assert r["missing_env_vars"] == ["QWEN_API_KEY"]
+
+
+def test_declared_marker_match(tmp_path, monkeypatch) -> None:
+    class Completed:
+        returncode = 1
+        stdout = "external ai judge missing"
+        stderr = ""
+
+    monkeypatch.setattr("visual_agent.command_verification.hidden_subprocess_kwargs", lambda: {})
+    monkeypatch.setattr("visual_agent.command_verification.subprocess.run", lambda *_args, **_kwargs: Completed())
+
+    r = run_command_verification(
+        command="npm run eval:acceptance",
+        repo_root=tmp_path,
+        verification_env=[{"kind": "marker", "pattern": "external ai judge missing"}],
+    )
+
+    assert r["failure_kind"] == "verification_environment_missing"
+    assert r["classification_confidence"] == "definitive"
+    assert r["matched_marker"] == "external ai judge missing"
+
+
+def test_legacy_marker_is_heuristic_confidence(tmp_path, monkeypatch) -> None:
+    class Completed:
+        returncode = 1
+        stdout = "QWEN_API_KEY missing"
+        stderr = ""
+
+    monkeypatch.setattr("visual_agent.command_verification.hidden_subprocess_kwargs", lambda: {})
+    monkeypatch.setattr("visual_agent.command_verification.subprocess.run", lambda *_args, **_kwargs: Completed())
+
+    r = run_command_verification(command="npm run eval:acceptance", repo_root=tmp_path)
+
+    assert r["failure_kind"] == "verification_environment_missing"
+    assert r["classification_confidence"] == "heuristic"
 
 
 def test_command_verification_classifies_missing_external_ai_environment() -> None:

@@ -746,6 +746,7 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     chief_run.add_argument("--allow-dirty", action="store_true", help="Allow executing from a dirty repository. Default: blocked.")
     chief_run.add_argument("--allow-coverage-gap", action="store_true", help="Allow running even when plan coverage is weak.")
     chief_run.add_argument("--test-command", default=None, help="Run this test/build command as the acceptance gate (works on any project, no workflow needed), e.g. 'pytest -q' or 'npm test'.")
+    chief_run.add_argument("--require-env", action="append", default=[], help="Require an environment variable before running the verification command. Can be repeated.")
     chief_run.add_argument("--allow-test-edits", action="store_true", help="Let the worker modify test files without failing verification (only for tasks explicitly about changing tests).")
     chief_run.add_argument("--merge", action="store_true", help="After verification passes, merge the worker's isolated branch back into the current branch. Only merges when verified; aborts on conflict.")
     chief_run.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")

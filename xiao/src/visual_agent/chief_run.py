@@ -17,7 +17,11 @@ from .agent_capabilities import canonical_agent_name, load_agent_profile, recomm
 from .chief_dispatch import dispatch_chief_plan
 from .chief_engineer import build_chief_plan, chief_plan_to_dict
 from .chief_plans_store import load_plan, save_plan
-from .command_verification import NON_REPAIRABLE_COMMAND_FAILURE_KINDS
+from .command_verification import (
+    NON_REPAIRABLE_COMMAND_FAILURE_KINDS,
+    normalize_verification_env,
+    verification_env_from_required_names,
+)
 from .goal_grounding import goal_references_plan, ground_goal, grounding_to_markdown
 from .mission_intake import is_manual_verification_goal, is_review_plan_goal
 from .missions import (
@@ -53,6 +57,21 @@ def _planning_answers(answers: tuple[str, ...] | list[str], contract: dict[str, 
     return tuple(merged)
 
 
+def _merge_verification_env(*groups: list[dict[str, Any]]) -> list[dict[str, str]]:
+    merged: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for group in groups:
+        for item in normalize_verification_env(group):
+            if item.get("kind") == "env_var":
+                key = ("env_var", str(item.get("name") or ""))
+            else:
+                key = ("marker", str(item.get("pattern") or ""))
+            if key[1] and key not in seen:
+                seen.add(key)
+                merged.append(item)
+    return merged
+
+
 def run_chief_mission(
     *,
     goal: str | None = None,
@@ -79,6 +98,8 @@ def run_chief_mission(
     test_command: str | None = None,
     allow_test_edits: bool = False,
     merge: bool = False,
+    require_env: tuple[str, ...] = (),
+    verification_env: list[dict[str, Any]] | None = None,
     dispatch_runner: DispatchRunner | None = None,
     ground_vague_goals: bool = True,
     grounding_runner: Callable[..., dict[str, Any]] | None = None,
@@ -110,6 +131,10 @@ def run_chief_mission(
         max_wall_minutes=max_wall_minutes,
         max_worker_minutes=max_worker_minutes,
     )
+    requested_verification_env = _merge_verification_env(
+        normalize_verification_env(verification_env),
+        verification_env_from_required_names(require_env),
+    )
     runner = dispatch_runner or dispatch_chief_plan
     mission: dict[str, Any] | None = None
     grounding_payload: dict[str, Any] | None = None
@@ -140,6 +165,10 @@ def run_chief_mission(
             planning_answers = _planning_answers(answers, contract_payload)
         if isinstance(mission.get("budget_policy"), dict):
             budget = dict(mission["budget_policy"])
+        requested_verification_env = _merge_verification_env(
+            normalize_verification_env(mission.get("verification_env")),
+            requested_verification_env,
+        )
 
     plan_payload = load_plan(workspace_path, plan_id) if plan_id else None
     if resume_mission_id and (not plan_id or plan_payload is None):
@@ -272,6 +301,7 @@ def run_chief_mission(
             mission_id=mission_id,
             status="created",
             requirement_contract=contract_payload,
+            verification_env=requested_verification_env,
         )
         write_mission_state(
             workspace_path,
@@ -315,6 +345,8 @@ def run_chief_mission(
             last_activity_at=str(mission.get("updated_at") or ""),
         )
     elif execute and not dry_run:
+        if requested_verification_env:
+            mission["verification_env"] = requested_verification_env
         mission["status"] = "running"
         mission["stop_reason"] = ""
         save_mission(workspace_path, mission)
@@ -479,6 +511,7 @@ def run_chief_mission(
         model_policy=budget.get("model_policy") if isinstance(budget, dict) else None,
         test_command=test_command,
         allow_test_edits=effective_allow_test_edits,
+        verification_env=requested_verification_env,
     )
     append_round(
         workspace_path,
@@ -563,6 +596,7 @@ def run_chief_mission(
         test_command=test_command,
         allow_test_edits=effective_allow_test_edits,
         merge=merge,
+        verification_env=requested_verification_env,
         allow_prior_verified_evidence=_allow_prior_verified_evidence_for_resume(
             mission,
             resume_mission_id=resume_mission_id,
@@ -1292,6 +1326,11 @@ def chief_run_to_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- Exit code: `{command_verification.get('exit_code')}`")
         if command_verification.get("failure_kind"):
             lines.append(f"- Failure kind: `{command_verification.get('failure_kind')}`")
+        confidence = str(command_verification.get("classification_confidence") or "")
+        if confidence:
+            lines.append(f"- Classification confidence: `{confidence}`")
+            if confidence == "heuristic":
+                lines.append("- Classification note: heuristic判定，建议人工确认。")
     toolchain_violation = (
         dispatch_payload.get("toolchain_violation")
         if isinstance(dispatch_payload.get("toolchain_violation"), dict)
