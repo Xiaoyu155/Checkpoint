@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 from datetime import datetime, timezone
@@ -141,6 +142,8 @@ def build_mission_progress(
     )
     latest_log = _latest_log_metadata(root=root, plan_id=plan_id, mission_id=mission_id)
     activity = _infer_activity(stage=stage, saved=saved, latest_worker=latest_worker, latest_log=latest_log)
+    reported_activity_active = activity == str(saved.get("activity") or "") and _reported_activity_is_fresh(saved)
+    activity_started_at = str(saved.get("activity_started_at") or "") if reported_activity_active else ""
     last_activity_at = _latest_timestamp(
         saved.get("last_activity_at"),
         saved.get("updated_at"),
@@ -162,6 +165,9 @@ def build_mission_progress(
         "stage_label": _stage_label(stage),
         "activity": activity,
         "activity_label": _activity_label(activity),
+        "activity_command": str(saved.get("activity_command") or "") if reported_activity_active else "",
+        "activity_started_at": activity_started_at,
+        "activity_elapsed_seconds": _activity_elapsed_seconds(activity_started_at) if activity_started_at else None,
         "message": _stage_message(stage),
         "current_round": mission.get("current_round"),
         "latest_round_type": str(latest_round.get("type") or ""),
@@ -383,6 +389,9 @@ def _stage_label(stage: str) -> str:
 
 
 def _infer_activity(*, stage: str, saved: dict[str, Any], latest_worker: dict[str, Any], latest_log: dict[str, str]) -> str:
+    reported_activity = str(saved.get("activity") or "")
+    if reported_activity and _reported_activity_is_fresh(saved):
+        return reported_activity
     worker_status = str(latest_worker.get("status") or "")
     if stage.startswith("verification"):
         return "verification"
@@ -402,10 +411,20 @@ def _infer_activity(*, stage: str, saved: dict[str, Any], latest_worker: dict[st
         text = _read_text_tail(Path(str(latest_log["path"])), max_chars=4000).lower()
     if not text:
         return "waiting_for_output" if stage in {"worker_running", "worker_started", "background_started"} else ""
-    if any(marker in text for marker in ("npm ci", "npm install", "silly tarball", "extracting by manifest", "node_modules")):
-        return "dependency_install"
-    if any(marker in text for marker in ("node --import", "npm test", "pytest", "vitest", "tap", "test ", "--test")):
+    if any(marker in text for marker in ("node --import", "npm test", "pytest", "vitest", "tap", "--test")):
         return "tests_running"
+    if any(
+        re.search(pattern, text, re.MULTILINE)
+        for pattern in (
+            r"^\s*npm\s+ci\b",
+            r"^\s*npm\s+install\b",
+            r"^\s*\$?\s*npm\s+ci\b",
+            r"^\s*\$?\s*npm\s+install\b",
+            r"silly tarball",
+            r"extracting by manifest",
+        )
+    ):
+        return "dependency_install"
     if any(marker in text for marker in ("apply_patch", "update file", "new file", "write_text", "set-content")):
         return "editing_files"
     if any(marker in text for marker in ("get-content", "rg ", "ripgrep", "read file", "git status", "git diff")):
@@ -429,11 +448,27 @@ def _activity_label(activity: str) -> str:
         "dependency_install": "Installing dependencies",
         "tests_running": "Running tests",
         "verification": "Running verification",
+        "worker_executing": "Worker executing",
         "worker_completed": "Worker completed",
         "worker_blocked": "Worker blocked",
         "worker_output": "Worker output",
     }
     return labels.get(activity, "")
+
+
+def _reported_activity_is_fresh(saved: dict[str, Any], *, max_seconds: int = 600) -> bool:
+    started = _parse_time(saved.get("activity_started_at"))
+    if started is None:
+        return False
+    now = datetime.now(timezone.utc)
+    return 0 <= (now - started).total_seconds() <= max_seconds
+
+
+def _activity_elapsed_seconds(started_at: str) -> int:
+    started = _parse_time(started_at)
+    if started is None:
+        return 0
+    return max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
 
 
 def _stage_message(stage: str) -> str:

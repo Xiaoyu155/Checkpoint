@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
+from datetime import datetime, timedelta, timezone
 
 from visual_agent.mission_progress import (
     build_mission_progress,
@@ -301,6 +302,107 @@ def test_worker_progress_infers_test_activity(tmp_path) -> None:
 
     assert progress["activity"] == "tests_running"
     assert progress["activity_label"] == "Running tests"
+
+
+def test_stack_trace_with_node_modules_is_not_dependency_install(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    mission = {
+        "mission_id": "m1",
+        "plan_id": "p1",
+        "objective": "fix app",
+        "status": "running",
+        "stop_reason": "",
+    }
+    save_mission_progress(
+        workspace,
+        "m1",
+        stage="worker_running",
+        last_output_tail=(
+            "Error: failed assertion\n"
+            "    at node_modules/vitest/dist/index.js:1:1\n"
+            "node --test test/app.test.js\n"
+        ),
+    )
+
+    progress = build_mission_progress(
+        workspace_root=workspace,
+        mission=mission,
+        background={"status": "running", "alive": True},
+        worker_records=[],
+        verification={},
+        rounds=[],
+    )
+
+    assert progress["activity"] == "tests_running"
+    assert progress["activity_label"] == "Running tests"
+
+
+def test_reported_activity_wins_over_inference(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    mission = {
+        "mission_id": "m1",
+        "plan_id": "p1",
+        "objective": "fix app",
+        "status": "running",
+        "stop_reason": "",
+    }
+    started_at = datetime.now(timezone.utc).isoformat()
+    save_mission_progress(
+        workspace,
+        "m1",
+        stage="worker_running",
+        activity="verification",
+        activity_command="pytest -q",
+        activity_started_at=started_at,
+        last_output_tail="npm ci\nextracting by manifest",
+    )
+
+    progress = build_mission_progress(
+        workspace_root=workspace,
+        mission=mission,
+        background={"status": "running", "alive": True},
+        worker_records=[],
+        verification={},
+        rounds=[],
+    )
+
+    assert progress["activity"] == "verification"
+    assert progress["activity_command"] == "pytest -q"
+    assert progress["activity_started_at"] == started_at
+    assert progress["activity_elapsed_seconds"] >= 0
+
+
+def test_stale_reported_activity_falls_back(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    mission = {
+        "mission_id": "m1",
+        "plan_id": "p1",
+        "objective": "fix app",
+        "status": "running",
+        "stop_reason": "",
+    }
+    save_mission_progress(
+        workspace,
+        "m1",
+        stage="worker_running",
+        activity="verification",
+        activity_command="pytest -q",
+        activity_started_at=(datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat(),
+        last_output_tail="npm ci\nextracting by manifest",
+    )
+
+    progress = build_mission_progress(
+        workspace_root=workspace,
+        mission=mission,
+        background={"status": "running", "alive": True},
+        worker_records=[],
+        verification={},
+        rounds=[],
+    )
+
+    assert progress["activity"] == "dependency_install"
+    assert progress["activity_command"] == ""
+    assert progress["activity_started_at"] == ""
 
 
 def test_blank_worker_output_does_not_replace_last_meaningful_tail(tmp_path) -> None:

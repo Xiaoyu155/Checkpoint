@@ -786,6 +786,16 @@ def _run_post_merge_command_verification(
     verification_env: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
+    save_mission_progress(
+        workspace_root,
+        mission_id,
+        stage="verification_running",
+        stage_label="Post-merge verification running",
+        verification_command=command,
+        activity="verification",
+        activity_command=command,
+        activity_started_at=now,
+    )
     command_result = run_command_verification(
         command=command,
         repo_root=repo_root,
@@ -822,6 +832,9 @@ def _run_post_merge_command_verification(
         verification_verdict=verdict,
         verification_command=command,
         blocker="" if verdict == "pass" else str(command_result.get("failure_kind") or "post_merge_verification_failed"),
+        activity="",
+        activity_command="",
+        activity_started_at="",
     )
     return payload
 
@@ -1349,6 +1362,7 @@ def run_dispatch_verification(
 ) -> dict[str, Any]:
     verification_workspace_path = (verification_workspace_root or workspace_root).expanduser().resolve()
     progress_mission_id = str(mission_id or plan_id)
+    verification_activity_started_at = datetime.now(timezone.utc).isoformat()
     save_mission_progress(
         workspace_root,
         progress_mission_id,
@@ -1357,6 +1371,9 @@ def run_dispatch_verification(
         status="running",
         plan_id=plan_id,
         worktree=str(Path(repo_root).expanduser().resolve()),
+        activity="verification" if test_command else None,
+        activity_command=str(test_command or "") if test_command else None,
+        activity_started_at=verification_activity_started_at if test_command else None,
     )
     now = datetime.now(timezone.utc).isoformat()
 
@@ -1398,6 +1415,9 @@ def run_dispatch_verification(
                 stage_label="Verification failed",
                 verification_verdict="fail",
                 blocker="test_tampering",
+                activity="",
+                activity_command="",
+                activity_started_at="",
             )
             return payload
         chain_tampered = changed_acceptance_chain_files(
@@ -1436,6 +1456,9 @@ def run_dispatch_verification(
                 stage_label="Verification failed",
                 verification_verdict="fail",
                 blocker="acceptance_chain_tampering",
+                activity="",
+                activity_command="",
+                activity_started_at="",
             )
             return payload
         command_result = run_command_verification(
@@ -1485,6 +1508,9 @@ def run_dispatch_verification(
             verification_verdict=verdict,
             verification_command=str(command_result.get("command") or ""),
             blocker="" if verdict == "pass" else str(command_result.get("failure_kind") or "command_failed"),
+            activity="",
+            activity_command="",
+            activity_started_at="",
         )
         return payload
 
@@ -1602,6 +1628,7 @@ def _run_mimo_patch_attempt(
     started = monotonic()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     progress_mission_id = str(mission_id or plan_id)
+    activity_started_at = datetime.now(timezone.utc).isoformat()
     save_mission_progress(
         workspace_root,
         progress_mission_id,
@@ -1612,6 +1639,9 @@ def _run_mimo_patch_attempt(
         agent=str(track.get("agent") or ""),
         worktree=str(cwd),
         log_path=str(log_path),
+        activity="worker_executing",
+        activity_command="low-cost-backend patch-worker",
+        activity_started_at=activity_started_at,
     )
     backend = backend or resolve_failover_backend()
     if not backend:
@@ -1640,6 +1670,9 @@ def _run_mimo_patch_attempt(
             worker_status="failed",
             blocker="backend_missing",
             log_path=str(log_path),
+            activity="",
+            activity_command="",
+            activity_started_at="",
         )
         return record
 
@@ -1759,6 +1792,16 @@ def _run_mimo_patch_attempt(
         backend=backend,
     )
     append_worker_record(workspace_root, plan_id, record)
+    save_mission_progress(
+        workspace_root,
+        progress_mission_id,
+        worker_status=record["status"],
+        worker_exit_code=record["exit_code"],
+        log_path=str(log_path),
+        activity="",
+        activity_command="",
+        activity_started_at="",
+    )
     return record
 
 
@@ -2249,6 +2292,7 @@ def _run_worker_attempt(
     started = monotonic()
     progress_mission_id = str(mission_id or plan_id)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    activity_started_at = datetime.now(timezone.utc).isoformat()
     save_mission_progress(
         workspace_root,
         progress_mission_id,
@@ -2259,6 +2303,9 @@ def _run_worker_attempt(
         agent=str(track.get("agent") or ""),
         worktree=str(cwd),
         log_path=str(log_path),
+        activity="worker_executing",
+        activity_command=format_argv(argv),
+        activity_started_at=activity_started_at,
     )
 
     def progress_callback(event: dict[str, Any]) -> None:
@@ -2338,6 +2385,9 @@ def _run_worker_attempt(
         blocker="" if record["status"] == "completed" else (stderr_tail or "worker_failed")[:500],
         log_path=str(log_path),
         worktree=str(cwd),
+        activity="",
+        activity_command="",
+        activity_started_at="",
     )
     return record
 
