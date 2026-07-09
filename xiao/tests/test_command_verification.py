@@ -4,7 +4,7 @@ import sys
 
 from visual_agent.chief_dispatch import run_dispatch_verification
 from visual_agent.codex_check import CodexCheckResult
-from visual_agent.command_verification import command_repair_brief, run_command_verification
+from visual_agent.command_verification import classify_command_failure, command_repair_brief, run_command_verification
 from visual_agent.workspace import init_workspace
 
 
@@ -12,6 +12,56 @@ def test_command_verification_pass(tmp_path) -> None:
     r = run_command_verification(command=f'"{sys.executable}" -c "exit(0)"', repo_root=tmp_path)
     assert r["verdict"] == "pass"
     assert r["exit_code"] == 0
+
+
+def test_command_verification_uses_hidden_launch_kwargs(tmp_path, monkeypatch) -> None:
+    captured = {}
+
+    class Completed:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return Completed()
+
+    monkeypatch.setattr("visual_agent.command_verification.hidden_subprocess_kwargs", lambda: {"creationflags": 12345})
+    monkeypatch.setattr("visual_agent.command_verification.subprocess.run", fake_run)
+
+    r = run_command_verification(command="npm test", repo_root=tmp_path)
+
+    assert r["verdict"] == "pass"
+    assert captured["kwargs"]["creationflags"] == 12345
+    assert captured["kwargs"]["shell"] is True
+
+
+def test_command_verification_normalizes_windows_cmd_if_exist(tmp_path, monkeypatch) -> None:
+    captured = {}
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return Completed()
+
+    monkeypatch.setattr("visual_agent.command_verification._is_windows", lambda: True)
+    monkeypatch.setattr("visual_agent.command_verification.hidden_subprocess_kwargs", lambda: {})
+    monkeypatch.setattr("visual_agent.command_verification.subprocess.run", fake_run)
+
+    r = run_command_verification(
+        command=r"cmd /c if exist reports\done.md (exit /b 0) else (exit /b 1)",
+        repo_root=tmp_path,
+    )
+
+    assert r["verdict"] == "pass"
+    assert captured["command"] == ["cmd", "/c", r"if exist reports\done.md (exit /b 0) else (exit /b 1)"]
+    assert captured["kwargs"]["shell"] is False
 
 
 def test_command_verification_fail_keeps_output(tmp_path) -> None:
@@ -28,6 +78,50 @@ def test_command_verification_classifies_invalid_command(tmp_path) -> None:
     r = run_command_verification(command="definitely-not-a-real-devpacer-command-xyz", repo_root=tmp_path)
     assert r["verdict"] == "fail"
     assert r["failure_kind"] == "test_command_invalid"
+
+
+def test_command_verification_classifies_missing_external_ai_environment() -> None:
+    kind = classify_command_failure(
+        exit_code=1,
+        output="AI知识验收与防作弊校准 FAIL ai_knowledge_acceptance\nQWEN_API_KEY missing",
+    )
+    assert kind == "verification_environment_missing"
+
+    brief = command_repair_brief(
+        {
+            "command": "npm run eval:acceptance",
+            "exit_code": 1,
+            "failure_kind": kind,
+            "output_tail": "QWEN_API_KEY missing",
+        }
+    )
+
+    assert brief["failure_kind"] == "verification_environment_missing"
+    assert "Do not change product code" in brief["repair_prompt"]
+    assert "verification environment" in brief["repair_prompt"]
+
+
+def test_command_verification_reads_referenced_log_for_external_ai_failure(tmp_path) -> None:
+    log = tmp_path / "reports" / "continuous-acceptance" / "0001" / "ai_knowledge_acceptance.log"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        "AI知识审查(qwen-plus): 6/6 passed\n"
+        "AI知识审查: skipped (Expected ',' or ']' after array element in JSON at position 601)\n",
+        encoding="utf-8",
+    )
+    script = tmp_path / "fail_command.py"
+    script.write_text(
+        "print('FAIL ai_knowledge_acceptance (reports/continuous-acceptance/0001/ai_knowledge_acceptance.log)')\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+
+    r = run_command_verification(command=f'"{sys.executable}" "{script}"', repo_root=tmp_path)
+
+    assert r["verdict"] == "fail"
+    assert r["failure_kind"] == "verification_environment_missing"
+    assert "referenced log" in r["output_tail"]
+    assert "AI知识审查: skipped" in r["output_tail"]
 
 
 def _no_workflow_runner(*_args, **_kwargs):

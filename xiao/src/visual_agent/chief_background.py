@@ -12,8 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from .chief_run import run_chief_mission
-from .missions import append_round, load_mission, mission_dir, save_mission
+from .missions import append_round, load_mission, load_rounds, mission_dir, save_mission
 from .models import to_jsonable
+from .mission_progress import save_mission_progress
+from .subprocess_window import hidden_subprocess_kwargs
 
 
 def start_background_chief_run(
@@ -90,10 +92,10 @@ def start_background_chief_run(
     stdout_handle = stdout_path.open("w", encoding="utf-8")
     stderr_handle = stderr_path.open("w", encoding="utf-8")
     try:
-        creationflags = 0
         start_new_session = False
+        launch_kwargs = hidden_subprocess_kwargs(detached=True)
         if os.name == "nt":
-            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+            start_new_session = False
         else:
             start_new_session = True
         process = subprocess.Popen(
@@ -103,8 +105,8 @@ def start_background_chief_run(
             stdout=stdout_handle,
             stderr=stderr_handle,
             stdin=subprocess.DEVNULL,
-            creationflags=creationflags,
             start_new_session=start_new_session,
+            **launch_kwargs,
         )
     finally:
         stdout_handle.close()
@@ -125,6 +127,17 @@ def start_background_chief_run(
         "merge": bool(merge),
     }
     (directory / "background.json").write_text(json.dumps(to_jsonable(record), ensure_ascii=False, indent=2), encoding="utf-8")
+    save_mission_progress(
+        workspace_path,
+        mission_id,
+        stage="background_started",
+        stage_label="Background started",
+        status="background_running",
+        plan_id=str(mission.get("plan_id") or mission_id),
+        started_at=record["started_at"],
+        last_activity_at=record["started_at"],
+        agent=",".join(record["agents"]),
+    )
     append_round(
         workspace_path,
         mission_id,
@@ -177,6 +190,16 @@ def run_background_worker(
     background["worker_pid"] = os.getpid()
     background["worker_started_at"] = datetime.now(timezone.utc).isoformat()
     save_background_record(workspace_path, mission_id, background)
+    save_mission_progress(
+        workspace_path,
+        mission_id,
+        stage="worker_started",
+        stage_label="Worker started",
+        status="running",
+        plan_id=mission_id,
+        last_activity_at=background["worker_started_at"],
+        agent=",".join(str(agent) for agent in (agents or tuple(background.get("agents") or ()))),
+    )
 
     try:
         payload = run_chief_mission(
@@ -207,6 +230,15 @@ def run_background_worker(
             }
         )
         save_background_record(workspace_path, mission_id, background)
+        save_mission_progress(
+            workspace_path,
+            mission_id,
+            stage="verified" if exit_code == 0 else "blocked",
+            stage_label="Verified" if exit_code == 0 else "Stopped",
+            status=str(payload.get("status") or ""),
+            blocker=str(payload.get("stop_reason") or "") if exit_code != 0 else "",
+            last_activity_at=background["completed_at"],
+        )
         return {**payload, "background": background}
     except Exception as exc:
         background.update(
@@ -218,6 +250,15 @@ def run_background_worker(
             }
         )
         save_background_record(workspace_path, mission_id, background)
+        save_mission_progress(
+            workspace_path,
+            mission_id,
+            stage="blocked",
+            stage_label="Worker failed",
+            status="failed",
+            blocker=f"{type(exc).__name__}: {exc}",
+            last_activity_at=background["completed_at"],
+        )
         mission = load_mission(workspace_path, mission_id)
         if mission is not None:
             mission["status"] = "stopped"
@@ -267,6 +308,15 @@ def inspect_background_state(
         )
         if update:
             save_background_record(workspace_path, mission_id, background)
+            save_mission_progress(
+                workspace_path,
+                mission_id,
+                stage="blocked",
+                stage_label="Budget exhausted",
+                status="timeout",
+                blocker="budget_exhausted",
+                last_activity_at=background["completed_at"],
+            )
             _mark_mission_from_background(
                 workspace_path,
                 mission_id,
@@ -285,6 +335,43 @@ def inspect_background_state(
                 "exit_code": process.get("exit_code"),
             }
         )
+        save_mission_progress(
+            workspace_path,
+            mission_id,
+            stage="worker_running",
+            stage_label="Worker running",
+            status="running",
+            heartbeat_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return background
+
+    if _mission_has_terminal_progress(workspace_path, mission_id, mission):
+        mission_status = str((mission or {}).get("status") or "verified")
+        stop_reason = str((mission or {}).get("stop_reason") or "")
+        exit_code = 0 if mission_status in {"verified", "merged"} or stop_reason == "verified" else process.get("exit_code")
+        background.update(
+            {
+                "status": "completed",
+                "process_state": "reconciled_from_mission",
+                "alive": False,
+                "budget_exceeded": budget_exceeded,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "exit_code": exit_code,
+                "result_status": mission_status,
+                "result_stop_reason": stop_reason,
+            }
+        )
+        if update:
+            save_background_record(workspace_path, mission_id, background)
+            save_mission_progress(
+                workspace_path,
+                mission_id,
+                stage="verified" if exit_code == 0 else "blocked",
+                stage_label="Mission already completed",
+                status=mission_status,
+                blocker="" if exit_code == 0 else stop_reason,
+                last_activity_at=background["completed_at"],
+            )
         return background
 
     background.update(
@@ -299,6 +386,15 @@ def inspect_background_state(
     )
     if update:
         save_background_record(workspace_path, mission_id, background)
+        save_mission_progress(
+            workspace_path,
+            mission_id,
+            stage="blocked",
+            stage_label="Worker exited unexpectedly",
+            status="orphaned",
+            blocker="worker_error",
+            last_activity_at=background["completed_at"],
+        )
         _mark_mission_from_background(
             workspace_path,
             mission_id,
@@ -351,6 +447,30 @@ def parse_iso_datetime(value: str) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def _mission_has_terminal_progress(workspace_root: Path, mission_id: str, mission: dict[str, Any] | None) -> bool:
+    if mission is not None:
+        status = str(mission.get("status") or "")
+        stop_reason = str(mission.get("stop_reason") or "")
+        if status in {"verified", "verified_blocked", "merged"} or stop_reason == "verified":
+            return True
+    try:
+        rounds = load_rounds(workspace_root, mission_id)
+    except OSError:
+        return False
+    for item in reversed(rounds):
+        if not isinstance(item, dict):
+            continue
+        round_type = str(item.get("type") or "")
+        status = str(item.get("status") or "")
+        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+        verdict = str(payload.get("verdict") or "")
+        if round_type == "verification" and (status == "pass" or verdict == "pass"):
+            return True
+        if round_type == "merge" and status in {"merged", "blocked", "conflict", "nothing_to_merge"}:
+            return True
+    return False
 
 
 def process_status(pid: int) -> dict[str, Any]:

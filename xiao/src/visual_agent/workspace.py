@@ -244,6 +244,10 @@ def copy_demo_assets(workspace: Workspace, *, overwrite: bool = False) -> None:
             repo_root / "examples" / "workflows" / "checkout" / "checkout_verification.yaml",
             workspace.workflows_dir / "checkout_verification.yaml",
         ),
+        (
+            repo_root / "examples" / "workflows" / "pacer" / "pacer_workbench_static_acceptance.yaml",
+            workspace.workflows_dir / "pacer_workbench_static_acceptance.yaml",
+        ),
         (repo_root / "examples" / "inputs" / "demo_login.json", workspace.inputs_dir / "demo_login.json"),
         (repo_root / "examples" / "web" / "login_demo.html", workspace.fixtures_dir / "login_demo.html"),
     ]

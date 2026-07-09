@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -161,6 +162,45 @@ class TestBuildDiffSummary:
         assert result["file_count"] == 0
         assert result["large_diff"] is False
         assert isinstance(result["user_checklist"], list)
+
+    def test_untracked_files_are_included(self, tmp_path):
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "devpacer@example.local"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.name", "DevPacer"], cwd=tmp_path, check=True)
+        (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
+
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "new.js").write_text("function added() {\n  return true;\n}\n", encoding="utf-8")
+
+        result = build_diff_summary(repo_root=tmp_path, base_ref="HEAD")
+
+        assert {
+            "path": "src/new.js",
+            "status": "A",
+            "lines_added": 3,
+            "lines_removed": 0,
+        } in result["changed_files"]
+        assert any(symbol["name"] == "added" for symbol in result["functions_touched"])
+
+    def test_chinese_paths_are_not_quoted(self, tmp_path):
+        subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "devpacer@example.local"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "config", "user.name", "DevPacer"], cwd=tmp_path, check=True)
+        (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
+
+        target = tmp_path / "快手" / "feature.js"
+        target.parent.mkdir()
+        target.write_text("export const feature = true;\n", encoding="utf-8")
+
+        result = build_diff_summary(repo_root=tmp_path, base_ref="HEAD")
+        paths = [item["path"] for item in result["changed_files"]]
+
+        assert "快手/feature.js" in paths
+        assert not any("\\345" in path or path.startswith('"') for path in paths)
 
 
 # ── _extract_symbols ─────────────────────────────────────────────────────────

@@ -160,6 +160,30 @@ def test_run_command_receipt_counts_as_real_interaction() -> None:
     assert grade.valid_operation_receipts == 1
 
 
+def test_run_command_only_success_counts_as_command_acceptance() -> None:
+    command = WorkflowStepResult(
+        id="cmd",
+        action="run_command",
+        status=ActionStatus.SUCCESS,
+        metadata={
+            "operation_receipt": {
+                "schema_version": 1,
+                "engine": "subprocess",
+                "action": "run_command",
+                "live": True,
+                "exit_code": 0,
+                "actionability": {"checked": True, "executable": True},
+            }
+        },
+    )
+
+    grade = grade_run([command])
+
+    assert grade.label == "L3"
+    assert grade.name == "data_round_trip"
+    assert grade.is_product_acceptance is True
+
+
 def test_live_receipt_without_actionability_does_not_count_as_real() -> None:
     bad_receipt = WorkflowStepResult(
         id="click",

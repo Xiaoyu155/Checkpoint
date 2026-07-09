@@ -37,6 +37,9 @@ def test_is_test_path_classification():
     assert is_test_path("src/checkout.spec.js")
     assert is_test_path("conftest.py")
     assert is_test_path("pkg/foo_test.go")
+    assert is_test_path("快手/test.js")
+    assert is_test_path("eval/service-quality-acceptance.mjs")
+    assert is_test_path("regression_tests/index.json")
     assert not is_test_path("src/calc.py")
     assert not is_test_path("src/latest_report.py")
     assert not is_test_path("docs/testing.md")  # 'testing' is only a test marker as a directory name
@@ -44,6 +47,10 @@ def test_is_test_path_classification():
 
 def test_changed_test_files_detects_edits_and_new_files(tmp_path):
     repo = _make_repo(tmp_path)
+    (repo / "eval").mkdir()
+    (repo / "eval" / "acceptance.mjs").write_text("export const cases = [];\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add acceptance")
     assert changed_test_files(repo_root=repo) == []
 
     # Editing production code does not trip the guard.
@@ -53,7 +60,8 @@ def test_changed_test_files_detects_edits_and_new_files(tmp_path):
     # Editing an existing test and adding a new one are both caught.
     (repo / "tests" / "test_calc.py").write_text("def test_add():\n    assert True\n", encoding="utf-8")
     (repo / "tests" / "test_new.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
-    assert changed_test_files(repo_root=repo) == ["tests/test_calc.py", "tests/test_new.py"]
+    (repo / "eval" / "acceptance.mjs").write_text("export const cases = ['weakened'];\n", encoding="utf-8")
+    assert changed_test_files(repo_root=repo) == ["eval/acceptance.mjs", "tests/test_calc.py", "tests/test_new.py"]
 
 
 def test_changed_test_files_catches_committed_edits_via_base(tmp_path):
@@ -67,6 +75,19 @@ def test_changed_test_files_catches_committed_edits_via_base(tmp_path):
     # Working tree is clean, but the diff against the branch base still catches it.
     assert changed_test_files(repo_root=repo) == []
     assert changed_test_files(repo_root=repo, base_ref=base) == ["tests/test_calc.py"]
+
+
+def test_changed_test_files_keeps_chinese_paths_readable(tmp_path):
+    repo = _make_repo(tmp_path)
+    base = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    (repo / "快手").mkdir()
+    (repo / "快手" / "test.js").write_text("console.log('weakened');\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "add kuaishou test")
+
+    assert changed_test_files(repo_root=repo, base_ref=base) == ["快手/test.js"]
 
 
 def test_verification_refuses_tampered_tests(tmp_path):

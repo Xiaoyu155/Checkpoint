@@ -14,16 +14,36 @@ gets real evidence instead of the model's own words.
 from __future__ import annotations
 
 import re
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
+
+from .subprocess_window import hidden_subprocess_kwargs
 
 # The command gate is only trustworthy while the tests themselves are what the
 # user wrote. A worker that edits tests can turn any failure green, so test
 # changes are detected mechanically — the prompt-level "do not weaken tests"
 # instruction is a request, this is the enforcement.
-_TEST_DIR_NAMES = {"tests", "test", "__tests__", "spec", "specs", "testing"}
-_TEST_BASENAME = re.compile(r"(^test_.+|.+_test\.[^.]+$|.+\.test\.[^.]+$|.+\.spec\.[^.]+$|^conftest\.py$)", re.IGNORECASE)
+_TEST_DIR_NAMES = {"tests", "test", "__tests__", "spec", "specs", "testing", "eval", "evaluation", "evaluations", "acceptance", "regression_tests"}
+_TEST_BASENAME = re.compile(r"(^test_.+|^(?:test|spec)\.[^.]+$|.+_test\.[^.]+$|.+\.test\.[^.]+$|.+\.spec\.[^.]+$|^conftest\.py$)", re.IGNORECASE)
+NON_REPAIRABLE_COMMAND_FAILURE_KINDS = frozenset(
+    {
+        "test_command_invalid",
+        "command_launch_error",
+        "command_timeout",
+        "verification_environment_missing",
+    }
+)
+
+_ENVIRONMENT_MISSING_MARKERS = (
+    "qwen_api_key missing",
+    "ai_acceptance_use_qwen is not 1",
+    "external ai review skipped while ai required",
+    "external ai judge missing",
+    "ai知识审查: skipped",
+    "ai judge returned no json object",
+)
 
 
 def is_test_path(path: str) -> bool:
@@ -44,10 +64,10 @@ def changed_test_files(*, repo_root: str | Path, base_ref: str | None = None) ->
     """
     root = Path(repo_root).expanduser().resolve()
     touched: set[str] = set()
-    diff_args = ["git", "-C", str(root), "diff", "--name-only"]
+    diff_args = ["git", "-C", str(root), "-c", "core.quotePath=false", "diff", "--name-only"]
     if str(base_ref or "").strip():
         diff_args.append(str(base_ref).strip())
-    for args in (diff_args, ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard"]):
+    for args in (diff_args, ["git", "-C", str(root), "-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard"]):
         try:
             completed = subprocess.run(args, capture_output=True, text=True, timeout=30.0, encoding="utf-8", errors="replace")
         except (OSError, subprocess.TimeoutExpired):
@@ -86,15 +106,17 @@ def run_command_verification(
     cmd = str(command or "").strip()
     if not cmd:
         return {"verdict": "skipped", "command": "", "reason": "no test command provided"}
+    prepared_command, shell = _prepare_command(cmd)
     try:
         completed = subprocess.run(
-            cmd,
+            prepared_command,
             cwd=str(root),
-            shell=True,  # let users pass a natural command line (pytest -q, npm test)
+            shell=shell,  # let users pass a natural command line (pytest -q, npm test)
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
             env=({**_os_environ(), **env} if env else None),
+            **hidden_subprocess_kwargs(),
         )
         exit_code = completed.returncode
         stdout = completed.stdout or ""
@@ -119,6 +141,8 @@ def run_command_verification(
         }
 
     combined = (stdout + ("\n" if stdout and stderr else "") + stderr).strip()
+    if exit_code != 0:
+        combined = _append_referenced_log_tails(combined, root)
     failure_kind = "" if exit_code == 0 else classify_command_failure(exit_code=exit_code, output=combined)
     return {
         "verdict": "pass" if exit_code == 0 else "fail",
@@ -129,11 +153,50 @@ def run_command_verification(
     }
 
 
+def _prepare_command(command: str) -> tuple[str | list[str], bool]:
+    """Return a subprocess command and shell mode.
+
+    Most commands intentionally keep ``shell=True`` so users can paste natural
+    command lines. On Windows, direct ``cmd /c if exist ... else ...`` checks are
+    fragile when Python wraps them in another shell; run that form as argv.
+    """
+    cmd = str(command or "").strip()
+    if not _is_windows():
+        return cmd, True
+    m = re.match(r"^\s*cmd(?:\.exe)?\s+/c\s+(?P<body>.+?)\s*$", cmd, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return cmd, True
+    body = _strip_balanced_quotes(m.group("body").strip())
+    lowered = re.sub(r"\s+", " ", body.strip().lower())
+    if lowered.startswith("if exist ") and "(exit /b 0)" in lowered and " else " in lowered and "(exit /b 1)" in lowered:
+        return ["cmd", "/c", body], False
+    return cmd, True
+
+
+def _strip_balanced_quotes(value: str) -> str:
+    text = str(value or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {"'", '"'}:
+        return text[1:-1].strip()
+    return text
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 def command_repair_brief(result: dict[str, Any]) -> dict[str, Any]:
     """Turn a failed command result into a repair brief for the worker."""
     output = str(result.get("output_tail") or "")
     failure_kind = str(result.get("failure_kind") or "command_failed")
-    if failure_kind in {"test_command_invalid", "command_launch_error", "command_timeout"}:
+    if failure_kind == "verification_environment_missing":
+        repair_prompt = (
+            f"The verification command `{result.get('command')}` failed because its required "
+            f"verification environment is missing ({failure_kind}, exit {result.get('exit_code')}). "
+            "Do not change product code, tests, eval scripts, or acceptance thresholds to work around this. "
+            "Report the missing external service/key setup and ask the operator to configure the verification "
+            f"environment before retrying. Command output (tail):\n\n{output[-2500:]}"
+        )
+    elif failure_kind in NON_REPAIRABLE_COMMAND_FAILURE_KINDS:
         repair_prompt = (
             f"The verification command `{result.get('command')}` could not be trusted "
             f"({failure_kind}, exit {result.get('exit_code')}). Do not guess at code changes. "
@@ -159,6 +222,8 @@ def command_repair_brief(result: dict[str, Any]) -> dict[str, Any]:
 
 def classify_command_failure(*, exit_code: int, output: str) -> str:
     text = str(output or "").lower()
+    if any(marker in text for marker in _ENVIRONMENT_MISSING_MARKERS):
+        return "verification_environment_missing"
     invalid_markers = (
         "is not recognized as an internal or external command",
         "command not found",
@@ -187,3 +252,45 @@ def _decode(value: Any) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return str(value)
+
+
+def _append_referenced_log_tails(output: str, repo_root: Path) -> str:
+    text = str(output or "")
+    if not text:
+        return text
+    chunks = [text]
+    for rel in _referenced_log_paths(text)[:5]:
+        tail = _safe_repo_log_tail(repo_root, rel)
+        if tail:
+            chunks.append(f"\n--- referenced log: {rel} ---\n{tail}")
+    return "\n".join(chunks)
+
+
+def _referenced_log_paths(text: str) -> list[str]:
+    seen: set[str] = set()
+    paths: list[str] = []
+    for match in re.finditer(r"(?P<path>[^\s()]+\.log)", str(text or "")):
+        raw = match.group("path").strip().strip("`'\"")
+        normalized = raw.replace("\\", "/").lstrip("/")
+        if not normalized or normalized in seen or "://" in normalized:
+            continue
+        seen.add(normalized)
+        paths.append(normalized)
+    return paths
+
+
+def _safe_repo_log_tail(repo_root: Path, relative_path: str, *, max_chars: int = 2500) -> str:
+    normalized = str(relative_path or "").replace("\\", "/").strip().lstrip("/")
+    if not normalized or ".." in normalized.split("/"):
+        return ""
+    path = (repo_root / normalized).resolve()
+    try:
+        path.relative_to(repo_root.resolve())
+    except ValueError:
+        return ""
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[-max_chars:]
+    except OSError:
+        return ""

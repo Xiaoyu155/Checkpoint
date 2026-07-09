@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from visual_agent.codex_check import codex_check_to_markdown, run_codex_check
+from visual_agent.codex_check import codex_check_to_markdown, filter_runtime_changed_files, run_codex_check
 from visual_agent.models import ActionStatus
 from visual_agent.workflow import WorkflowStepResult
 from visual_agent.workspace import init_workspace
@@ -105,6 +105,30 @@ def test_run_codex_check_reports_fallback_only_coverage_gap(tmp_path, monkeypatc
     assert "Suggested affects: broad_smoke -> src/payment/" in text
 
 
+def test_run_codex_check_prefers_precise_workflow_over_fallback(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_fallback_workflow(workspace, "broad_smoke")
+    write_check_workflow(workspace, "checkout", affects="src/payment/")
+    calls = []
+
+    def fake_run_workspace_workflow(_workspace, name, **_kwargs):
+        calls.append(name)
+
+        class Result:
+            run_id = f"run-{name}"
+            steps = (WorkflowStepResult(id="observe", action="observe_ocr", status=ActionStatus.SUCCESS),)
+
+        return Result()
+
+    monkeypatch.setattr("visual_agent.codex_check.run_workspace_workflow", fake_run_workspace_workflow)
+
+    result = run_codex_check(workspace, changed=["src/payment/checkout.py"])
+
+    assert calls == ["checkout"]
+    assert result.selected_workflows == ["checkout"]
+    assert result.coverage["status"] == "covered"
+
+
 def test_run_codex_check_reports_uncovered_changed_files(tmp_path, monkeypatch) -> None:
     workspace = init_workspace(tmp_path / "workspace", with_demo=False)
     write_check_workflow(workspace, "profile", affects="src/profile/")
@@ -134,6 +158,117 @@ def test_run_codex_check_reports_uncovered_changed_files(tmp_path, monkeypatch) 
     assert result.verdict == "coverage_gap"
     assert "Uncovered files: src/payment/checkout.py" in text
     assert "Suggested new workflow: src_payment_verification affects src/payment/" in text
+
+
+def test_run_codex_check_ignores_runtime_artifacts_for_coverage(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_check_workflow(workspace, "pacer", affects="src/visual_agent/")
+    calls = []
+
+    def fake_run_workspace_workflow(_workspace, name, **_kwargs):
+        calls.append(name)
+
+        class Result:
+            run_id = f"run-{name}"
+            steps = (WorkflowStepResult(id="observe", action="observe_ocr", status=ActionStatus.SUCCESS),)
+
+        return Result()
+
+    monkeypatch.setattr("visual_agent.codex_check.run_workspace_workflow", fake_run_workspace_workflow)
+
+    result = run_codex_check(
+        workspace,
+        changed=[
+            "artifacts/pacer-dogfood/followup-workspace/missions/m1/state.json",
+            "artifacts/dashboard-commercial-live/readiness.png",
+            "artifacts/random-run/latest/report.json",
+            "src/visual_agent/chief_run.py",
+        ],
+    )
+    text = codex_check_to_markdown(result)
+
+    assert calls == ["pacer"]
+    assert result.changed_files == ["src/visual_agent/chief_run.py"]
+    assert result.coverage["status"] == "covered"
+    assert result.coverage["ignored_runtime_file_count"] == 3
+    assert "Ignored generated runtime files" in text
+
+
+def test_runtime_filter_handles_nested_repo_prefix_without_hiding_source_artifacts(tmp_path) -> None:
+    repo_root = tmp_path / "xiao"
+    kept, ignored = filter_runtime_changed_files(
+        [
+            "xiao/artifacts/pacer-dogfood/latest/report.json",
+            "xiao/.agent-workspace/runs/latest/report.json",
+            "xiao/src/artifacts/schema.json",
+        ],
+        repo_root=repo_root,
+    )
+
+    assert kept == ["xiao/src/artifacts/schema.json"]
+    assert ignored == [
+        "xiao/.agent-workspace/runs/latest/report.json",
+        "xiao/artifacts/pacer-dogfood/latest/report.json",
+    ]
+
+
+def test_run_codex_check_runtime_only_changes_do_not_run_all_workflows(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    write_check_workflow(workspace, "pacer", affects="src/visual_agent/")
+    calls = []
+
+    def fake_run_workspace_workflow(_workspace, name, **_kwargs):
+        calls.append(name)
+        raise AssertionError("runtime-only changes should not run workflows")
+
+    monkeypatch.setattr("visual_agent.codex_check.run_workspace_workflow", fake_run_workspace_workflow)
+
+    result = run_codex_check(
+        workspace,
+        changed=[
+            ".agent-workspace/missions/m1/state.json",
+            "artifacts/any-local-run/followup-workspace/repo_map.json",
+        ],
+    )
+    text = codex_check_to_markdown(result)
+
+    assert calls == []
+    assert result.changed_files == []
+    assert result.selected_workflows == []
+    assert result.coverage["status"] == "runtime_only"
+    assert result.verdict == "no_changed_files"
+    assert "NO PRODUCT CHANGES" in text
+
+
+def test_default_pacer_workflow_covers_visual_agent_changes(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace")
+    calls = []
+
+    def fake_run_workspace_workflow(_workspace, name, **_kwargs):
+        calls.append(name)
+
+        class Result:
+            run_id = f"run-{name}"
+            steps = (WorkflowStepResult(id="static", action="run_command", status=ActionStatus.DRY_RUN),)
+
+        return Result()
+
+    monkeypatch.setattr("visual_agent.codex_check.run_workspace_workflow", fake_run_workspace_workflow)
+
+    result = run_codex_check(
+        workspace,
+        changed=[
+            ".gitignore",
+            "xiao/src/visual_agent/dashboard/static/app.js",
+            "xiao/examples/workflows/index.json",
+            "examples/workflows/pacer/pacer_workbench_static_acceptance.yaml",
+        ],
+    )
+
+    assert "pacer_workbench_static_acceptance" in result.selected_workflows
+    assert "pacer_workbench_static_acceptance" in result.coverage["primary_workflows"]
+    assert result.coverage["status"] == "covered"
+    assert result.coverage["uncovered_files"] == []
 
 
 def test_run_codex_check_passes_only_with_real_interaction(tmp_path, monkeypatch) -> None:

@@ -50,6 +50,7 @@ def test_init_workspace_creates_dirs_and_demo(tmp_path) -> None:
         "browser_form_workflow",
         "checkout_verification",
         "local_html_form_workflow",
+        "pacer_workbench_static_acceptance",
     }
     manifest = json.loads((workspace.root / "workspace.json").read_text(encoding="utf-8"))
     assert manifest["project_root"] == str(workspace.project_root)
@@ -86,7 +87,7 @@ def test_validate_workspace_accepts_demo(tmp_path) -> None:
 
     results = validate_workspace(workspace)
 
-    assert len(results) == 3
+    assert len(results) == 4
     assert all(result.valid for result in results)
 
 
@@ -445,10 +446,10 @@ def test_workspace_status_reports_counts(tmp_path) -> None:
 
     assert status["project_root"] == str(workspace.project_root)
     assert status["framework_hint"] is None
-    assert status["workflow_count"] == 3
+    assert status["workflow_count"] == 4
     assert status["report_count"] == 0
     assert status["regression_test_count"] == 0
-    assert status["valid_workflows"] == 3
+    assert status["valid_workflows"] == 4
     assert status["invalid_workflows"] == 0
 
 

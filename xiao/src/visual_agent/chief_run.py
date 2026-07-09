@@ -17,6 +17,7 @@ from .agent_capabilities import canonical_agent_name, load_agent_profile, recomm
 from .chief_dispatch import dispatch_chief_plan
 from .chief_engineer import build_chief_plan, chief_plan_to_dict
 from .chief_plans_store import load_plan, save_plan
+from .command_verification import NON_REPAIRABLE_COMMAND_FAILURE_KINDS
 from .goal_grounding import goal_references_plan, ground_goal, grounding_to_markdown
 from .mission_intake import is_manual_verification_goal, is_review_plan_goal
 from .missions import (
@@ -30,12 +31,26 @@ from .missions import (
 )
 from .models import to_jsonable
 from .mission_pipeline import mission_result_to_pipeline_state, write_mission_state
+from .mission_contract import normalize_requirement_contract, requirement_contract_planning_answers
+from .mission_progress import build_mission_progress, save_mission_progress
 from .notifications import build_event_notification, load_notification_config, send_email_notification
 from .verification_profiles import resolve_test_command
 from .workspace import init_workspace
 
 
 DispatchRunner = Callable[..., dict[str, Any]]
+
+
+def _planning_answers(answers: tuple[str, ...] | list[str], contract: dict[str, Any]) -> tuple[str, ...]:
+    merged: list[str] = []
+    for item in answers:
+        text = str(item).strip()
+        if text and text not in merged:
+            merged.append(text)
+    for item in requirement_contract_planning_answers(contract):
+        if item and item not in merged:
+            merged.append(item)
+    return tuple(merged)
 
 
 def run_chief_mission(
@@ -67,11 +82,25 @@ def run_chief_mission(
     dispatch_runner: DispatchRunner | None = None,
     ground_vague_goals: bool = True,
     grounding_runner: Callable[..., dict[str, Any]] | None = None,
+    requirement_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     started = monotonic()
     original_goal = str(goal or "")
     workspace_path = Path(workspace_root).expanduser().resolve()
     repo_path = Path(repo_root).expanduser().resolve()
+    agent_for_contract = str(agents[0]) if agents else ""
+    contract_payload = normalize_requirement_contract(
+        requirement_contract,
+        goal=original_goal,
+        answers=answers,
+        repo_root=repo_path,
+        test_command=test_command,
+        agent=agent_for_contract,
+    )
+    contract_goal = str(contract_payload.get("final_goal") or "").strip()
+    if contract_goal:
+        goal = contract_goal
+    planning_answers = _planning_answers(answers, contract_payload)
     resolved_test_command, verification_profile = resolve_test_command(test_command, repo_root=repo_path)
     test_command = resolved_test_command
     if test_command and not workspace_path.exists():
@@ -99,6 +128,16 @@ def run_chief_mission(
         plan_id = str(mission.get("plan_id") or plan_id or "")
         goal = str(mission.get("objective") or goal or "")
         repo_path = Path(str(mission.get("repo_root") or repo_path)).expanduser().resolve()
+        if not contract_payload and isinstance(mission.get("requirement_contract"), dict):
+            contract_payload = normalize_requirement_contract(
+                mission.get("requirement_contract"),
+                goal=str(goal or ""),
+                answers=answers,
+                repo_root=repo_path,
+                test_command=test_command,
+                agent=agent_for_contract,
+            )
+            planning_answers = _planning_answers(answers, contract_payload)
         if isinstance(mission.get("budget_policy"), dict):
             budget = dict(mission["budget_policy"])
 
@@ -145,9 +184,11 @@ def run_chief_mission(
             max_workflows=max_workflows,
             run_profile=run_profile,
             interview=interview,
-            answers=answers,
+            answers=planning_answers,
         )
         plan_payload = chief_plan_to_dict(plan)
+        if contract_payload:
+            plan_payload["requirement_contract"] = contract_payload
         # A vague goal is not always noise: it often points at a plan document
         # in the repo. Review those documents (cheap model) before refusing —
         # resolve into the plan's next concrete task, or come back with a
@@ -165,7 +206,7 @@ def run_chief_mission(
                 grounding_payload = None
             if grounding_payload and grounding_payload.get("resolved") and str(grounding_payload.get("grounded_goal") or "").strip():
                 goal = str(grounding_payload["grounded_goal"]).strip()
-                grounded_answers = tuple(answers) + tuple(
+                grounded_answers = tuple(planning_answers) + tuple(
                     part
                     for part in (
                         f"依据项目计划文档 {grounding_payload.get('plan_document') or ''}：{grounding_payload.get('evidence') or ''}".strip("："),
@@ -186,6 +227,8 @@ def run_chief_mission(
                     answers=grounded_answers,
                 )
                 plan_payload = chief_plan_to_dict(plan)
+                if contract_payload:
+                    plan_payload["requirement_contract"] = contract_payload
             if grounding_payload:
                 plan_payload["grounding"] = grounding_payload
         saved = save_plan(plan_payload, workspace_root=workspace_path)
@@ -228,6 +271,7 @@ def run_chief_mission(
             budget_policy=budget,
             mission_id=mission_id,
             status="created",
+            requirement_contract=contract_payload,
         )
         write_mission_state(
             workspace_path,
@@ -250,10 +294,38 @@ def run_chief_mission(
                     "grounded_goal": str(grounding_payload.get("grounded_goal") or ""),
                 },
             )
+        if contract_payload:
+            append_round(
+                workspace_path,
+                mission["mission_id"],
+                {
+                    "round": _next_round_number(workspace_path, mission["mission_id"]),
+                    "type": "requirement_contract",
+                    "status": "recorded",
+                    "payload": _compact_requirement_contract(contract_payload),
+                },
+            )
+        save_mission_progress(
+            workspace_path,
+            str(mission["mission_id"]),
+            stage="planning",
+            stage_label="Planning",
+            status=str(mission.get("status") or "created"),
+            plan_id=str(plan_id or ""),
+            last_activity_at=str(mission.get("updated_at") or ""),
+        )
     elif execute and not dry_run:
         mission["status"] = "running"
         mission["stop_reason"] = ""
         save_mission(workspace_path, mission)
+        save_mission_progress(
+            workspace_path,
+            str(mission["mission_id"]),
+            stage="resuming",
+            stage_label="Resuming mission",
+            status="running",
+            plan_id=str(plan_id or ""),
+        )
         write_mission_state(
             workspace_path,
             str(mission["mission_id"]),
@@ -394,6 +466,7 @@ def run_chief_mission(
     preview = runner(
         workspace_root=workspace_path,
         plan_id=str(plan_id),
+        mission_id=str(mission["mission_id"]),
         execute=False,
         dry_run=True,
         run_profile=run_profile,
@@ -418,6 +491,16 @@ def run_chief_mission(
             "plan_id": plan_id,
             "payload": _compact_dispatch(preview),
         },
+    )
+    preview_worktree = preview.get("worktree") if isinstance(preview.get("worktree"), dict) else {}
+    save_mission_progress(
+        workspace_path,
+        str(mission["mission_id"]),
+        stage="dispatch_ready",
+        stage_label="Dispatch ready",
+        status=str(preview.get("status") or ""),
+        plan_id=str(plan_id or ""),
+        worktree=str(preview_worktree.get("path") or ""),
     )
     if str(preview.get("status") or "") == "blocked":
         return _finish(
@@ -455,9 +538,18 @@ def run_chief_mission(
         )
 
     auto_repair_once = bool(budget["max_rounds"] > 1 and budget["max_repair_rounds"] > 0)
+    save_mission_progress(
+        workspace_path,
+        str(mission["mission_id"]),
+        stage="worker_starting",
+        stage_label="Worker starting",
+        status="running",
+        plan_id=str(plan_id or ""),
+    )
     dispatch = runner(
         workspace_root=workspace_path,
         plan_id=str(plan_id),
+        mission_id=str(mission["mission_id"]),
         execute=True,
         dry_run=False,
         run_profile=run_profile,
@@ -474,7 +566,14 @@ def run_chief_mission(
     )
     _record_dispatch_attempts(workspace_path, mission["mission_id"], dispatch, start_round=_next_round_number(workspace_path, mission["mission_id"]))
     stop_reason = _stop_reason_from_dispatch(dispatch, budget)
-    status = "verified" if stop_reason == "verified" else "stopped"
+    dispatch_status = str(dispatch.get("status") or "")
+    status = (
+        "verified"
+        if stop_reason == "verified"
+        else "verified_blocked"
+        if dispatch_status == "verified_blocked"
+        else "stopped"
+    )
     return _finish(
         workspace_root=workspace_path,
         mission=mission,
@@ -493,8 +592,11 @@ _TEST_EDIT_REQUEST_PATTERNS = (
     # the cold-start objective said "写 pytest 测试" and the guard then
     # deleted the tests the task explicitly asked for).
     re.compile(r"(写|加|补|改|更新|添加|新增|创建|编写)[^。！？!?；;\n]{0,16}测试"),
+    re.compile(r"(写|加|补|改|更新|添加|新增|创建|编写|补齐)[^。！？!?；;\n]{0,24}(验收|评测|回归|eval)"),
     re.compile(r"测试用例"),
+    re.compile(r"(验收|评测|回归)(样本|用例)"),
     re.compile(r"\b(add|write|update|create)\b[^.!?\n]{0,40}\btests?\b"),
+    re.compile(r"\b(add|write|update|create)\b[^.!?\n]{0,40}\b(eval|acceptance|regression)\b"),
     re.compile(r"\btest cases?\b"),
 )
 
@@ -523,6 +625,28 @@ def _plan_requests_test_edits(
             for key in ("input_goal", "grounded_goal", "acceptance_hint", "evidence")
         )
     return _objective_requests_test_edits("\n".join(item for item in snippets if item))
+
+
+def _compact_requirement_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    answers = contract.get("answers") if isinstance(contract.get("answers"), list) else []
+    questions = contract.get("clarifying_questions") if isinstance(contract.get("clarifying_questions"), list) else []
+    compact: dict[str, Any] = {
+        "source": str(contract.get("source") or ""),
+        "input_goal": str(contract.get("input_goal") or "")[:500],
+        "final_goal": str(contract.get("final_goal") or "")[:500],
+        "acceptance_hint": str(contract.get("acceptance_hint") or "")[:500],
+        "answers": [str(item)[:500] for item in answers[:8]],
+        "clarifying_questions": [str(item)[:300] for item in questions[:8]],
+    }
+    if "already_clear" in contract:
+        compact["already_clear"] = bool(contract.get("already_clear"))
+    if contract.get("model_id"):
+        compact["model_id"] = str(contract.get("model_id"))
+    if contract.get("intake_policy"):
+        compact["intake_policy"] = str(contract.get("intake_policy"))
+    if contract.get("model_unavailable") is not None:
+        compact["model_unavailable"] = bool(contract.get("model_unavailable"))
+    return compact
 
 
 def _record_dispatch_attempts(workspace_root: Path, mission_id: str, dispatch: dict[str, Any], *, start_round: int = 1) -> None:
@@ -661,17 +785,25 @@ def _stop_reason_from_dispatch(dispatch: dict[str, Any], budget: dict[str, Any])
         return "quota_exhausted"
     latest = dispatch.get("latest_verification") if isinstance(dispatch.get("latest_verification"), dict) else {}
     verdict = str(latest.get("verdict") or "")
-    if verdict == "pass":
+    if status in {"verified", "merged"} and verdict == "pass":
         return "verified"
+    if status == "verified_blocked":
+        return "worker_toolchain_violation"
+    if status == "no_product_changes":
+        return "no_product_changes"
+    if status == "worker_toolchain_violation":
+        return "worker_toolchain_violation"
     if status == "worker_failed":
         return "worker_error"
+    if status == "merged_verification_failed":
+        return "merged_verification_failed"
     if verdict == "coverage_gap":
         return "coverage_gap"
     if verdict == "inspection_only":
         return "inspection_only"
     command_result = latest.get("command_verification") if isinstance(latest.get("command_verification"), dict) else {}
     failure_kind = str(command_result.get("failure_kind") or "")
-    if failure_kind in {"test_command_invalid", "command_launch_error", "command_timeout"}:
+    if failure_kind in NON_REPAIRABLE_COMMAND_FAILURE_KINDS:
         return failure_kind
     attempts = dispatch.get("verification_attempts") if isinstance(dispatch.get("verification_attempts"), list) else []
     failed = [_failed_signature(item) for item in attempts if _failed_signature(item)]
@@ -726,6 +858,9 @@ def _compact_dispatch(payload: dict[str, Any]) -> dict[str, Any]:
         "worker": payload.get("worker"),
         "worktree": payload.get("worktree"),
         "verification": payload.get("verification"),
+        "toolchain_policy": payload.get("toolchain_policy"),
+        "toolchain_preflight": payload.get("toolchain_preflight"),
+        "toolchain_violation": payload.get("toolchain_violation"),
         "usage_summary": payload.get("usage_summary"),
         "merge": payload.get("merge"),
         "failover_worker_record": _compact_worker(payload.get("failover_worker_record")),
@@ -778,6 +913,14 @@ def _message_for_stop(stop_reason: str) -> str:
             "任务停止：验证命令超时。"
             "修复：增加 --timeout-seconds 或加快测试速度。"
         ),
+        "verification_environment_missing": (
+            "任务停止：验证环境缺少必需的外部服务或密钥。"
+            "修复：配置验收所需环境变量/API key 后重试；不要让 worker 修改产品代码、测试或 eval 脚本来绕过。"
+        ),
+        "merged_verification_failed": (
+            "任务停止：worktree 验收通过并已合并，但目标分支合并后复验失败。"
+            "修复：打开 final_report.md 查看 post-merge 输出，先修复或回滚目标分支，再继续托管。"
+        ),
         "same_failure_repeated": (
             "任务停止：自动修复后同样的测试失败仍然出现。"
             "修复：打开 final_report.md 查看失败输出，然后用更具体的目标重新开始。"
@@ -789,7 +932,16 @@ def _message_for_stop(stop_reason: str) -> str:
         "worker_error": (
             "任务停止：AI worker 进程失败或被终止。"
             "修复：运行 `checkpoint agents doctor` 确认可用，然后恢复。"
-            "如果是额度问题，可以尝试切换 agent：--agent claude-code 或 --agent mimo。"
+            "如果你明确接受其他后端，可以手动重试：--agent claude-code 或 --agent mimo。"
+        ),
+        "worker_toolchain_violation": (
+            "任务验收命令通过，但 AI worker 使用了任务禁止的工具链路径。"
+            "当前状态为 verified_blocked，不能合并。"
+            "修复：打开 final_report.md 查看 forbidden_path，要求 worker 只使用验收命令中的精确 SDK 可执行文件后重试。"
+        ),
+        "no_product_changes": (
+            "任务停止：验证命令通过，但 worker 没有产生真实产品代码改动。"
+            "修复：缩小目标或更换 agent 后重试；不要把缓存、报告或 .gitignore 当作产品改动。"
         ),
         "verification_failed": (
             "任务停止：所有修复轮次后验证仍然失败。"
@@ -801,9 +953,9 @@ def _message_for_stop(stop_reason: str) -> str:
             "或添加 --allow-dirty 跳过此安全检查。"
         ),
         "quota_exhausted": (
-            "任务停止：所有可用的 AI 后端都达到了配额限制。"
-            "修复：等待配额重置（codex: 每周，claude: 5 小时窗口），"
-            "或切换到其他 agent：--agent claude-code（如果 codex 额度用完）或 --agent mimo（免费后端）。"
+            "任务停止：当前指定的 AI agent 达到了配额限制。"
+            "修复：等待配额重置；如果你明确接受其他后端，"
+            "可以手动重试：--agent claude-code 或 --agent mimo。"
         ),
         "needs_clarification": (
             "任务停止：目标太模糊，无法安全规划。"
@@ -866,14 +1018,19 @@ def _finish(
         "dispatch": dispatch_payload,
     }
     if mission:
+        progress = build_mission_progress(workspace_root=workspace_root, mission=mission, rounds=rounds)
+        progress_fields = {key: value for key, value in progress.items() if key != "mission_id"}
+        progress = save_mission_progress(workspace_root, str(mission["mission_id"]), **progress_fields)
+        payload["progress"] = progress
         report_text = chief_run_to_markdown(payload)
         saved_report = write_final_report(workspace_root, str(mission["mission_id"]), report_text)
         payload["final_report_path"] = saved_report["path"]
-        record = _append_mandatory_record(payload)
-        if record.get("path"):
-            payload["mandatory_record_path"] = record["path"]
-        if record.get("error"):
-            payload["mandatory_record_error"] = record["error"]
+        if _should_append_mandatory_record(payload):
+            record = _append_mandatory_record(payload, workspace_root=workspace_root)
+            if record.get("path"):
+                payload["mandatory_record_path"] = record["path"]
+            if record.get("error"):
+                payload["mandatory_record_error"] = record["error"]
         payload["notification"] = _send_terminal_notification(payload)
     return payload
 
@@ -917,7 +1074,9 @@ def _notification_event_for_terminal_payload(payload: dict[str, Any]) -> str:
         return "worker_error"
     if stop_reason == "needs_clarification":
         return "needs_user_input"
-    if status in {"blocked", "failed"}:
+    if status == "verified_blocked":
+        return "mission_stopped"
+    if status in {"blocked", "failed", "merged_verification_failed"}:
         return "mission_failed"
     if status in {"stopped", "preview"}:
         return "mission_stopped"
@@ -932,17 +1091,24 @@ def _first_implementation_track(plan: dict[str, Any]) -> dict[str, Any]:
     return tracks[0] if tracks and isinstance(tracks[0], dict) else {}
 
 
-def _append_mandatory_record(payload: dict[str, Any]) -> dict[str, Any]:
+def _should_append_mandatory_record(payload: dict[str, Any]) -> bool:
+    status = str(payload.get("status") or "")
+    stop_reason = str(payload.get("stop_reason") or "")
+    if status in {"preview", "background_started"} or stop_reason == "preview_only":
+        return False
+    return status in {"verified", "verified_blocked", "stopped", "blocked", "failed"} or bool(stop_reason)
+
+
+def _append_mandatory_record(payload: dict[str, Any], *, workspace_root: Path) -> dict[str, Any]:
     mission = payload.get("mission") if isinstance(payload.get("mission"), dict) else {}
     if not mission:
         return {}
-    repo_root_text = str(mission.get("repo_root") or "").strip()
-    if not repo_root_text:
+    mission_id = str(mission.get("mission_id") or "").strip()
+    if not mission_id:
         return {}
     try:
-        repo_root = Path(repo_root_text).expanduser().resolve()
-        repo_root.mkdir(parents=True, exist_ok=True)
-        path = repo_root / "强制测试记录.md"
+        path = Path(workspace_root).expanduser().resolve() / "missions" / mission_id / "强制测试记录.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
         dispatch = payload.get("dispatch") if isinstance(payload.get("dispatch"), dict) else {}
         latest = dispatch.get("latest_verification") if isinstance(dispatch.get("latest_verification"), dict) else {}
         command_verification = latest.get("command_verification") if isinstance(latest.get("command_verification"), dict) else {}
@@ -951,7 +1117,7 @@ def _append_mandatory_record(payload: dict[str, Any]) -> dict[str, Any]:
         if not path.exists():
             path.write_text(
                 "# 强制测试记录\n\n"
-                "本文件由 DevPacer / Checkpoint / Codex 自动追加。每次托管开发、验收、合并或失败都必须记录到这里，方便审查与回滚。\n",
+                "本文件由 DevPacer / Checkpoint / Codex 自动追加，保存在 mission 工作区内，避免污染产品仓库。\n",
                 encoding="utf-8",
             )
         lines = [
@@ -1003,12 +1169,38 @@ def chief_run_to_markdown(payload: dict[str, Any]) -> str:
     mission = payload.get("mission") if isinstance(payload.get("mission"), dict) else {}
     plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
     rounds = payload.get("rounds") if isinstance(payload.get("rounds"), list) else []
+    dispatch_payload = payload.get("dispatch") if isinstance(payload.get("dispatch"), dict) else {}
+    latest_verification = (
+        dispatch_payload.get("latest_verification")
+        if isinstance(dispatch_payload.get("latest_verification"), dict)
+        else {}
+    )
+    command_verification = (
+        latest_verification.get("command_verification")
+        if isinstance(latest_verification.get("command_verification"), dict)
+        else {}
+    )
     lines = ["## Pacer Mission", ""]
     lines.append(f"Status: `{payload.get('status')}`")
     lines.append(f"Stop reason: `{payload.get('stop_reason')}`")
     if payload.get("message"):
         lines.append(f"Message: {payload['message']}")
-    dispatch_payload = payload.get("dispatch") if isinstance(payload.get("dispatch"), dict) else {}
+    progress = payload.get("progress") if isinstance(payload.get("progress"), dict) else {}
+    if progress:
+        lines.extend(["", "### Progress", ""])
+        lines.append(f"- Stage: `{progress.get('stage') or ''}`")
+        if progress.get("stage_label"):
+            lines.append(f"- Stage label: {progress.get('stage_label')}")
+        if progress.get("last_activity_at"):
+            lines.append(f"- Last activity: `{progress.get('last_activity_at')}`")
+        lines.append(f"- Product files changed: `{progress.get('changed_product_file_count', 0)}`")
+        changed_product = progress.get("changed_product_files") if isinstance(progress.get("changed_product_files"), list) else []
+        if changed_product:
+            lines.append("- Changed product files: " + ", ".join(f"`{item}`" for item in changed_product[:8]))
+        if progress.get("verification_verdict"):
+            lines.append(f"- Verification verdict: `{progress.get('verification_verdict')}`")
+        if progress.get("blocker"):
+            lines.append(f"- Blocker: `{progress.get('blocker')}`")
     diagnosis_report = str(dispatch_payload.get("diagnosis_report") or "")
     if diagnosis_report:
         lines.extend(["", "### 诊断报告", "", diagnosis_report])
@@ -1035,11 +1227,66 @@ def chief_run_to_markdown(payload: dict[str, Any]) -> str:
                 f"max_wall_minutes={budget.get('max_wall_minutes')}, "
                 f"max_worker_minutes={budget.get('max_worker_minutes')}"
             )
+        contract = mission.get("requirement_contract") if isinstance(mission.get("requirement_contract"), dict) else {}
+        if contract:
+            lines.extend(["", "### Requirement Contract", ""])
+            audit_parts = []
+            if contract.get("source"):
+                audit_parts.append(f"source={contract.get('source')}")
+            if contract.get("intake_policy"):
+                audit_parts.append(f"policy={contract.get('intake_policy')}")
+            if contract.get("model_id"):
+                audit_parts.append(f"model={contract.get('model_id')}")
+            if audit_parts:
+                lines.append(f"- 收口来源：`{', '.join(audit_parts)}`")
+            if contract.get("model_unavailable"):
+                lines.append("- 收口降级：选中的 Agent 不可用，未静默切换到其他模型。")
+            if contract.get("input_goal") and contract.get("input_goal") != contract.get("final_goal"):
+                lines.append(f"- 原始目标：{contract.get('input_goal')}")
+            if contract.get("final_goal"):
+                lines.append(f"- 收口目标：{contract.get('final_goal')}")
+            if contract.get("acceptance_hint"):
+                lines.append(f"- 验收提示：{contract.get('acceptance_hint')}")
+            answers = contract.get("answers") if isinstance(contract.get("answers"), list) else []
+            for item in answers[:8]:
+                lines.append(f"- 用户补充：{item}")
     if plan:
         lines.extend(["", "### Plan", ""])
-        lines.append(f"- Status: `{plan.get('status')}`")
-        workflows = ", ".join(plan.get("selected_workflows") or []) or "none"
-        lines.append(f"- Selected workflows: {workflows}")
+        if command_verification:
+            original_status = str(plan.get("status") or "")
+            lines.append("- Status: `command_gate`")
+            if original_status and original_status != "ready":
+                lines.append(f"- Workflow coverage status: `{original_status}` (superseded by explicit test command)")
+            lines.append("- Verification mode: `command`")
+            lines.append("- Selected workflows: not used (explicit test command)")
+        else:
+            lines.append(f"- Status: `{plan.get('status')}`")
+            workflows = ", ".join(plan.get("selected_workflows") or []) or "none"
+            lines.append(f"- Selected workflows: {workflows}")
+    if command_verification:
+        lines.extend(["", "### Verification", ""])
+        lines.append("- Mode: `command`")
+        lines.append(f"- Command: `{command_verification.get('command') or ''}`")
+        lines.append(f"- Verdict: `{latest_verification.get('verdict') or command_verification.get('verdict') or ''}`")
+        if command_verification.get("exit_code") is not None:
+            lines.append(f"- Exit code: `{command_verification.get('exit_code')}`")
+        if command_verification.get("failure_kind"):
+            lines.append(f"- Failure kind: `{command_verification.get('failure_kind')}`")
+    toolchain_violation = (
+        dispatch_payload.get("toolchain_violation")
+        if isinstance(dispatch_payload.get("toolchain_violation"), dict)
+        else {}
+    )
+    if toolchain_violation:
+        lines.extend(["", "### Gate Decision", ""])
+        lines.append("- Verified: `false`")
+        lines.append("- Reason: worker used a forbidden sibling SDK wrapper/path.")
+        if toolchain_violation.get("expected_executable"):
+            lines.append(f"- Expected executable: `{toolchain_violation.get('expected_executable')}`")
+        if toolchain_violation.get("forbidden_path"):
+            lines.append(f"- Forbidden path: `{toolchain_violation.get('forbidden_path')}`")
+        if toolchain_violation.get("log_path"):
+            lines.append(f"- Worker log: `{toolchain_violation.get('log_path')}`")
     grounding = plan.get("grounding") if isinstance(plan.get("grounding"), dict) else None
     if grounding:
         lines.extend(["", grounding_to_markdown(grounding)])
@@ -1130,6 +1377,15 @@ def mission_status_payload(*, workspace_root: str | Path, mission_id: str) -> di
                     payload["final_report_path"] = saved_report["path"]
         except (OSError, json.JSONDecodeError):
             payload["background"] = {"status": "unreadable", "path": str(background_path)}
+    payload["progress"] = build_mission_progress(
+        workspace_root=workspace_path,
+        mission=payload["mission"] if isinstance(payload.get("mission"), dict) else mission,
+        rounds=payload["rounds"] if isinstance(payload.get("rounds"), list) else rounds,
+        background=payload.get("background") if isinstance(payload.get("background"), dict) else None,
+    )
+    progress_message = _progress_next_action(payload["progress"])
+    if progress_message:
+        payload["message"] = progress_message
     return payload
 
 
@@ -1137,11 +1393,13 @@ def _status_next_action(mission: dict[str, Any]) -> str:
     status = str(mission.get("status") or "")
     stop_reason = str(mission.get("stop_reason") or "")
     if status == "background_running":
-        return "Background run is active or recently started. Inspect logs if it does not update."
+        return "Background run is active. Check the progress field for stage, activity, product changes, and verification state."
     if status == "preview" and stop_reason == "preview_only":
         return "Run `mission start --resume <mission_id> --execute` to execute this previewed mission."
     if status == "verified":
         return "Mission verified. Run `checkpoint mission list` to review, or `git log` to see the merged commit."
+    if status == "verified_blocked":
+        return "Verification passed, but a policy gate blocked verified/merge. Open final_report.md and retry with the required toolchain."
     if stop_reason == "coverage_gap":
         return "Add --test-command \"<your test command>\" to your next mission start, or add --allow-coverage-gap."
     if stop_reason == "manual_verification_required":
@@ -1154,13 +1412,36 @@ def _status_next_action(mission: dict[str, Any]) -> str:
         return "Run `git status` to see dirty files. Commit or stash them, then retry."
     if stop_reason in ("same_failure_repeated", "verification_failed"):
         return "Open final_report.md to read the failing test output, then start a new mission with a more specific goal."
+    if stop_reason == "merged_verification_failed":
+        return "Open final_report.md for the post-merge failure, then fix or revert the target branch before continuing."
     if stop_reason == "quota_exhausted":
-        return "Wait for quota reset or switch agent with --agent claude-code (or --agent mimo)."
+        return "Wait for quota reset, or explicitly retry with another agent such as --agent claude-code or --agent mimo."
+    if stop_reason == "worker_toolchain_violation":
+        return "Open final_report.md for the forbidden tool path, then retry with the exact SDK executable named by the verification command."
     if stop_reason == "worker_error":
         return "Run `checkpoint agents doctor` to confirm the agent is installed, then resume the mission."
+    if stop_reason == "verification_environment_missing":
+        return "Configure the required verification environment or API key, then resume the mission without changing tests or eval scripts."
     if stop_reason in ("budget_exhausted", "command_timeout"):
         return "Resume with a larger --max-rounds or narrower --goal to reduce scope."
     return "Run `checkpoint mission list` and open final_report.md for the next action."
+
+
+def _progress_next_action(progress: dict[str, Any]) -> str:
+    stage = str(progress.get("stage") or "")
+    if stage == "worker_activity_stale":
+        return (
+            "Mission is marked running, but no live background worker or worker record was found. "
+            "Resume the mission or start a new one; current worktree changes are listed in progress.changed_files."
+        )
+    if stage in {"worker_running", "worker_started", "background_started"}:
+        changed = int(progress.get("changed_product_file_count") or 0)
+        return f"Worker is active; product files changed so far: {changed}. Check progress.latest_log_path for live output."
+    if stage == "verification_running":
+        return "Worker finished or is finishing; Pacer is running the acceptance gate."
+    if stage == "verification_pending":
+        return "Worker completed; run or wait for verification before trusting the result."
+    return ""
 
 
 def payload_to_json(payload: dict[str, Any]) -> str:

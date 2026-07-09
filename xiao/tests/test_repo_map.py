@@ -52,6 +52,28 @@ def test_build_repo_map_extracts_symbols(tmp_path):
     assert "TAX_RATE" in ts_symbols
 
 
+def test_build_repo_map_handles_non_ascii_git_paths(tmp_path):
+    repo = tmp_path / "proj"
+    source = repo / "支付宝" / "backend" / "src"
+    source.mkdir(parents=True)
+    (source / "service.js").write_text(
+        "export function reviewMedicalPolicy() {}\n"
+        "export class ServiceCase {}\n",
+        encoding="utf-8",
+    )
+    _git(repo, "init")
+    _git(repo, "add", ".")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init")
+
+    payload = build_repo_map(repo_root=repo, cache_path=None)
+
+    rel = "支付宝/backend/src/service.js"
+    assert rel in payload["files"]
+    assert "reviewMedicalPolicy" in payload["files"][rel]["symbols"]
+    text = render_repo_map(payload, goal="支付宝 医保 service", max_lines=20)
+    assert rel in text
+
+
 def test_build_repo_map_incremental_reuses_cache(tmp_path):
     repo = _make_repo(tmp_path)
     cache = repo_map_cache_path(tmp_path / ".agent-workspace")
@@ -116,6 +138,8 @@ def test_worker_prompt_includes_repo_map_excerpt(tmp_path):
     prompt = command.get("stdin") or command["argv"][-1]
     assert "Repository map" in prompt
     assert "class Invoice(total, currency)" in prompt
+    assert "verify the real paths you need" in prompt
+    assert "trust it for orientation instead of scanning" not in prompt
 
 
 def test_worker_prompt_without_map_is_unchanged(tmp_path):

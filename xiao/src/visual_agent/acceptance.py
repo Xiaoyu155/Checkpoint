@@ -376,6 +376,22 @@ def grade_run(steps: Iterable[Any], *, visual_passed: bool | None = None) -> Acc
     opened_simulated = any(action in SIMULATED_OBSERVE_ACTIONS for _, action in succeeded)
     simulated = opened_simulated and not opened_live
 
+    command_acceptance_index = next(
+        (
+            index
+            for index, step in enumerate(step_list)
+            if str(getattr(step, "action", "") or "") == "run_command"
+            and getattr(step, "status", None) == ActionStatus.SUCCESS
+            and has_valid_operation_receipt(step)
+        ),
+        None,
+    )
+    if not opened_live and not opened_simulated and command_acceptance_index is not None:
+        # A trusted workflow command is a CLI/test acceptance gate rather than a
+        # UI visit. Treat a successful command with a live subprocess receipt as
+        # L3 evidence: it exercised the product contract and verified the outcome.
+        return grade(3, missing=_LEVEL_REQUIREMENTS[4])
+
     if not opened_live and not opened_simulated:
         return grade(-1, missing=_LEVEL_REQUIREMENTS[0])
 

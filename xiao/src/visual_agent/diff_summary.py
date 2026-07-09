@@ -139,7 +139,7 @@ def _git_diff_stat(root: Path, base: str) -> list[dict[str, Any]]:
     """Parse `git diff --numstat` for per-file line counts."""
     try:
         result = subprocess.run(
-            ["git", "diff", "--numstat", base],
+            ["git", "-c", "core.quotePath=false", "diff", "--numstat", base],
             cwd=str(root),
             capture_output=True,
             text=True,
@@ -154,7 +154,7 @@ def _git_diff_stat(root: Path, base: str) -> list[dict[str, Any]]:
     staged: dict[str, tuple[int, int]] = {}
     try:
         staged_result = subprocess.run(
-            ["git", "diff", "--numstat", "--cached"],
+            ["git", "-c", "core.quotePath=false", "diff", "--numstat", "--cached"],
             cwd=str(root),
             capture_output=True,
             text=True,
@@ -173,7 +173,7 @@ def _git_diff_stat(root: Path, base: str) -> list[dict[str, Any]]:
     status_map: dict[str, str] = {}
     try:
         ns = subprocess.run(
-            ["git", "diff", "--name-status", base],
+            ["git", "-c", "core.quotePath=false", "diff", "--name-status", base],
             cwd=str(root), capture_output=True, text=True, timeout=30.0,
             encoding="utf-8", errors="replace",
         )
@@ -210,13 +210,23 @@ def _git_diff_stat(root: Path, base: str) -> list[dict[str, Any]]:
                 "lines_removed": removed,
             }
 
+    for path in _git_untracked_files(root):
+        if path in files:
+            continue
+        files[path] = {
+            "path": path,
+            "status": "A",
+            "lines_added": _count_file_lines(root / path),
+            "lines_removed": 0,
+        }
+
     return sorted(files.values(), key=lambda f: f["path"])
 
 
 def _git_diff_text(root: Path, base: str) -> str:
     try:
         result = subprocess.run(
-            ["git", "diff", base],
+            ["git", "-c", "core.quotePath=false", "diff", base],
             cwd=str(root),
             capture_output=True,
             timeout=30.0,
@@ -224,9 +234,70 @@ def _git_diff_text(root: Path, base: str) -> str:
             errors="replace",
         )
         text = result.stdout or ""
+        untracked_text = _untracked_diff_text(root)
+        if untracked_text:
+            text = text + "\n" + untracked_text
         return text[:_MAX_DIFF_BYTES]
     except (OSError, subprocess.TimeoutExpired):
         return ""
+
+
+def _git_untracked_files(root: Path) -> list[str]:
+    try:
+        result = subprocess.run(
+            ["git", "-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    paths: list[str] = []
+    for raw in result.stdout.splitlines():
+        path = raw.strip().strip('"').replace("\\", "/")
+        if not path:
+            continue
+        full = root / path
+        if full.exists() and full.is_file():
+            paths.append(path)
+    return sorted(dict.fromkeys(paths))
+
+
+def _count_file_lines(path: Path) -> int:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return 0
+    if b"\0" in data:
+        return 0
+    if not data:
+        return 0
+    return data.count(b"\n") + (0 if data.endswith(b"\n") else 1)
+
+
+def _untracked_diff_text(root: Path) -> str:
+    chunks: list[str] = []
+    remaining = _MAX_DIFF_BYTES
+    for rel in _git_untracked_files(root):
+        path = root / rel
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        header = f"diff --git a/{rel} b/{rel}\n--- /dev/null\n+++ b/{rel}\n"
+        body = "\n".join(f"+{line}" for line in text.splitlines())
+        chunk = header + body + "\n"
+        if len(chunk) > remaining:
+            chunks.append(chunk[:remaining])
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+        if remaining <= 0:
+            break
+    return "\n".join(chunks)
 
 
 def _extract_symbols(diff_text: str) -> list[dict[str, str]]:

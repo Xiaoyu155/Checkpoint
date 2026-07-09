@@ -185,7 +185,7 @@ def _load_cache(cache_path: str | Path | None) -> dict[str, Any]:
 def _list_files(root: Path) -> list[str]:
     try:
         completed = subprocess.run(
-            ["git", "-C", str(root), "ls-files"],
+            ["git", "-C", str(root), "-c", "core.quotePath=false", "ls-files"],
             capture_output=True,
             text=True,
             timeout=30.0,

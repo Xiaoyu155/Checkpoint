@@ -4,8 +4,9 @@ import json
 from pathlib import Path
 
 from visual_agent.chief_dispatch import build_worker_command
-from visual_agent.chief_run import _override_plan_agent, mission_status_payload, run_chief_mission
-from visual_agent.missions import load_mission, load_rounds
+from visual_agent.chief_run import _override_plan_agent, chief_run_to_markdown, mission_status_payload, run_chief_mission
+from visual_agent.mission_progress import save_mission_progress
+from visual_agent.missions import load_mission, load_rounds, save_mission
 from visual_agent.notifications import NotificationConfig
 from visual_agent.workspace import init_workspace
 
@@ -58,6 +59,64 @@ def verified_payload(**kwargs):
     }
 
 
+def worker_failed_passing_check_payload(**kwargs):
+    if not kwargs.get("execute"):
+        return preview_payload(**kwargs)
+    attempt = {
+        "verdict": "pass",
+        "run_profile": "supervised",
+        "passed": 1,
+        "inspection_only": 0,
+        "failed": 0,
+        "total": 1,
+        "results": [{"name": "explicit-command", "status": "passed"}],
+        "command_verification": {
+            "command": "python -c pass",
+            "verdict": "pass",
+            "exit_code": 0,
+        },
+    }
+    return {
+        "schema_version": 1,
+        "status": "worker_failed",
+        "worker_record": {"status": "failed", "stderr_tail": "patch fragment without header"},
+        "verification_attempts": [attempt],
+        "latest_verification": attempt,
+    }
+
+
+def verified_blocked_payload(**kwargs):
+    if not kwargs.get("execute"):
+        return preview_payload(**kwargs)
+    attempt = {
+        "verdict": "pass",
+        "run_profile": "supervised",
+        "passed": 1,
+        "inspection_only": 0,
+        "failed": 0,
+        "total": 1,
+        "results": [{"name": "explicit-command", "status": "passed"}],
+        "command_verification": {
+            "command": "dart analyze",
+            "verdict": "pass",
+            "exit_code": 0,
+        },
+    }
+    return {
+        "schema_version": 1,
+        "status": "verified_blocked",
+        "worker_record": {"status": "completed"},
+        "verification_attempts": [attempt],
+        "latest_verification": attempt,
+        "toolchain_violation": {
+            "status": "violated",
+            "expected_executable": r"D:\Projects\flutter_stable\bin\cache\dart-sdk\bin\dart.exe",
+            "forbidden_path": r"D:\Projects\flutter_stable\bin\flutter.bat",
+            "log_path": r"D:\logs\worker.log",
+        },
+    }
+
+
 def repeated_failure_payload(**kwargs):
     if not kwargs.get("execute"):
         return preview_payload(**kwargs)
@@ -82,6 +141,37 @@ def repeated_failure_payload(**kwargs):
         "status": "verification_failed",
         "worker_record": {"status": "completed"},
         "verification_attempts": [attempt, attempt],
+        "latest_verification": attempt,
+    }
+
+
+def missing_verification_environment_payload(**kwargs):
+    if not kwargs.get("execute"):
+        return preview_payload(**kwargs)
+    attempt = {
+        "verdict": "fail",
+        "run_profile": "supervised",
+        "passed": 0,
+        "inspection_only": 0,
+        "failed": 1,
+        "total": 1,
+        "command_verification": {
+            "command": "npm run eval:acceptance",
+            "verdict": "fail",
+            "exit_code": 1,
+            "failure_kind": "verification_environment_missing",
+            "output_tail": "QWEN_API_KEY missing",
+        },
+        "repair_brief": {
+            "source": "test_command",
+            "failure_kind": "verification_environment_missing",
+        },
+    }
+    return {
+        "schema_version": 1,
+        "status": "verification_failed",
+        "worker_record": {"status": "completed"},
+        "verification_attempts": [attempt],
         "latest_verification": attempt,
     }
 
@@ -112,6 +202,8 @@ def test_chief_run_dry_run_saves_preview_mission(tmp_path, monkeypatch) -> None:
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["current_state"] == "REVIEW"
     assert state["context"]["history"][-1]["event"] == "chief_run_finished"
+    assert "mandatory_record_path" not in payload
+    assert not (tmp_path / "强制测试记录.md").exists()
     rounds = load_rounds(workspace.root, mission["mission_id"])
     assert rounds[0]["type"] == "dispatch_preview"
 
@@ -167,6 +259,9 @@ def test_objective_test_edit_inference_handles_qualified_phrases() -> None:
     # V5 cold-start regression: a qualifier between the verb and 测试 must match.
     assert _objective_requests_test_edits("创建 counting.py 并写 pytest 测试到 tests/test_counting.py")
     assert _objective_requests_test_edits("添加对应的单元测试")
+    assert _objective_requests_test_edits("补齐必要实现与验收样本")
+    assert _objective_requests_test_edits("更新 eval 验收脚本")
+    assert not _objective_requests_test_edits("审查 eval 脚本但不修改")
     assert _objective_requests_test_edits("write unit tests for the parser")
     assert _objective_requests_test_edits("add integration tests covering login")
     assert _plan_requests_test_edits(
@@ -178,6 +273,67 @@ def test_objective_test_edit_inference_handles_qualified_phrases() -> None:
     # Plain implementation goals must not unlock test edits.
     assert not _objective_requests_test_edits("修复登录页面的崩溃")
     assert not _objective_requests_test_edits("optimize the query planner")
+
+
+def test_chief_run_report_marks_command_verification_mode() -> None:
+    report = chief_run_to_markdown(
+        {
+            "status": "verified",
+            "stop_reason": "verified",
+            "mission": {"mission_id": "m1", "objective": "Add util", "plan_id": "p1"},
+            "plan": {"status": "needs_workflow_coverage", "selected_workflows": ["checkout_verification"]},
+            "rounds": [],
+            "dispatch": {
+                "latest_verification": {
+                    "verdict": "pass",
+                    "command_verification": {
+                        "command": "npm ci && npm test",
+                        "verdict": "pass",
+                        "exit_code": 0,
+                    },
+                }
+            },
+        }
+    )
+
+    assert "- Status: `command_gate`" in report
+    assert "- Workflow coverage status: `needs_workflow_coverage` (superseded by explicit test command)" in report
+    assert "- Verification mode: `command`" in report
+    assert "- Selected workflows: not used (explicit test command)" in report
+    assert "- Command: `npm ci && npm test`" in report
+    assert "Selected workflows: checkout_verification" not in report
+
+
+def test_chief_run_report_explains_toolchain_violation_gate() -> None:
+    report = chief_run_to_markdown(
+        {
+            "status": "stopped",
+            "stop_reason": "worker_toolchain_violation",
+            "mission": {"mission_id": "m1", "objective": "Fix discovery page", "plan_id": "p1"},
+            "plan": {"status": "ready"},
+            "rounds": [],
+            "dispatch": {
+                "latest_verification": {
+                    "verdict": "pass",
+                    "command_verification": {
+                        "command": r"D:\Projects\flutter_stable\bin\cache\dart-sdk\bin\dart.exe analyze lib/main.dart",
+                        "verdict": "pass",
+                        "exit_code": 0,
+                    },
+                },
+                "toolchain_violation": {
+                    "expected_executable": r"D:\Projects\flutter_stable\bin\cache\dart-sdk\bin\dart.exe",
+                    "forbidden_path": r"D:\Projects\flutter_stable\bin\dart.bat",
+                    "log_path": r"D:\logs\worker.log",
+                },
+            },
+        }
+    )
+
+    assert "### Gate Decision" in report
+    assert "- Verified: `false`" in report
+    assert r"D:\Projects\flutter_stable\bin\cache\dart-sdk\bin\dart.exe" in report
+    assert r"D:\Projects\flutter_stable\bin\dart.bat" in report
 
 
 def test_agent_override_recomputes_codex_specific_track_config(tmp_path) -> None:
@@ -269,6 +425,49 @@ def test_chief_run_blocks_vague_goal_before_dispatch(tmp_path, monkeypatch) -> N
     mission = load_mission(workspace.root, payload["mission"]["mission_id"])
     assert mission is not None
     assert mission["status"] == "stopped"
+
+
+def test_chief_run_dispatches_vague_goal_with_requirement_contract(tmp_path, monkeypatch) -> None:
+    workspace = ready_workspace(tmp_path, monkeypatch)
+
+    payload = run_chief_mission(
+        goal="改一下",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        requirement_contract={
+            "source": "goal_intake",
+            "input_goal": "改一下",
+            "final_goal": "修复结算页 checkout 金额显示，总价必须等于行项目之和",
+            "answers": ["保留现有优惠和税费展示"],
+            "acceptance_hint": "checkout 工作流验收通过",
+            "model_id": "codex:cli",
+            "intake_policy": "selected_agent_cli",
+        },
+        dispatch_runner=preview_payload,
+    )
+
+    assert payload["status"] == "preview"
+    assert payload["stop_reason"] == "preview_only"
+    assert "checkout 金额显示" in payload["mission"]["objective"]
+    assert payload["plan"]["clarity"]["ok"] is True
+    assert any("用户补充：保留现有优惠和税费展示" in item for item in payload["plan"]["acceptance_criteria"])
+    assert any("验收提示：checkout 工作流验收通过" in item for item in payload["plan"]["acceptance_criteria"])
+
+    mission = load_mission(workspace.root, payload["mission"]["mission_id"])
+    assert mission is not None
+    assert mission["requirement_contract"]["input_goal"] == "改一下"
+    assert mission["requirement_contract"]["final_goal"] == "修复结算页 checkout 金额显示，总价必须等于行项目之和"
+    rounds = load_rounds(workspace.root, mission["mission_id"])
+    assert any(round_.get("type") == "requirement_contract" for round_ in rounds)
+    contract_round = next(round_ for round_ in rounds if round_.get("type") == "requirement_contract")
+    assert contract_round["payload"]["intake_policy"] == "selected_agent_cli"
+    assert contract_round["payload"]["model_id"] == "codex:cli"
+    report = Path(payload["final_report_path"]).read_text(encoding="utf-8")
+    assert "### Requirement Contract" in report
+    assert "policy=selected_agent_cli" in report
+    assert "model=codex:cli" in report
+    assert "原始目标：改一下" in report
+    assert "收口目标：修复结算页 checkout 金额显示" in report
 
 
 def test_chief_run_grounds_vague_goal_onto_plan_document(tmp_path, monkeypatch) -> None:
@@ -442,10 +641,56 @@ def test_chief_run_execute_verified(tmp_path, monkeypatch) -> None:
     assert payload["status"] == "verified"
     assert payload["stop_reason"] == "verified"
     assert Path(payload["mandatory_record_path"]).name == "强制测试记录.md"
+    assert Path(payload["mandatory_record_path"]).parent == workspace.root / "missions" / payload["mission"]["mission_id"]
     assert "Fix checkout total display" in Path(payload["mandatory_record_path"]).read_text(encoding="utf-8")
+    assert not (tmp_path / "强制测试记录.md").exists()
     rounds = load_rounds(workspace.root, payload["mission"]["mission_id"])
     assert rounds[-1]["status"] == "pass"
     assert payload["notification"]["status"] == "skipped"
+
+
+def test_chief_run_worker_failure_is_not_verified_by_passing_command(tmp_path, monkeypatch) -> None:
+    workspace = ready_workspace(tmp_path, monkeypatch)
+
+    payload = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        execute=True,
+        dry_run=False,
+        test_command="python -c pass",
+        dispatch_runner=worker_failed_passing_check_payload,
+    )
+
+    assert payload["status"] == "stopped"
+    assert payload["stop_reason"] == "worker_error"
+    assert "worker 进程失败" in payload["message"]
+    rounds = load_rounds(workspace.root, payload["mission"]["mission_id"])
+    assert rounds[-1]["status"] == "pass"
+
+
+def test_chief_run_verified_blocked_is_not_reported_as_stopped(tmp_path, monkeypatch) -> None:
+    workspace = ready_workspace(tmp_path, monkeypatch)
+
+    payload = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        execute=True,
+        dry_run=False,
+        test_command="dart analyze",
+        dispatch_runner=verified_blocked_payload,
+    )
+
+    assert payload["status"] == "verified_blocked"
+    assert payload["stop_reason"] == "worker_toolchain_violation"
+    assert "不能合并" in payload["message"]
+    report = Path(payload["final_report_path"]).read_text(encoding="utf-8")
+    assert "Verified: `false`" in report
+    assert r"D:\Projects\flutter_stable\bin\flutter.bat" in report
+    mission_status = mission_status_payload(workspace_root=workspace.root, mission_id=payload["mission"]["mission_id"])
+    assert mission_status["status"] == "verified_blocked"
+    assert "policy gate blocked" in mission_status["message"]
 
 
 def test_chief_run_sends_terminal_notification_when_configured(tmp_path, monkeypatch) -> None:
@@ -505,6 +750,56 @@ def test_chief_run_execute_stops_on_repeated_failure(tmp_path, monkeypatch) -> N
     assert rounds[-1]["failed_signature"] == "checkout|assert_total|expected total 128"
 
 
+def test_chief_run_stops_on_missing_verification_environment(tmp_path, monkeypatch) -> None:
+    workspace = ready_workspace(tmp_path, monkeypatch)
+
+    payload = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        execute=True,
+        dry_run=False,
+        test_command="npm run eval:acceptance",
+        dispatch_runner=missing_verification_environment_payload,
+    )
+
+    assert payload["status"] == "stopped"
+    assert payload["stop_reason"] == "verification_environment_missing"
+    assert "验证环境" in payload["message"]
+    report = Path(payload["final_report_path"]).read_text(encoding="utf-8")
+    assert "verification_environment_missing" in report
+
+
+def test_chief_run_reports_post_merge_verification_failure() -> None:
+    from visual_agent.chief_run import _stop_reason_from_dispatch
+
+    dispatch = {
+        "status": "merged_verification_failed",
+        "latest_verification": {
+            "verdict": "fail",
+            "command_verification": {
+                "command": "npm run eval:acceptance",
+                "verdict": "fail",
+                "exit_code": 1,
+                "failure_kind": "verification_environment_missing",
+            },
+        },
+    }
+
+    assert _stop_reason_from_dispatch(dispatch, {"max_rounds": 2}) == "merged_verification_failed"
+    report = chief_run_to_markdown(
+        {
+            "status": "stopped",
+            "stop_reason": "merged_verification_failed",
+            "mission": {"mission_id": "m1", "objective": "Fix checkout", "plan_id": "p1"},
+            "plan": {"status": "ready"},
+            "rounds": [],
+            "dispatch": dispatch,
+        }
+    )
+    assert "Failure kind: `verification_environment_missing`" in report
+
+
 def test_chief_run_resume_executes_existing_preview_mission(tmp_path, monkeypatch) -> None:
     workspace = ready_workspace(tmp_path, monkeypatch)
     preview = run_chief_mission(
@@ -544,3 +839,27 @@ def test_mission_status_payload_reports_next_action(tmp_path, monkeypatch) -> No
     assert payload["status"] == "preview"
     assert "--resume" in payload["message"]
     assert payload["rounds"][0]["type"] == "dispatch_preview"
+    assert payload["progress"]["stage"] == "dispatch_ready"
+    assert "changed_product_file_count" in payload["progress"]
+
+
+def test_mission_status_payload_reports_stale_running_worker_activity(tmp_path, monkeypatch) -> None:
+    workspace = ready_workspace(tmp_path, monkeypatch)
+    preview = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        dispatch_runner=preview_payload,
+    )
+    mission = preview["mission"]
+    mission["status"] = "running"
+    mission["stop_reason"] = ""
+    save_mission(workspace.root, mission)
+    save_mission_progress(workspace.root, mission["mission_id"], stage="worker_running")
+
+    payload = mission_status_payload(workspace_root=workspace.root, mission_id=mission["mission_id"])
+
+    assert payload["status"] == "running"
+    assert payload["progress"]["stage"] == "worker_activity_stale"
+    assert payload["progress"]["needs_attention"] is True
+    assert "no live background worker" in payload["message"]

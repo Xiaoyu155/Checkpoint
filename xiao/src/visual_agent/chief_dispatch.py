@@ -21,10 +21,19 @@ from .agent_backends import (
     resolve_backend_for_tier,
 )
 from .agent_capabilities import canonical_agent_name, load_agent_profile, recommend_worker_config
-from .command_verification import changed_test_files, command_repair_brief, run_command_verification, tamper_repair_brief
+from .command_verification import (
+    NON_REPAIRABLE_COMMAND_FAILURE_KINDS,
+    changed_test_files,
+    command_repair_brief,
+    is_test_path,
+    run_command_verification,
+    tamper_repair_brief,
+)
 from .chief_plans_store import append_worker_record, load_plan, plan_dir, save_verification
-from .codex_check import codex_check_to_markdown, run_codex_check
+from .codex_check import codex_check_to_markdown, is_runtime_changed_file, run_codex_check
 from .diff_summary import build_diff_summary
+from .mission_progress import record_worker_output, save_mission_progress
+from .subprocess_window import hidden_subprocess_kwargs
 from .git_diff import changed_files
 from .llm_providers import LLMBackend, run_llm_completion
 from .models import to_jsonable
@@ -37,17 +46,30 @@ from .workspace import open_workspace
 # and must never be counted as changed files — otherwise a second verification
 # round sees them as uncovered changes and reports a phantom coverage gap.
 _ARTIFACT_BASENAMES = {".visual-agent-status.md", "强制测试记录.md"}
-_ARTIFACT_DIR_PREFIXES = (".pw-browsers/",)
+_ARTIFACT_DIR_PREFIXES = (".pw-browsers/", ".npm-cache/", ".dart-home/", ".dart_tool/", "artifacts/")
 _NON_PRODUCT_DIR_PREFIXES = ("_graveyard_", "graveyard/", "archive/", "archives/", "_open_source_cases/")
 # Python cache and compiled files should never be counted as product changes.
 _CACHE_DIR_PREFIXES = ("__pycache__/", ".pytest_cache/")
 _CACHE_EXTENSIONS = {".pyc", ".pyo", ".pyd"}
+_GENERATED_NOISE_PATHS = {
+    "linux/flutter/generated_plugin_registrant.cc",
+    "linux/flutter/generated_plugin_registrant.h",
+    "linux/flutter/generated_plugins.cmake",
+    "macos/Flutter/GeneratedPluginRegistrant.swift",
+    "windows/flutter/generated_plugin_registrant.cc",
+    "windows/flutter/generated_plugin_registrant.h",
+    "windows/flutter/generated_plugins.cmake",
+}
 
 # Coding agents that have a real unattended worker adapter. Claude Code was
 # re-enabled 2026-07-05 by product decision: the free tier runs on the user's
 # own codex/claude subscriptions, so both must be dispatchable. Note that
 # unattended claude-code missions consume the 5-hour subscription window.
 EXECUTABLE_CODING_AGENTS = {"codex", "claude-code", "mimo"}
+
+
+def _allow_automatic_low_cost_failover(worker_agent_norm: str) -> bool:
+    return worker_agent_norm != "codex"
 
 
 def _coverage_changed_files(*, repo_root: Path, workspace_root: Path) -> list[str]:
@@ -67,7 +89,11 @@ def _coverage_changed_files(*, repo_root: Path, workspace_root: Path) -> list[st
             continue
         if workspace_prefix and (normalized == workspace_prefix or normalized.startswith(workspace_prefix + "/")):
             continue
+        if is_runtime_changed_file(normalized, repo_root=repo_root):
+            continue
         if any(normalized == prefix.rstrip("/") or normalized.startswith(prefix) for prefix in _ARTIFACT_DIR_PREFIXES):
+            continue
+        if _is_tool_generated_change(repo_root, normalized):
             continue
         if _is_non_product_path(normalized):
             continue
@@ -97,6 +123,7 @@ def dispatch_chief_plan(
     *,
     workspace_root: str | Path,
     plan_id: str,
+    mission_id: str | None = None,
     execute: bool = False,
     dry_run: bool = True,
     track_id: str | None = None,
@@ -122,6 +149,7 @@ def dispatch_chief_plan(
     dispatch will not run them as coding workers.
     """
     workspace_path = Path(workspace_root).expanduser().resolve()
+    progress_mission_id = str(mission_id or plan_id)
     plan = load_plan(workspace_path, plan_id)
     if plan is None:
         return _blocked(plan_id=plan_id, reason=f"No saved plan found: {plan_id}")
@@ -145,6 +173,7 @@ def dispatch_chief_plan(
         run_profile=run_profile,
         include_slow=include_slow,
     )
+    effective_verification_command = str(test_command or "").strip() or verification_command
     # Zero-token architecture memory: refresh the local index (only files that
     # changed since the last dispatch are re-parsed) and hand every worker
     # attempt a budgeted excerpt. The memory layer must never block dispatch.
@@ -175,6 +204,12 @@ def dispatch_chief_plan(
     objective_text = str(plan.get("objective") or "")
     diagnosis_mode = _is_diagnosis_goal(objective_text) and not str(test_command or "").strip()
     review_plan_mode = is_review_plan_goal(objective_text) and not str(test_command or "").strip()
+    dirty_context = _dirty_context_summary(
+        repo_root=repo_root,
+        allow_dirty=allow_dirty,
+        ignored_prefixes=workspace_record_dirty_prefixes(repo_root=repo_root, workspace_root=workspace_path),
+    )
+    dirty_context_text = _dirty_context_prompt(dirty_context)
     report_prompt = None
     if diagnosis_mode:
         report_prompt = (
@@ -197,12 +232,15 @@ def dispatch_chief_plan(
         plan=plan,
         track=selected_track,
         worktree=worktree,
-        verification_command=verification_command,
+        verification_command=effective_verification_command,
         phase="implementation",
         model_policy=model_policy,
         repo_map_text=repo_map_text,
         prompt_override=report_prompt,
+        prompt_suffix=dirty_context_text,
     )
+    toolchain_policy = _toolchain_policy_for_command(effective_verification_command)
+    toolchain_preflight = _toolchain_preflight_for_command(effective_verification_command, policy=toolchain_policy)
     preview = {
         "schema_version": 1,
         "status": "preview",
@@ -224,7 +262,9 @@ def dispatch_chief_plan(
             "created": False,
         },
         "verification": {
-            "command": verification_command,
+            "command": effective_verification_command,
+            "checkpoint_command": verification_command if str(test_command or "").strip() else "",
+            "mode": "command" if str(test_command or "").strip() else "workflow",
             "workspace_root": str(verification_workspace),
             "records_workspace_root": str(workspace_path),
             "run_profile": run_profile,
@@ -232,6 +272,7 @@ def dispatch_chief_plan(
             "max_workflows": int(max_workflows),
         },
         "repo_map": repo_map_stats,
+        "toolchain_policy": toolchain_policy,
         "subscription_quota": _quota_preview(),
         "warnings": _dispatch_warnings(plan, selected_track),
         "records": {
@@ -240,6 +281,8 @@ def dispatch_chief_plan(
             "verification_json": str(plan_dir(workspace_path, plan_id) / "verification.json"),
         },
     }
+    if dirty_context:
+        preview["worktree"]["source_dirty_context"] = dirty_context
 
     blocked_reason = _dispatch_block_reason(
         plan=plan,
@@ -248,8 +291,42 @@ def dispatch_chief_plan(
         execute=execute and not dry_run,
         has_test_command=bool(str(test_command or "").strip()),
     )
+    save_mission_progress(
+        workspace_path,
+        progress_mission_id,
+        stage="dispatch_ready",
+        stage_label="Dispatch ready",
+        status="preview",
+        plan_id=plan_id,
+        agent=str(selected_track.get("agent") or ""),
+        worktree=str(worktree),
+        verification_command=effective_verification_command,
+    )
     if blocked_reason:
+        save_mission_progress(
+            workspace_path,
+            progress_mission_id,
+            stage="blocked",
+            stage_label="Dispatch blocked",
+            status="blocked",
+            blocker=blocked_reason,
+        )
         return {**preview, "status": "blocked", "reason": blocked_reason}
+    if toolchain_preflight.get("status") == "blocked":
+        save_mission_progress(
+            workspace_path,
+            progress_mission_id,
+            stage="blocked",
+            stage_label="Toolchain preflight blocked",
+            status="blocked",
+            blocker=str(toolchain_preflight.get("message") or "toolchain_preflight"),
+        )
+        return {
+            **preview,
+            "status": "blocked",
+            "reason": str(toolchain_preflight.get("message") or "Toolchain preflight blocked dispatch."),
+            "toolchain_preflight": toolchain_preflight,
+        }
     if dry_run or not execute:
         return preview
 
@@ -282,11 +359,24 @@ def dispatch_chief_plan(
     setup = create_worktree(repo_root=repo_root, worktree=worktree, branch=branch, allow_dirty=allow_dirty)
     if setup.get("status") not in {"created", "reused"}:
         return {**preview, "status": "blocked", "reason": setup.get("reason"), "worktree_setup": setup}
+    preview["worktree"]["setup_status"] = str(setup.get("status") or "")
+    for key, value in setup.items():
+        if key not in {"status", "path", "branch"}:
+            preview["worktree"][key] = value
     preview["worktree"]["created"] = True
     if setup.get("status") == "reused":
         preview["worktree"]["reused"] = True
-    if setup.get("status") == "created":
-        _write_worktree_gitignore(worktree, repo_root)
+    _write_worktree_gitignore(worktree, repo_root)
+    save_mission_progress(
+        workspace_path,
+        progress_mission_id,
+        stage="worker_starting",
+        stage_label="Worker starting",
+        status="running",
+        plan_id=plan_id,
+        agent=str(selected_track.get("agent") or ""),
+        worktree=str(worktree),
+    )
     # The commit the worker branched from: the tamper guard diffs against it, so
     # test edits are caught even when the worker commits inside the worktree.
     worktree_base = _git_head(worktree)
@@ -347,11 +437,15 @@ def dispatch_chief_plan(
         preview["worker"]["backend"] = redact_backend(worker_backend)
         if force_backend_name:
             preview["worker"]["forced_backend"] = force_backend_name
+    initial_env = _apply_toolchain_policy_env(initial_env, toolchain_policy)
+    if initial_env and initial_env.get("DEVPACER_TOOLCHAIN_POLICY"):
+        preview["worker"]["toolchain_policy_env"] = "enabled"
 
     if worker_agent == "mimo":
         worker_record = _run_mimo_patch_attempt(
             workspace_root=workspace_path,
             plan_id=plan_id,
+            mission_id=progress_mission_id,
             attempt="initial",
             track=selected_track,
             plan=plan,
@@ -360,7 +454,7 @@ def dispatch_chief_plan(
             log_path=logs_dir / f"{track_token}-initial.log",
             backend=worker_backend,
             repo_map_text=repo_map_text,
-            verification_command=verification_command,
+            verification_command=effective_verification_command,
             prompt_override=report_prompt,
         )
         repair_backend = worker_backend
@@ -368,6 +462,7 @@ def dispatch_chief_plan(
         worker_record = _run_worker_attempt(
             workspace_root=workspace_path,
             plan_id=plan_id,
+            mission_id=progress_mission_id,
             attempt="initial",
             track=selected_track,
             argv=initial_argv,
@@ -380,9 +475,10 @@ def dispatch_chief_plan(
             backend=worker_backend,
         )
 
-    # Quota failover: if the subscription worker was blocked by a usage/rate
-    # limit, continue once through the standalone MiMo patch worker when a MiMo
-    # token is configured. This keeps xiao useful without launching claude.exe.
+    # Quota failover: if a non-Codex subscription worker was blocked by a
+    # usage/rate limit, continue once through the standalone MiMo patch worker
+    # when a MiMo token is configured. Codex is user-explicit here; do not
+    # silently substitute it with MiMo and report that as a Codex result.
     failover_record: dict[str, Any] | None = None
     # Repair must run on whichever worker actually did the work; when a
     # failover hop takes over, these follow it.
@@ -399,7 +495,12 @@ def dispatch_chief_plan(
         # Record the quota failure so future dispatches can skip this agent
         from .agent_backends import record_quota_failure
         record_quota_failure(worker_agent_norm)
-    if quota_hit:
+    if quota_hit and not _allow_automatic_low_cost_failover(worker_agent_norm):
+        preview["worker"]["failover_disabled"] = (
+            "Codex was explicitly requested; automatic MiMo failover is disabled. "
+            "Retry explicitly with --agent mimo if you want MiMo."
+        )
+    elif quota_hit:
         failover_backend = resolve_backend_by_name("bugteam") or resolve_backend_by_name("mimo")
         if failover_backend:
             failover_name = str(failover_backend.get("name") or "backend")
@@ -412,6 +513,7 @@ def dispatch_chief_plan(
             failover_record = _run_mimo_patch_attempt(
                 workspace_root=workspace_path,
                 plan_id=plan_id,
+                mission_id=progress_mission_id,
                 attempt=f"quota_failover_{failover_name}",
                 track=failover_track,
                 plan=plan,
@@ -420,7 +522,7 @@ def dispatch_chief_plan(
                 log_path=logs_dir / f"{track_token}-quota-failover-{failover_name}.log",
                 backend=failover_backend,
                 repo_map_text=repo_map_text,
-                verification_command=verification_command,
+                verification_command=effective_verification_command,
             )
             if failover_record.get("status") == "completed":
                 repair_track = failover_track
@@ -440,6 +542,7 @@ def dispatch_chief_plan(
             workspace_root=workspace_path,
             verification_workspace_root=verification_workspace,
             plan_id=plan_id,
+            mission_id=progress_mission_id,
             repo_root=worktree,
             run_profile=run_profile,
             include_slow=include_slow,
@@ -456,11 +559,12 @@ def dispatch_chief_plan(
     if auto_repair_once and verification.get("verdict") == "fail" and _verification_is_repairable(verification):
         repair_prompt = str((verification.get("repair_brief") or {}).get("repair_prompt") or "").strip()
         if repair_prompt:
-            repair_prompt_full = repair_prompt + "\n\nAfter repairing, run: " + verification_command
+            repair_prompt_full = repair_prompt + "\n\nAfter repairing, run: " + effective_verification_command
             if canonical_agent_name(str(repair_track.get("agent") or "")) == "mimo":
                 repair_worker_record = _run_mimo_patch_attempt(
                     workspace_root=workspace_path,
                     plan_id=plan_id,
+                    mission_id=progress_mission_id,
                     attempt="auto_repair_once",
                     track=repair_track,
                     plan=plan,
@@ -469,7 +573,7 @@ def dispatch_chief_plan(
                     log_path=logs_dir / f"{track_token}-auto-repair-once.log",
                     backend=repair_backend or resolve_failover_backend(),
                     repo_map_text=repo_map_text,
-                    verification_command=verification_command,
+                    verification_command=effective_verification_command,
                     prompt_override=repair_prompt_full,
                 )
             else:
@@ -477,7 +581,7 @@ def dispatch_chief_plan(
                     plan=plan,
                     track=repair_track,
                     worktree=worktree,
-                    verification_command=verification_command,
+                    verification_command=effective_verification_command,
                     prompt_override=repair_prompt_full,
                     phase="repair",
                     model_policy=model_policy,
@@ -488,9 +592,11 @@ def dispatch_chief_plan(
                     repair_argv[0] = repair_executable
                 if repair_backend:
                     repair_argv = _override_model_flag(repair_argv, repair_backend["model"])
+                repair_env = _apply_toolchain_policy_env(repair_env, toolchain_policy)
                 repair_worker_record = _run_worker_attempt(
                     workspace_root=workspace_path,
                     plan_id=plan_id,
+                    mission_id=progress_mission_id,
                     attempt="auto_repair_once",
                     track=repair_track,
                     argv=repair_argv,
@@ -507,6 +613,7 @@ def dispatch_chief_plan(
                     workspace_root=workspace_path,
                     verification_workspace_root=verification_workspace,
                     plan_id=plan_id,
+                    mission_id=progress_mission_id,
                     repo_root=worktree,
                     run_profile=run_profile,
                     include_slow=include_slow,
@@ -547,6 +654,10 @@ def dispatch_chief_plan(
             or has_prior_verified
         )
     )
+    toolchain_violation = _first_worker_toolchain_violation(
+        [worker_record, failover_record, repair_worker_record],
+        test_command or verification_command,
+    )
     status = "completed" if worker_completed else "worker_failed"
     latest_verdict = str(latest_verification.get("verdict") or "")
     verification_changed = latest_verification.get("changed_files")
@@ -554,8 +665,15 @@ def dispatch_chief_plan(
         diff = latest_verification.get("diff_summary") if isinstance(latest_verification.get("diff_summary"), dict) else {}
         verification_changed = diff.get("changed_files") if isinstance(diff.get("changed_files"), list) else []
     has_change_evidence = has_product_changes or bool(verification_changed) or has_prior_verified
-    if latest_verdict == "fail":
+    report_deliverable_verified = bool(diagnosis_mode or review_plan_mode) and latest_verdict == "pass"
+    if toolchain_violation and latest_verdict == "pass":
+        status = "verified_blocked"
+    elif toolchain_violation:
+        status = "worker_toolchain_violation"
+    elif latest_verdict == "fail":
         status = "verification_failed"
+    elif report_deliverable_verified:
+        status = "verified"
     elif latest_verdict == "pass" and worker_completed and has_change_evidence:
         status = "verified"
     elif latest_verdict == "pass" and worker_completed:
@@ -594,6 +712,30 @@ def dispatch_chief_plan(
             )
         else:
             merge_result = {"status": "skipped", "reason": f"not merged: status is {status}, not verified."}
+        if (
+            merge_result.get("status") in {"merged", "nothing_to_merge"}
+            and str(test_command or "").strip()
+        ):
+            post_merge_verification = _run_post_merge_command_verification(
+                workspace_root=workspace_path,
+                plan_id=plan_id,
+                mission_id=progress_mission_id,
+                repo_root=repo_root,
+                command=effective_verification_command,
+            )
+            merge_result["post_merge_verification"] = {
+                "verdict": post_merge_verification.get("verdict"),
+                "failure_kind": (
+                    (post_merge_verification.get("command_verification") or {}).get("failure_kind")
+                    if isinstance(post_merge_verification.get("command_verification"), dict)
+                    else ""
+                ),
+                "saved_path": post_merge_verification.get("saved_path"),
+            }
+            verification_attempts.append(post_merge_verification)
+            latest_verification = post_merge_verification
+            if post_merge_verification.get("verdict") != "pass":
+                status = "merged_verification_failed"
 
     payload = {
         **preview,
@@ -603,6 +745,7 @@ def dispatch_chief_plan(
         "worker_record": worker_record,
         "failover_worker_record": failover_record,
         "repair_worker_record": repair_worker_record,
+        "toolchain_violation": toolchain_violation,
         "verification_attempts": verification_attempts,
         "latest_verification": latest_verification,
         "usage_summary": summarize_worker_usage(
@@ -628,13 +771,58 @@ def dispatch_chief_plan(
     return payload
 
 
+def _run_post_merge_command_verification(
+    *,
+    workspace_root: Path,
+    plan_id: str,
+    mission_id: str,
+    repo_root: Path,
+    command: str,
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()
+    command_result = run_command_verification(command=command, repo_root=repo_root)
+    verdict = "pass" if command_result.get("verdict") == "pass" else "fail"
+    payload: dict[str, Any] = {
+        "plan_id": plan_id,
+        "repo_root": str(repo_root),
+        "workspace_root": str(workspace_root),
+        "run_profile": "post-merge",
+        "passed": 1 if verdict == "pass" else 0,
+        "inspection_only": 0,
+        "failed": 0 if verdict == "pass" else 1,
+        "total": 1,
+        "verdict": verdict,
+        "command_verification": command_result,
+        "markdown": (
+            f"Post-merge test command `{command}` passed (exit 0)."
+            if verdict == "pass"
+            else f"Post-merge test command failed: `{command}` (exit {command_result.get('exit_code')})."
+        ),
+        "recorded_at": now,
+    }
+    if verdict == "fail":
+        payload["repair_brief"] = command_repair_brief(command_result)
+    saved = save_verification(workspace_root, plan_id, payload)
+    payload["saved_path"] = saved["path"]
+    save_mission_progress(
+        workspace_root,
+        mission_id,
+        stage="post_merge_verification_passed" if verdict == "pass" else "post_merge_verification_failed",
+        stage_label="Post-merge verification passed" if verdict == "pass" else "Post-merge verification failed",
+        verification_verdict=verdict,
+        verification_command=command,
+        blocker="" if verdict == "pass" else str(command_result.get("failure_kind") or "post_merge_verification_failed"),
+    )
+    return payload
+
+
 def _verification_is_repairable(verification: dict[str, Any]) -> bool:
     repair = verification.get("repair_brief") if isinstance(verification.get("repair_brief"), dict) else {}
     source = str(repair.get("source") or "")
     failure_kind = str(repair.get("failure_kind") or "")
     if source == "test_tampering":
         return False
-    if failure_kind in {"test_command_invalid", "command_launch_error", "command_timeout"}:
+    if failure_kind in NON_REPAIRABLE_COMMAND_FAILURE_KINDS:
         return False
     return True
 
@@ -642,7 +830,7 @@ def _verification_is_repairable(verification: dict[str, Any]) -> bool:
 def _worktree_has_product_changes(worktree: Path) -> bool:
     try:
         completed = subprocess.run(
-            ["git", "-C", str(worktree), "status", "--porcelain"],
+            ["git", "-C", str(worktree), "-c", "core.quotePath=false", "status", "--porcelain"],
             capture_output=True,
             text=True,
             timeout=10.0,
@@ -658,6 +846,14 @@ def _worktree_has_product_changes(worktree: Path) -> bool:
             continue
         if path.startswith(".agent-workspace/") or path == ".visual-agent-status.md":
             continue
+        if is_runtime_changed_file(path, repo_root=worktree):
+            continue
+        if is_test_path(path):
+            continue
+        if any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in _ARTIFACT_DIR_PREFIXES):
+            continue
+        if _is_tool_generated_change(worktree, path):
+            continue
         # Filter out Python cache and compiled files
         if any(path.startswith(prefix) for prefix in _CACHE_DIR_PREFIXES):
             continue
@@ -666,6 +862,63 @@ def _worktree_has_product_changes(worktree: Path) -> bool:
             continue
         return True
     return False
+
+
+def _is_tool_generated_change(repo_root: Path, path: str) -> bool:
+    normalized = str(path).replace("\\", "/").strip().lstrip("/")
+    if not normalized:
+        return True
+    if normalized in _GENERATED_NOISE_PATHS:
+        return True
+    if normalized == ".gitignore":
+        return _gitignore_change_is_only_devpacer_block(repo_root)
+    return False
+
+
+def _gitignore_change_is_only_devpacer_block(repo_root: Path) -> bool:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo_root), "diff", "--", ".gitignore"],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if completed.returncode != 0:
+        return False
+    added = []
+    for raw in completed.stdout.splitlines():
+        if raw.startswith("+++") or raw.startswith("---"):
+            continue
+        if raw.startswith("+"):
+            added.append(raw[1:].strip())
+        elif raw.startswith("-"):
+            return False
+    if not added:
+        return False
+    allowed = {
+        "# Auto-generated by DevPacer for this worktree - safe to commit",
+        "# Auto-generated by DevPacer for this worktree — safe to commit",
+        "__pycache__/",
+        "*.pyc",
+        "*.pyo",
+        ".pytest_cache/",
+        "*.egg-info/",
+        ".eggs/",
+        "dist/",
+        "build/",
+        "node_modules/",
+        ".cache/",
+        ".npm-cache/",
+        ".yarn/",
+        ".pnpm-store/",
+        "coverage/",
+        ".dart_tool/",
+        ".dart-home/",
+    }
+    return all(line in allowed for line in added)
 
 
 def _mission_has_prior_verified_evidence(workspace_root: Path, plan_id: str) -> bool:
@@ -898,19 +1151,22 @@ def build_worker_command(
     phase: str = "implementation",
     model_policy: dict[str, Any] | None = None,
     repo_map_text: str | None = None,
+    prompt_suffix: str | None = None,
 ) -> dict[str, Any]:
     agent = canonical_agent_name(str(track.get("agent") or "codex"))
     profile = load_agent_profile(agent) or {}
     task_kind = _task_kind_for_phase(phase, model_policy)
     config = recommend_worker_config(profile, task_kind=task_kind) if profile else {}
     prompt = prompt_override or build_worker_prompt(plan=plan, track=track, worktree=worktree, verification_command=verification_command)
+    if str(prompt_suffix or "").strip():
+        prompt = prompt.rstrip() + "\n\n" + str(prompt_suffix).strip()
     # Every attempt (including repair) is a fresh model session; the map is how
     # the worker orients without re-reading the repository each round.
     if repo_map_text:
         prompt = (
             prompt
-            + "\n\nRepository map (DevPacer local index, current at dispatch; trust it for"
-            " orientation instead of scanning the repo):\n"
+            + "\n\nRepository map (DevPacer local index excerpt, current at dispatch; use it for"
+            " orientation, then verify the real paths you need):\n"
             + repo_map_text
         )
     if agent != "codex":
@@ -1018,6 +1274,25 @@ def build_worker_prompt(
         [
             "Work efficiently to conserve model budget: read only the files you need for this objective;"
             " do not scan or grep the whole repository, and do not refactor unrelated code.",
+        ]
+    )
+    toolchain_policy = _toolchain_policy_for_command(verification_command)
+    if toolchain_policy:
+        forbidden = ", ".join(str(item) for item in toolchain_policy.get("forbidden_paths", [])[:4])
+        lines.extend(
+            [
+                "Toolchain policy: reuse that exact toolchain; use the exact SDK executable named by verification for related local commands.",
+                f"Expected Dart executable: {toolchain_policy.get('expected_executable')}",
+                f"Forbidden sibling wrappers/paths: {forbidden}",
+                "For Flutter/Dart tasks, do not call bare `dart` or `flutter` when verification names a specific SDK executable.",
+                r"Do not derive sibling SDK paths: not `...\bin\dart.exe`, `...\bin\dart.bat`, or a PATH-resolved wrapper.",
+                "If worker logs include any forbidden path, DevPacer will withhold verified/merge even if the final command passes.",
+            ]
+        )
+    else:
+        lines.append("If the verification command contains an absolute tool path, reuse that exact toolchain for related local commands.")
+    lines.extend(
+        [
             "Before claiming done, run this verification command and inspect the evidence if it fails:",
             verification_command,
         ]
@@ -1050,6 +1325,7 @@ def run_dispatch_verification(
     workspace_root: Path,
     verification_workspace_root: Path | None = None,
     plan_id: str,
+    mission_id: str | None = None,
     repo_root: Path,
     run_profile: str,
     include_slow: bool,
@@ -1061,6 +1337,16 @@ def run_dispatch_verification(
     allow_test_edits: bool = False,
 ) -> dict[str, Any]:
     verification_workspace_path = (verification_workspace_root or workspace_root).expanduser().resolve()
+    progress_mission_id = str(mission_id or plan_id)
+    save_mission_progress(
+        workspace_root,
+        progress_mission_id,
+        stage="verification_running",
+        stage_label="Verification running",
+        status="running",
+        plan_id=plan_id,
+        worktree=str(Path(repo_root).expanduser().resolve()),
+    )
     now = datetime.now(timezone.utc).isoformat()
 
     # Command gate: when a test/build command is given, it IS the acceptance
@@ -1094,6 +1380,14 @@ def run_dispatch_verification(
             }
             saved = save_verification(workspace_root, plan_id, payload)
             payload["saved_path"] = saved["path"]
+            save_mission_progress(
+                workspace_root,
+                progress_mission_id,
+                stage="verification_failed",
+                stage_label="Verification failed",
+                verification_verdict="fail",
+                blocker="test_tampering",
+            )
             return payload
         command_result = run_command_verification(command=test_command, repo_root=Path(repo_root))
         verdict = "pass" if command_result.get("verdict") == "pass" else "fail"
@@ -1129,6 +1423,15 @@ def run_dispatch_verification(
             )
         saved = save_verification(workspace_root, plan_id, payload)
         payload["saved_path"] = saved["path"]
+        save_mission_progress(
+            workspace_root,
+            progress_mission_id,
+            stage="verification_passed" if verdict == "pass" else "verification_failed",
+            stage_label="Verification passed" if verdict == "pass" else "Verification failed",
+            verification_verdict=verdict,
+            verification_command=str(command_result.get("command") or ""),
+            blocker="" if verdict == "pass" else str(command_result.get("failure_kind") or "command_failed"),
+        )
         return payload
 
     command_result = None
@@ -1188,6 +1491,15 @@ def run_dispatch_verification(
         )
     saved = save_verification(workspace_root, plan_id, payload)
     payload["saved_path"] = saved["path"]
+    save_mission_progress(
+        workspace_root,
+        progress_mission_id,
+        stage="verification_passed" if verdict == "pass" else "verification_failed",
+        stage_label="Verification passed" if verdict == "pass" else "Verification failed",
+        verification_verdict=verdict,
+        verification_command=str(payload.get("command") or ""),
+        blocker="" if verdict == "pass" else "workflow_verification_failed",
+    )
     return payload
 
 
@@ -1221,6 +1533,7 @@ def _run_mimo_patch_attempt(
     *,
     workspace_root: Path,
     plan_id: str,
+    mission_id: str | None = None,
     attempt: str,
     track: dict[str, Any],
     plan: dict[str, Any],
@@ -1234,6 +1547,18 @@ def _run_mimo_patch_attempt(
 ) -> dict[str, Any]:
     started = monotonic()
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    progress_mission_id = str(mission_id or plan_id)
+    save_mission_progress(
+        workspace_root,
+        progress_mission_id,
+        stage="worker_running",
+        stage_label="Worker running",
+        status="running",
+        plan_id=plan_id,
+        agent=str(track.get("agent") or ""),
+        worktree=str(cwd),
+        log_path=str(log_path),
+    )
     backend = backend or resolve_failover_backend()
     if not backend:
         stderr_tail = "Low-cost backend token was not found."
@@ -1253,6 +1578,15 @@ def _run_mimo_patch_attempt(
             backend=None,
         )
         append_worker_record(workspace_root, plan_id, record)
+        save_mission_progress(
+            workspace_root,
+            progress_mission_id,
+            stage="worker_blocked",
+            stage_label="Worker blocked",
+            worker_status="failed",
+            blocker="backend_missing",
+            log_path=str(log_path),
+        )
         return record
 
     prompt = _build_mimo_patch_prompt(
@@ -1268,6 +1602,14 @@ def _run_mimo_patch_attempt(
     stdout_tail = ""
     stderr_tail = ""
     try:
+        save_mission_progress(
+            workspace_root,
+            progress_mission_id,
+            stage="worker_running",
+            stage_label="Worker querying model",
+            last_activity_at=datetime.now(timezone.utc).isoformat(),
+            log_path=str(log_path),
+        )
         response = run_llm_completion(
             backend=LLMBackend(
                 provider=str(backend.get("provider") or "openai"),
@@ -1288,6 +1630,14 @@ def _run_mimo_patch_attempt(
         if not diff_text:
             stderr_tail = f"{backend.get('name') or 'backend'} returned no unified diff."
         else:
+            save_mission_progress(
+                workspace_root,
+                progress_mission_id,
+                stage="worker_running",
+                stage_label="Worker applying patch",
+                last_activity_at=datetime.now(timezone.utc).isoformat(),
+                log_path=str(log_path),
+            )
             apply_result = _apply_unified_diff(cwd=cwd, diff_text=diff_text, timeout_seconds=min(float(timeout_seconds), 120.0))
             exit_code = int(apply_result.get("exit_code") or 0)
             stdout_tail = str(apply_result.get("stdout_tail") or "")[-4000:]
@@ -1395,6 +1745,141 @@ def _worker_record(
     return record
 
 
+def _first_worker_toolchain_violation(records: list[dict[str, Any] | None], command: str | None) -> dict[str, str] | None:
+    expected = _extract_dart_sdk_executable(command)
+    if not expected:
+        return None
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        violation = _worker_toolchain_violation(record, expected)
+        if violation:
+            return violation
+    return None
+
+
+def _toolchain_policy_for_command(command: str | None) -> dict[str, Any]:
+    expected = _extract_dart_sdk_executable(command)
+    if not expected:
+        return {}
+    forbidden = _forbidden_dart_sibling_paths(expected)
+    return {
+        "status": "active",
+        "kind": "dart_exact_sdk_executable",
+        "expected_executable": expected,
+        "forbidden_paths": forbidden,
+        "message": (
+            "Dart/Flutter commands must use the exact dart.exe from the verification command; "
+            "sibling Flutter wrapper paths block verified/merge."
+        ),
+    }
+
+
+def _toolchain_preflight_for_command(command: str | None, *, policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    policy = policy if isinstance(policy, dict) else _toolchain_policy_for_command(command)
+    if not policy:
+        return {"status": "none"}
+    text = _normalize_toolchain_text(command or "")
+    expected = _normalize_toolchain_text(str(policy.get("expected_executable") or ""))
+    for raw in policy.get("forbidden_paths") or []:
+        forbidden = _normalize_toolchain_text(str(raw))
+        if forbidden and forbidden in text and forbidden != expected:
+            return {
+                "status": "blocked",
+                "expected_executable": str(policy.get("expected_executable") or ""),
+                "forbidden_path": str(raw),
+                "message": (
+                    "Toolchain preflight blocked dispatch: the verification command itself contains "
+                    "a forbidden sibling Flutter/Dart wrapper path."
+                ),
+            }
+    return {
+        "status": "active",
+        "expected_executable": str(policy.get("expected_executable") or ""),
+        "forbidden_paths": list(policy.get("forbidden_paths") or []),
+    }
+
+
+def _apply_toolchain_policy_env(env: dict[str, str] | None, policy: dict[str, Any] | None) -> dict[str, str] | None:
+    if not isinstance(policy, dict) or not policy.get("expected_executable"):
+        return env
+    merged = {str(k): str(v) for k, v in (env or {}).items()}
+    base_path = str(merged.get("PATH") or merged.get("Path") or os.environ.get("PATH") or "")
+    forbidden_dirs = {
+        str(Path(str(path)).parent)
+        for path in policy.get("forbidden_paths") or []
+        if str(path).strip()
+    }
+    if base_path and forbidden_dirs:
+        normalized_forbidden = {_normalize_toolchain_text(item).rstrip("/") for item in forbidden_dirs}
+        kept_parts: list[str] = []
+        for part in base_path.split(os.pathsep):
+            normalized_part = _normalize_toolchain_text(part).rstrip("/")
+            if normalized_part and normalized_part in normalized_forbidden:
+                continue
+            kept_parts.append(part)
+        merged["PATH"] = os.pathsep.join(kept_parts)
+        merged.pop("Path", None)
+    merged["DEVPACER_TOOLCHAIN_POLICY"] = str(policy.get("kind") or "active")
+    merged["DEVPACER_EXPECTED_DART_EXE"] = str(policy.get("expected_executable") or "")
+    merged["DEVPACER_FORBIDDEN_TOOLCHAIN_PATHS"] = os.pathsep.join(str(item) for item in policy.get("forbidden_paths") or [])
+    return merged
+
+
+def _extract_dart_sdk_executable(command: str | None) -> str:
+    text = str(command or "")
+    match = re.search(
+        r"([A-Za-z]:[\\/][^\r\n\"']*?[\\/]bin[\\/]cache[\\/]dart-sdk[\\/]bin[\\/]dart\.exe)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1) if match else ""
+
+
+def _worker_toolchain_violation(record: dict[str, Any], expected_executable: str) -> dict[str, str] | None:
+    log_path = Path(str(record.get("log_path") or ""))
+    if not log_path.is_file():
+        return None
+    try:
+        raw = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    text = _normalize_toolchain_text(raw)
+    expected = _normalize_toolchain_text(expected_executable)
+    marker = "/bin/cache/dart-sdk/bin/dart.exe"
+    if marker not in expected:
+        return None
+    for raw in _forbidden_dart_sibling_paths(expected_executable):
+        path = _normalize_toolchain_text(raw)
+        if path in text:
+            return {
+                "status": "violated",
+                "expected_executable": expected_executable,
+                "forbidden_path": raw,
+                "log_path": str(log_path),
+                "message": "Worker used a sibling Flutter wrapper instead of the exact Dart SDK executable from the verification command.",
+            }
+    return None
+
+
+def _forbidden_dart_sibling_paths(expected_executable: str) -> list[str]:
+    expected = _normalize_toolchain_text(expected_executable)
+    marker = "/bin/cache/dart-sdk/bin/dart.exe"
+    if marker not in expected:
+        return []
+    flutter_root = expected.split(marker, 1)[0]
+    return [
+        f"{flutter_root}/bin/dart.exe".replace("/", "\\"),
+        f"{flutter_root}/bin/dart.bat".replace("/", "\\"),
+        f"{flutter_root}/bin/flutter.exe".replace("/", "\\"),
+        f"{flutter_root}/bin/flutter.bat".replace("/", "\\"),
+    ]
+
+
+def _normalize_toolchain_text(value: str) -> str:
+    return str(value or "").replace("\\\\", "\\").replace("\\", "/").lower()
+
+
 def _build_mimo_patch_prompt(
     *,
     plan: dict[str, Any],
@@ -1406,6 +1891,15 @@ def _build_mimo_patch_prompt(
 ) -> str:
     context = _mimo_file_context(cwd=cwd, plan=plan, extra_text=prompt_override or "")
     objective = str(prompt_override or plan.get("objective") or "")
+    policy = _toolchain_policy_for_command(verification_command)
+    toolchain_block = ""
+    if policy:
+        toolchain_block = (
+            "\nToolchain policy:\n"
+            f"- Expected Dart executable: {policy.get('expected_executable')}\n"
+            f"- Forbidden sibling wrappers/paths: {', '.join(str(item) for item in policy.get('forbidden_paths', [])[:4])}\n"
+            "- If logs or diff instructions use a forbidden path, DevPacer withholds verified/merge.\n"
+        )
     return (
         f"Objective:\n{objective}\n\n"
         f"Plan id: {plan.get('plan_id') or ''}\n"
@@ -1417,6 +1911,7 @@ def _build_mimo_patch_prompt(
         "- Do not edit .agent-workspace, .visual-agent-status.md, or test artifacts unless the objective explicitly asks for tests.\n"
         "- If no safe change is possible from the provided context, return no diff.\n\n"
         f"Verification command to satisfy after patch:\n{verification_command}\n\n"
+        f"{toolchain_block}"
         f"Repository map:\n{repo_map_text[:12000]}\n\n"
         f"File context:\n{context}"
     )
@@ -1468,15 +1963,19 @@ def _extract_context_paths(text: str) -> list[str]:
 def _build_mimo_patch_retry_prompt(*, original_prompt: str, diff_text: str, stderr_tail: str, cwd: Path) -> str:
     paths = _extract_diff_paths(diff_text)
     file_context = _file_context_for_paths(cwd=cwd, paths=paths, max_chars=42000)
+    base_prompt = str(original_prompt or "").split("\n\nFile context:\n", 1)[0]
     return (
-        original_prompt
-        + "\n\nThe previous diff failed to apply. Generate a smaller corrected diff against the CURRENT file contents."
-        + "\n\nGit apply error:\n"
-        + stderr_tail[-4000:]
-        + "\n\nPrevious diff:\n"
-        + diff_text[-12000:]
+        base_prompt
+        + "\n\nPATCH RETRY RULES:\n"
+        + "- The previous diff failed to apply. Generate a smaller corrected diff against the CURRENT file contents below.\n"
+        + "- Treat the current target file contents as the source of truth; ignore any earlier file snippets or hunk line numbers.\n"
+        + "- Return only a unified git diff with paths relative to the repository root.\n"
         + "\n\nCurrent target file contents:\n"
         + file_context
+        + "\n\nGit apply error:\n"
+        + stderr_tail[-4000:]
+        + "\n\nPrevious failed diff, for intent only:\n"
+        + diff_text[-12000:]
     )
 
 
@@ -1540,7 +2039,7 @@ def _mimo_openai_base_url(raw_base_url: str) -> str:
 
 def _is_ignored_context_path(path: str) -> bool:
     lowered = path.lower()
-    ignored = ("node_modules/", ".git/", ".agent-workspace/", "dist/", "build/", ".venv/", "__pycache__/")
+    ignored = ("node_modules/", ".git/", ".agent-workspace/", "artifacts/", "dist/", "build/", ".venv/", "__pycache__/")
     return any(lowered == prefix.rstrip("/") or lowered.startswith(prefix) for prefix in ignored)
 
 
@@ -1681,6 +2180,7 @@ def _run_worker_attempt(
     *,
     workspace_root: Path,
     plan_id: str,
+    mission_id: str | None = None,
     attempt: str,
     track: dict[str, Any],
     argv: list[str],
@@ -1693,22 +2193,51 @@ def _run_worker_attempt(
     backend: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     started = monotonic()
+    progress_mission_id = str(mission_id or plan_id)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    save_mission_progress(
+        workspace_root,
+        progress_mission_id,
+        stage="worker_running",
+        stage_label="Worker running",
+        status="running",
+        plan_id=plan_id,
+        agent=str(track.get("agent") or ""),
+        worktree=str(cwd),
+        log_path=str(log_path),
+    )
+
+    def progress_callback(event: dict[str, Any]) -> None:
+        record_worker_output(
+            workspace_root,
+            progress_mission_id,
+            stream=str(event.get("stream") or ""),
+            chunk=str(event.get("chunk") or ""),
+            log_path=log_path,
+        )
+
     if stdin_text is not None:
         try:
-            result = runner(argv, cwd, timeout_seconds, log_path, env=env, stdin_text=stdin_text)
+            result = runner(argv, cwd, timeout_seconds, log_path, env=env, stdin_text=stdin_text, progress_callback=progress_callback)
         except TypeError:
             try:
-                result = runner(argv, cwd, timeout_seconds, log_path, stdin_text=stdin_text)
+                result = runner(argv, cwd, timeout_seconds, log_path, env=env, stdin_text=stdin_text)
             except TypeError:
                 try:
-                    result = runner(argv, cwd, timeout_seconds, log_path, env=env)
+                    result = runner(argv, cwd, timeout_seconds, log_path, stdin_text=stdin_text)
                 except TypeError:
-                    result = runner(argv, cwd, timeout_seconds, log_path)
+                    try:
+                        result = runner(argv, cwd, timeout_seconds, log_path, env=env)
+                    except TypeError:
+                        result = runner(argv, cwd, timeout_seconds, log_path)
     else:
         try:
-            result = runner(argv, cwd, timeout_seconds, log_path, env=env)
+            result = runner(argv, cwd, timeout_seconds, log_path, env=env, progress_callback=progress_callback)
         except TypeError:
-            result = runner(argv, cwd, timeout_seconds, log_path)
+            try:
+                result = runner(argv, cwd, timeout_seconds, log_path, env=env)
+            except TypeError:
+                result = runner(argv, cwd, timeout_seconds, log_path)
     exit_code = int(result.get("exit_code") or 0)
     stdout_tail = str(result.get("stdout_tail") or "")
     stderr_tail = str(result.get("stderr_tail") or "")
@@ -1745,6 +2274,17 @@ def _run_worker_attempt(
     if backend:
         record["backend"] = {"name": backend.get("name"), "model": backend.get("model")}
     append_worker_record(workspace_root, plan_id, record)
+    save_mission_progress(
+        workspace_root,
+        progress_mission_id,
+        stage="worker_completed" if record["status"] == "completed" else "worker_blocked",
+        stage_label="Worker completed" if record["status"] == "completed" else "Worker blocked",
+        worker_status=record["status"],
+        worker_exit_code=record["exit_code"],
+        blocker="" if record["status"] == "completed" else (stderr_tail or "worker_failed")[:500],
+        log_path=str(log_path),
+        worktree=str(cwd),
+    )
     return record
 
 
@@ -1825,6 +2365,7 @@ def run_process_capture(
     log_path: Path,
     env: dict[str, str] | None = None,
     stdin_text: str | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     run_env = None
@@ -1834,7 +2375,7 @@ def run_process_capture(
     stderr_parts: list[str] = []
     lock = threading.Lock()
 
-    def append_stream(stream: Any, target: list[str]) -> None:
+    def append_stream(stream: Any, target: list[str], stream_name: str) -> None:
         try:
             for chunk in iter(stream.readline, ""):
                 if not chunk:
@@ -1844,6 +2385,11 @@ def run_process_capture(
                     with log_path.open("a", encoding="utf-8", errors="replace") as handle:
                         handle.write(chunk)
                         handle.flush()
+                if progress_callback is not None:
+                    try:
+                        progress_callback({"event": "output", "stream": stream_name, "chunk": chunk})
+                    except Exception:
+                        pass
         finally:
             try:
                 stream.close()
@@ -1860,11 +2406,12 @@ def run_process_capture(
             stdin=subprocess.PIPE if stdin_text is not None else None,
             text=True,
             env=run_env,
+            **hidden_subprocess_kwargs(),
         )
         assert proc.stdout is not None
         assert proc.stderr is not None
-        stdout_thread = threading.Thread(target=append_stream, args=(proc.stdout, stdout_parts), daemon=True)
-        stderr_thread = threading.Thread(target=append_stream, args=(proc.stderr, stderr_parts), daemon=True)
+        stdout_thread = threading.Thread(target=append_stream, args=(proc.stdout, stdout_parts, "stdout"), daemon=True)
+        stderr_thread = threading.Thread(target=append_stream, args=(proc.stderr, stderr_parts, "stderr"), daemon=True)
         stdout_thread.start()
         stderr_thread.start()
         if stdin_text is not None and proc.stdin is not None:
@@ -1917,7 +2464,16 @@ def merge_worktree_branch(*, repo_root: Path, worktree: Path, branch: str, messa
     # mandatory record, tool caches) must never ride along: committing them makes
     # the merge collide with the main repo's untracked copies of the same files.
     g(worktree, "add", "-A")
-    for artifact in (".agent-workspace", ".gitignore", "强制测试记录.md", "*__pycache__*", "*.pytest_cache*"):
+    for artifact in (
+        ".agent-workspace",
+        ".gitignore",
+        ".npm-cache",
+        ".dart-home",
+        ".dart_tool",
+        "强制测试记录.md",
+        "*__pycache__*",
+        "*.pytest_cache*",
+    ):
         g(worktree, "reset", "-q", "HEAD", "--", artifact)
     wt_status = g(worktree, "status", "--porcelain")
     staged = g(worktree, "diff", "--cached", "--name-only")
@@ -2021,7 +2577,7 @@ def create_worktree(*, repo_root: Path, worktree: Path, branch: str, allow_dirty
                     "dirty": still_dirty[:10],
                     "clean_output": clean.stdout.strip()[:200],
                 }
-        overlay = _overlay_nested_dirty_repo_root(repo_root=repo_root, worktree=worktree, allow_dirty=allow_dirty)
+        overlay = _overlay_dirty_context(repo_root=repo_root, worktree=worktree, allow_dirty=allow_dirty)
         return {"status": "reused", "path": str(worktree), "branch": branch, **overlay}
     worktree.parent.mkdir(parents=True, exist_ok=True)
     completed = subprocess.run(
@@ -2036,8 +2592,251 @@ def create_worktree(*, repo_root: Path, worktree: Path, branch: str, allow_dirty
             "status": "failed",
             "reason": (completed.stderr or completed.stdout or "git worktree add failed").strip(),
         }
-    overlay = _overlay_nested_dirty_repo_root(repo_root=repo_root, worktree=worktree, allow_dirty=allow_dirty)
+    overlay = _overlay_dirty_context(repo_root=repo_root, worktree=worktree, allow_dirty=allow_dirty)
     return {"status": "created", "path": str(worktree), "branch": branch, **overlay}
+
+
+def _overlay_dirty_context(*, repo_root: Path, worktree: Path, allow_dirty: bool) -> dict[str, Any]:
+    overlay = _overlay_nested_dirty_repo_root(repo_root=repo_root, worktree=worktree, allow_dirty=allow_dirty)
+    if overlay:
+        return overlay
+    return _overlay_local_dirty_files(repo_root=repo_root, worktree=worktree, allow_dirty=allow_dirty)
+
+
+def _dirty_context_summary(*, repo_root: Path, allow_dirty: bool, ignored_prefixes: tuple[str, ...] = ()) -> dict[str, Any]:
+    if not allow_dirty:
+        return {}
+    repo = Path(repo_root).expanduser().resolve()
+    source_dirty = git_dirty_files(repo, ignored_prefixes=ignored_prefixes)
+    summary: dict[str, Any] = {"allow_dirty": True}
+    if source_dirty:
+        summary["source_dirty_files"] = source_dirty[:50]
+        summary["source_dirty_count"] = len(source_dirty)
+
+    if (repo / ".git").exists():
+        candidates: list[str] = []
+        ignored_candidates: list[str] = []
+        skipped = 0
+        seen: set[str] = set()
+        for path, ignored in _local_dirty_overlay_candidates(repo):
+            if path in seen:
+                continue
+            seen.add(path)
+            if not _local_dirty_overlay_allowed(path, ignored=ignored):
+                skipped += 1
+                continue
+            if ignored:
+                ignored_candidates.append(path)
+            else:
+                candidates.append(path)
+        if candidates:
+            summary["overlay_candidate_files"] = candidates[:50]
+            summary["overlay_candidate_count"] = len(candidates)
+        if ignored_candidates:
+            summary["ignored_overlay_candidate_files"] = ignored_candidates[:50]
+            summary["ignored_overlay_candidate_count"] = len(ignored_candidates)
+        if skipped:
+            summary["overlay_skipped_count"] = skipped
+    else:
+        nested = _nested_repo_root_summary(repo)
+        if nested:
+            summary.update(nested)
+    return summary if len(summary) > 1 else {}
+
+
+def _nested_repo_root_summary(repo: Path) -> dict[str, Any]:
+    top = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if top.returncode != 0:
+        return {}
+    git_root = Path(top.stdout.strip()).expanduser().resolve()
+    if repo == git_root:
+        return {}
+    try:
+        relative = repo.relative_to(git_root).as_posix()
+    except ValueError:
+        return {}
+    return {
+        "nested_dirty_project": True,
+        "nested_dirty_project_path": str(repo),
+        "nested_dirty_project_relative_path": relative,
+    }
+
+
+def _dirty_context_prompt(summary: dict[str, Any]) -> str:
+    if not summary:
+        return ""
+    lines = [
+        "Source checkout dirty context (captured before DevPacer created/copied the isolated worktree):",
+        "- `--allow-dirty` is enabled. The isolated worktree may contain a baseline commit for these files, so do not assume an empty `git status` there means the user's original checkout was clean.",
+    ]
+    dirty = summary.get("source_dirty_files") if isinstance(summary.get("source_dirty_files"), list) else []
+    candidates = summary.get("overlay_candidate_files") if isinstance(summary.get("overlay_candidate_files"), list) else []
+    ignored = summary.get("ignored_overlay_candidate_files") if isinstance(summary.get("ignored_overlay_candidate_files"), list) else []
+    if dirty:
+        lines.append("Original dirty files:")
+        lines.extend(f"- {item}" for item in dirty[:20])
+    if candidates:
+        lines.append("Dirty files copied into the worktree overlay:")
+        lines.extend(f"- {item}" for item in candidates[:20])
+    if ignored:
+        lines.append("Ignored source/test files copied into the worktree overlay:")
+        lines.extend(f"- {item}" for item in ignored[:20])
+    if summary.get("nested_dirty_project"):
+        lines.append(f"Nested untracked project root copied into the worktree: {summary.get('nested_dirty_project_relative_path')}")
+    skipped = int(summary.get("overlay_skipped_count") or 0)
+    if skipped:
+        lines.append(f"Overlay skipped {skipped} dirty candidate(s), usually caches, dependencies, or secret-like files.")
+    return "\n".join(lines)
+
+
+_LOCAL_OVERLAY_SKIP_PARTS = {
+    ".git",
+    ".agent-workspace",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".cache",
+    ".npm-cache",
+    "__pycache__",
+    "node_modules",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "coverage",
+}
+_LOCAL_OVERLAY_SECRET_BASENAMES = {
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+    "model_api_keys.txt",
+    "api_keys.txt",
+}
+_LOCAL_OVERLAY_SECRET_EXTS = {".key", ".pem", ".pfx", ".p12", ".crt"}
+_LOCAL_OVERLAY_IGNORED_PREFIXES = (
+    "src/",
+    "test/",
+    "tests/",
+    "spec/",
+    "specs/",
+    "fixtures/",
+    "knowledge/",
+    "benchmarks/",
+)
+
+
+def _overlay_local_dirty_files(*, repo_root: Path, worktree: Path, allow_dirty: bool) -> dict[str, Any]:
+    """Copy local dirty source/test context into an allow-dirty worktree.
+
+    Git worktrees are based on committed files. In dogfood projects it is common
+    to have required fixtures or generated source files ignored by broad
+    patterns such as ``data/``. Copy only non-secret source/test context so the
+    worker can run the same project the user is running, without pulling in
+    node_modules, .env files, or tool caches.
+    """
+    if not allow_dirty:
+        return {}
+    repo = Path(repo_root).expanduser().resolve()
+    target = Path(worktree).expanduser().resolve()
+    if not (repo / ".git").exists():
+        return {}
+
+    copied = 0
+    ignored_copied = 0
+    skipped = 0
+    errors: list[str] = []
+    seen: set[str] = set()
+    for path, ignored in _local_dirty_overlay_candidates(repo):
+        if path in seen:
+            continue
+        seen.add(path)
+        if not _local_dirty_overlay_allowed(path, ignored=ignored):
+            skipped += 1
+            continue
+        src = repo / path
+        dest = target / path
+        if not src.is_file():
+            skipped += 1
+            continue
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+            copied += 1
+            if ignored:
+                ignored_copied += 1
+        except OSError as exc:
+            errors.append(f"{path}: {type(exc).__name__}: {exc}"[:200])
+
+    if copied == 0 and not errors:
+        return {}
+    baseline = _prefix_overlay_baseline(_commit_dirty_overlay_baseline(target), "dirty_file_overlay")
+    result: dict[str, Any] = {
+        "dirty_file_overlay": "copied" if copied else "failed",
+        "dirty_file_overlay_files": copied,
+        "dirty_file_overlay_ignored_files": ignored_copied,
+        "dirty_file_overlay_skipped": skipped,
+        **baseline,
+    }
+    if errors:
+        result["dirty_file_overlay_errors"] = errors[:5]
+    return result
+
+
+def _local_dirty_overlay_candidates(repo: Path) -> list[tuple[str, bool]]:
+    tracked = _git_lines(repo, ["git", "-C", str(repo), "ls-files", "--modified"])
+    untracked = _git_lines(repo, ["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard"])
+    ignored = _git_lines(repo, ["git", "-C", str(repo), "ls-files", "--others", "--ignored", "--exclude-standard"])
+    candidates: list[tuple[str, bool]] = []
+    for path in tracked + untracked:
+        normalized = _normalize_repo_path(path)
+        if normalized:
+            candidates.append((normalized, False))
+    for path in ignored:
+        normalized = _normalize_repo_path(path)
+        if normalized:
+            candidates.append((normalized, True))
+    return candidates
+
+
+def _git_lines(repo: Path, args: list[str]) -> list[str]:
+    completed = subprocess.run(args, cwd=str(repo), capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        return []
+    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+
+def _normalize_repo_path(path: str) -> str:
+    normalized = str(path).replace("\\", "/").strip().lstrip("/")
+    if not normalized or normalized.startswith("../") or "/../" in normalized:
+        return ""
+    return normalized
+
+
+def _local_dirty_overlay_allowed(path: str, *, ignored: bool) -> bool:
+    normalized = _normalize_repo_path(path)
+    if not normalized:
+        return False
+    parts = normalized.split("/")
+    if any(part in _LOCAL_OVERLAY_SKIP_PARTS for part in parts):
+        return False
+    basename = parts[-1].lower()
+    if basename in _LOCAL_OVERLAY_SECRET_BASENAMES:
+        return False
+    if Path(basename).suffix.lower() in _LOCAL_OVERLAY_SECRET_EXTS:
+        return False
+    if ignored and not normalized.startswith(_LOCAL_OVERLAY_IGNORED_PREFIXES):
+        return False
+    return True
+
+
+def _prefix_overlay_baseline(payload: dict[str, Any], prefix: str) -> dict[str, Any]:
+    return {f"{prefix}_{key}": value for key, value in payload.items()}
 
 
 def _overlay_nested_dirty_repo_root(*, repo_root: Path, worktree: Path, allow_dirty: bool) -> dict[str, Any]:
@@ -2154,7 +2953,7 @@ def _commit_dirty_overlay_baseline(worktree: Path) -> dict[str, Any]:
 
 
 _PYTHON_GITIGNORE = """\
-# Auto-generated by DevPacer for this worktree — safe to commit
+# Auto-generated by DevPacer for this worktree runtime exclude
 __pycache__/
 *.pyc
 *.pyo
@@ -2166,37 +2965,73 @@ build/
 """
 
 _NODE_GITIGNORE = """\
-# Auto-generated by DevPacer for this worktree — safe to commit
+# Auto-generated by DevPacer for this worktree runtime exclude
 node_modules/
 .cache/
+.npm-cache/
+.yarn/
+.pnpm-store/
 dist/
 build/
+coverage/
+"""
+
+_DART_GITIGNORE = """\
+# Auto-generated by DevPacer for this worktree runtime exclude
+.dart_tool/
+.dart-home/
+.flutter-plugins
+.flutter-plugins-dependencies
 """
 
 
 def _write_worktree_gitignore(worktree: Path, repo_root: Path) -> None:
-    """Write a basic .gitignore into a newly created worktree if one doesn't exist.
+    """Ensure a worktree locally ignores DevPacer/runtime caches.
 
     Prevents runtime caches (__pycache__, node_modules) from being accidentally
-    committed in verified merge commits.
+    committed in verified merge commits without changing the product's
+    versioned .gitignore.
     """
-    gitignore = worktree / ".gitignore"
-    if gitignore.exists():
-        return
+    exclude = _worktree_exclude_path(worktree)
     # Detect project type from root; fall back to Python patterns (most common).
     has_python = any(repo_root.glob("**/*.py")) or (repo_root / "pyproject.toml").exists() or (repo_root / "setup.py").exists()
     has_node = (repo_root / "package.json").exists()
-    lines = []
-    if has_python:
-        lines.append(_PYTHON_GITIGNORE)
-    if has_node:
-        lines.append(_NODE_GITIGNORE)
-    if not lines:
-        lines.append(_PYTHON_GITIGNORE)
+    has_dart = (repo_root / "pubspec.yaml").exists() or any(repo_root.glob("lib/**/*.dart"))
     try:
-        gitignore.write_text("".join(lines), encoding="utf-8")
+        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        lines = []
+        if has_python and "__pycache__/" not in existing:
+            lines.append(_PYTHON_GITIGNORE)
+        if has_node and ".npm-cache/" not in existing:
+            lines.append(_NODE_GITIGNORE)
+        if has_dart and ".dart-home/" not in existing:
+            lines.append(_DART_GITIGNORE)
+        if not lines and not existing:
+            lines.append(_PYTHON_GITIGNORE)
+        if not lines:
+            return
+        additions = "".join(lines)
+        separator = "" if not existing or existing.endswith("\n") else "\n"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text(existing + separator + additions, encoding="utf-8")
     except OSError:
         pass
+
+
+def _worktree_exclude_path(worktree: Path) -> Path:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "--git-path", "info/exclude"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return worktree / ".git" / "info" / "exclude"
+    if completed.returncode == 0 and completed.stdout.strip():
+        path = Path(completed.stdout.strip())
+        return path if path.is_absolute() else (worktree / path)
+    return worktree / ".git" / "info" / "exclude"
 
 
 def default_worktree_workspace_path(*, source_workspace: Path, repo_root: Path, worktree: Path) -> Path:

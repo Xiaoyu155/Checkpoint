@@ -11,6 +11,25 @@ from .models import ActionStatus
 from .workspace import Workspace, WorkflowRef, discover_workflows, run_workspace_workflow
 
 
+RUNTIME_CHANGE_PREFIXES = (
+    ".agent-workspace/",
+    ".runs/",
+    "runs/",
+    "reports/",
+    "artifacts/",
+    ".pytest_cache/",
+    ".pytest_cache_local/",
+    "__pycache__/",
+)
+RUNTIME_CHANGE_FILES = {
+    ".visual-agent-status.md",
+    "agent_session.json",
+    "run_history.jsonl",
+    "workflow_index.json",
+    "强制测试记录.md",
+}
+
+
 @dataclass(frozen=True)
 class CodexWorkflowCheck:
     name: str
@@ -62,6 +81,8 @@ class CodexCheckResult:
             return "fail"
         if self.coverage.get("status") in {"uncovered", "fallback_only"}:
             return "coverage_gap"
+        if self.coverage.get("status") == "runtime_only":
+            return "no_changed_files"
         if not self.results:
             return "no_workflows"
         if self.inspection_only:
@@ -81,14 +102,21 @@ def run_codex_check(
     changed: list[str] | None = None,
     from_step: str | None = None,
 ) -> CodexCheckResult:
-    changed_paths = changed if changed is not None else changed_files(base=base, cwd=Path(repo_root))
+    raw_changed_paths = changed if changed is not None else changed_files(base=base, cwd=Path(repo_root))
+    changed_paths, ignored_runtime_paths = filter_runtime_changed_files(raw_changed_paths, repo_root=repo_root)
     all_refs = list(discover_workflows(workspace, include_slow=True))
     tagged_refs = [ref for ref in all_refs if workflow_has_tags(ref, tags)]
     skipped_slow = [ref.name for ref in tagged_refs if "slow" in ref.tags and not include_slow]
     runnable = [ref for ref in tagged_refs if include_slow or "slow" not in ref.tags]
-    selected = affected_workflows(runnable, changed=changed_paths)
+    selected = [] if ignored_runtime_paths and not changed_paths else select_codex_check_workflows(runnable, changed_paths)
     selected = selected[: max(0, int(max_workflows))]
     coverage = codex_coverage_summary(changed_paths, runnable)
+    if ignored_runtime_paths:
+        coverage["ignored_runtime_files"] = ignored_runtime_paths
+        coverage["ignored_runtime_file_count"] = len(ignored_runtime_paths)
+        if not changed_paths:
+            coverage["status"] = "runtime_only"
+            coverage["next_action"] = "Only generated Pacer/Checkpoint runtime files changed; no product workflow is needed."
     results = [
         run_one_codex_workflow(workspace, ref, run_profile=run_profile, from_step=from_step)
         for ref in selected
@@ -99,6 +127,60 @@ def run_codex_check(
         skipped_slow_workflows=skipped_slow,
         coverage=coverage,
         results=results,
+    )
+
+
+def filter_runtime_changed_files(changed_paths: list[str], *, repo_root: str | Path | None = None) -> tuple[list[str], list[str]]:
+    kept: list[str] = []
+    ignored: list[str] = []
+    for item in changed_paths:
+        path = str(item).replace("\\", "/").strip()
+        while path.startswith("./"):
+            path = path[2:]
+        if not path:
+            continue
+        if is_runtime_changed_file(path, repo_root=repo_root):
+            ignored.append(path)
+            continue
+        kept.append(path)
+    return sorted(dict.fromkeys(kept)), sorted(dict.fromkeys(ignored))
+
+
+def select_codex_check_workflows(workflows: list[WorkflowRef], changed_paths: list[str]) -> list[WorkflowRef]:
+    if not changed_paths:
+        return affected_workflows(workflows, changed=changed_paths)
+    precise = [
+        ref
+        for ref in workflows
+        if ref.affects and any(workflow_ref_covers_path(ref, path) for path in changed_paths)
+    ]
+    if precise:
+        return precise
+    return affected_workflows(workflows, changed=changed_paths)
+
+
+def is_runtime_changed_file(path: str, *, repo_root: str | Path | None = None) -> bool:
+    normalized = str(path).replace("\\", "/").strip()
+    return any(_is_runtime_path_variant(candidate) for candidate in runtime_path_variants(normalized, repo_root=repo_root))
+
+
+def runtime_path_variants(path: str, *, repo_root: str | Path | None = None) -> tuple[str, ...]:
+    normalized = str(path).replace("\\", "/").strip().lstrip("/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    variants = [normalized] if normalized else []
+    if repo_root is not None:
+        root_name = Path(repo_root).expanduser().resolve().name
+        prefix = f"{root_name}/" if root_name else ""
+        if prefix and normalized.startswith(prefix):
+            variants.append(normalized[len(prefix):])
+    return tuple(dict.fromkeys(item for item in variants if item))
+
+
+def _is_runtime_path_variant(path: str) -> bool:
+    return path in RUNTIME_CHANGE_FILES or any(
+        path == prefix.rstrip("/") or path.startswith(prefix)
+        for prefix in RUNTIME_CHANGE_PREFIXES
     )
 
 
@@ -287,6 +369,13 @@ def codex_check_to_markdown(result: CodexCheckResult) -> str:
         lines.append("[codex-check] Skipping slow workflows: " + ", ".join(result.skipped_slow_workflows))
     if result.coverage:
         lines.append(f"[codex-check] Coverage: {result.coverage.get('status')}")
+        if result.coverage.get("ignored_runtime_files"):
+            ignored = list(result.coverage.get("ignored_runtime_files", []))
+            lines.append(
+                "[codex-check] Ignored generated runtime files: "
+                + ", ".join(str(item) for item in ignored[:5])
+                + ("..." if len(ignored) > 5 else "")
+            )
         if result.coverage.get("uncovered_files"):
             lines.append("[codex-check] Uncovered files: " + ", ".join(str(item) for item in result.coverage.get("uncovered_files", [])))
         if result.coverage.get("fallback_only_files"):
@@ -365,4 +454,6 @@ def codex_check_to_markdown(result: CodexCheckResult) -> str:
             lines.append("[codex-check] Verdict: PASS — real user interaction was executed and verified.")
     elif result.verdict == "coverage_gap":
         lines.append("[codex-check] Verdict: COVERAGE GAP — no precise workflow coverage for this diff.")
+    elif result.verdict == "no_changed_files":
+        lines.append("[codex-check] Verdict: NO PRODUCT CHANGES — ignored generated runtime files only.")
     return "\n".join(lines)

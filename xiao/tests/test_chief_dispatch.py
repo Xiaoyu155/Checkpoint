@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import sys
 from pathlib import Path
 
 from visual_agent.chief_dispatch import (
+    _dirty_context_prompt,
+    _dirty_context_summary,
     _dirty_path_ignored,
+    _run_worker_attempt,
     _verification_is_repairable,
     _write_worktree_gitignore,
     build_verification_command,
@@ -229,6 +233,71 @@ def test_run_process_capture_writes_log_and_supports_stdin(tmp_path) -> None:
     assert "err-line" in text
 
 
+def test_run_process_capture_uses_hidden_launch_kwargs(tmp_path, monkeypatch) -> None:
+    captured = {}
+
+    class FakeProcess:
+        stdout = io.StringIO("out-line\n")
+        stderr = io.StringIO("")
+        stdin = None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            raise AssertionError("worker should not be killed")
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr("visual_agent.chief_dispatch.hidden_subprocess_kwargs", lambda: {"creationflags": 12345})
+    monkeypatch.setattr("visual_agent.chief_dispatch.subprocess.Popen", fake_popen)
+
+    result = run_process_capture(
+        ["worker"],
+        cwd=tmp_path,
+        timeout_seconds=10,
+        log_path=tmp_path / "worker.log",
+    )
+
+    assert result["exit_code"] == 0
+    assert captured["kwargs"]["creationflags"] == 12345
+    assert "out-line" in result["stdout_tail"]
+
+
+def test_worker_attempt_persists_progress_heartbeat(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    workspace.mkdir()
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, **kwargs):
+        progress_callback = kwargs.get("progress_callback")
+        assert progress_callback is not None
+        progress_callback({"stream": "stdout", "chunk": "editing src/app.js\n"})
+        log_path.write_text("editing src/app.js\n", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
+
+    record = _run_worker_attempt(
+        workspace_root=workspace,
+        plan_id="p1",
+        mission_id="m1",
+        attempt="initial",
+        track={"id": "track_1_codex", "agent": "codex"},
+        argv=["codex", "exec"],
+        cwd=tmp_path,
+        timeout_seconds=10,
+        log_path=workspace / "chief_plans" / "p1" / "logs" / "worker.log",
+        runner=fake_runner,
+    )
+
+    progress = json.loads((workspace / "missions" / "m1" / "progress.json").read_text(encoding="utf-8"))
+    assert record["status"] == "completed"
+    assert progress["stage"] == "worker_completed"
+    assert progress["worker_status"] == "completed"
+    assert "editing src/app.js" in progress["last_output_tail"]
+
+
 def test_build_worker_command_claude_code_is_headless(tmp_path) -> None:
     plan = {"objective": "fix", "acceptance_criteria": [], "selected_workflows": [], "changed_files": []}
     track = {"id": "track_1_claude_code", "agent": "claude-code", "model": "opus"}
@@ -241,6 +310,22 @@ def test_build_worker_command_claude_code_is_headless(tmp_path) -> None:
     assert "--model" in argv and "opus" in argv
     # Headless-safe permission mode so the worker does not hang on prompts.
     assert "--permission-mode" in argv and "acceptEdits" in argv
+
+
+def test_build_worker_command_appends_prompt_suffix_to_codex_stdin(tmp_path) -> None:
+    plan = {"objective": "fix", "acceptance_criteria": [], "selected_workflows": [], "changed_files": []}
+    track = {"id": "track_1_codex", "agent": "codex"}
+
+    cmd = build_worker_command(
+        plan=plan,
+        track=track,
+        worktree=Path(tmp_path),
+        verification_command="python -m pytest -q",
+        prompt_suffix="Source checkout dirty context: M src/app.py",
+    )
+
+    assert "stdin" in cmd
+    assert "Source checkout dirty context: M src/app.py" in cmd["stdin"]
 
 
 def test_chief_dispatch_claude_code_worker_executes(tmp_path, monkeypatch) -> None:
@@ -345,6 +430,108 @@ def test_chief_dispatch_explicit_command_pass_without_changes_is_not_verified(tm
 
     assert payload["latest_verification"]["verdict"] == "pass"
     assert payload["status"] == "no_product_changes"
+
+
+def test_chief_dispatch_rejects_worker_sibling_flutter_toolchain(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.run_command_verification",
+        lambda **_kwargs: {"verdict": "pass", "exit_code": 0, "stdout_tail": "", "stderr_tail": ""},
+    )
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path):
+        log_path.write_text(
+            r"exec & 'D:\\Projects\\flutter_stable\\bin\\dart.bat' format lib/screens/discovery_page.dart",
+            encoding="utf-8",
+        )
+        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        test_command=(
+            r"D:\Projects\flutter_stable\bin\cache\dart-sdk\bin\dart.exe "
+            r"D:\Projects\flutter_stable\bin\cache\flutter_tools.snapshot analyze lib/screens/discovery_page.dart"
+        ),
+    )
+
+    assert payload["latest_verification"]["verdict"] == "pass"
+    assert payload["status"] == "verified_blocked"
+    assert payload["toolchain_violation"]["forbidden_path"].lower().endswith(r"\bin\dart.bat")
+
+
+def test_chief_dispatch_sanitizes_worker_env_for_exact_dart_toolchain(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    monkeypatch.setattr("visual_agent.chief_dispatch._worktree_has_product_changes", lambda _worktree: True)
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.run_command_verification",
+        lambda **_kwargs: {"verdict": "pass", "exit_code": 0, "stdout_tail": "", "stderr_tail": ""},
+    )
+    monkeypatch.setenv("PATH", r"C:\Windows;D:\Projects\flutter_stable\bin;C:\Tools")
+    calls = []
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None, stdin_text=None):
+        calls.append(env or {})
+        log_path.write_text("worker used exact sdk", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        test_command=(
+            r"D:\Projects\flutter_stable\bin\cache\dart-sdk\bin\dart.exe "
+            r"D:\Projects\flutter_stable\bin\cache\flutter_tools.snapshot analyze lib/screens/discovery_page.dart"
+        ),
+    )
+
+    assert payload["status"] == "verified"
+    assert payload["toolchain_policy"]["status"] == "active"
+    assert payload["worker"]["toolchain_policy_env"] == "enabled"
+    assert calls
+    env = calls[0]
+    assert env["DEVPACER_EXPECTED_DART_EXE"].endswith(r"\bin\cache\dart-sdk\bin\dart.exe")
+    assert r"D:\Projects\flutter_stable\bin" not in env["PATH"]
+
+
+def test_chief_dispatch_toolchain_preflight_blocks_conflicting_verification_command(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+
+    def should_not_run(*_args, **_kwargs):
+        raise AssertionError("preflight should block before worker launch")
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=should_not_run,
+        test_command=(
+            r"D:\Projects\flutter_stable\bin\cache\dart-sdk\bin\dart.exe "
+            r"D:\Projects\flutter_stable\bin\cache\flutter_tools.snapshot analyze && "
+            r"D:\Projects\flutter_stable\bin\flutter.bat doctor"
+        ),
+    )
+
+    assert payload["status"] == "blocked"
+    assert payload["toolchain_preflight"]["status"] == "blocked"
+    assert payload["toolchain_preflight"]["forbidden_path"].lower().endswith(r"\bin\flutter.bat")
 
 
 def test_chief_dispatch_mimo_agent_applies_standalone_patch(tmp_path, monkeypatch) -> None:
@@ -489,11 +676,14 @@ def test_chief_dispatch_codex_quota_does_not_fall_over_to_claude(tmp_path, monke
     assert len(calls) == 1
     assert calls[0]["argv"][0] == "codex"
     assert payload["failover_worker_record"] is None
-    assert payload["worker"].get("failover_disabled") == "Low-cost backend failover unavailable: no backend token was found."
+    assert payload["worker"].get("failover_disabled") == (
+        "Codex was explicitly requested; automatic MiMo failover is disabled. "
+        "Retry explicitly with --agent mimo if you want MiMo."
+    )
     assert payload["quota_exhausted"] is True
 
 
-def test_chief_dispatch_codex_quota_falls_over_to_mimo_patch_worker(tmp_path, monkeypatch) -> None:
+def test_chief_dispatch_codex_quota_does_not_auto_fall_over_to_mimo_patch_worker(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("codex",))
     target = tmp_path / "src" / "payment" / "checkout.py"
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -513,17 +703,10 @@ def test_chief_dispatch_codex_quota_falls_over_to_mimo_patch_worker(tmp_path, mo
             "env": {"ANTHROPIC_API_KEY": "tp-test", "ANTHROPIC_BASE_URL": "https://mimo.test/anthropic"},
         },
     )
-    monkeypatch.setattr(
-        "visual_agent.chief_dispatch.run_llm_completion",
-        lambda **_kwargs: (
-            "diff --git a/src/payment/checkout.py b/src/payment/checkout.py\n"
-            "--- a/src/payment/checkout.py\n"
-            "+++ b/src/payment/checkout.py\n"
-            "@@ -1 +1 @@\n"
-            "-total = 0\n"
-            "+total = 128\n"
-        ),
-    )
+    def unexpected_mimo_call(**_kwargs):
+        raise AssertionError("Codex quota exhaustion must not automatically call MiMo")
+
+    monkeypatch.setattr("visual_agent.chief_dispatch.run_llm_completion", unexpected_mimo_call)
 
     calls = []
 
@@ -539,11 +722,14 @@ def test_chief_dispatch_codex_quota_falls_over_to_mimo_patch_worker(tmp_path, mo
 
     assert len(calls) == 1
     assert calls[0]["argv"][0] == "codex"
-    assert payload["failover_worker_record"]["agent"] == "mimo"
-    assert payload["failover_worker_record"]["status"] == "completed"
-    assert payload["quota_exhausted"] is False
-    assert payload["status"] == "verified"
-    assert target.read_text(encoding="utf-8") == "total = 128\n"
+    assert payload["failover_worker_record"] is None
+    assert payload["worker"].get("failover_disabled") == (
+        "Codex was explicitly requested; automatic MiMo failover is disabled. "
+        "Retry explicitly with --agent mimo if you want MiMo."
+    )
+    assert payload["quota_exhausted"] is True
+    assert payload["status"] == "worker_failed"
+    assert target.read_text(encoding="utf-8") == "total = 0\n"
 
 
 def test_chief_dispatch_quota_exhausted_is_honest_when_no_failover(tmp_path, monkeypatch) -> None:
@@ -632,7 +818,8 @@ def test_chief_dispatch_claude_code_worker_writes_records(tmp_path, monkeypatch)
 def test_coverage_changed_files_excludes_checkpoint_artifacts(tmp_path, monkeypatch) -> None:
     from visual_agent import chief_dispatch
 
-    repo = tmp_path
+    repo = tmp_path / "xiao"
+    repo.mkdir()
     workspace = repo / ".agent-workspace"
     workspace.mkdir()
     # Raw diff includes real code plus Checkpoint's own run artifacts (which the
@@ -646,12 +833,151 @@ def test_coverage_changed_files_excludes_checkpoint_artifacts(tmp_path, monkeypa
             ".agent-workspace/run_history.jsonl",
             ".visual-agent-status.md",
             ".pw-browsers/chromium-1223/x",
+            ".dart-home/pub-cache/hosted/pub.dev/x",
+            ".dart_tool/package_config.json",
+            "artifacts/random-local-run/report.json",
+            "xiao/artifacts/random-local-run/report.json",
+            "xiao/.agent-workspace/runs/20260101-abc/report.json",
         ],
     )
 
     kept = chief_dispatch._coverage_changed_files(repo_root=repo, workspace_root=workspace)
 
     assert kept == ["examples/web/checkout_verification_demo.html"]
+
+
+def test_worktree_product_changes_ignore_devpacer_gitignore_block(tmp_path) -> None:
+    from visual_agent import chief_dispatch
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / ".gitignore").write_text(".agent-workspace/\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=tmp_path, check=True, capture_output=True)
+
+    (tmp_path / ".gitignore").write_text(
+        ".agent-workspace/\n"
+        "# Auto-generated by DevPacer for this worktree - safe to commit\n"
+        "__pycache__/\n"
+        "*.pyc\n"
+        ".pytest_cache/\n"
+        "node_modules/\n"
+        ".npm-cache/\n"
+        ".dart_tool/\n"
+        ".dart-home/\n"
+        "coverage/\n",
+        encoding="utf-8",
+    )
+
+    assert chief_dispatch._worktree_has_product_changes(tmp_path) is False
+
+
+def test_worktree_product_changes_ignore_dart_runtime_caches(tmp_path) -> None:
+    from visual_agent import chief_dispatch
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "main.dart").write_text("void main() {}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=tmp_path, check=True, capture_output=True)
+
+    (tmp_path / ".dart-home" / "pub-cache").mkdir(parents=True)
+    (tmp_path / ".dart-home" / "pub-cache" / "README").write_text("cache\n", encoding="utf-8")
+    (tmp_path / ".dart_tool").mkdir()
+    (tmp_path / ".dart_tool" / "package_config.json").write_text("{}\n", encoding="utf-8")
+
+    assert chief_dispatch._worktree_has_product_changes(tmp_path) is False
+
+
+def test_worktree_product_changes_ignore_flutter_generated_registrants(tmp_path) -> None:
+    from visual_agent import chief_dispatch
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    path = tmp_path / "windows" / "flutter" / "generated_plugin_registrant.cc"
+    path.parent.mkdir(parents=True)
+    path.write_text("old\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=tmp_path, check=True, capture_output=True)
+
+    path.write_text("new\n", encoding="utf-8")
+
+    assert chief_dispatch._worktree_has_product_changes(tmp_path) is False
+
+
+def test_worktree_product_changes_keeps_real_source_changes(tmp_path) -> None:
+    from visual_agent import chief_dispatch
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    path = tmp_path / "lib" / "screens" / "discovery_page.dart"
+    path.parent.mkdir(parents=True)
+    path.write_text("old\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=tmp_path, check=True, capture_output=True)
+
+    path.write_text("new\n", encoding="utf-8")
+
+    assert chief_dispatch._worktree_has_product_changes(tmp_path) is True
+
+
+def test_worktree_product_changes_ignore_acceptance_and_test_files(tmp_path) -> None:
+    from visual_agent import chief_dispatch
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "eval").mkdir()
+    (tmp_path / "eval" / "service-quality-acceptance.mjs").write_text("export const cases = [];\n", encoding="utf-8")
+    (tmp_path / "快手").mkdir()
+    (tmp_path / "快手" / "test.js").write_text("console.log('test');\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=tmp_path, check=True, capture_output=True)
+
+    (tmp_path / "eval" / "service-quality-acceptance.mjs").write_text("export const cases = ['stricter'];\n", encoding="utf-8")
+    (tmp_path / "快手" / "test.js").write_text("console.log('updated test');\n", encoding="utf-8")
+
+    assert chief_dispatch._worktree_has_product_changes(tmp_path) is False
+
+
+def test_worktree_product_changes_keeps_non_ascii_real_source_changes(tmp_path) -> None:
+    from visual_agent import chief_dispatch
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    path = tmp_path / "快手" / "miniapp" / "utils" / "caseStore.js"
+    path.parent.mkdir(parents=True)
+    path.write_text("export const oldValue = 1;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=tmp_path, check=True, capture_output=True)
+
+    path.write_text("export const newValue = 2;\n", encoding="utf-8")
+
+    assert chief_dispatch._worktree_has_product_changes(tmp_path) is True
+
+
+def test_mimo_patch_retry_prompt_drops_stale_file_context(tmp_path) -> None:
+    from visual_agent.chief_dispatch import _build_mimo_patch_retry_prompt
+
+    target = tmp_path / "src" / "routes" / "diagnosis.js"
+    target.parent.mkdir(parents=True)
+    target.write_text("export const current = true;\n", encoding="utf-8")
+
+    prompt = _build_mimo_patch_retry_prompt(
+        original_prompt=(
+            "Objective:\nfix diagnosis\n\n"
+            "Rules:\n- Return only a unified git diff.\n\n"
+            "File context:\n--- src/routes/diagnosis.js ---\nSTALE_SNIPPET\n"
+        ),
+        diff_text=(
+            "diff --git a/src/routes/diagnosis.js b/src/routes/diagnosis.js\n"
+            "--- a/src/routes/diagnosis.js\n"
+            "+++ b/src/routes/diagnosis.js\n"
+            "@@ -1 +1 @@\n"
+            "-STALE_SNIPPET\n"
+            "+new\n"
+        ),
+        stderr_tail="error: patch failed: src/routes/diagnosis.js:1",
+        cwd=tmp_path,
+    )
+
+    assert "export const current = true;" in prompt
+    assert "File context:\n--- src/routes/diagnosis.js ---\nSTALE_SNIPPET" not in prompt
+    assert "CURRENT file contents" in prompt
 
 
 def test_build_worker_command_codex_uses_cli_default_model(tmp_path) -> None:
@@ -672,6 +998,28 @@ def test_build_worker_command_codex_uses_cli_default_model(tmp_path) -> None:
     assert impl["argv"][-1] == "-"
     assert "Objective: fix" in impl["stdin"]
     assert "Objective: fix" not in impl["argv"]
+
+
+def test_build_worker_command_warns_to_reuse_absolute_verification_toolchain(tmp_path) -> None:
+    plan = {
+        "objective": "format and analyze Flutter discovery page",
+        "acceptance_criteria": [],
+        "selected_workflows": [],
+    }
+    cmd = build_worker_command(
+        plan=plan,
+        track=_codex_track(),
+        worktree=Path(tmp_path),
+        verification_command=(
+            r"D:\Projects\flutter_stable\bin\cache\dart-sdk\bin\dart.exe "
+            r"D:\Projects\flutter_stable\bin\cache\flutter_tools.snapshot analyze lib/screens/discovery_page.dart"
+        ),
+    )
+
+    assert "reuse that exact toolchain" in cmd["stdin"]
+    assert "do not call bare `dart` or `flutter`" in cmd["stdin"]
+    assert r"not `...\bin\dart.exe`, `...\bin\dart.bat`" in cmd["stdin"]
+    assert r"D:\Projects\flutter_stable\bin\cache\dart-sdk\bin\dart.exe" in cmd["stdin"]
 
 
 def test_build_verification_command_uses_python_module_entrypoint(tmp_path) -> None:
@@ -745,6 +1093,52 @@ def test_chief_dispatch_merges_when_verified(tmp_path, monkeypatch) -> None:
     assert payload["merge"]["status"] == "merged"
 
 
+def test_chief_dispatch_marks_post_merge_command_failure(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    monkeypatch.setattr("visual_agent.chief_dispatch._worktree_has_product_changes", lambda _worktree: True)
+    monkeypatch.setattr("visual_agent.chief_dispatch.merge_worktree_branch", lambda **kwargs: {"status": "merged", "target": "main"})
+
+    calls = []
+
+    def fake_verify(**kwargs):
+        calls.append(kwargs["repo_root"])
+        if len(calls) == 1:
+            return {"verdict": "pass", "command": kwargs["command"], "exit_code": 0, "output_tail": "", "failure_kind": ""}
+        return {
+            "verdict": "fail",
+            "command": kwargs["command"],
+            "exit_code": 1,
+            "output_tail": "AI知识审查: skipped (QWEN_API_KEY missing)",
+            "failure_kind": "verification_environment_missing",
+        }
+
+    monkeypatch.setattr("visual_agent.chief_dispatch.run_command_verification", fake_verify)
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
+        log_path.write_text("done", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        test_command="npm run eval:acceptance",
+        merge=True,
+    )
+
+    assert payload["status"] == "merged_verification_failed"
+    assert payload["latest_verification"]["run_profile"] == "post-merge"
+    assert payload["latest_verification"]["command_verification"]["failure_kind"] == "verification_environment_missing"
+    assert payload["merge"]["post_merge_verification"]["verdict"] == "fail"
+    assert len(calls) == 2
+
+
 def test_chief_dispatch_dry_run_previews_worktree_and_commands(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
 
@@ -809,6 +1203,62 @@ def test_chief_dispatch_review_plan_uses_report_as_acceptance(tmp_path, monkeypa
     assert payload["status"] == "verified"
     assert payload["latest_verification"]["run_profile"] == "review_plan"
     assert "建议开发计划" in payload["review_plan_report"]
+
+
+def test_chief_dispatch_review_plan_report_pass_beats_worker_timeout(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    plan_id = "review-timeout"
+    save_plan(
+        {
+            "schema_version": 1,
+            "plan_id": plan_id,
+            "objective": "审查当前产品并输出开发计划",
+            "status": "ready",
+            "repo_root": str(tmp_path),
+            "selected_workflows": [],
+            "acceptance_criteria": ["产出审查与开发计划报告"],
+            "worker_tracks": [
+                {"id": "track_1_codex", "agent": "codex", "track_kind": "implementation", "tier": "strong"}
+            ],
+        },
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+    )
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    monkeypatch.setattr("visual_agent.chief_dispatch._git_head", lambda _repo_root: "base")
+    monkeypatch.setattr("visual_agent.chief_dispatch._worktree_has_product_changes", lambda _worktree: False)
+
+    def fake_create_worktree(**kwargs):
+        kwargs["worktree"].mkdir(parents=True, exist_ok=True)
+        return {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]}
+
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", fake_create_worktree)
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
+        Path(cwd, "审查与开发计划.md").write_text(
+            "## 产品判断\n\n已有可审查产品。\n\n## 当前状态\n\n报告已生成。\n\n"
+            "## 主要风险\n\n验收仍需闭环。\n\n## 建议开发计划\n\n1. 收口关键路径。\n2. 补验收。\n\n"
+            "## 验收方式\n\n运行固定验收命令并检查报告。报告内容足够长，能作为本轮交付物。"
+            "继续保留日志、任务轮次和最终报告路径，便于复盘。",
+            encoding="utf-8",
+        )
+        log_path.write_text("report written before timeout", encoding="utf-8")
+        return {"exit_code": 124, "stdout_tail": "", "stderr_tail": "timed out"}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+    )
+
+    assert payload["worker_record"]["status"] == "failed"
+    assert payload["latest_verification"]["run_profile"] == "review_plan"
+    assert payload["latest_verification"]["verdict"] == "pass"
+    assert payload["status"] == "verified"
 
 
 def test_chief_dispatch_blocks_inspection_lane(tmp_path, monkeypatch) -> None:
@@ -1003,6 +1453,18 @@ def test_untrusted_command_failure_is_not_repairable() -> None:
     assert _verification_is_repairable(verification) is False
 
 
+def test_missing_verification_environment_failure_is_not_repairable() -> None:
+    verification = {
+        "verdict": "fail",
+        "repair_brief": {
+            "source": "test_command",
+            "failure_kind": "verification_environment_missing",
+        },
+    }
+
+    assert _verification_is_repairable(verification) is False
+
+
 def test_test_tampering_failure_is_not_repairable() -> None:
     verification = {
         "verdict": "fail",
@@ -1085,7 +1547,7 @@ def test_dirty_gate_ignores_mandatory_record(tmp_path) -> None:
     assert dirty == []
 
 
-def test_write_worktree_gitignore_creates_file_for_python_project(tmp_path) -> None:
+def test_write_worktree_gitignore_creates_local_exclude_for_python_project(tmp_path) -> None:
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     repo_root = tmp_path / "repo"
@@ -1094,14 +1556,15 @@ def test_write_worktree_gitignore_creates_file_for_python_project(tmp_path) -> N
 
     _write_worktree_gitignore(worktree, repo_root)
 
-    gi = worktree / ".gitignore"
-    assert gi.exists(), ".gitignore should be written for a Python project"
-    content = gi.read_text(encoding="utf-8")
+    assert not (worktree / ".gitignore").exists()
+    exclude = worktree / ".git" / "info" / "exclude"
+    assert exclude.exists(), "local git exclude should be written for a Python project"
+    content = exclude.read_text(encoding="utf-8")
     assert "__pycache__/" in content
     assert "*.pyc" in content
 
 
-def test_write_worktree_gitignore_skips_when_already_exists(tmp_path) -> None:
+def test_write_worktree_gitignore_preserves_existing_gitignore_and_appends_runtime_cache_rules_to_exclude(tmp_path) -> None:
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     existing = worktree / ".gitignore"
@@ -1109,10 +1572,17 @@ def test_write_worktree_gitignore_skips_when_already_exists(tmp_path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     (repo_root / "main.py").write_text("# python\n", encoding="utf-8")
+    (repo_root / "package.json").write_text('{"scripts":{"test":"node --test"}}\n', encoding="utf-8")
+    (repo_root / "pubspec.yaml").write_text("name: demo\n", encoding="utf-8")
 
     _write_worktree_gitignore(worktree, repo_root)
 
     assert existing.read_text(encoding="utf-8") == "custom\n"
+    content = (worktree / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert "__pycache__/" in content
+    assert ".npm-cache/" in content
+    assert ".dart-home/" in content
+    assert ".dart_tool/" in content
 
 
 def test_create_worktree_allows_dirty_reuse_only_when_explicit(tmp_path) -> None:
@@ -1175,7 +1645,62 @@ def test_create_worktree_overlays_nested_untracked_project_when_dirty_allowed(tm
     assert status.stdout.strip() == ""
 
 
-def test_stop_reason_prefers_passed_verification_over_worker_failure() -> None:
+def test_create_worktree_overlays_ignored_source_files_when_dirty_allowed(tmp_path) -> None:
+    from visual_agent.chief_dispatch import create_worktree
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "devpacer@example.local"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "DevPacer"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("src/data/\nnode_modules/\n.env\n", encoding="utf-8")
+    (repo / "package.json").write_text('{"scripts":{"test":"node --test"}}\n', encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore", "package.json"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=repo, check=True, capture_output=True, text=True)
+
+    (repo / "src" / "data").mkdir(parents=True)
+    (repo / "src" / "data" / "caseAtlas.js").write_text("export const cases = [];\n", encoding="utf-8")
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / "leftpad.js").write_text("module.exports = null;\n", encoding="utf-8")
+    (repo / ".env").write_text("SECRET=1\n", encoding="utf-8")
+
+    worktree = tmp_path / "wt"
+    result = create_worktree(repo_root=repo, worktree=worktree, branch="devpacer-ignored", allow_dirty=True)
+
+    assert result["status"] == "created"
+    assert result["dirty_file_overlay"] == "copied"
+    assert result["dirty_file_overlay_ignored_files"] == 1
+    assert (worktree / "src" / "data" / "caseAtlas.js").exists()
+    assert not (worktree / "node_modules" / "leftpad.js").exists()
+    assert not (worktree / ".env").exists()
+
+
+def test_dirty_context_summary_reports_source_dirty_files_before_overlay(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "devpacer@example.local"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "DevPacer"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("src/data/\n.env\nnode_modules/\n", encoding="utf-8")
+    (repo / "README.md").write_text("baseline\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore", "README.md"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=repo, check=True, capture_output=True, text=True)
+
+    (repo / "README.md").write_text("dirty\n", encoding="utf-8")
+    (repo / "src" / "data").mkdir(parents=True)
+    (repo / "src" / "data" / "caseAtlas.js").write_text("export const cases = [];\n", encoding="utf-8")
+    (repo / ".env").write_text("SECRET=1\n", encoding="utf-8")
+
+    summary = _dirty_context_summary(repo_root=repo, allow_dirty=True)
+    prompt = _dirty_context_prompt(summary)
+
+    assert "M README.md" in summary["source_dirty_files"]
+    assert "src/data/caseAtlas.js" in summary["ignored_overlay_candidate_files"]
+    assert ".env" not in prompt
+    assert "empty `git status`" in prompt
+
+
+def test_stop_reason_keeps_worker_failure_when_verification_passes() -> None:
     from visual_agent.chief_run import _stop_reason_from_dispatch
 
     dispatch = {
@@ -1184,4 +1709,16 @@ def test_stop_reason_prefers_passed_verification_over_worker_failure() -> None:
         "latest_verification": {"verdict": "pass"},
     }
 
-    assert _stop_reason_from_dispatch(dispatch, {"max_rounds": 2}) == "verified"
+    assert _stop_reason_from_dispatch(dispatch, {"max_rounds": 2}) == "worker_error"
+
+
+def test_stop_reason_reports_worker_toolchain_violation() -> None:
+    from visual_agent.chief_run import _stop_reason_from_dispatch
+
+    dispatch = {
+        "status": "worker_toolchain_violation",
+        "latest_verification": {"verdict": "pass"},
+        "toolchain_violation": {"forbidden_path": r"D:\Projects\flutter_stable\bin\dart.bat"},
+    }
+
+    assert _stop_reason_from_dispatch(dispatch, {"max_rounds": 2}) == "worker_toolchain_violation"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 
 from datetime import datetime, timedelta, timezone
 
@@ -11,7 +13,7 @@ from visual_agent.chief_background import (
     start_background_chief_run,
 )
 from visual_agent.chief_run import mission_status_payload, run_chief_mission
-from visual_agent.missions import load_mission, load_rounds, save_mission
+from visual_agent.missions import append_round, load_mission, load_rounds, save_mission
 from visual_agent.workspace import init_workspace
 
 
@@ -86,6 +88,9 @@ def test_start_background_chief_run_records_process(tmp_path, monkeypatch) -> No
     assert "python -m pytest -q" in captured["argv"]
     assert "--allow-test-edits" in captured["argv"]
     assert "--merge" in captured["argv"]
+    if os.name == "nt":
+        assert captured["kwargs"]["creationflags"] & getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        assert captured["kwargs"].get("startupinfo") is not None
     background_json = workspace.root / "missions" / mission_id / "background.json"
     saved = json.loads(background_json.read_text(encoding="utf-8"))
     assert saved["pid"] == 43210
@@ -162,6 +167,39 @@ def test_inspect_background_state_marks_orphaned_process_as_worker_error(tmp_pat
     assert mission["stop_reason"] == "worker_error"
     rounds = load_rounds(workspace.root, mission_id)
     assert rounds[-1]["type"] == "background_health"
+
+
+def test_inspect_background_state_preserves_verified_mission_when_launcher_exits(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    write_verification_workflow(workspace, "checkout", affects="src/payment/")
+    monkeypatch.setattr("visual_agent.chief_engineer.changed_files", lambda **_kwargs: ["src/payment/checkout.py"])
+    preview = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        dispatch_runner=preview_payload,
+    )
+    mission_id = preview["mission"]["mission_id"]
+    mission = load_mission(workspace.root, mission_id)
+    assert mission is not None
+    mission["status"] = "verified"
+    mission["stop_reason"] = "verified"
+    save_mission(workspace.root, mission)
+    append_round(workspace.root, mission_id, {"round": 1, "type": "verification", "status": "pass"})
+    save_background_record(workspace.root, mission_id, {"status": "running", "pid": 999, "started_at": datetime.now(timezone.utc).isoformat()})
+
+    state = inspect_background_state(
+        workspace_root=workspace.root,
+        mission_id=mission_id,
+        process_probe=lambda _pid: {"alive": False, "exit_code": None},
+    )
+
+    assert state["status"] == "completed"
+    assert state["process_state"] == "reconciled_from_mission"
+    mission = load_mission(workspace.root, mission_id)
+    assert mission is not None
+    assert mission["status"] == "verified"
+    assert mission["stop_reason"] == "verified"
 
 
 def test_inspect_background_state_times_out_and_marks_budget_exhausted(tmp_path, monkeypatch) -> None:
