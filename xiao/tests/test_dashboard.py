@@ -385,6 +385,16 @@ def test_dashboard_mission_detail_includes_pacer_evidence(tmp_path) -> None:
     log_dir.mkdir(parents=True)
     log_path = log_dir / "track_1_mimo-initial.log"
     log_path.write_text("{\"stdout_tail\":\"mimo unified diff applied.\"}", encoding="utf-8")
+    save_plan(
+        {
+            "plan_id": "p1",
+            "objective": "fix checkout",
+            "status": "needs_workflow_coverage",
+            "verification_mode": "command",
+        },
+        workspace_root=workspace,
+        plan_id="p1",
+    )
     append_worker_record(
         workspace,
         "p1",
@@ -419,9 +429,47 @@ def test_dashboard_mission_detail_includes_pacer_evidence(tmp_path) -> None:
     assert detail["pacer_evidence"]["worker_status"] == "completed"
     assert detail["pacer_evidence"]["backend"] == "mimo"
     assert detail["pacer_evidence"]["verification_command"] == "cmd /c dir PACER_MIMO_SMOKE.md >nul"
+    assert detail["pacer_evidence"]["verification_mode"] == "command"
     assert "mimo unified diff applied" in detail["pacer_evidence"]["log_tail"]
     assert detail["progress"]["stage"] == "verified"
     assert detail["pacer_evidence"]["stage"] == "verified"
+
+
+def test_dashboard_data_propagates_command_verification_mode(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    workspace.mkdir()
+    mission = {
+        "mission_id": "m1",
+        "plan_id": "p1",
+        "objective": "fix checkout",
+        "status": "stopped",
+        "stop_reason": "coverage_gap",
+    }
+    save_mission(workspace, mission)
+    save_plan(
+        {
+            "plan_id": "p1",
+            "objective": "fix checkout",
+            "status": "needs_workflow_coverage",
+            "verification_mode": "command",
+        },
+        workspace_root=workspace,
+        plan_id="p1",
+    )
+    save_verification(
+        workspace,
+        "p1",
+        {
+            "verdict": "pass",
+            "command_verification": {"command": "python -m pytest -q"},
+        },
+    )
+
+    data = build_dashboard_data(workspace)
+
+    mission_payload = data["missions"][0]
+    assert mission_payload["verification_mode"] == "command"
+    assert mission_payload["pacer_evidence"]["verification_mode"] == "command"
 
 
 def test_start_worker_uses_cli_module_entrypoint(tmp_path, monkeypatch) -> None:
@@ -536,6 +584,9 @@ def test_dashboard_app_js_exposes_execution_evidence_surface() -> None:
     assert "renderPromotionReadinessPanel" in text
     assert "saveProfileConfig" in text
     assert "打开中转站" in text
+    assert "verification_mode" in text
+    assert "commandMode && m.stop_reason==='coverage_gap'" in text
+    assert "commandMode&&m.stop_reason==='coverage_gap'" in text
 
 
 def test_dashboard_goal_intake_refines_goal_into_dialogue(tmp_path, monkeypatch) -> None:

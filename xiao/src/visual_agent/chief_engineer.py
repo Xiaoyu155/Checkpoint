@@ -58,6 +58,7 @@ class ChiefPlan:
     selected_workflows: list[str]
     skipped_slow_workflows: list[str]
     coverage: dict[str, Any] = field(default_factory=dict)
+    verification_mode: str = "workflow"
     acceptance_criteria: list[str] = field(default_factory=list)
     worker_tracks: list[dict[str, Any]] = field(default_factory=list)
     verification_commands: list[str] = field(default_factory=list)

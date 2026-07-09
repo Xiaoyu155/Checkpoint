@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from visual_agent.chief_dispatch import build_worker_command
+from visual_agent.chief_plans_store import load_plan
 from visual_agent.chief_run import _override_plan_agent, chief_run_to_markdown, mission_status_payload, run_chief_mission
 from visual_agent.mission_progress import save_mission_progress
 from visual_agent.missions import load_mission, load_rounds, save_mission
@@ -366,14 +367,32 @@ def test_chief_run_report_marks_command_verification_mode() -> None:
     )
 
     assert "- Status: `command_gate`" in report
-    assert "- Workflow coverage status: `needs_workflow_coverage` (superseded by explicit test command)" in report
     assert "- Verification mode: `command`" in report
+    assert "- Workflow coverage: workflow coverage 由显式测试命令接管" in report
     assert "- Selected workflows: not used (explicit test command)" in report
+    assert "needs_workflow_coverage" not in report
     assert "Preflight" in report
     assert "| dependency | `warning` |" in report
     assert "reason=missing_node_modules" in report
     assert "- Command: `npm ci && npm test`" in report
     assert "Selected workflows: checkout_verification" not in report
+
+
+def test_chief_run_saves_command_verification_mode_to_plan(tmp_path, monkeypatch) -> None:
+    workspace = ready_workspace(tmp_path, monkeypatch)
+
+    payload = run_chief_mission(
+        goal="Fix checkout",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        test_command="python -m pytest -q",
+        dispatch_runner=preview_payload,
+    )
+
+    saved = load_plan(workspace.root, payload["plan"]["plan_id"])
+    assert payload["plan"]["verification_mode"] == "command"
+    assert saved is not None
+    assert saved["verification_mode"] == "command"
 
 
 def test_final_report_has_three_sections() -> None:

@@ -146,6 +146,7 @@ def _build_dashboard_data_uncached(root: Path) -> dict[str, Any]:
             mission["board_column"] = "in_review"
         mission["efficiency"] = _mission_efficiency(root, mission)
         mission["pacer_evidence"] = _mission_pacer_evidence(root, mission)
+        mission["verification_mode"] = str(mission["pacer_evidence"].get("verification_mode") or mission.get("verification_mode") or "")
     plans = list_plans(root)
 
     try:
@@ -613,6 +614,8 @@ def _mission_pacer_evidence(root: Path, mission: dict[str, Any]) -> dict[str, An
     records = load_worker_records(root, plan_id) if plan_id else []
     verification = load_verification(root, plan_id) if plan_id else None
     verification = verification if isinstance(verification, dict) else {}
+    plan = load_plan(root, plan_id) if plan_id else None
+    plan = plan if isinstance(plan, dict) else {}
     latest_worker = records[-1] if records else {}
     backend = latest_worker.get("backend") if isinstance(latest_worker.get("backend"), dict) else {}
     log_path = str(latest_worker.get("log_path") or "").strip()
@@ -622,6 +625,9 @@ def _mission_pacer_evidence(root: Path, mission: dict[str, Any]) -> dict[str, An
         command = str(verification["command_verification"].get("command") or "").strip()
     if not command:
         command = str(verification.get("command") or "").strip()
+    verification_mode = str(plan.get("verification_mode") or "").strip()
+    if not verification_mode:
+        verification_mode = "command" if command else "workflow"
     progress = build_mission_progress(
         workspace_root=root,
         mission=mission,
@@ -642,6 +648,7 @@ def _mission_pacer_evidence(root: Path, mission: dict[str, Any]) -> dict[str, An
         "log_tail": _read_worker_log_tail(Path(log_path)) if log_path else "",
         "verification_verdict": str(verification.get("verdict") or ""),
         "verification_command": command,
+        "verification_mode": verification_mode,
         "verification_path": str(plan_dir(root, plan_id) / "verification.json") if plan_id else "",
         "merge_state": str(mission.get("merge_state") or ""),
         "final_report": str(report_path) if report_path else "",

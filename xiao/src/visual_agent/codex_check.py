@@ -79,7 +79,7 @@ class CodexCheckResult:
     def verdict(self) -> str:
         if self.failed:
             return "fail"
-        if self.coverage.get("status") in {"uncovered", "fallback_only"}:
+        if self.coverage.get("status") in {"uncovered", "fallback_only"} and self.coverage.get("verification_mode") != "command":
             return "coverage_gap"
         if self.coverage.get("status") == "runtime_only":
             return "no_changed_files"
@@ -369,6 +369,9 @@ def codex_check_to_markdown(result: CodexCheckResult) -> str:
         lines.append("[codex-check] Skipping slow workflows: " + ", ".join(result.skipped_slow_workflows))
     if result.coverage:
         lines.append(f"[codex-check] Coverage: {result.coverage.get('status')}")
+        command_mode = result.coverage.get("verification_mode") == "command"
+        if command_mode:
+            lines.append("[codex-check] Verification mode: command — workflow coverage 由显式测试命令接管.")
         if result.coverage.get("ignored_runtime_files"):
             ignored = list(result.coverage.get("ignored_runtime_files", []))
             lines.append(
@@ -376,21 +379,21 @@ def codex_check_to_markdown(result: CodexCheckResult) -> str:
                 + ", ".join(str(item) for item in ignored[:5])
                 + ("..." if len(ignored) > 5 else "")
             )
-        if result.coverage.get("uncovered_files"):
+        if result.coverage.get("uncovered_files") and not command_mode:
             lines.append("[codex-check] Uncovered files: " + ", ".join(str(item) for item in result.coverage.get("uncovered_files", [])))
-        if result.coverage.get("fallback_only_files"):
+        if result.coverage.get("fallback_only_files") and not command_mode:
             lines.append("[codex-check] Fallback-only files: " + ", ".join(str(item) for item in result.coverage.get("fallback_only_files", [])))
-        if result.coverage.get("next_action"):
+        if result.coverage.get("next_action") and not command_mode:
             lines.append(f"[codex-check] Coverage next action: {result.coverage.get('next_action')}")
         suggested_affects = result.coverage.get("suggested_affects")
-        if isinstance(suggested_affects, list) and suggested_affects:
+        if isinstance(suggested_affects, list) and suggested_affects and not command_mode:
             first = suggested_affects[0] if isinstance(suggested_affects[0], dict) else {}
             lines.append(
                 "[codex-check] Suggested affects: "
                 f"{first.get('workflow')} -> {', '.join(str(item) for item in first.get('add_affects', []))}"
             )
         suggested_new = result.coverage.get("suggested_new_workflows")
-        if isinstance(suggested_new, list) and suggested_new:
+        if isinstance(suggested_new, list) and suggested_new and not command_mode:
             first = suggested_new[0] if isinstance(suggested_new[0], dict) else {}
             lines.append(
                 "[codex-check] Suggested new workflow: "

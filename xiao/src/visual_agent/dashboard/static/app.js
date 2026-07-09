@@ -773,9 +773,10 @@ function missionCard(m){
   const sr = srInfo(m.stop_reason);
   const isStopped = m.status==='stopped'||m.status==='failed';
   const canDelete = !['running','preview_running','starting','verified','merged','archived'].includes(String(m.status||''));
-  const hasStop = m.stop_reason && m.stop_reason!=='verified';
   const eff = m.efficiency || {};
   const ev = m.pacer_evidence || {};
+  const commandMode = String(m.verification_mode || ev.verification_mode || '').toLowerCase() === 'command';
+  const hasStop = m.stop_reason && m.stop_reason!=='verified' && !(commandMode && m.stop_reason==='coverage_gap');
   const effLine = _efficiencyLine(eff);
   const mergeBtn = m.can_merge
     ? `<button class="act-merge" onclick="mergeMission(event,'${esc(m.mission_id)}')">✓ 合并</button>` : '';
@@ -785,7 +786,7 @@ function missionCard(m){
     ? `<button class="act-retry" onclick="loadMissionToComposer(event,'${esc(m.mission_id)}')">填回</button>` : '';
   const deleteBtn = canDelete
     ? `<button class="act-delete" onclick="deleteMission(event,'${esc(m.mission_id)}')">删除</button>` : '';
-  const clarifyBtn = (m.stop_reason==='needs_clarification' || m.stop_reason==='coverage_gap')
+  const clarifyBtn = (!commandMode && (m.stop_reason==='needs_clarification' || m.stop_reason==='coverage_gap'))
     ? `<button class="act-retry" onclick="event.stopPropagation();openTaskIntake('${jsq(m.objective||'')}')">继续确认</button>` : '';
   const stopTag = hasStop && !m.can_merge
     ? `<span class="stop-tag">${esc(sr.zh)}</span>` : '';
@@ -826,16 +827,17 @@ function missionRow(m){
   const status = String(m.status || '');
   const isStopped = status==='stopped'||status==='failed';
   const canDelete = !['running','preview_running','starting','verified','merged','archived'].includes(status);
-  const hasStop = m.stop_reason && m.stop_reason!=='verified';
   const eff = m.efficiency || {};
   const ev = m.pacer_evidence || {};
+  const commandMode = String(m.verification_mode || ev.verification_mode || '').toLowerCase() === 'command';
+  const hasStop = m.stop_reason && m.stop_reason!=='verified' && !(commandMode && m.stop_reason==='coverage_gap');
   const effLine = _efficiencyLine(eff);
   const mergeBtn = m.can_merge ? `<button class="act-merge" onclick="mergeMission(event,'${esc(m.mission_id)}')">合并</button>` : '';
   const retryBtn = isStopped && hasStop ? `<button class="act-retry" onclick="retryMission(event,'${esc(m.mission_id)}')">重试</button>` : '';
   const loadBtn = !['running','preview_running','starting','merged','archived'].includes(status)
     ? `<button class="act-retry" onclick="loadMissionToComposer(event,'${esc(m.mission_id)}')">填回</button>` : '';
   const deleteBtn = canDelete ? `<button class="act-delete" onclick="deleteMission(event,'${esc(m.mission_id)}')">删除</button>` : '';
-  const clarifyBtn = (m.stop_reason==='needs_clarification' || m.stop_reason==='coverage_gap')
+  const clarifyBtn = (!commandMode && (m.stop_reason==='needs_clarification' || m.stop_reason==='coverage_gap'))
     ? `<button class="act-retry" onclick="event.stopPropagation();openTaskIntake('${jsq(m.objective||'')}')">继续确认</button>` : '';
   const stopTag = hasStop && !m.can_merge ? `<span class="stop-tag">${esc(sr.zh)}</span>` : '';
   const contract = _requirementContractBlock(m);
@@ -1324,12 +1326,13 @@ async function detail(id){
   const sr=srInfo(m.stop_reason);
   const eff=m.efficiency || {};
   const isStopped=m.status==='stopped'||m.status==='failed';
-  const hasStop=m.stop_reason&&m.stop_reason!=='verified';
+  const commandMode = String(m.verification_mode || ev.verification_mode || '').toLowerCase() === 'command';
+  const hasStop=m.stop_reason&&m.stop_reason!=='verified'&&!(commandMode&&m.stop_reason==='coverage_gap');
   const canRetry=isStopped&&hasStop;
   const canDelete=!['running','preview_running','starting','verified','merged','archived'].includes(String(m.status||''));
 
   const mergeBtn=d.can_merge?`<button class="act-merge" style="padding:6px 14px;font-size:12px;" onclick="mergeMission(event,'${esc(m.mission_id)}')">✓ 合并到主分支</button>`:'';
-  const clarifyBtn=(m.stop_reason==='needs_clarification'||m.stop_reason==='coverage_gap')?`<button class="act-retry" style="padding:6px 14px;font-size:12px;" onclick="openTaskIntake('${jsq(m.objective||'')}')">继续确认任务</button>`:'';
+  const clarifyBtn=(!commandMode&&(m.stop_reason==='needs_clarification'||m.stop_reason==='coverage_gap'))?`<button class="act-retry" style="padding:6px 14px;font-size:12px;" onclick="openTaskIntake('${jsq(m.objective||'')}')">继续确认任务</button>`:'';
   const relayBtn=m.stop_reason==='quota_exhausted'?`<button class="act-retry" style="padding:6px 14px;font-size:12px;" onclick="closeDrawer();focusWorkbenchPanel('relay-panel','#relayBaseUrl')">打开中转站</button>`:'';
   const retryBtn=canRetry?`<button class="act-retry" style="padding:6px 14px;font-size:12px;" onclick="retryMission(event,'${esc(m.mission_id)}')">↺ 用相同目标重试</button>`:'';
   const deleteBtn=canDelete?`<button class="act-delete" style="padding:6px 14px;font-size:12px;" onclick="deleteMission(event,'${esc(m.mission_id)}')">删除任务</button>`:'';

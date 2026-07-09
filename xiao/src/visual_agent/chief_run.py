@@ -270,6 +270,11 @@ def run_chief_mission(
         plan_id = str(plan_payload.get("plan_id") or plan_id)
         if not goal:
             goal = str(plan_payload.get("objective") or "")
+    verification_mode = "command" if str(test_command or "").strip() else "workflow"
+    if str(plan_payload.get("verification_mode") or "workflow") != verification_mode:
+        plan_payload["verification_mode"] = verification_mode
+        if plan_id:
+            save_plan(plan_payload, workspace_root=workspace_path, plan_id=str(plan_id))
     if agents:
         changed_agent = _override_plan_agent(plan_payload, str(agents[0]))
         if changed_agent and plan_id:
@@ -1309,11 +1314,9 @@ def _append_plan_evidence(lines: list[str], *, plan: dict[str, Any], command_ver
     if not plan:
         return
     if command_verification:
-        original_status = str(plan.get("status") or "")
         lines.append("- Status: `command_gate`")
-        if original_status and original_status != "ready":
-            lines.append(f"- Workflow coverage status: `{original_status}` (superseded by explicit test command)")
         lines.append("- Verification mode: `command`")
+        lines.append("- Workflow coverage: workflow coverage 由显式测试命令接管")
         lines.append("- Selected workflows: not used (explicit test command)")
         return
     workflows = ", ".join(plan.get("selected_workflows") or []) or "none"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from visual_agent.codex_check import codex_check_to_markdown, filter_runtime_changed_files, run_codex_check
+from visual_agent.codex_check import CodexCheckResult, codex_check_to_markdown, filter_runtime_changed_files, run_codex_check
 from visual_agent.models import ActionStatus
 from visual_agent.workflow import WorkflowStepResult
 from visual_agent.workspace import init_workspace
@@ -158,6 +158,37 @@ def test_run_codex_check_reports_uncovered_changed_files(tmp_path, monkeypatch) 
     assert result.verdict == "coverage_gap"
     assert "Uncovered files: src/payment/checkout.py" in text
     assert "Suggested new workflow: src_payment_verification affects src/payment/" in text
+
+
+def test_codex_check_command_mode_does_not_report_coverage_gap() -> None:
+    result = CodexCheckResult(
+        changed_files=["src/payment/checkout.py"],
+        selected_workflows=[],
+        skipped_slow_workflows=[],
+        coverage={
+            "status": "uncovered",
+            "verification_mode": "command",
+            "uncovered_files": ["src/payment/checkout.py"],
+            "next_action": "Add precise workflow coverage for changed files.",
+            "suggested_new_workflows": [
+                {
+                    "changed_file": "src/payment/checkout.py",
+                    "suggested_name": "src_payment_verification",
+                    "affects": ["src/payment/"],
+                }
+            ],
+        },
+    )
+
+    text = codex_check_to_markdown(result)
+
+    assert result.verdict != "coverage_gap"
+    assert "Verification mode: command" in text
+    assert "workflow coverage 由显式测试命令接管" in text
+    assert "Uncovered files" not in text
+    assert "Coverage next action" not in text
+    assert "Suggested new workflow" not in text
+    assert "COVERAGE GAP" not in text
 
 
 def test_run_codex_check_ignores_runtime_artifacts_for_coverage(tmp_path, monkeypatch) -> None:

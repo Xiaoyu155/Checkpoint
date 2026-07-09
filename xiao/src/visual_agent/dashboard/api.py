@@ -926,6 +926,7 @@ def _build_pacer_evidence(
     worker_records: list[dict[str, Any]],
     verification: dict[str, Any],
 ) -> dict[str, Any]:
+    plan_id = str(mission.get("plan_id") or "").strip()
     mission_id = str(mission.get("mission_id") or "").strip()
     latest_worker = worker_records[-1] if worker_records else {}
     backend = latest_worker.get("backend") if isinstance(latest_worker.get("backend"), dict) else {}
@@ -936,6 +937,11 @@ def _build_pacer_evidence(
         command = str(verification["command_verification"].get("command") or "").strip()
     if not command:
         command = str(verification.get("command") or "").strip()
+    plan = load_plan(workspace_root, plan_id) if plan_id else None
+    plan = plan if isinstance(plan, dict) else {}
+    verification_mode = str(plan.get("verification_mode") or "").strip()
+    if not verification_mode:
+        verification_mode = "command" if command else "workflow"
     return {
         "worker_status": str(latest_worker.get("status") or ""),
         "worker_command": str(latest_worker.get("command") or ""),
@@ -950,7 +956,8 @@ def _build_pacer_evidence(
         "log_tail": _read_tail(Path(log_path), max_chars=1600) if log_path else "",
         "verification_verdict": str(verification.get("verdict") or ""),
         "verification_command": command,
-        "verification_path": str(plan_dir(workspace_root, str(mission.get("plan_id") or "")) / "verification.json") if mission.get("plan_id") else "",
+        "verification_mode": verification_mode,
+        "verification_path": str(plan_dir(workspace_root, plan_id) / "verification.json") if plan_id else "",
         "merge_state": str(mission.get("merge_state") or ""),
         "final_report": str(report_path) if report_path else "",
     }
