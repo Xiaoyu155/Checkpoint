@@ -563,6 +563,10 @@ def run_chief_mission(
         test_command=test_command,
         allow_test_edits=effective_allow_test_edits,
         merge=merge,
+        allow_prior_verified_evidence=_allow_prior_verified_evidence_for_resume(
+            mission,
+            resume_mission_id=resume_mission_id,
+        ),
     )
     _record_dispatch_attempts(workspace_path, mission["mission_id"], dispatch, start_round=_next_round_number(workspace_path, mission["mission_id"]))
     stop_reason = _stop_reason_from_dispatch(dispatch, budget)
@@ -793,6 +797,8 @@ def _stop_reason_from_dispatch(dispatch: dict[str, Any], budget: dict[str, Any])
         return "no_product_changes"
     if status == "worker_toolchain_violation":
         return "worker_toolchain_violation"
+    if status == "worker_failed_tests_pass":
+        return "worker_failed_tests_pass"
     if status == "worker_failed":
         return "worker_error"
     if status == "merged_verification_failed":
@@ -827,6 +833,16 @@ def _dispatch_stop_reason(dispatch: dict[str, Any]) -> str:
     if "dirty" in reason:
         return "permission_required"
     return "blocked"
+
+
+def _allow_prior_verified_evidence_for_resume(
+    mission: dict[str, Any] | None,
+    *,
+    resume_mission_id: str | None,
+) -> bool:
+    if not resume_mission_id or not isinstance(mission, dict):
+        return False
+    return str(mission.get("status") or "") == "verified" and str(mission.get("stop_reason") or "") == "verified"
 
 
 def _failed_signature(verification: dict[str, Any]) -> str:
@@ -933,6 +949,10 @@ def _message_for_stop(stop_reason: str) -> str:
             "任务停止：AI worker 进程失败或被终止。"
             "修复：运行 `checkpoint agents doctor` 确认可用，然后恢复。"
             "如果你明确接受其他后端，可以手动重试：--agent claude-code 或 --agent mimo。"
+        ),
+        "worker_failed_tests_pass": (
+            "任务停止：worker 未正常完成，但现有改动通过了测试命令。"
+            "请人工检查 worktree 后再用 chief-merge 手动合并。"
         ),
         "worker_toolchain_violation": (
             "任务验收命令通过，但 AI worker 使用了任务禁止的工具链路径。"

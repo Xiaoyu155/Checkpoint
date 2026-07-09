@@ -141,6 +141,7 @@ def dispatch_chief_plan(
     command_runner: CommandRunner | None = None,
     codex_runner: Any = None,
     failure_evidence_builder: Any = None,
+    allow_prior_verified_evidence: bool = False,
 ) -> dict[str, Any]:
     """Preview or execute one chief-engineer worker dispatch.
 
@@ -645,14 +646,8 @@ def dispatch_chief_plan(
     )
     quota_exhausted = not worker_completed and (primary_quota or failover_quota)
     has_product_changes = _worktree_has_product_changes(worktree)
-    has_prior_verified = _mission_has_prior_verified_evidence(workspace_path, plan_id)
-    existing_verified_change = (
-        bool(test_command)
-        and latest_verification.get("verdict") == "pass"
-        and (
-            has_product_changes
-            or has_prior_verified
-        )
+    has_prior_verified = bool(
+        allow_prior_verified_evidence and _mission_has_prior_verified_evidence(workspace_path, plan_id)
     )
     toolchain_violation = _first_worker_toolchain_violation(
         [worker_record, failover_record, repair_worker_record],
@@ -678,11 +673,10 @@ def dispatch_chief_plan(
         status = "verified"
     elif latest_verdict == "pass" and worker_completed:
         status = "no_product_changes"
-    elif existing_verified_change:
-        # Mark as verified if:
-        # 1. There are actual product changes in the worktree, OR
-        # 2. There's prior verified evidence AND the current verification passed (code is still correct)
+    elif latest_verdict == "pass" and has_prior_verified:
         status = "verified"
+    elif latest_verdict == "pass" and not worker_completed and has_product_changes:
+        status = "worker_failed_tests_pass"
     elif latest_verdict == "pass":
         status = "worker_failed"
     elif latest_verdict in {"coverage_gap", "no_workflows", "no_changed_files"}:
@@ -763,10 +757,10 @@ def dispatch_chief_plan(
         )
     if merge_result is not None:
         payload["merge"] = merge_result
-    if existing_verified_change and not worker_completed:
+    if status == "worker_failed_tests_pass":
         payload.setdefault("warnings", []).append(
-            "Worker failed to apply an additional patch, but the existing mission worktree "
-            "contains product changes and the explicit test command passed."
+            "Worker did not complete normally, but the current worktree changes passed the "
+            "test command. Inspect the worktree manually before merging."
         )
     return payload
 

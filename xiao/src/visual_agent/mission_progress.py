@@ -292,6 +292,8 @@ def _derive_stage(
         return "verified"
     if status == "verified_blocked":
         return "verified_blocked"
+    if stop_reason == "worker_failed_tests_pass":
+        return "worker_failed_tests_pass"
     if status == "preview" and (stop_reason == "preview_only" or latest_type == "dispatch_preview"):
         return "dispatch_ready"
     if stop_reason:
@@ -352,6 +354,7 @@ def _stage_label(stage: str) -> str:
         "verification_failed": "Verification failed",
         "verified": "Verified",
         "verified_blocked": "Verified but blocked",
+        "worker_failed_tests_pass": "Worker failed; tests passed",
         "worker_blocked": "Worker blocked",
         "worker_activity_stale": "Worker activity stale",
         "blocked": "Blocked",
@@ -422,6 +425,10 @@ def _stage_message(stage: str) -> str:
         "verification_failed": "Acceptance gate failed; repair evidence is available.",
         "verified": "Mission reached verified.",
         "verified_blocked": "Verification passed but a policy gate blocked merge/verified acceptance.",
+        "worker_failed_tests_pass": (
+            "Worker did not complete normally, but current worktree changes passed the test command. "
+            "Manual inspection is required before merge."
+        ),
         "worker_activity_stale": "Mission is marked running, but no live background worker or worker record was found.",
         "blocked": "Mission stopped and needs attention.",
     }
@@ -432,7 +439,14 @@ def _needs_attention(stage: str, *, mission: dict[str, Any], background: dict[st
     stop_reason = str(mission.get("stop_reason") or "")
     if stop_reason and stop_reason != "verified":
         return True
-    if stage in {"verification_failed", "worker_blocked", "worker_activity_stale", "blocked", "verified_blocked"}:
+    if stage in {
+        "verification_failed",
+        "worker_blocked",
+        "worker_activity_stale",
+        "blocked",
+        "verified_blocked",
+        "worker_failed_tests_pass",
+    }:
         return True
     if str(background.get("status") or "") in {"failed", "timeout", "orphaned"}:
         return True
@@ -459,7 +473,7 @@ def _blocker(
         return str(repair.get("failure_kind") or repair.get("source") or "verification_failed")
     if stage == "worker_activity_stale":
         return "worker_activity_stale"
-    if stage in {"verified_blocked", "worker_blocked"}:
+    if stage in {"verified_blocked", "worker_blocked", "worker_failed_tests_pass"}:
         return stage
     return ""
 

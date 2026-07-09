@@ -85,6 +85,35 @@ def worker_failed_passing_check_payload(**kwargs):
     }
 
 
+def worker_failed_tests_pass_payload(**kwargs):
+    if not kwargs.get("execute"):
+        return preview_payload(**kwargs)
+    attempt = {
+        "verdict": "pass",
+        "run_profile": "supervised",
+        "passed": 1,
+        "inspection_only": 0,
+        "failed": 0,
+        "total": 1,
+        "results": [{"name": "explicit-command", "status": "passed"}],
+        "command_verification": {
+            "command": "python -c pass",
+            "verdict": "pass",
+            "exit_code": 0,
+        },
+    }
+    return {
+        "schema_version": 1,
+        "status": "worker_failed_tests_pass",
+        "worker_record": {"status": "failed", "stderr_tail": "patch fragment without header"},
+        "verification_attempts": [attempt],
+        "latest_verification": attempt,
+        "warnings": [
+            "Worker did not complete normally, but the current worktree changes passed the test command."
+        ],
+    }
+
+
 def verified_blocked_payload(**kwargs):
     if not kwargs.get("execute"):
         return preview_payload(**kwargs)
@@ -667,6 +696,27 @@ def test_chief_run_worker_failure_is_not_verified_by_passing_command(tmp_path, m
     assert "worker 进程失败" in payload["message"]
     rounds = load_rounds(workspace.root, payload["mission"]["mission_id"])
     assert rounds[-1]["status"] == "pass"
+
+
+def test_chief_run_worker_failed_tests_pass_needs_manual_merge(tmp_path, monkeypatch) -> None:
+    workspace = ready_workspace(tmp_path, monkeypatch)
+
+    payload = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        execute=True,
+        dry_run=False,
+        test_command="python -c pass",
+        dispatch_runner=worker_failed_tests_pass_payload,
+    )
+
+    assert payload["status"] == "stopped"
+    assert payload["stop_reason"] == "worker_failed_tests_pass"
+    assert "人工检查 worktree" in payload["message"]
+    assert payload["progress"]["stage"] == "worker_failed_tests_pass"
+    assert payload["progress"]["stage_label"] == "Worker failed; tests passed"
+    assert payload["progress"]["needs_attention"] is True
 
 
 def test_chief_run_verified_blocked_is_not_reported_as_stopped(tmp_path, monkeypatch) -> None:

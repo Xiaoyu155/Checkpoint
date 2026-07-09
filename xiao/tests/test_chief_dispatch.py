@@ -1352,13 +1352,22 @@ def test_chief_dispatch_does_not_verify_when_worker_fails_even_if_check_passes(t
     assert payload["latest_verification"]["verdict"] == "pass"
 
 
-def test_chief_dispatch_verifies_existing_dirty_worktree_when_explicit_command_passes(tmp_path, monkeypatch) -> None:
+def test_worker_failed_with_passing_tests_is_not_verified(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
     monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
     monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
     monkeypatch.setattr("visual_agent.chief_dispatch._worktree_has_product_changes", lambda _worktree: True)
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.run_command_verification",
+        lambda **_kwargs: {"verdict": "pass", "exit_code": 0, "failure_kind": "", "command": "python -c pass"},
+    )
+    merge_calls = []
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.merge_worktree_branch",
+        lambda **kwargs: merge_calls.append(kwargs) or {"status": "merged"},
+    )
 
     def fake_runner(argv, cwd, timeout_seconds, log_path):
         log_path.write_text("worker failed after previous edits", encoding="utf-8")
@@ -1372,14 +1381,17 @@ def test_chief_dispatch_verifies_existing_dirty_worktree_when_explicit_command_p
         command_runner=fake_runner,
         codex_runner=passing_codex_result,
         test_command="python -c pass",
+        merge=True,
     )
 
-    assert payload["status"] == "verified"
+    assert payload["status"] == "worker_failed_tests_pass"
     assert payload["latest_verification"]["verdict"] == "pass"
-    assert any("existing mission worktree" in item for item in payload["warnings"])
+    assert payload["merge"]["status"] == "skipped"
+    assert merge_calls == []
+    assert any("Worker did not complete normally" in item for item in payload["warnings"])
 
 
-def test_chief_dispatch_keeps_prior_verified_mission_verified_on_explicit_pass(tmp_path, monkeypatch) -> None:
+def test_prior_verified_evidence_does_not_verify_new_work(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
     mission_dir = workspace.root / "missions" / plan_id
     mission_dir.mkdir(parents=True)
@@ -1392,10 +1404,82 @@ def test_chief_dispatch_keeps_prior_verified_mission_verified_on_explicit_pass(t
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
     monkeypatch.setattr("visual_agent.chief_dispatch._worktree_has_product_changes", lambda _worktree: False)
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.run_command_verification",
+        lambda **_kwargs: {"verdict": "pass", "exit_code": 0, "failure_kind": "", "command": "python -c pass"},
+    )
 
     def fake_runner(argv, cwd, timeout_seconds, log_path):
         log_path.write_text("worker failed after prior merge", encoding="utf-8")
         return {"exit_code": 1, "stdout_tail": "", "stderr_tail": "patch does not apply"}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        codex_runner=passing_codex_result,
+        test_command="python -c pass",
+    )
+
+    assert payload["status"] != "verified"
+    assert payload["status"] == "worker_failed"
+    assert payload["latest_verification"]["verdict"] == "pass"
+
+
+def test_prior_verified_evidence_is_allowed_for_explicit_resume_verification(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    mission_dir = workspace.root / "missions" / plan_id
+    mission_dir.mkdir(parents=True)
+    (mission_dir / "rounds.jsonl").write_text(
+        json.dumps({"type": "merge", "status": "merged"}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    monkeypatch.setattr("visual_agent.chief_dispatch._worktree_has_product_changes", lambda _worktree: False)
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.run_command_verification",
+        lambda **_kwargs: {"verdict": "pass", "exit_code": 0, "failure_kind": "", "command": "python -c pass"},
+    )
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path):
+        log_path.write_text("worker failed after prior merge", encoding="utf-8")
+        return {"exit_code": 1, "stdout_tail": "", "stderr_tail": "patch does not apply"}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        codex_runner=passing_codex_result,
+        test_command="python -c pass",
+        allow_prior_verified_evidence=True,
+    )
+
+    assert payload["status"] == "verified"
+    assert payload["latest_verification"]["verdict"] == "pass"
+
+
+def test_worker_completed_with_pass_and_changes_still_verified(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    monkeypatch.setattr("visual_agent.chief_dispatch._worktree_has_product_changes", lambda _worktree: True)
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.run_command_verification",
+        lambda **_kwargs: {"verdict": "pass", "exit_code": 0, "failure_kind": "", "command": "python -c pass"},
+    )
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path):
+        log_path.write_text("worker completed", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
 
     payload = dispatch_chief_plan(
         workspace_root=workspace.root,
