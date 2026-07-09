@@ -311,3 +311,32 @@ def test_blank_worker_output_does_not_replace_last_meaningful_tail(tmp_path) -> 
     progress = load_mission_progress(workspace, "m1")
 
     assert progress["last_output_tail"] == "npm ci --prefer-offline"
+
+
+def test_late_worker_output_does_not_reset_terminal_stage(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    save_mission_progress(
+        workspace,
+        "m1",
+        stage="verified",
+        stage_label="Verified",
+        status="verified",
+        stop_reason="verified",
+        blocker="",
+        needs_attention=False,
+    )
+
+    progress = record_worker_output(
+        workspace,
+        "m1",
+        stream="stdout",
+        chunk="late worker output after terminal state",
+    )
+
+    assert progress["stage"] == "verified"
+    assert progress["stage_label"] == "Verified"
+    assert progress["status"] == "verified"
+    assert progress["stop_reason"] == "verified"
+    assert progress["blocker"] == ""
+    assert progress["needs_attention"] is False
+    assert progress["last_output_tail"] == "late worker output after terminal state"

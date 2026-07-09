@@ -15,6 +15,14 @@ from .missions import load_rounds, mission_dir
 from .models import to_jsonable
 
 _PROGRESS_LOCK = threading.RLock()
+_TERMINAL_STAGES = {
+    "verified",
+    "verified_blocked",
+    "blocked",
+    "worker_failed_tests_pass",
+    "post_merge_verification_passed",
+    "post_merge_verification_failed",
+}
 
 
 def progress_path(workspace_root: str | Path, mission_id: str) -> Path:
@@ -60,6 +68,18 @@ def record_worker_output(
     log_path: str | Path | None = None,
 ) -> dict[str, Any]:
     text = str(chunk or "")
+    with _PROGRESS_LOCK:
+        current = load_mission_progress(workspace_root, mission_id)
+        if str(current.get("stage") or "") in _TERMINAL_STAGES:
+            if not text.strip():
+                return current
+            return save_mission_progress(
+                workspace_root,
+                mission_id,
+                last_output_at=_utc_now(),
+                last_output_stream=str(stream or ""),
+                last_output_tail=text[-500:],
+            )
     fields: dict[str, Any] = {
         "stage": "worker_running",
         "stage_label": "Worker running",
