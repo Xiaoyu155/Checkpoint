@@ -65,6 +65,18 @@
       ]
     },
     {
+      "id": "pacer",
+      "title": "Pacer product workflows",
+      "workflows": [
+        {
+          "name": "pacer_workbench_static_acceptance",
+          "path": "workflows/pacer/pacer_workbench_static_acceptance.yaml",
+          "tags": ["verification", "fast", "pacer", "dashboard", "workbench"],
+          "description": "Validate Pacer workbench mission intake, value metrics, and requirement-contract evidence."
+        }
+      ]
+    },
+    {
       "id": "miniprogram",
       "title": "WeChat Mini Program workflows",
       "workflows": [
