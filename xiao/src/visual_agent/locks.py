@@ -10,6 +10,9 @@ from time import monotonic, sleep, time
 from uuid import uuid4
 
 
+_LOCK_INITIALIZATION_GRACE_SECONDS = 2.0
+
+
 @dataclass(frozen=True)
 class RunLockInfo:
     lock_id: str
@@ -97,6 +100,8 @@ class RunLock:
             raise RuntimeError(f"Run lock is active:{detail}, path={self.path}") from exc
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(lock_to_dict(info), handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
         self.info = info
         return info
 
@@ -154,15 +159,29 @@ def read_lock(path: str | Path) -> RunLockInfo | None:
             cwd=None,
         )
     except Exception as exc:
+        try:
+            stat = lock_path.stat()
+            created_at = float(stat.st_mtime)
+            expires_at = created_at + _LOCK_INITIALIZATION_GRACE_SECONDS
+            lock_id = f"initializing-{stat.st_mtime_ns}-{stat.st_size}"
+        except OSError:
+            created_at = time()
+            expires_at = created_at + _LOCK_INITIALIZATION_GRACE_SECONDS
+            lock_id = "initializing-unknown"
         warnings.warn(
-            f"Lock file at {lock_path} is unreadable (will be treated as stale and removed): {exc}",
+            f"Lock file at {lock_path} is not fully readable and will be treated as active during initialization: {exc}",
             stacklevel=2,
         )
-        try:
-            lock_path.unlink()
-        except OSError:
-            pass
-        return None
+        return RunLockInfo(
+            lock_id=lock_id,
+            path=lock_path,
+            owner="initializing",
+            created_at=created_at,
+            expires_at=expires_at,
+            pid=None,
+            host=None,
+            cwd=None,
+        )
 
 
 def lock_to_dict(info: RunLockInfo) -> dict[str, object]:

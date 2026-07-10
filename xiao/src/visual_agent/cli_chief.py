@@ -144,6 +144,9 @@ def _handle_chief_plans(args: Any) -> int:
 def _handle_chief_dispatch(args: Any) -> int:
     from .chief_dispatch import chief_dispatch_to_markdown, dispatch_chief_plan, payload_to_json
 
+    configured_repair_rounds = getattr(args, "max_repair_rounds", None)
+    if configured_repair_rounds is None:
+        configured_repair_rounds = 1 if args.auto_repair_once else 2
     payload = dispatch_chief_plan(
         test_command=getattr(args, "test_command", None),
         allow_test_edits=getattr(args, "allow_test_edits", False),
@@ -160,6 +163,11 @@ def _handle_chief_dispatch(args: Any) -> int:
         allow_dirty=args.allow_dirty,
         allow_coverage_gap=args.allow_coverage_gap,
         auto_repair_once=args.auto_repair_once,
+        max_repair_rounds=configured_repair_rounds,
+        reasoning_effort=getattr(args, "reasoning_effort", None),
+        dispatch_mode=getattr(args, "dispatch_mode", "tracked"),
+        prompt_style=getattr(args, "prompt_style", "expanded"),
+        repair_strategy=getattr(args, "repair_strategy", "resume"),
     )
     if args.format == "json":
         print(payload_to_json(payload))
@@ -188,6 +196,7 @@ def _run_chief_mission_args(args: Any, *, execute: bool, dry_run: bool, resume_m
         answers=tuple(getattr(args, "answer", []) or ()),
         interview=args.interview,
         max_rounds=args.max_rounds,
+        max_repair_rounds=getattr(args, "max_repair_rounds", 2),
         max_wall_minutes=args.max_wall_minutes,
         max_worker_minutes=args.max_worker_minutes,
         execute=execute,
@@ -198,6 +207,10 @@ def _run_chief_mission_args(args: Any, *, execute: bool, dry_run: bool, resume_m
         timeout_seconds=args.timeout_seconds,
         allow_dirty=args.allow_dirty,
         allow_coverage_gap=args.allow_coverage_gap,
+        reasoning_effort=getattr(args, "reasoning_effort", None),
+        dispatch_mode=getattr(args, "dispatch_mode", None),
+        prompt_style=getattr(args, "prompt_style", None),
+        repair_strategy=getattr(args, "repair_strategy", None),
     )
 
 
@@ -572,6 +585,10 @@ def _mission_queue(args: Any) -> int:
             test_command=getattr(args, "test_command", None),
             allow_test_edits=getattr(args, "allow_test_edits", False),
             merge_policy=getattr(args, "merge_policy", "manual"),
+            reasoning_effort=getattr(args, "reasoning_effort", None),
+            dispatch_mode=getattr(args, "dispatch_mode", None),
+            prompt_style=getattr(args, "prompt_style", None),
+            repair_strategy=getattr(args, "repair_strategy", None),
             force=args.force,
         )
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
@@ -688,6 +705,10 @@ def _handle_chief_queue(args: Any) -> int:
                 test_command=getattr(args, "test_command", None),
                 allow_test_edits=getattr(args, "allow_test_edits", False),
                 merge_policy=getattr(args, "merge_policy", "manual"),
+                reasoning_effort=getattr(args, "reasoning_effort", None),
+                dispatch_mode=getattr(args, "dispatch_mode", None),
+                prompt_style=getattr(args, "prompt_style", None),
+                repair_strategy=getattr(args, "repair_strategy", None),
                 force=args.force,
             )
         except (FileNotFoundError, RuntimeError, ValueError) as exc:

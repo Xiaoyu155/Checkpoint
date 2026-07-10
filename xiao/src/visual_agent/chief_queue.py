@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Any, Callable, TypeVar
@@ -26,6 +27,8 @@ MISSION_QUEUE_DIRNAME = "mission_queue"
 RUNNABLE_MISSION_STATUSES = {"created", "preview"}
 ACTIVE_QUEUE_STATUSES = {"pending", "running"}
 FINISHED_QUEUE_STATUSES = {"success", "failed", "canceled"}
+QUEUE_LEASE_GRACE_SECONDS = 300.0
+LEGACY_RUNNING_STALE_SECONDS = 3600.0
 T = TypeVar("T")
 
 MissionRunner = Callable[..., dict[str, Any]]
@@ -50,10 +53,18 @@ class MissionQueueItem:
     test_command: str | None = None
     allow_test_edits: bool = False
     merge_policy: str = "manual"
+    reasoning_effort: str | None = None
+    dispatch_mode: str = "tracked"
+    prompt_style: str = "expanded"
+    repair_strategy: str = "resume"
     last_result_status: str | None = None
     last_stop_reason: str | None = None
     last_error: str | None = None
     final_report_path: str | None = None
+    lease_id: str | None = None
+    lease_owner: str | None = None
+    lease_started_at: str | None = None
+    lease_expires_at: str | None = None
 
 
 def mission_queue_dir(workspace_root: str | Path) -> Path:
@@ -113,6 +124,10 @@ def submit_mission_queue_item(
     test_command: str | None = None,
     allow_test_edits: bool = False,
     merge_policy: str = "manual",
+    reasoning_effort: str | None = None,
+    dispatch_mode: str | None = None,
+    prompt_style: str | None = None,
+    repair_strategy: str | None = None,
     force: bool = False,
 ) -> MissionQueueItem:
     workspace_path = Path(workspace_root).expanduser().resolve()
@@ -144,9 +159,14 @@ def submit_mission_queue_item(
         test_command=str(test_command).strip() if str(test_command or "").strip() else None,
         allow_test_edits=bool(allow_test_edits),
         merge_policy=normalized_merge_policy,
+        reasoning_effort=str(reasoning_effort or mission.get("reasoning_effort") or "inherit"),
+        dispatch_mode=str(dispatch_mode or mission.get("dispatch_mode") or "tracked"),
+        prompt_style=str(prompt_style or mission.get("prompt_style") or "expanded"),
+        repair_strategy=str(repair_strategy or mission.get("repair_strategy") or "resume"),
     )
 
     def update(state: dict[str, Any]) -> MissionQueueItem:
+        _reclaim_expired_queue_leases(state)
         for payload in state.get("items", []):
             if not isinstance(payload, dict):
                 continue
@@ -188,10 +208,16 @@ def load_mission_queue_item(workspace_root: str | Path, queue_id: str) -> Missio
     return None
 
 
-def claim_next_mission_queue_item(workspace_root: str | Path) -> MissionQueueItem | None:
+def claim_next_mission_queue_item(
+    workspace_root: str | Path,
+    *,
+    worker_id: str | None = None,
+    lease_seconds: float | None = None,
+) -> MissionQueueItem | None:
     workspace_path = Path(workspace_root).expanduser().resolve()
 
     def update(state: dict[str, Any]) -> MissionQueueItem | None:
+        _reclaim_expired_queue_leases(state)
         pending = [
             normalize_mission_queue_item(item)
             for item in state.get("items", [])
@@ -200,6 +226,12 @@ def claim_next_mission_queue_item(workspace_root: str | Path) -> MissionQueueIte
         if not pending:
             return None
         selected = sorted(pending, key=mission_queue_sort_key)[0]
+        lease_started = datetime.now(timezone.utc)
+        lease_duration = (
+            max(1.0, float(lease_seconds))
+            if lease_seconds is not None
+            else max(1.0, float(selected.timeout_seconds) + QUEUE_LEASE_GRACE_SECONDS)
+        )
         updated = replace_mission_queue_item(
             state,
             selected.queue_id,
@@ -208,6 +240,10 @@ def claim_next_mission_queue_item(workspace_root: str | Path) -> MissionQueueIte
             last_error=None,
             last_result_status=None,
             last_stop_reason=None,
+            lease_id=uuid4().hex,
+            lease_owner=str(worker_id or f"{socket.gethostname()}:{os.getpid()}"),
+            lease_started_at=lease_started.isoformat(),
+            lease_expires_at=(lease_started + timedelta(seconds=lease_duration)).isoformat(),
         )
         append_mission_queue_history(state, updated, event="claimed")
         return updated
@@ -221,6 +257,7 @@ def finish_mission_queue_item(
     *,
     result: dict[str, Any] | None = None,
     error: str | None = None,
+    lease_id: str | None = None,
 ) -> MissionQueueItem:
     payload = result if isinstance(result, dict) else {}
     result_status = str(payload.get("status") or "")
@@ -229,6 +266,9 @@ def finish_mission_queue_item(
     final_report_path = str(payload.get("final_report_path") or "") or None
 
     def update(state: dict[str, Any]) -> MissionQueueItem:
+        current = _mission_queue_item_from_state(state, queue_id)
+        if lease_id and current.lease_id != lease_id:
+            raise RuntimeError(f"Mission queue lease is no longer owned: {queue_id}")
         status = "success" if success else "failed"
         updated = replace_mission_queue_item(
             state,
@@ -238,6 +278,10 @@ def finish_mission_queue_item(
             last_stop_reason=stop_reason or None,
             last_error=error,
             final_report_path=final_report_path,
+            lease_id=None,
+            lease_owner=None,
+            lease_started_at=None,
+            lease_expires_at=None,
         )
         append_mission_queue_history(
             state,
@@ -281,9 +325,18 @@ def run_next_mission_queue_item(
             test_command=item.test_command,
             allow_test_edits=item.allow_test_edits,
             merge=item.merge_policy == "auto",
+            reasoning_effort=item.reasoning_effort,
+            dispatch_mode=item.dispatch_mode,
+            prompt_style=item.prompt_style,
+            repair_strategy=item.repair_strategy,
         )
     except Exception as exc:
-        updated = finish_mission_queue_item(workspace_path, item.queue_id, error=f"{type(exc).__name__}: {exc}")
+        updated = finish_mission_queue_item(
+            workspace_path,
+            item.queue_id,
+            error=f"{type(exc).__name__}: {exc}",
+            lease_id=item.lease_id,
+        )
         return {
             "ran": True,
             "queue_item": mission_queue_item_to_dict(updated),
@@ -296,6 +349,7 @@ def run_next_mission_queue_item(
         item.queue_id,
         result=result,
         error=None if str(result.get("status") or "") == "verified" else str(result.get("message") or result.get("stop_reason") or ""),
+        lease_id=item.lease_id,
     )
     return {
         "ran": True,
@@ -520,10 +574,18 @@ def normalize_mission_queue_item(payload: dict[str, Any]) -> MissionQueueItem:
         test_command=str(payload.get("test_command")).strip() if payload.get("test_command") else None,
         allow_test_edits=bool(payload.get("allow_test_edits", False)),
         merge_policy=normalize_merge_policy(str(payload.get("merge_policy") or "manual")),
+        reasoning_effort=str(payload.get("reasoning_effort")) if payload.get("reasoning_effort") else None,
+        dispatch_mode=str(payload.get("dispatch_mode") or "tracked"),
+        prompt_style=str(payload.get("prompt_style") or "expanded"),
+        repair_strategy=str(payload.get("repair_strategy") or "resume"),
         last_result_status=str(payload.get("last_result_status")) if payload.get("last_result_status") else None,
         last_stop_reason=str(payload.get("last_stop_reason")) if payload.get("last_stop_reason") else None,
         last_error=str(payload.get("last_error")) if payload.get("last_error") else None,
         final_report_path=str(payload.get("final_report_path")) if payload.get("final_report_path") else None,
+        lease_id=str(payload.get("lease_id")) if payload.get("lease_id") else None,
+        lease_owner=str(payload.get("lease_owner")) if payload.get("lease_owner") else None,
+        lease_started_at=str(payload.get("lease_started_at")) if payload.get("lease_started_at") else None,
+        lease_expires_at=str(payload.get("lease_expires_at")) if payload.get("lease_expires_at") else None,
     )
 
 
@@ -559,6 +621,71 @@ def append_mission_queue_history(
             "created_at": _now_iso(),
         }
     )
+
+
+def reclaim_stale_mission_queue_items(workspace_root: str | Path) -> list[MissionQueueItem]:
+    """Return expired running leases to pending so another worker can resume them."""
+
+    def update(state: dict[str, Any]) -> list[MissionQueueItem]:
+        return _reclaim_expired_queue_leases(state)
+
+    return _locked_update_mission_queue_state(workspace_root, update)
+
+
+def _reclaim_expired_queue_leases(
+    state: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> list[MissionQueueItem]:
+    moment = now or datetime.now(timezone.utc)
+    reclaimed: list[MissionQueueItem] = []
+    running_ids = [
+        str(item.get("queue_id") or "")
+        for item in state.get("items", [])
+        if isinstance(item, dict) and str(item.get("status") or "") == "running"
+    ]
+    for queue_id in running_ids:
+        item = _mission_queue_item_from_state(state, queue_id)
+        expires_at = _parse_iso_datetime(item.lease_expires_at)
+        if expires_at is None:
+            updated_at = _parse_iso_datetime(item.updated_at)
+            legacy_ttl = max(LEGACY_RUNNING_STALE_SECONDS, item.timeout_seconds + QUEUE_LEASE_GRACE_SECONDS)
+            expires_at = updated_at + timedelta(seconds=legacy_ttl) if updated_at else None
+        if expires_at is None or expires_at > moment:
+            continue
+        updated = replace_mission_queue_item(
+            state,
+            queue_id,
+            status="pending",
+            last_error="Previous worker lease expired; item was returned to pending.",
+            lease_id=None,
+            lease_owner=None,
+            lease_started_at=None,
+            lease_expires_at=None,
+        )
+        append_mission_queue_history(state, updated, event="lease_expired", message=updated.last_error)
+        reclaimed.append(updated)
+    return reclaimed
+
+
+def _mission_queue_item_from_state(state: dict[str, Any], queue_id: str) -> MissionQueueItem:
+    for payload in state.get("items", []):
+        if isinstance(payload, dict) and str(payload.get("queue_id") or "") == queue_id:
+            return normalize_mission_queue_item(payload)
+    raise FileNotFoundError(f"Mission queue item not found: {queue_id}")
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def mission_queue_sort_key(item: MissionQueueItem) -> tuple[int, str]:

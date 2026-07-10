@@ -11,6 +11,7 @@ from .capabilities import build_atomic_capability_manifest
 from .locks import RunLock, lock_to_dict, queue_to_dict
 from .models import to_jsonable
 from .preflight import run_preflight
+from .resources import bundled_path
 from .reports import (
     RunSummary,
     list_run_summaries,
@@ -236,20 +237,20 @@ def workspace_framework_hint(workspace: Workspace) -> str | None:
 
 
 def copy_demo_assets(workspace: Workspace, *, overwrite: bool = False) -> None:
-    repo_root = Path(__file__).resolve().parent.parent.parent
+    examples_root = bundled_path("examples")
     copies = [
-        (repo_root / "examples" / "local_html_form_workflow.yaml", workspace.workflows_dir / "local_html_form_workflow.yaml"),
-        (repo_root / "examples" / "browser_form_workflow.yaml", workspace.workflows_dir / "browser_form_workflow.yaml"),
+        (examples_root / "local_html_form_workflow.yaml", workspace.workflows_dir / "local_html_form_workflow.yaml"),
+        (examples_root / "browser_form_workflow.yaml", workspace.workflows_dir / "browser_form_workflow.yaml"),
         (
-            repo_root / "examples" / "workflows" / "checkout" / "checkout_verification.yaml",
+            examples_root / "workflows" / "checkout" / "checkout_verification.yaml",
             workspace.workflows_dir / "checkout_verification.yaml",
         ),
         (
-            repo_root / "examples" / "workflows" / "pacer" / "pacer_workbench_static_acceptance.yaml",
+            examples_root / "workflows" / "pacer" / "pacer_workbench_static_acceptance.yaml",
             workspace.workflows_dir / "pacer_workbench_static_acceptance.yaml",
         ),
-        (repo_root / "examples" / "inputs" / "demo_login.json", workspace.inputs_dir / "demo_login.json"),
-        (repo_root / "examples" / "web" / "login_demo.html", workspace.fixtures_dir / "login_demo.html"),
+        (examples_root / "inputs" / "demo_login.json", workspace.inputs_dir / "demo_login.json"),
+        (examples_root / "web" / "login_demo.html", workspace.fixtures_dir / "login_demo.html"),
     ]
     for source, target in copies:
         if target.exists() and not overwrite:

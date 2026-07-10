@@ -1,18 +1,21 @@
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1
-WORKDIR /app
+WORKDIR /app/xiao
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md LICENSE ./
-COPY src ./src
-COPY cloud_api ./cloud_api
+COPY xiao/pyproject.toml xiao/README.md xiao/LICENSE xiao/MANIFEST.in ./
+COPY xiao/src ./src
+COPY xiao/cloud_api ./cloud_api
+COPY xiao/templates ./templates
+COPY xiao/examples ./examples
+COPY xiao/workflows ./workflows
 
 RUN python -m pip install --upgrade pip \
-    && python -m pip install -e ".[web,mcp,cloud]" \
+    && python -m pip install ".[web,cloud]" \
     && python -m playwright install --with-deps chromium
 
 EXPOSE 8000

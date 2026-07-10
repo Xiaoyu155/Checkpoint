@@ -38,9 +38,15 @@ SAFE_SECRETISH_KEYS = {
     "total_tokens",
     "max_tokens",
     "max_completion_tokens",
+    "input_tokens",
+    "output_tokens",
+    "cached_input_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "reasoning_output_tokens",
 }
 SECRET_TEXT_PATTERNS = (
-    re.compile(r"sk-[A-Za-z0-9_-]{8,}"),
+    re.compile(r"(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{8,}"),
     re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}"),
     re.compile(r"(?i)([\"']?(?:api[_-]?key|password|passwd|pwd|token|secret|authorization|bearer|cookie)[\"']?\s*:\s*[\"']?)[^\"'}\s,&|;`]{3,}"),
     re.compile(r"(?i)((?:api[_-]?key|password|passwd|pwd|token|secret|authorization|bearer|cookie)\s*[:=]\s*)[^\s,&|;`'\"]{3,}"),

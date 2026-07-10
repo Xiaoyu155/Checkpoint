@@ -261,9 +261,99 @@ def test_run_process_capture_writes_log_and_supports_stdin(tmp_path) -> None:
     text = log.read_text(encoding="utf-8")
     assert "out:hello" in text
     assert "err-line" in text
+    stdout_log = Path(result["stdout_log_path"])
+    stderr_log = Path(result["stderr_log_path"])
+    assert stdout_log.name == "worker.stdout.log"
+    assert stderr_log.name == "worker.stderr.log"
+    assert stdout_log.read_text(encoding="utf-8").strip() == "out:hello"
+    assert stderr_log.read_text(encoding="utf-8").strip() == "err-line"
 
 
-def test_run_process_capture_uses_hidden_launch_kwargs(tmp_path, monkeypatch) -> None:
+def test_run_process_capture_timeout_writes_stderr_sidecar(tmp_path) -> None:
+    log = tmp_path / "timeout.log"
+
+    result = run_process_capture(
+        [sys.executable, "-c", "import time; print('started', flush=True); time.sleep(5)"],
+        cwd=tmp_path,
+        timeout_seconds=0.1,
+        log_path=log,
+    )
+
+    assert result["exit_code"] == 124
+    assert "Timed out after" in result["stderr_tail"]
+    assert "started" in Path(result["stdout_log_path"]).read_text(encoding="utf-8")
+    assert "Timed out after" in Path(result["stderr_log_path"]).read_text(encoding="utf-8")
+    assert "Timed out after" in log.read_text(encoding="utf-8")
+
+
+def test_run_process_capture_timeout_terminates_isolated_tree(tmp_path, monkeypatch) -> None:
+    captured = {}
+
+    class FakeProcess:
+        pid = 9753
+        stdout = io.StringIO("child-output\n")
+        stderr = io.StringIO("")
+        stdin = None
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired("worker", timeout)
+
+    process = FakeProcess()
+
+    def fake_popen(argv, **kwargs):
+        captured["kwargs"] = kwargs
+        return process
+
+    def fake_terminate(candidate):
+        captured["terminated"] = candidate.pid
+        return True
+
+    monkeypatch.setattr("visual_agent.chief_dispatch.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.isolated_process_group_kwargs",
+        lambda: {"start_new_session": True},
+    )
+    monkeypatch.setattr("visual_agent.chief_dispatch.terminate_process_tree", fake_terminate)
+    log = tmp_path / "tree-timeout.log"
+
+    result = run_process_capture(
+        ["worker"],
+        cwd=tmp_path,
+        timeout_seconds=0.1,
+        log_path=log,
+    )
+
+    assert result["exit_code"] == 124
+    assert captured["terminated"] == 9753
+    assert captured["kwargs"]["start_new_session"] is True
+    assert "child-output" in Path(result["stdout_log_path"]).read_text(encoding="utf-8")
+    assert "Timed out after" in Path(result["stderr_log_path"]).read_text(encoding="utf-8")
+    assert "Timed out after" in log.read_text(encoding="utf-8")
+
+
+def test_run_process_capture_launch_oserror_writes_stderr_sidecar(tmp_path, monkeypatch) -> None:
+    log = tmp_path / "missing.log"
+
+    def fail_to_launch(*_args, **_kwargs):
+        raise OSError("worker executable missing")
+
+    monkeypatch.setattr("visual_agent.chief_dispatch.subprocess.Popen", fail_to_launch)
+
+    result = run_process_capture(
+        ["missing-worker"],
+        cwd=tmp_path,
+        timeout_seconds=10,
+        log_path=log,
+    )
+
+    assert result["exit_code"] == 127
+    assert Path(result["stdout_log_path"]).read_text(encoding="utf-8") == ""
+    stderr = Path(result["stderr_log_path"]).read_text(encoding="utf-8")
+    assert "worker executable missing" in stderr
+    assert log.read_text(encoding="utf-8") == stderr
+
+
+def test_run_process_capture_uses_isolated_launch_kwargs(tmp_path, monkeypatch) -> None:
     captured = {}
 
     class FakeProcess:
@@ -282,7 +372,7 @@ def test_run_process_capture_uses_hidden_launch_kwargs(tmp_path, monkeypatch) ->
         captured["kwargs"] = kwargs
         return FakeProcess()
 
-    monkeypatch.setattr("visual_agent.chief_dispatch.hidden_subprocess_kwargs", lambda: {"creationflags": 12345})
+    monkeypatch.setattr("visual_agent.chief_dispatch.isolated_process_group_kwargs", lambda: {"creationflags": 12345})
     monkeypatch.setattr("visual_agent.chief_dispatch.subprocess.Popen", fake_popen)
 
     result = run_process_capture(
@@ -326,6 +416,54 @@ def test_worker_attempt_persists_progress_heartbeat(tmp_path) -> None:
     assert progress["stage"] == "worker_completed"
     assert progress["worker_status"] == "completed"
     assert "editing src/app.js" in progress["last_output_tail"]
+
+
+def test_worker_attempt_persists_sidecars_and_prefers_codex_stdout_usage(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    workspace.mkdir()
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, **kwargs):
+        stdout_log = log_path.with_name("worker.stdout.log")
+        stderr_log = log_path.with_name("worker.stderr.log")
+        log_path.write_text(
+            '{"type":"thread.started","thread_id":"combined-session"}\n'
+            '{"type":"turn.completed","usage":{"input_tokens":999,"output_tokens":99}}\n',
+            encoding="utf-8",
+        )
+        stdout_log.write_text(
+            '{"type":"thread.started","thread_id":"stdout-session"}\n'
+            '{"type":"turn.completed","usage":{"input_tokens":12,"output_tokens":3}}\n',
+            encoding="utf-8",
+        )
+        stderr_log.write_text('{"type":"turn.completed","usage":{"input_tokens":777}}\n', encoding="utf-8")
+        return {
+            "exit_code": 0,
+            "stdout_tail": "",
+            "stderr_tail": "",
+            "stdout_log_path": str(stdout_log),
+            "stderr_log_path": str(stderr_log),
+        }
+
+    record = _run_worker_attempt(
+        workspace_root=workspace,
+        plan_id="p-sidecars",
+        attempt="initial",
+        track={"id": "track_1_codex", "agent": "codex"},
+        argv=["codex", "exec", "--json", "-"],
+        cwd=tmp_path,
+        timeout_seconds=10,
+        log_path=workspace / "chief_plans" / "p-sidecars" / "logs" / "worker.log",
+        runner=fake_runner,
+    )
+
+    assert Path(record["stdout_log_path"]).name == "worker.stdout.log"
+    assert Path(record["stderr_log_path"]).name == "worker.stderr.log"
+    assert record["usage"]["session_id"] == "stdout-session"
+    assert record["usage"]["input_tokens"] == 12
+    assert record["usage"]["output_tokens"] == 3
+    persisted = load_worker_records(workspace, "p-sidecars")
+    assert persisted[0]["stdout_log_path"] == record["stdout_log_path"]
+    assert persisted[0]["stderr_log_path"] == record["stderr_log_path"]
 
 
 def test_build_worker_command_claude_code_is_headless(tmp_path) -> None:
@@ -629,9 +767,26 @@ def test_summarize_worker_usage_separates_spend_and_savings() -> None:
     from visual_agent.chief_dispatch import summarize_worker_usage
 
     records = [
-        {"usage": {"input_tokens": 100, "output_tokens": 200, "cost_usd": 0.05}},
+        {
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 200,
+                "reasoning_output_tokens": 5,
+                "num_turns": 2,
+                "cost_usd": 0.05,
+            }
+        },
         None,
-        {"usage": {"input_tokens": 10, "output_tokens": 20, "cost_usd": 0.30, "cost_is_savings": True}},
+        {
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "reasoning_output_tokens": 7,
+                "num_turns": 1,
+                "cost_usd": 0.30,
+                "cost_is_savings": True,
+            }
+        },
     ]
     summary = summarize_worker_usage(records)
     assert summary["total_tokens"] == 330
@@ -639,6 +794,74 @@ def test_summarize_worker_usage_separates_spend_and_savings() -> None:
     assert summary["spent_usd"] == 0.05
     assert summary["saved_usd"] == 0.30
     assert summary["attempts_with_usage"] == 2
+    assert summary["reasoning_output_tokens"] == 12
+    assert summary["num_turns"] == 3
+
+
+def test_summarize_worker_usage_deduplicates_resumed_session_and_adds_fresh_sessions() -> None:
+    from visual_agent.chief_dispatch import summarize_worker_usage
+
+    records = [
+        {
+            "agent": "codex",
+            "usage": {
+                "session_id": "resumed-thread",
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "cache_read_input_tokens": 60,
+                "cache_creation_input_tokens": 4,
+                "reasoning_output_tokens": 2,
+                "total_tokens": 110,
+                "num_turns": 1,
+            },
+        },
+        {
+            "agent": "codex",
+            "usage": {
+                "session_id": "resumed-thread",
+                "input_tokens": 220,
+                "output_tokens": 25,
+                "cache_read_input_tokens": 170,
+                "cache_creation_input_tokens": 8,
+                "reasoning_output_tokens": 5,
+                "total_tokens": 245,
+                "num_turns": 1,
+            },
+        },
+        {
+            "agent": "codex",
+            "usage": {
+                "session_id": "fresh-thread",
+                "input_tokens": 40,
+                "output_tokens": 8,
+                "cache_read_input_tokens": 10,
+                "cache_creation_input_tokens": 2,
+                "reasoning_output_tokens": 1,
+                "total_tokens": 48,
+                "num_turns": 1,
+            },
+        },
+        {
+            "usage": {
+                "input_tokens": 5,
+                "output_tokens": 2,
+                "cache_creation_input_tokens": 1,
+                "total_tokens": 7,
+                "num_turns": 1,
+            },
+        },
+    ]
+
+    summary = summarize_worker_usage(records)
+
+    assert summary["attempts_with_usage"] == 4
+    assert summary["num_turns"] == 4
+    assert summary["input_tokens"] == 265
+    assert summary["output_tokens"] == 35
+    assert summary["cache_read_tokens"] == 180
+    assert summary["cache_creation_tokens"] == 11
+    assert summary["reasoning_output_tokens"] == 6
+    assert summary["total_tokens"] == 300
 
 
 def test_looks_like_quota_exhaustion() -> None:
@@ -1076,6 +1299,41 @@ def test_build_worker_command_honors_explicit_codex_model(tmp_path) -> None:
     assert "custom-codex-model" in cmd["argv"]
 
 
+def test_worker_reasoning_uses_track_for_implementation_and_profile_for_repair(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.recommend_worker_config",
+        lambda _profile, *, task_kind: {
+            "model": "",
+            "reasoning_effort": "xhigh",
+            "sandbox": {},
+            "approval": {},
+        },
+    )
+    plan = {"objective": "fix", "acceptance_criteria": [], "selected_workflows": []}
+    track = {"id": "track_1_codex", "agent": "codex", "reasoning_effort": "high"}
+
+    implementation = build_worker_command(
+        plan=plan,
+        track=track,
+        worktree=tmp_path,
+        verification_command="python -c pass",
+        phase="implementation",
+    )
+    repair = build_worker_command(
+        plan=plan,
+        track=track,
+        worktree=tmp_path,
+        verification_command="python -c pass",
+        phase="repair",
+        prompt_override="repair",
+    )
+
+    assert "model_reasoning_effort=high" in implementation["argv"]
+    assert implementation["reasoning_effort_source"] == "track"
+    assert "model_reasoning_effort=xhigh" in repair["argv"]
+    assert repair["reasoning_effort_source"] == "profile"
+
+
 def test_chief_dispatch_does_not_merge_when_not_verified(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
     monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
@@ -1285,6 +1543,8 @@ def test_chief_dispatch_marks_post_merge_command_failure(tmp_path, monkeypatch) 
     assert payload["latest_verification"]["command_verification"]["failure_kind"] == "verification_environment_missing"
     assert payload["merge"]["post_merge_verification"]["verdict"] == "fail"
     assert len(calls) == 2
+    assert payload["dispatch_record"]["repair_rounds"] == 0
+    assert payload["dispatch_record"]["verification_attempts"] == 2
 
 
 def test_chief_dispatch_dry_run_previews_worktree_and_commands(tmp_path, monkeypatch) -> None:
@@ -1294,7 +1554,7 @@ def test_chief_dispatch_dry_run_previews_worktree_and_commands(tmp_path, monkeyp
 
     assert payload["status"] == "preview"
     assert payload["dry_run"] is True
-    assert "codex exec" in payload["worker"]["command"]
+    assert "exec --json" in payload["worker"]["command"]
     assert "python -m visual_agent.cli codex-check" in payload["verification"]["command"]
     assert payload["worktree"]["path"].endswith("track-1-codex")
 
@@ -2047,3 +2307,438 @@ def test_stop_reason_reports_worker_toolchain_violation() -> None:
     }
 
     assert _stop_reason_from_dispatch(dispatch, {"max_rounds": 2}) == "worker_toolchain_violation"
+
+
+def test_codex_worker_command_inherits_user_model_and_reasoning_for_audit(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch._codex_user_defaults",
+        lambda: {"model": "gpt-5.6-sol", "reasoning_effort": "ultra"},
+    )
+    command = build_worker_command(
+        plan={"objective": "Fix totals"},
+        track={"agent": "codex", "reasoning_effort": "inherit"},
+        worktree=tmp_path,
+        verification_command="python -m pytest -q",
+    )
+
+    assert command["argv"][:3] == ["codex", "exec", "--json"]
+    assert "--model" not in command["argv"]
+    assert "-c" not in command["argv"]
+    assert command["resolved_model"] == "gpt-5.6-sol"
+    assert command["resolved_reasoning_effort"] == "ultra"
+    assert command["reasoning_effort_source"] == "config.toml"
+
+
+def test_execute_preflight_blocks_exploration_restricting_prompt_source(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.build_worker_prompt_alignment_check",
+        lambda: {
+            "status": "blocked",
+            "issue_count": 1,
+            "issues": [
+                {
+                    "code": "repository_scan_ban",
+                    "message": "Worker prompts must not prohibit repository-wide discovery.",
+                }
+            ],
+        },
+    )
+    calls = []
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=lambda *_args, **_kwargs: calls.append(True),
+        test_command="python -c pass",
+    )
+
+    assert payload["status"] == "preflight_blocked"
+    assert payload["reason"] == "execution_alignment_prompt_restriction"
+    assert payload["preflight"]["execution_alignment"]["issues"][0]["code"] == "repository_scan_ban"
+    assert calls == []
+
+
+def test_codex_worker_command_explicit_effort_and_resume_argv(tmp_path) -> None:
+    command = build_worker_command(
+        plan={"objective": "Fix totals"},
+        track={
+            "agent": "codex",
+            "model": "gpt-5.6-sol",
+            "reasoning_effort": "high",
+            "sandbox": {"flag": "--sandbox workspace-write"},
+            "approval": {"flag": "--ask-for-approval never"},
+        },
+        worktree=tmp_path,
+        verification_command="python -m pytest -q",
+        resume_session_id="019f4a34-2fc9-7622-8e24-21c7200fcf8d",
+    )
+
+    assert command["argv"][:7] == [
+        "codex",
+        "--sandbox",
+        "workspace-write",
+        "--ask-for-approval",
+        "never",
+        "exec",
+        "resume",
+    ]
+    assert command["argv"][7] == "--json"
+    assert ("-c", "model_reasoning_effort=high") in zip(command["argv"], command["argv"][1:])
+    assert "model_reasoning_effort=inherit" not in command["argv"]
+    assert command["argv"][-2:] == ["019f4a34-2fc9-7622-8e24-21c7200fcf8d", "-"]
+    assert command["resolved_reasoning_effort"] == "high"
+    assert command["reasoning_effort_source"] == "track"
+    assert command["resolved_sandbox"] == "workspace-write"
+    assert command["sandbox_source"] == "track"
+    assert command["resolved_approval"] == "never"
+    assert command["approval_source"] == "track"
+    assert command["session_mode"] == "resume"
+
+
+def test_worker_prompt_allows_exploration_and_delegated_omits_file_guidance(tmp_path) -> None:
+    from visual_agent.chief_dispatch import build_worker_prompt
+
+    plan = {
+        "objective": "Find and fix the checkout total bug",
+        "changed_files": [f"src/module_{index}.py" for index in range(40)],
+        "acceptance_criteria": ["Tests pass"],
+    }
+    tracked = build_worker_prompt(
+        plan=plan,
+        track={"id": "track_1_codex", "agent": "codex"},
+        worktree=tmp_path,
+        verification_command="python -m pytest -q",
+        dispatch_mode="tracked",
+    )
+    delegated = build_worker_prompt(
+        plan=plan,
+        track={"id": "track_1_codex", "agent": "codex"},
+        worktree=tmp_path,
+        verification_command="python -m pytest -q",
+        dispatch_mode="delegated",
+    )
+
+    assert "Explore the codebase as much as needed" in tracked
+    assert "Likely-relevant files" in tracked
+    assert tracked.count("- src/module_") == 30
+    assert "Likely-relevant files" not in delegated
+    assert "Worker track:" not in delegated
+    for prompt in (tracked, delegated):
+        lowered = prompt.lower()
+        assert "do not scan" not in lowered
+        assert "conserve model budget" not in lowered
+
+
+def test_delegated_dispatch_uses_one_session_long_timeout_and_shared_gate(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    monkeypatch.setattr("visual_agent.chief_dispatch._git_head", lambda _repo_root: "base")
+    monkeypatch.setattr("visual_agent.chief_dispatch._worktree_has_product_changes", lambda _worktree: True)
+
+    def fake_create_worktree(**kwargs):
+        kwargs["worktree"].mkdir(parents=True, exist_ok=True)
+        return {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]}
+
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", fake_create_worktree)
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.run_command_verification",
+        lambda **_kwargs: {
+            "verdict": "pass",
+            "exit_code": 0,
+            "failure_kind": "",
+            "command": "python -c pass",
+        },
+    )
+    calls = []
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, **kwargs):
+        calls.append(
+            {
+                "argv": list(argv),
+                "stdin": kwargs.get("stdin_text", ""),
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        log_path.write_text(
+            '{"type":"thread.started","thread_id":"delegated-thread"}\n'
+            '{"type":"turn.completed","usage":{"input_tokens":20,"output_tokens":5}}\n',
+            encoding="utf-8",
+        )
+        return {"exit_code": 0, "stdout_tail": "", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        test_command="python -c pass",
+        timeout_seconds=11,
+        delegated_timeout_seconds=37,
+        dispatch_mode="delegated",
+        max_repair_rounds=0,
+    )
+
+    assert payload["status"] == "verified"
+    assert len(calls) == 1
+    assert calls[0]["timeout_seconds"] == 37
+    assert "Worker track:" not in calls[0]["stdin"]
+    assert "Likely-relevant files" not in calls[0]["stdin"]
+    assert payload["worker_record"]["dispatch_mode"] == "delegated"
+    assert payload["dispatch_record"]["dispatch_mode"] == "delegated"
+    assert payload["dispatch_record"]["verification_attempts"] == 1
+
+
+def test_scope_gate_rejects_restricted_worker_path(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "pacer@example.local"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Pacer"], cwd=repo, check=True)
+    (repo / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
+    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+    (repo / "archive").mkdir()
+    (repo / "archive" / "old.py").write_text("changed\n", encoding="utf-8")
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+
+    payload = run_dispatch_verification(
+        workspace_root=workspace.root,
+        plan_id="scope-plan",
+        repo_root=repo,
+        run_profile="dry-run",
+        include_slow=False,
+        max_workflows=1,
+        test_command="python -c pass",
+        worktree_base=base,
+    )
+
+    assert payload["verdict"] == "fail"
+    assert payload["failure_kind"] == "scope_violation"
+    assert payload["restricted_worker_files"] == ["archive/old.py"]
+
+
+def test_scope_gate_rejects_tracked_agent_workspace_records(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "pacer@example.local"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Pacer"], cwd=repo, check=True)
+    record = repo / ".agent-workspace" / "chief_plans" / "plan.json"
+    record.parent.mkdir(parents=True)
+    record.write_text('{"status":"ready"}\n', encoding="utf-8")
+    subprocess.run(["git", "add", "-f", ".agent-workspace/chief_plans/plan.json"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    record.write_text('{"status":"verified"}\n', encoding="utf-8")
+    workspace = init_workspace(tmp_path / "records", with_demo=False)
+
+    payload = run_dispatch_verification(
+        workspace_root=workspace.root,
+        plan_id="workspace-record-plan",
+        repo_root=repo,
+        run_profile="dry-run",
+        include_slow=False,
+        max_workflows=1,
+        test_command="python -c pass",
+        worktree_base=base,
+    )
+
+    assert payload["verdict"] == "fail"
+    assert payload["failure_kind"] == "scope_violation"
+    assert payload["restricted_worker_files"] == [".agent-workspace/chief_plans/plan.json"]
+
+
+def test_verification_workspace_snapshot_rejects_worker_tampering(tmp_path) -> None:
+    from visual_agent.chief_dispatch import prepare_worktree_workspace
+
+    source = tmp_path / "source-workspace"
+    target = tmp_path / "target-workspace"
+    (source / "workflows").mkdir(parents=True)
+    (source / "workflows" / "gate.yaml").write_text("name: gate\n", encoding="utf-8")
+    setup = prepare_worktree_workspace(source_workspace=source, target_workspace=target)
+    (target / "workflows" / "gate.yaml").write_text("name: weakened\n", encoding="utf-8")
+
+    payload = run_dispatch_verification(
+        workspace_root=source,
+        verification_workspace_root=target,
+        plan_id="workspace-tamper",
+        repo_root=tmp_path,
+        run_profile="dry-run",
+        include_slow=False,
+        max_workflows=1,
+        test_command="python -c pass",
+        trusted_workspace_snapshot=setup["trusted_snapshot"],
+    )
+
+    assert payload["verdict"] == "fail"
+    assert payload["failure_kind"] == "verification_workspace_tampering"
+    assert payload["tampered_workspace_files"] == ["workflows/gate.yaml"]
+
+
+def test_dispatch_repair_resumes_codex_session_and_writes_ledger(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    monkeypatch.setattr("visual_agent.chief_dispatch._git_head", lambda _repo_root: "base")
+    monkeypatch.setattr("visual_agent.chief_dispatch._worktree_has_product_changes", lambda _worktree: True)
+
+    def fake_create_worktree(**kwargs):
+        kwargs["worktree"].mkdir(parents=True, exist_ok=True)
+        return {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]}
+
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", fake_create_worktree)
+    verification_results = [
+        {"verdict": "fail", "exit_code": 1, "failure_kind": "command_failed", "command": "python -c pass", "raw_output_tail": "assertion failed"},
+        {"verdict": "fail", "exit_code": 1, "failure_kind": "command_failed", "command": "python -c pass", "raw_output_tail": "assertion still failing"},
+        {"verdict": "pass", "exit_code": 0, "failure_kind": "", "command": "python -c pass"},
+    ]
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.run_command_verification",
+        lambda **_kwargs: verification_results.pop(0),
+    )
+    calls = []
+    cumulative_usage = [
+        {"input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 10, "reasoning_output_tokens": 2},
+        {"input_tokens": 220, "cached_input_tokens": 170, "output_tokens": 25, "reasoning_output_tokens": 5},
+        {"input_tokens": 350, "cached_input_tokens": 300, "output_tokens": 40, "reasoning_output_tokens": 9},
+    ]
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, **kwargs):
+        calls.append({"argv": list(argv), "stdin": kwargs.get("stdin_text", "")})
+        usage = cumulative_usage[len(calls) - 1]
+        log_path.write_text(
+            '{"type":"thread.started","thread_id":"thread-123"}\n'
+            + json.dumps({"type": "turn.completed", "usage": usage})
+            + "\n",
+            encoding="utf-8",
+        )
+        return {"exit_code": 0, "stdout_tail": "", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        test_command="python -c pass",
+        repair_strategy="resume",
+    )
+
+    assert payload["status"] == "verified"
+    assert len(payload["verification_attempts"]) == 3
+    assert [record["attempt"] for record in payload["repair_worker_records"]] == [
+        "repair_1_resume",
+        "repair_2_resume",
+    ]
+    for call in calls[1:]:
+        exec_index = call["argv"].index("exec")
+        assert call["argv"][exec_index : exec_index + 3] == ["exec", "resume", "--json"]
+        assert call["argv"][-2:] == ["thread-123", "-"]
+    assert "assertion failed" in calls[1]["stdin"]
+    assert "assertion still failing" in calls[2]["stdin"]
+    assert all("Objective:" not in call["stdin"] for call in calls[1:])
+    assert payload["usage_summary"]["input_tokens"] == 350
+    assert payload["usage_summary"]["cache_read_tokens"] == 300
+    assert payload["usage_summary"]["output_tokens"] == 40
+    assert payload["usage_summary"]["reasoning_output_tokens"] == 9
+    assert payload["usage_summary"]["total_tokens"] == 390
+    assert payload["usage_summary"]["num_turns"] == 3
+    assert Path(payload["dispatch_record_path"]).exists()
+    assert payload["dispatch_record"]["session_ids"] == ["thread-123"]
+    assert payload["dispatch_record"]["resolved_sandbox"] == "workspace-write"
+    assert payload["dispatch_record"]["repair_rounds"] == 2
+    assert payload["dispatch_record"]["verification_attempts"] == 3
+
+
+def test_dispatch_resume_unavailable_falls_back_to_fresh_with_full_evidence(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    monkeypatch.setattr("visual_agent.chief_dispatch._git_head", lambda _repo_root: "base")
+    monkeypatch.setattr("visual_agent.chief_dispatch._worktree_has_product_changes", lambda _worktree: True)
+
+    def fake_create_worktree(**kwargs):
+        kwargs["worktree"].mkdir(parents=True, exist_ok=True)
+        return {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]}
+
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", fake_create_worktree)
+    verification_results = [
+        {
+            "verdict": "fail",
+            "exit_code": 1,
+            "failure_kind": "command_failed",
+            "command": "python -c pass",
+            "raw_output_tail": "ORIGINAL FAILURE OUTPUT",
+        },
+        {"verdict": "pass", "exit_code": 0, "failure_kind": "", "command": "python -c pass"},
+    ]
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.run_command_verification",
+        lambda **_kwargs: verification_results.pop(0),
+    )
+    calls = []
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, **kwargs):
+        calls.append({"argv": list(argv), "stdin": kwargs.get("stdin_text", "")})
+        if "resume" in argv:
+            log_path.write_text("error: unrecognized subcommand 'resume'\n", encoding="utf-8")
+            return {
+                "exit_code": 2,
+                "stdout_tail": "",
+                "stderr_tail": "error: unrecognized subcommand 'resume'",
+            }
+        thread_id = "thread-initial" if len(calls) == 1 else "thread-fallback"
+        log_path.write_text(
+            '{"type":"thread.started","thread_id":"' + thread_id + '"}\n'
+            '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}\n',
+            encoding="utf-8",
+        )
+        return {"exit_code": 0, "stdout_tail": "", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        test_command="python -c pass",
+        max_repair_rounds=1,
+        repair_strategy="resume",
+    )
+
+    assert payload["status"] == "verified"
+    assert [record["attempt"] for record in payload["repair_worker_records"]] == [
+        "repair_1_resume",
+        "repair_1_fresh_fallback",
+    ]
+    assert "resume" in calls[1]["argv"]
+    assert "resume" not in calls[2]["argv"]
+    assert "Objective: Fix checkout total display" in calls[2]["stdin"]
+    assert "ORIGINAL FAILURE OUTPUT" in calls[2]["stdin"]
+
+
+def test_repair_evidence_is_redacted_and_capped_at_32kb_utf8() -> None:
+    from visual_agent.chief_dispatch import _repair_evidence_text
+
+    secret = "sk-" + ("s" * 48)
+    raw = secret + ("错" * 20000)
+    evidence = _repair_evidence_text({"command_verification": {"raw_output_tail": raw}})
+
+    assert secret not in evidence
+    assert len(evidence.encode("utf-8")) <= 32768
+    assert evidence.endswith("错")

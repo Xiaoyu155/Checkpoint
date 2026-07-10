@@ -726,6 +726,17 @@ def test_cloud_server_rejects_non_loopback_without_auth(tmp_path) -> None:
         create_cloud_server(workspace_root=workspace.root, host="0.0.0.0", port=0)
 
 
+def test_cloud_server_required_org_does_not_replace_non_loopback_auth(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    with pytest.raises(CloudServerConfigError):
+        create_cloud_server(
+            workspace_root=workspace.root,
+            host="0.0.0.0",
+            port=0,
+            required_org="team-a",
+        )
+
+
 def test_cloud_server_allows_loopback_without_auth(tmp_path) -> None:
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     server = create_cloud_server(workspace_root=workspace.root, host="127.0.0.1", port=0)

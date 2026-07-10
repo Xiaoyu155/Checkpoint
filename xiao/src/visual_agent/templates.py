@@ -7,10 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from .models import to_jsonable
+from .resources import bundled_path
 from .workspace import Workspace
 
 
-TEMPLATE_ROOT = Path(__file__).resolve().parents[2] / "templates"
+TEMPLATE_ROOT = bundled_path("templates")
 
 
 @dataclass(frozen=True)
@@ -86,4 +87,3 @@ def copy_template_file(source: Path, target_dir: Path, *, overwrite: bool) -> st
     target_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, target)
     return str(target)
-

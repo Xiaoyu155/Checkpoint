@@ -41,6 +41,8 @@ ai模型api.txt
 .pytest_cache/
 .pytest_cache_local/
 .ruff_cache/
+xiao/.pytest_scope_debug/
+xiao/.benchmark-private-workspace/
 *.lock
 *.log
 
@@ -81,11 +83,12 @@ xiao.checkpoint-worktrees/
 # ---- Local external/reference material ----
 local-sub2api/
 产品源码/
+.review_applications/
 
 # ---- Internal planning notes ----
 宏大蓝图开发计划.md
 开发日志.md
-CODEX_*.md
+/CODEX_*.md
 MCP_SERVER_PLAN.md
 E2E_TEST_PLAN.md
 PRODUCT_EVALUATION_REPORT_FOR_CLAUDE.md

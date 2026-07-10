@@ -20,7 +20,7 @@ from .missions import append_round, load_mission, load_rounds, mission_dir, miss
 
 BOARD_COLUMNS = ("todo", "in_progress", "in_review", "pending_merge", "done")
 
-_RUNNING_STATUSES = {"running", "preview_running", "starting"}
+_RUNNING_STATUSES = {"running", "preview_running", "starting", "background_running"}
 _DONE_MERGE_STATES = {"merged", "nothing_to_merge"}
 
 
@@ -216,7 +216,7 @@ def archive_all_missions_now(workspace_root: str | Path) -> dict[str, Any]:
         mission_id = mission_json.parent.name
         mission = load_mission(root, mission_id) or {}
         status = str(mission.get("status") or "")
-        if status in _RUNNING_STATUSES or status == "background_running":
+        if status in _RUNNING_STATUSES:
             skipped_running += 1
             continue
         if status in {"verified", "merged"}:

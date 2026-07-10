@@ -614,12 +614,14 @@ def _worker_tracks(
         model = ""
         sandbox: dict[str, str] = {}
         approval: dict[str, str] = {}
+        reasoning_effort = "inherit"
         parallelism_hint = ""
         if profile:
             config = recommend_worker_config(profile, task_kind=task_kind)
             model = str(config.get("model") or "")
             sandbox = config.get("sandbox") or {}
             approval = config.get("approval") or {}
+            reasoning_effort = str(config.get("reasoning_effort") or "inherit")
             parallelism_hint = str(config.get("parallelism_hint") or "")
             command = _agent_command(profile, prompt=prompt, config=config)
         else:
@@ -639,6 +641,7 @@ def _worker_tracks(
                 "model_selection": model_selection if route else None,
                 "sandbox": sandbox,
                 "approval": approval,
+                "reasoning_effort": reasoning_effort,
                 "parallelism_hint": parallelism_hint,
                 "command": command,
                 "command_template": _agent_command_template(agent, prompt),

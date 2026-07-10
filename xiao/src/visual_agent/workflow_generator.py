@@ -7,6 +7,7 @@ from typing import Any
 from xml.etree import ElementTree
 
 from .llm_providers import LLMBackend, resolve_llm_backend, run_llm_completion
+from .resources import bundled_path
 from .workflow import parse_workflow_file, workflow_from_dict
 from .workflow_quality import score_workflow_quality
 
@@ -87,7 +88,7 @@ Rules:
 8. End with assertions that verify the expected outcome.
 """
 
-EXAMPLE_ROOT = Path(__file__).resolve().parents[2] / "workflows" / "examples"
+EXAMPLE_ROOT = bundled_path("workflows", "examples")
 
 EXAMPLE_GROUPS: dict[str, tuple[str, ...]] = {
     "auth": ("login_basic", "login_redirect", "register_form", "logout_flow", "password_reset"),

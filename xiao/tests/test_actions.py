@@ -1,6 +1,15 @@
+from visual_agent import actions
 from visual_agent.actions import DesktopActions
 from visual_agent.security import text_metadata
 from visual_agent.models import ActionStatus, Point, ProviderKind, Target
+
+
+def test_desktop_actions_constructor_keeps_gui_backend_lazy(monkeypatch) -> None:
+    monkeypatch.setattr(actions.pyautogui, "_module", None)
+
+    DesktopActions()
+
+    assert actions.pyautogui._module is None
 
 
 def test_text_metadata_masks_preview() -> None:

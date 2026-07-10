@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shlex
@@ -32,16 +33,23 @@ from .command_verification import (
     run_command_verification,
     tamper_repair_brief,
 )
-from .chief_plans_store import append_worker_record, load_plan, plan_dir, save_verification
+from .chief_plans_store import append_dispatch_record, append_worker_record, load_plan, plan_dir, save_verification
 from .codex_check import codex_check_to_markdown, is_runtime_changed_file, run_codex_check
 from .diff_summary import build_diff_summary
+from .execution_alignment import build_worker_prompt_alignment_check
 from .mission_progress import record_worker_output, save_mission_progress
 from .preflight import dependency_preflight
-from .subprocess_window import hidden_subprocess_kwargs
+from .subprocess_window import (
+    hidden_subprocess_kwargs,
+    isolated_process_group_kwargs,
+    prepare_subprocess_command,
+    terminate_process_tree,
+)
 from .git_diff import changed_files
 from .llm_providers import LLMBackend, run_llm_completion
 from .models import to_jsonable
 from .repo_map import build_repo_map, render_repo_map, repo_map_cache_path
+from .security import redact_secret_text, scrub_secrets
 from .verification_profiles import (
     conditional_test_command_short_circuit,
     estimate_verification_timeout,
@@ -57,7 +65,14 @@ from .workspace import open_workspace
 # round sees them as uncovered changes and reports a phantom coverage gap.
 _ARTIFACT_BASENAMES = {".visual-agent-status.md", "强制测试记录.md"}
 _ARTIFACT_DIR_PREFIXES = (".pw-browsers/", ".npm-cache/", ".dart-home/", ".dart_tool/", "artifacts/")
-_NON_PRODUCT_DIR_PREFIXES = ("_graveyard_", "graveyard/", "archive/", "archives/", "_open_source_cases/")
+_NON_PRODUCT_DIR_PREFIXES = (
+    ".agent-workspace/",
+    "_graveyard_",
+    "graveyard/",
+    "archive/",
+    "archives/",
+    "_open_source_cases/",
+)
 # Python cache and compiled files should never be counted as product changes.
 _CACHE_DIR_PREFIXES = ("__pycache__/", ".pytest_cache/")
 _CACHE_EXTENSIONS = {".pyc", ".pyo", ".pyd"}
@@ -76,6 +91,32 @@ _GENERATED_NOISE_PATHS = {
 # own codex/claude subscriptions, so both must be dispatchable. Note that
 # unattended claude-code missions consume the 5-hour subscription window.
 EXECUTABLE_CODING_AGENTS = {"codex", "claude-code", "mimo"}
+DISPATCH_MODES = {"tracked", "delegated"}
+PROMPT_STYLES = {"expanded", "legacy"}
+REPAIR_STRATEGIES = {"resume", "fresh"}
+
+
+def _normalized_choice(value: str, choices: set[str], *, field: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized not in choices:
+        raise ValueError(f"Unsupported {field}: {value!r}; expected one of {', '.join(sorted(choices))}.")
+    return normalized
+
+
+def _codex_user_defaults() -> dict[str, str]:
+    try:
+        from .codex_exec import load_codex_user_defaults
+
+        return load_codex_user_defaults()
+    except (OSError, ValueError, ImportError):
+        return {}
+
+
+def _resolved_or_inherited(value: str, field: str) -> str:
+    normalized = str(value or "").strip()
+    if normalized and normalized.lower() != "inherit":
+        return normalized
+    return f"inherited({field})"
 
 
 def _allow_automatic_low_cost_failover(worker_agent_norm: str) -> bool:
@@ -121,9 +162,23 @@ def _is_non_product_path(path: str) -> bool:
     if not normalized:
         return True
     parts = normalized.split("/")
+    if ".agent-workspace" in parts:
+        return True
     if any(part.endswith(".checkpoint-worktrees") or ".checkpoint-worktrees" in part for part in parts):
         return True
     return any(normalized == prefix.rstrip("/") or normalized.startswith(prefix) for prefix in _NON_PRODUCT_DIR_PREFIXES)
+
+
+def _is_restricted_worker_path(path: str) -> bool:
+    normalized = str(path).replace("\\", "/").strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    normalized = normalized.lstrip("/")
+    if not normalized:
+        return False
+    if normalized in _ARTIFACT_BASENAMES:
+        return True
+    return _is_non_product_path(normalized)
 
 
 CommandRunner = Callable[..., dict[str, Any]]
@@ -153,6 +208,12 @@ def dispatch_chief_plan(
     failure_evidence_builder: Any = None,
     allow_prior_verified_evidence: bool = False,
     verification_env: list[dict[str, Any]] | None = None,
+    reasoning_effort: str | None = None,
+    dispatch_mode: str = "tracked",
+    prompt_style: str = "expanded",
+    repair_strategy: str = "resume",
+    max_repair_rounds: int | None = 2,
+    delegated_timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Preview or execute one chief-engineer worker dispatch.
 
@@ -160,7 +221,14 @@ def dispatch_chief_plan(
     supported. Other profiles can appear as inspection lanes in the plan, but
     dispatch will not run them as coding workers.
     """
+    dispatch_started = monotonic()
     workspace_path = Path(workspace_root).expanduser().resolve()
+    dispatch_mode = _normalized_choice(dispatch_mode, DISPATCH_MODES, field="dispatch_mode")
+    prompt_style = _normalized_choice(prompt_style, PROMPT_STYLES, field="prompt_style")
+    repair_strategy = _normalized_choice(repair_strategy, REPAIR_STRATEGIES, field="repair_strategy")
+    worker_timeout_seconds = float(timeout_seconds)
+    if dispatch_mode == "delegated":
+        worker_timeout_seconds = float(delegated_timeout_seconds or (float(timeout_seconds) * 2.0))
     progress_mission_id = str(mission_id or plan_id)
     plan = load_plan(workspace_path, plan_id)
     if plan is None:
@@ -216,6 +284,11 @@ def dispatch_chief_plan(
         timeout_info=timeout_info,
         command_safety=command_safety,
     )
+    if execute and not dry_run:
+        execution_alignment = build_worker_prompt_alignment_check()
+        preflight["execution_alignment"] = execution_alignment
+        if execution_alignment.get("status") == "blocked":
+            preflight["status"] = "blocked"
     # Zero-token architecture memory: refresh the local index (only files that
     # changed since the last dispatch are re-parsed) and hand every worker
     # attempt a budgeted excerpt. The memory layer must never block dispatch.
@@ -280,6 +353,9 @@ def dispatch_chief_plan(
         repo_map_text=repo_map_text,
         prompt_override=report_prompt,
         prompt_suffix=dirty_context_text,
+        reasoning_effort=reasoning_effort,
+        dispatch_mode=dispatch_mode,
+        prompt_style=prompt_style,
     )
     toolchain_policy = _toolchain_policy_for_command(effective_verification_command)
     toolchain_preflight = _toolchain_preflight_for_command(effective_verification_command, policy=toolchain_policy)
@@ -297,6 +373,18 @@ def dispatch_chief_plan(
             "track_kind": str(selected_track.get("track_kind") or "implementation"),
             "command": worker_command["display"],
             "argv": worker_command["argv"],
+            "resolved_model": worker_command.get("resolved_model", ""),
+            "resolved_reasoning_effort": worker_command.get("resolved_reasoning_effort", ""),
+            "model_source": worker_command.get("model_source", ""),
+            "reasoning_effort_source": worker_command.get("reasoning_effort_source", ""),
+            "resolved_sandbox": worker_command.get("resolved_sandbox", ""),
+            "sandbox_source": worker_command.get("sandbox_source", ""),
+            "resolved_approval": worker_command.get("resolved_approval", ""),
+            "approval_source": worker_command.get("approval_source", ""),
+            "dispatch_mode": dispatch_mode,
+            "prompt_style": prompt_style,
+            "repair_strategy": repair_strategy,
+            "timeout_seconds": worker_timeout_seconds,
         },
         "worktree": {
             "path": str(worktree),
@@ -326,6 +414,7 @@ def dispatch_chief_plan(
             "plan_dir": str(plan_dir(workspace_path, plan_id)),
             "workers_jsonl": str(plan_dir(workspace_path, plan_id) / "workers.jsonl"),
             "verification_json": str(plan_dir(workspace_path, plan_id) / "verification.json"),
+            "dispatches_jsonl": str(plan_dir(workspace_path, plan_id) / "dispatches.jsonl"),
         },
     }
     if dirty_context:
@@ -449,6 +538,11 @@ def dispatch_chief_plan(
         target_workspace=verification_workspace,
     )
     preview["verification"]["workspace_prepared"] = workspace_setup["status"]
+    trusted_workspace_snapshot = (
+        workspace_setup.get("trusted_snapshot")
+        if isinstance(workspace_setup.get("trusted_snapshot"), dict)
+        else None
+    )
     if workspace_setup.get("status") == "failed":
         return {**preview, "status": "blocked", "reason": workspace_setup.get("reason"), "workspace_setup": workspace_setup}
 
@@ -513,7 +607,7 @@ def dispatch_chief_plan(
             track=selected_track,
             plan=plan,
             cwd=worktree_project_root,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=worker_timeout_seconds,
             log_path=logs_dir / f"{track_token}-initial.log",
             backend=worker_backend,
             repo_map_text=repo_map_text,
@@ -531,11 +625,13 @@ def dispatch_chief_plan(
             argv=initial_argv,
             stdin_text=worker_command.get("stdin"),
             cwd=worktree_project_root,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=worker_timeout_seconds,
             log_path=logs_dir / f"{track_token}-initial.log",
             runner=runner,
             env=initial_env,
             backend=worker_backend,
+            command_metadata=worker_command,
+            dispatch_mode=dispatch_mode,
         )
 
     # Quota failover: if a non-Codex subscription worker was blocked by a
@@ -581,7 +677,7 @@ def dispatch_chief_plan(
                 track=failover_track,
                 plan=plan,
                 cwd=worktree_project_root,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=worker_timeout_seconds,
                 log_path=logs_dir / f"{track_token}-quota-failover-{failover_name}.log",
                 backend=failover_backend,
                 repo_map_text=repo_map_text,
@@ -596,7 +692,29 @@ def dispatch_chief_plan(
             preview["worker"]["failover_disabled"] = "Low-cost backend failover unavailable: no backend token was found."
 
     verification_attempts: list[dict[str, Any]] = []
-    if diagnosis_mode or review_plan_mode:
+    workspace_tamper = _workspace_tamper_verification(
+        workspace_root=workspace_path,
+        verification_workspace_root=verification_workspace,
+        plan_id=plan_id,
+        mission_id=progress_mission_id,
+        repo_root=worktree_project_root,
+        run_profile=run_profile,
+        trusted_workspace_snapshot=trusted_workspace_snapshot,
+    )
+    scope_verification = _scope_violation_verification(
+        workspace_root=workspace_path,
+        verification_workspace_root=verification_workspace,
+        plan_id=plan_id,
+        mission_id=progress_mission_id,
+        repo_root=worktree_project_root,
+        run_profile=run_profile,
+        worktree_base=worktree_base,
+    )
+    if workspace_tamper is not None:
+        verification = workspace_tamper
+    elif scope_verification is not None:
+        verification = scope_verification
+    elif diagnosis_mode or review_plan_mode:
         # The deliverable IS the report; running seeded demo workflows against a
         # report mission produces irrelevant failures (V7 dogfood finding).
         verification = _diagnosis_verification(worktree_project_root) if diagnosis_mode else _review_plan_verification(worktree_project_root)
@@ -617,84 +735,169 @@ def dispatch_chief_plan(
             worktree_base=worktree_base,
             allow_test_edits=allow_test_edits,
             timeout_seconds=timeout_seconds,
+            trusted_workspace_snapshot=trusted_workspace_snapshot,
         )
     verification_attempts.append(verification)
 
+    repair_worker_records: list[dict[str, Any]] = []
     repair_worker_record: dict[str, Any] | None = None
-    if auto_repair_once and verification.get("verdict") == "fail" and _verification_is_repairable(verification):
-        repair_prompt = str((verification.get("repair_brief") or {}).get("repair_prompt") or "").strip()
-        if repair_prompt:
-            repair_prompt_full = repair_prompt + "\n\nAfter repairing, run: " + effective_verification_command
-            if canonical_agent_name(str(repair_track.get("agent") or "")) == "mimo":
-                repair_worker_record = _run_mimo_patch_attempt(
-                    workspace_root=workspace_path,
-                    plan_id=plan_id,
-                    mission_id=progress_mission_id,
-                    attempt="auto_repair_once",
-                    track=repair_track,
+    repair_rounds_completed = 0
+    repair_limit = _repair_round_limit(
+        auto_repair_once=auto_repair_once,
+        max_repair_rounds=max_repair_rounds,
+    )
+    repair_context_record = (
+        failover_record
+        if isinstance(failover_record, dict) and failover_record.get("status") == "completed"
+        else worker_record
+    )
+    current_session_id = _worker_session_id(repair_context_record)
+    repair_agent = canonical_agent_name(str(repair_track.get("agent") or ""))
+    for repair_round in range(1, repair_limit + 1):
+        if verification.get("verdict") != "fail" or not _verification_is_repairable(verification):
+            break
+        use_resume = bool(
+            repair_strategy == "resume"
+            and repair_agent == "codex"
+            and current_session_id
+        )
+        repair_prompt_full = _build_dispatch_repair_prompt(
+            plan=plan,
+            verification=verification,
+            verification_command=effective_verification_command,
+            repair_round=repair_round,
+            resume=use_resume,
+            worker_record=repair_context_record,
+        )
+        if repair_agent == "mimo":
+            repair_worker_record = _run_mimo_patch_attempt(
+                workspace_root=workspace_path,
+                plan_id=plan_id,
+                mission_id=progress_mission_id,
+                attempt=f"repair_{repair_round}_fresh",
+                track=repair_track,
+                plan=plan,
+                cwd=worktree_project_root,
+                timeout_seconds=worker_timeout_seconds,
+                log_path=logs_dir / f"{track_token}-repair-{repair_round}-fresh.log",
+                backend=repair_backend or resolve_failover_backend(),
+                repo_map_text=repo_map_text,
+                verification_command=effective_verification_command,
+                prompt_override=repair_prompt_full,
+            )
+        else:
+            repair_command = build_worker_command(
+                plan=plan,
+                track=repair_track,
+                worktree=worktree_project_root,
+                verification_command=effective_verification_command,
+                prompt_override=repair_prompt_full,
+                phase="repair",
+                model_policy=model_policy,
+                repo_map_text=None if use_resume else repo_map_text,
+                reasoning_effort=reasoning_effort,
+                dispatch_mode=dispatch_mode,
+                prompt_style=prompt_style,
+                resume_session_id=current_session_id if use_resume else None,
+            )
+            repair_argv = list(repair_command["argv"])
+            if repair_executable:
+                repair_argv[0] = repair_executable
+            if repair_backend:
+                repair_argv = _override_model_flag(repair_argv, repair_backend["model"])
+            repair_env = _apply_toolchain_policy_env(repair_env, toolchain_policy)
+            attempt_kind = "resume" if use_resume else "fresh"
+            repair_worker_record = _run_worker_attempt(
+                workspace_root=workspace_path,
+                plan_id=plan_id,
+                mission_id=progress_mission_id,
+                attempt=f"repair_{repair_round}_{attempt_kind}",
+                track=repair_track,
+                argv=repair_argv,
+                stdin_text=repair_command.get("stdin"),
+                cwd=worktree_project_root,
+                timeout_seconds=worker_timeout_seconds,
+                log_path=logs_dir / f"{track_token}-repair-{repair_round}-{attempt_kind}.log",
+                runner=runner,
+                env=repair_env,
+                backend=repair_backend,
+                command_metadata=repair_command,
+                dispatch_mode=dispatch_mode,
+            )
+            repair_worker_records.append(repair_worker_record)
+            if use_resume and _resume_session_failed(repair_worker_record):
+                fallback_prompt = _build_dispatch_repair_prompt(
                     plan=plan,
-                    cwd=worktree_project_root,
-                    timeout_seconds=timeout_seconds,
-                    log_path=logs_dir / f"{track_token}-auto-repair-once.log",
-                    backend=repair_backend or resolve_failover_backend(),
-                    repo_map_text=repo_map_text,
+                    verification=verification,
                     verification_command=effective_verification_command,
-                    prompt_override=repair_prompt_full,
+                    repair_round=repair_round,
+                    resume=False,
+                    worker_record=repair_context_record,
                 )
-            else:
-                repair_command = build_worker_command(
+                fallback_command = build_worker_command(
                     plan=plan,
                     track=repair_track,
                     worktree=worktree_project_root,
                     verification_command=effective_verification_command,
-                    prompt_override=repair_prompt_full,
+                    prompt_override=fallback_prompt,
                     phase="repair",
                     model_policy=model_policy,
                     repo_map_text=repo_map_text,
+                    reasoning_effort=reasoning_effort,
+                    dispatch_mode=dispatch_mode,
+                    prompt_style=prompt_style,
                 )
-                repair_argv = list(repair_command["argv"])
+                fallback_argv = list(fallback_command["argv"])
                 if repair_executable:
-                    repair_argv[0] = repair_executable
-                if repair_backend:
-                    repair_argv = _override_model_flag(repair_argv, repair_backend["model"])
-                repair_env = _apply_toolchain_policy_env(repair_env, toolchain_policy)
+                    fallback_argv[0] = repair_executable
                 repair_worker_record = _run_worker_attempt(
                     workspace_root=workspace_path,
                     plan_id=plan_id,
                     mission_id=progress_mission_id,
-                    attempt="auto_repair_once",
+                    attempt=f"repair_{repair_round}_fresh_fallback",
                     track=repair_track,
-                    argv=repair_argv,
-                    stdin_text=repair_command.get("stdin"),
+                    argv=fallback_argv,
+                    stdin_text=fallback_command.get("stdin"),
                     cwd=worktree_project_root,
-                    timeout_seconds=timeout_seconds,
-                    log_path=logs_dir / f"{track_token}-auto-repair-once.log",
+                    timeout_seconds=worker_timeout_seconds,
+                    log_path=logs_dir / f"{track_token}-repair-{repair_round}-fresh-fallback.log",
                     runner=runner,
                     env=repair_env,
                     backend=repair_backend,
+                    command_metadata=fallback_command,
+                    dispatch_mode=dispatch_mode,
                 )
-            verification_attempts.append(
-                run_dispatch_verification(
-                    workspace_root=workspace_path,
-                    verification_workspace_root=verification_workspace,
-                    plan_id=plan_id,
-                    mission_id=progress_mission_id,
-                    repo_root=worktree_project_root,
-                    run_profile=run_profile,
-                    include_slow=include_slow,
-                    max_workflows=max_workflows,
-                    codex_runner=codex_runner,
-                    failure_evidence_builder=failure_evidence_builder,
-                    test_command=test_command,
-                    verification_env=verification_env,
-                    worktree_base=worktree_base,
-                    allow_test_edits=allow_test_edits,
-                )
-            )
+                repair_worker_records.append(repair_worker_record)
+        if repair_agent == "mimo" and isinstance(repair_worker_record, dict):
+            repair_worker_records.append(repair_worker_record)
+        current_session_id = _worker_session_id(repair_worker_record) or current_session_id
+        repair_context_record = repair_worker_record or repair_context_record
+        repair_rounds_completed += 1
+        verification = run_dispatch_verification(
+            workspace_root=workspace_path,
+            verification_workspace_root=verification_workspace,
+            plan_id=plan_id,
+            mission_id=progress_mission_id,
+            repo_root=worktree_project_root,
+            run_profile=run_profile,
+            include_slow=include_slow,
+            max_workflows=max_workflows,
+            codex_runner=codex_runner,
+            failure_evidence_builder=failure_evidence_builder,
+            test_command=test_command,
+            verification_env=verification_env,
+            worktree_base=worktree_base,
+            allow_test_edits=allow_test_edits,
+            timeout_seconds=timeout_seconds,
+            trusted_workspace_snapshot=trusted_workspace_snapshot,
+        )
+        verification_attempts.append(verification)
 
     latest_verification = verification_attempts[-1]
     effective_worker_record = (
-        failover_record
+        repair_worker_record
+        if isinstance(repair_worker_record, dict) and repair_worker_record.get("status") == "completed"
+        else failover_record
         if isinstance(failover_record, dict) and failover_record.get("status") == "completed"
         else worker_record
     )
@@ -715,7 +918,7 @@ def dispatch_chief_plan(
         allow_prior_verified_evidence and _mission_has_prior_verified_evidence(workspace_path, plan_id)
     )
     toolchain_violation = _first_worker_toolchain_violation(
-        [worker_record, failover_record, repair_worker_record],
+        [worker_record, failover_record, *repair_worker_records],
         test_command or verification_command,
     )
     status = "completed" if worker_completed else "worker_failed"
@@ -811,11 +1014,13 @@ def dispatch_chief_plan(
         "worker_record": worker_record,
         "failover_worker_record": failover_record,
         "repair_worker_record": repair_worker_record,
+        "repair_worker_records": repair_worker_records,
+        "repair_rounds": repair_rounds_completed,
         "toolchain_violation": toolchain_violation,
         "verification_attempts": verification_attempts,
         "latest_verification": latest_verification,
         "usage_summary": summarize_worker_usage(
-            [worker_record, failover_record, repair_worker_record]
+            [worker_record, failover_record, *repair_worker_records]
         ),
     }
     if diagnosis_mode and latest_verification.get("diagnosis_report"):
@@ -834,6 +1039,41 @@ def dispatch_chief_plan(
             "Worker did not complete normally, but the current worktree changes passed the "
             "test command. Inspect the worktree manually before merging."
         )
+    all_worker_records = [
+        record
+        for record in [worker_record, failover_record, *repair_worker_records]
+        if isinstance(record, dict)
+    ]
+    session_ids = list(
+        dict.fromkeys(session for session in (_worker_session_id(record) for record in all_worker_records) if session)
+    )
+    dispatch_record = {
+        "schema_version": 1,
+        "dispatch_id": f"{plan_id}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}",
+        "plan_id": plan_id,
+        "mission_id": progress_mission_id,
+        "dispatch_mode": dispatch_mode,
+        "prompt_style": prompt_style,
+        "repair_strategy": repair_strategy,
+        "resolved_model": preview["worker"].get("resolved_model"),
+        "resolved_reasoning_effort": preview["worker"].get("resolved_reasoning_effort"),
+        "resolved_sandbox": preview["worker"].get("resolved_sandbox"),
+        "resolved_approval": preview["worker"].get("resolved_approval"),
+        "session_ids": session_ids,
+        "worker_attempts": len(all_worker_records),
+        "repair_rounds": repair_rounds_completed,
+        "verification_attempts": len(verification_attempts),
+        "usage": payload.get("usage_summary"),
+        "verdict": latest_verification.get("verdict"),
+        "status": status,
+        "elapsed_seconds": round(monotonic() - dispatch_started, 6),
+    }
+    try:
+        dispatch_saved = append_dispatch_record(workspace_path, plan_id, dispatch_record)
+        payload["dispatch_record"] = dispatch_saved["record"]
+        payload["dispatch_record_path"] = dispatch_saved["path"]
+    except OSError as exc:
+        payload.setdefault("warnings", []).append(f"Dispatch ledger could not be written: {type(exc).__name__}: {exc}")
     return payload
 
 
@@ -953,6 +1193,21 @@ def _dispatch_preflight_payload(
 
 
 def _dispatch_preflight_block(preflight: dict[str, Any]) -> dict[str, str] | None:
+    execution_alignment = (
+        preflight.get("execution_alignment")
+        if isinstance(preflight.get("execution_alignment"), dict)
+        else {}
+    )
+    if str(execution_alignment.get("status") or "") == "blocked":
+        issues = execution_alignment.get("issues") if isinstance(execution_alignment.get("issues"), list) else []
+        codes = ", ".join(str(item.get("code") or "") for item in issues[:5] if isinstance(item, dict))
+        return {
+            "reason": "execution_alignment_prompt_restriction",
+            "message": (
+                "Worker prompt alignment blocked dispatch because exploration-limiting language was found"
+                + (f": {codes}" if codes else ".")
+            ),
+        }
     test_command = preflight.get("test_command") if isinstance(preflight.get("test_command"), dict) else {}
     if str(test_command.get("status") or "") == "unresolved":
         requested = str(test_command.get("requested") or "auto")
@@ -995,11 +1250,99 @@ def _verification_is_repairable(verification: dict[str, Any]) -> bool:
     repair = verification.get("repair_brief") if isinstance(verification.get("repair_brief"), dict) else {}
     source = str(repair.get("source") or "")
     failure_kind = str(repair.get("failure_kind") or "")
+    if repair.get("repairable") is False:
+        return False
     if source in {"test_tampering", "acceptance_chain_tampering"}:
         return False
     if failure_kind in NON_REPAIRABLE_COMMAND_FAILURE_KINDS:
         return False
     return True
+
+
+def _repair_round_limit(*, auto_repair_once: bool, max_repair_rounds: int | None) -> int:
+    if max_repair_rounds is None:
+        return 1 if auto_repair_once else 0
+    return max(0, int(max_repair_rounds))
+
+
+def _worker_session_id(record: dict[str, Any] | None) -> str:
+    if not isinstance(record, dict):
+        return ""
+    usage = record.get("usage") if isinstance(record.get("usage"), dict) else {}
+    return str(usage.get("session_id") or record.get("session_id") or "").strip()
+
+
+def _repair_evidence_text(verification: dict[str, Any]) -> str:
+    command = verification.get("command_verification") if isinstance(verification.get("command_verification"), dict) else {}
+    repair = verification.get("repair_brief") if isinstance(verification.get("repair_brief"), dict) else {}
+    raw = str(
+        command.get("raw_output_tail")
+        or command.get("output_tail")
+        or repair.get("raw_evidence_tail")
+        or verification.get("markdown")
+        or repair.get("message")
+        or ""
+    )
+    redacted = redact_secret_text(raw)
+    encoded = redacted.encode("utf-8", errors="replace")
+    if len(encoded) <= 32768:
+        return redacted
+    return encoded[-32768:].decode("utf-8", errors="ignore")
+
+
+def _build_dispatch_repair_prompt(
+    *,
+    plan: dict[str, Any],
+    verification: dict[str, Any],
+    verification_command: str,
+    repair_round: int,
+    resume: bool,
+    worker_record: dict[str, Any] | None,
+) -> str:
+    repair = verification.get("repair_brief") if isinstance(verification.get("repair_brief"), dict) else {}
+    command = verification.get("command_verification") if isinstance(verification.get("command_verification"), dict) else {}
+    summary = str(repair.get("repair_prompt") or repair.get("message") or "Verification failed.").strip()
+    summary = summary.replace("Do not apply changes.", "").strip()
+    evidence = _repair_evidence_text(verification)
+    diff = verification.get("diff_summary") if isinstance(verification.get("diff_summary"), dict) else {}
+    changed = diff.get("changed_files") if isinstance(diff.get("changed_files"), list) else []
+    lines = [
+        f"Repair round {repair_round}. Continue implementing a fix for the failed verification.",
+        f"Verification verdict: {verification.get('verdict') or 'fail'}",
+    ]
+    failed_command = str(command.get("command") or verification_command or "").strip()
+    if failed_command:
+        lines.append("Failed verification command: " + failed_command)
+    if not resume:
+        lines.append("Objective: " + str(plan.get("objective") or ""))
+        criteria = plan.get("acceptance_criteria") if isinstance(plan.get("acceptance_criteria"), list) else []
+        if criteria:
+            lines.append("Acceptance criteria:")
+            lines.extend(f"- {item}" for item in criteria)
+    if changed:
+        lines.append("Files already changed in this worktree: " + ", ".join(str(item) for item in changed[:50]))
+    if isinstance(worker_record, dict) and worker_record.get("log_path"):
+        lines.append("Prior worker log: " + str(worker_record.get("log_path")))
+    if summary:
+        lines.extend(["Repair guidance:", summary])
+    if evidence:
+        lines.extend(["Raw failure evidence (UTF-8 tail, secrets redacted):", evidence])
+    lines.extend(
+        [
+            "Make the smallest correct product change without weakening tests or acceptance configuration.",
+            "After repairing, run the full verification command again:",
+            verification_command,
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _resume_session_failed(record: dict[str, Any] | None) -> bool:
+    if not isinstance(record, dict) or record.get("status") == "completed":
+        return False
+    from .codex_exec import is_resume_unavailable_error
+
+    return is_resume_unavailable_error(record.get("stdout_tail"), record.get("stderr_tail"))
 
 
 def _worktree_has_product_changes(worktree: Path) -> bool:
@@ -1123,13 +1466,21 @@ def summarize_worker_usage(records: list[dict[str, Any] | None]) -> dict[str, An
     see exactly what a task cost. Cheap-backend spend is kept separate (it burns
     cheap credits, not the Claude subscription).
 
-    Cache tokens (cache_read_input_tokens, cache_creation_input_tokens) are
-    included in the total so the number reflects real model consumption, not
-    just the tiny uncached-new-input slice."""
-    input_tokens = 0
-    output_tokens = 0
-    cache_read_tokens = 0
-    cache_creation_tokens = 0
+    Codex reports cumulative usage when a session is resumed. Token counters for
+    the same session therefore use their maximum observed value, while fresh
+    sessions and records without a session id remain additive.
+    """
+    token_fields = (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_creation_tokens",
+        "reasoning_output_tokens",
+        "total_tokens",
+    )
+    token_totals = {field: 0 for field in token_fields}
+    session_totals: dict[str, dict[str, int]] = {}
+    num_turns = 0
     spent_usd = 0.0
     saved_usd = 0.0
     attempts = 0
@@ -1140,22 +1491,47 @@ def summarize_worker_usage(records: list[dict[str, Any] | None]) -> dict[str, An
         if not usage:
             continue
         attempts += 1
-        input_tokens += int(usage.get("input_tokens") or 0)
-        output_tokens += int(usage.get("output_tokens") or 0)
-        cache_read_tokens += int(usage.get("cache_read_input_tokens") or 0)
-        cache_creation_tokens += int(usage.get("cache_creation_input_tokens") or 0)
+        num_turns += int(usage.get("num_turns") or 0)
+        sample = {
+            "input_tokens": int(usage.get("input_tokens") or 0),
+            "output_tokens": int(usage.get("output_tokens") or 0),
+            "cache_read_tokens": int(usage.get("cache_read_input_tokens") or 0),
+            "cache_creation_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+            "reasoning_output_tokens": int(usage.get("reasoning_output_tokens") or 0),
+        }
+        sample["total_tokens"] = (
+            int(usage.get("total_tokens") or 0)
+            if usage.get("total_tokens") is not None
+            else sample["input_tokens"]
+            + sample["output_tokens"]
+            + sample["cache_read_tokens"]
+            + sample["cache_creation_tokens"]
+        )
+        session_id = _worker_session_id(record)
+        if session_id:
+            session = session_totals.setdefault(session_id, {field: 0 for field in token_fields})
+            for field in token_fields:
+                session[field] = max(session[field], sample[field])
+        else:
+            for field in token_fields:
+                token_totals[field] += sample[field]
         cost = float(usage.get("cost_usd") or 0.0)
         if usage.get("cost_is_savings"):
             saved_usd += cost
         else:
             spent_usd += cost
+    for session in session_totals.values():
+        for field in token_fields:
+            token_totals[field] += session[field]
     return {
         "attempts_with_usage": attempts,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cache_read_tokens": cache_read_tokens,
-        "cache_creation_tokens": cache_creation_tokens,
-        "total_tokens": input_tokens + output_tokens + cache_read_tokens + cache_creation_tokens,
+        "input_tokens": token_totals["input_tokens"],
+        "output_tokens": token_totals["output_tokens"],
+        "cache_read_tokens": token_totals["cache_read_tokens"],
+        "cache_creation_tokens": token_totals["cache_creation_tokens"],
+        "reasoning_output_tokens": token_totals["reasoning_output_tokens"],
+        "num_turns": num_turns,
+        "total_tokens": token_totals["total_tokens"],
         "spent_usd": round(spent_usd, 4),
         "saved_usd": round(saved_usd, 4),
     }
@@ -1327,21 +1703,30 @@ def build_worker_command(
     model_policy: dict[str, Any] | None = None,
     repo_map_text: str | None = None,
     prompt_suffix: str | None = None,
+    reasoning_effort: str | None = None,
+    dispatch_mode: str = "tracked",
+    prompt_style: str = "expanded",
+    resume_session_id: str | None = None,
 ) -> dict[str, Any]:
     agent = canonical_agent_name(str(track.get("agent") or "codex"))
     profile = load_agent_profile(agent) or {}
     task_kind = _task_kind_for_phase(phase, model_policy)
     config = recommend_worker_config(profile, task_kind=task_kind) if profile else {}
-    prompt = prompt_override or build_worker_prompt(plan=plan, track=track, worktree=worktree, verification_command=verification_command)
+    prompt = prompt_override or build_worker_prompt(
+        plan=plan,
+        track=track,
+        worktree=worktree,
+        verification_command=verification_command,
+        dispatch_mode=dispatch_mode,
+        prompt_style=prompt_style,
+    )
     if str(prompt_suffix or "").strip():
         prompt = prompt.rstrip() + "\n\n" + str(prompt_suffix).strip()
-    # Every attempt (including repair) is a fresh model session; the map is how
-    # the worker orients without re-reading the repository each round.
     if repo_map_text:
         prompt = (
             prompt
-            + "\n\nRepository map (DevPacer local index excerpt, current at dispatch; use it for"
-            " orientation, then verify the real paths you need):\n"
+            + "\n\nRepository map (DevPacer local index excerpt, current at dispatch; use it as"
+            " a starting point, then inspect the real repository wherever needed):\n"
             + repo_map_text
         )
     if agent != "codex":
@@ -1350,9 +1735,30 @@ def build_worker_command(
         headless = profile.get("headless") if isinstance(profile.get("headless"), dict) else {}
         if headless.get("command"):
             argv = _build_headless_argv(headless=headless, config=config, track=track, phase=phase, prompt=prompt)
-            return {"argv": argv, "display": format_argv(argv)}
-        return {"argv": [agent, prompt], "display": format_argv([agent, prompt])}
-    argv = ["codex", "exec"]
+            return {
+                "argv": argv,
+                "display": format_argv(argv),
+                "resolved_model": _resolved_or_inherited(str(track.get("model") or config.get("model") or ""), "model"),
+                "resolved_reasoning_effort": str(reasoning_effort or track.get("reasoning_effort") or config.get("reasoning_effort") or "inherit"),
+            }
+        return {
+            "argv": [agent, prompt],
+            "display": format_argv([agent, prompt]),
+            "resolved_model": _resolved_or_inherited(str(track.get("model") or ""), "model"),
+            "resolved_reasoning_effort": str(reasoning_effort or track.get("reasoning_effort") or "inherit"),
+        }
+    # Sandbox and approval are root Codex options.  ``codex exec`` accepts the
+    # sandbox flag too, but ``codex exec resume`` does not, so keeping both
+    # policies before ``exec`` preserves the same safety posture on repairs.
+    argv = ["codex"]
+    for source in (track.get("sandbox"), track.get("approval")):
+        flag = str((source or {}).get("flag") or "").strip() if isinstance(source, dict) else ""
+        if flag:
+            argv.extend(shlex.split(flag, posix=False))
+    argv.append("exec")
+    if resume_session_id:
+        argv.append("resume")
+    argv.append("--json")
     # The implementation phase honors any model already chosen for the track; other
     # phases (e.g. repair) follow the model_policy tier so a cheaper model can be
     # used when the policy asks for it.
@@ -1360,16 +1766,76 @@ def build_worker_command(
         model = str(track.get("model") or config.get("model") or "")
     else:
         model = str(config.get("model") or track.get("model") or "")
+    model = "" if model.strip().lower() == "inherit" else model.strip()
     if model:
         argv.extend(["--model", model])
-    for source in (track.get("sandbox"), track.get("approval")):
-        flag = str((source or {}).get("flag") or "").strip() if isinstance(source, dict) else ""
-        if flag:
-            argv.extend(shlex.split(flag, posix=False))
+    if reasoning_effort is not None:
+        effort = str(reasoning_effort).strip()
+        effort_source = "request"
+    elif phase == "implementation":
+        effort = str(track.get("reasoning_effort") or config.get("reasoning_effort") or "inherit").strip()
+        effort_source = "track" if track.get("reasoning_effort") else "profile"
+    else:
+        effort = str(config.get("reasoning_effort") or track.get("reasoning_effort") or "inherit").strip()
+        effort_source = "profile" if config.get("reasoning_effort") else "track"
+    effort = effort or "inherit"
+    if effort.lower() != "inherit":
+        argv.extend(["-c", f"model_reasoning_effort={effort}"])
     # Codex can read the initial prompt from stdin when PROMPT is "-".  Keeping
     # large repo maps out of argv avoids Windows' command-line length limit.
+    if resume_session_id:
+        argv.append(str(resume_session_id))
     argv.append("-")
-    return {"argv": argv, "display": format_argv(argv) + " < prompt via stdin", "stdin": prompt}
+    user_defaults = _codex_user_defaults()
+    resolved_model = model or str(user_defaults.get("model") or "inherited(config.toml)")
+    resolved_effort = effort if effort.lower() != "inherit" else str(
+        user_defaults.get("reasoning_effort") or "inherited(config.toml)"
+    )
+    resolved_sandbox, sandbox_source = _resolved_codex_policy(
+        track.get("sandbox"),
+        option_names=("--sandbox", "-s"),
+        inherited=str(user_defaults.get("sandbox") or "inherited(config.toml)"),
+    )
+    resolved_approval, approval_source = _resolved_codex_policy(
+        track.get("approval"),
+        option_names=("--ask-for-approval", "-a"),
+        inherited=str(user_defaults.get("approval") or "inherited(config.toml)"),
+    )
+    return {
+        "argv": argv,
+        "display": format_argv(argv) + " < prompt via stdin",
+        "stdin": prompt,
+        "resolved_model": resolved_model,
+        "resolved_reasoning_effort": resolved_effort,
+        "model_source": "command" if model else "config.toml",
+        "reasoning_effort_source": effort_source if effort.lower() != "inherit" else "config.toml",
+        "resolved_sandbox": resolved_sandbox,
+        "sandbox_source": sandbox_source,
+        "resolved_approval": resolved_approval,
+        "approval_source": approval_source,
+        "session_mode": "resume" if resume_session_id else "new",
+        "json_output": True,
+    }
+
+
+def _resolved_codex_policy(
+    source: Any,
+    *,
+    option_names: tuple[str, ...],
+    inherited: str,
+) -> tuple[str, str]:
+    payload = source if isinstance(source, dict) else {}
+    name = str(payload.get("name") or "").strip()
+    flag = str(payload.get("flag") or "").strip()
+    if name:
+        return name, "track"
+    if flag:
+        tokens = shlex.split(flag, posix=False)
+        for index, token in enumerate(tokens[:-1]):
+            if token in option_names:
+                return str(tokens[index + 1]).strip('"'), "track"
+        return flag, "track"
+    return inherited, "config.toml"
 
 
 def _override_model_flag(argv: list[str], model: str) -> list[str]:
@@ -1407,48 +1873,57 @@ def build_worker_prompt(
     track: dict[str, Any],
     worktree: Path,
     verification_command: str,
+    dispatch_mode: str = "tracked",
+    prompt_style: str = "expanded",
 ) -> str:
+    dispatch_mode = _normalized_choice(dispatch_mode, DISPATCH_MODES, field="dispatch_mode")
+    prompt_style = _normalized_choice(prompt_style, PROMPT_STYLES, field="prompt_style")
     criteria = plan.get("acceptance_criteria") if isinstance(plan.get("acceptance_criteria"), list) else []
     selected = plan.get("selected_workflows") if isinstance(plan.get("selected_workflows"), list) else []
     lines = [
         f"Objective: {plan.get('objective') or ''}",
         f"Plan id: {plan.get('plan_id') or ''}",
-        f"Worker track: {track.get('id') or ''} ({track.get('agent') or ''})",
+        f"Worker mode: {dispatch_mode}",
         f"Worktree: {worktree}",
-        "Keep changes scoped to the objective. Do not edit Checkpoint plan records.",
+        "Keep changes relevant to the objective. Do not edit Checkpoint plan records or Pacer runtime records.",
+        "Explore the codebase as much as needed to be confident in your change.",
     ]
+    if dispatch_mode == "tracked":
+        lines.insert(3, f"Worker track: {track.get('id') or ''} ({track.get('agent') or ''})")
     if selected:
         lines.append("Selected Checkpoint workflows: " + ", ".join(str(item) for item in selected))
     if criteria:
         lines.append("Acceptance criteria:")
         lines.extend(f"- {item}" for item in criteria)
-    objective_paths = [
-        item for item in _extract_context_paths(str(plan.get("objective") or ""))
-        if not _is_ignored_context_path(item) and not _is_non_product_path(item)
-    ]
-    changed = plan.get("changed_files") if isinstance(plan.get("changed_files"), list) else []
-    scoped: list[str] = []
-    for item in [*objective_paths, *(str(raw) for raw in changed)]:
-        normalized = str(item).replace("\\", "/").strip()
-        if not normalized or normalized in scoped:
-            continue
-        if normalized.startswith(".agent-workspace") or _is_ignored_context_path(normalized) or _is_non_product_path(normalized):
-            continue
-        scoped.append(normalized)
-        if len(scoped) >= 12:
-            break
-    if scoped:
-        lines.append("Touch only the files this task requires; target files in scope are:")
-        lines.extend(f"- {item}" for item in scoped)
-    else:
+    if dispatch_mode == "tracked":
+        objective_paths = [
+            item for item in _extract_context_paths(str(plan.get("objective") or ""))
+            if not _is_ignored_context_path(item) and not _is_non_product_path(item)
+        ]
+        changed = plan.get("changed_files") if isinstance(plan.get("changed_files"), list) else []
+        scoped: list[str] = []
+        scoped_limit = 12 if prompt_style == "legacy" else 30
+        for item in [*objective_paths, *(str(raw) for raw in changed)]:
+            normalized = str(item).replace("\\", "/").strip()
+            if not normalized or normalized in scoped:
+                continue
+            if normalized.startswith(".agent-workspace") or _is_ignored_context_path(normalized) or _is_non_product_path(normalized):
+                continue
+            scoped.append(normalized)
+            if len(scoped) >= scoped_limit:
+                break
+        if scoped:
+            lines.append("Likely-relevant files (verified at dispatch time; this list is guidance, not a boundary):")
+            lines.extend(f"- {item}" for item in scoped)
+    if dispatch_mode == "delegated" or not locals().get("scoped"):
         lines.append(
-            "No trusted target file was inferred from the objective. Do not edit archive,"
-            " graveyard, checkpoint worktree, or third-party sample directories unless the objective names them."
+            "No complete target-file list is imposed. Determine the necessary implementation surface from the objective and repository."
         )
     lines.extend(
         [
-            "Work efficiently to conserve model budget: read only the files you need for this objective;"
-            " do not scan or grep the whole repository, and do not refactor unrelated code.",
+            "Safety boundary: do not edit archive, graveyard, checkpoint worktree, third-party sample,"
+            " or .agent-workspace runtime paths.",
+            "The verification gate rejects restricted repository paths and changes to trusted verification inputs.",
         ]
     )
     toolchain_policy = _toolchain_policy_for_command(verification_command)
@@ -1468,7 +1943,7 @@ def build_worker_prompt(
         lines.append("If the verification command contains an absolute tool path, reuse that exact toolchain for related local commands.")
     lines.extend(
         [
-            "Before claiming done, run this verification command and inspect the evidence if it fails:",
+            "Run this verification command whenever it helps during implementation and again before claiming done; inspect the evidence if it fails:",
             verification_command,
         ]
     )
@@ -1495,6 +1970,163 @@ def build_verification_command(
     )
 
 
+def _restricted_worker_changes(*, repo_root: Path, base_ref: str | None) -> tuple[list[str], str]:
+    base = str(base_ref or "HEAD").strip() or "HEAD"
+    commands = (
+        ["git", "-c", "core.quotePath=false", "diff", "--name-only", base],
+        ["git", "-c", "core.quotePath=false", "diff", "--name-only", "--cached"],
+        ["git", "-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard"],
+    )
+    paths: set[str] = set()
+    for command_index, command in enumerate(commands):
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30.0,
+                encoding="utf-8",
+                errors="replace",
+                **hidden_subprocess_kwargs(),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return [], f"{type(exc).__name__}: {exc}"
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "git diff failed").strip()
+            return [], detail[-1000:]
+        for line in completed.stdout.splitlines():
+            normalized = line.strip().replace("\\", "/")
+            if not normalized:
+                continue
+            # Pacer prepares an untracked verification workspace before the
+            # worker starts. Its trusted inputs are guarded by a content
+            # snapshot; tracked or staged workspace edits remain scope errors.
+            if command_index == 2 and ".agent-workspace" in normalized.split("/"):
+                continue
+            paths.add(normalized)
+    return sorted(path for path in paths if _is_restricted_worker_path(path)), ""
+
+
+def _scope_violation_verification(
+    *,
+    workspace_root: Path,
+    verification_workspace_root: Path,
+    plan_id: str,
+    mission_id: str,
+    repo_root: Path,
+    run_profile: str,
+    worktree_base: str | None,
+) -> dict[str, Any] | None:
+    if not str(worktree_base or "").strip():
+        return None
+    if _git_toplevel(repo_root) is None:
+        return None
+    restricted, audit_error = _restricted_worker_changes(repo_root=repo_root, base_ref=worktree_base)
+    if not restricted and not audit_error:
+        return None
+    now = datetime.now(timezone.utc).isoformat()
+    failure_kind = "scope_audit_failed" if audit_error else "scope_violation"
+    message = (
+        f"Worker scope audit could not prove the diff boundary: {audit_error}"
+        if audit_error
+        else "Verification refused: worker modified restricted path(s): " + ", ".join(restricted[:10])
+    )
+    payload = {
+        "plan_id": plan_id,
+        "repo_root": str(repo_root),
+        "workspace_root": str(verification_workspace_root),
+        "records_workspace_root": str(workspace_root),
+        "run_profile": run_profile,
+        "passed": 0,
+        "inspection_only": 0,
+        "failed": 1,
+        "total": 1,
+        "verdict": "fail",
+        "source": "scope_violation",
+        "failure_kind": failure_kind,
+        "restricted_worker_files": restricted,
+        "scope_audit_error": audit_error,
+        "repair_brief": {
+            "failure_kind": failure_kind,
+            "repairable": False,
+            "repair_prompt": "",
+            "message": message,
+        },
+        "markdown": message,
+        "recorded_at": now,
+    }
+    saved = save_verification(workspace_root, plan_id, payload)
+    payload["saved_path"] = saved["path"]
+    save_mission_progress(
+        workspace_root,
+        mission_id,
+        stage="verification_failed",
+        stage_label="Verification failed",
+        verification_verdict="fail",
+        blocker=failure_kind,
+        activity="",
+        activity_command="",
+        activity_started_at="",
+    )
+    return payload
+
+
+def _workspace_tamper_verification(
+    *,
+    workspace_root: Path,
+    verification_workspace_root: Path,
+    plan_id: str,
+    mission_id: str,
+    repo_root: Path,
+    run_profile: str,
+    trusted_workspace_snapshot: dict[str, str] | None,
+) -> dict[str, Any] | None:
+    changed = _trusted_workspace_changes(verification_workspace_root, trusted_workspace_snapshot)
+    if not changed:
+        return None
+    now = datetime.now(timezone.utc).isoformat()
+    message = "Verification refused: worker modified trusted verification workspace file(s): " + ", ".join(changed[:10])
+    payload = {
+        "plan_id": plan_id,
+        "repo_root": str(repo_root),
+        "workspace_root": str(verification_workspace_root),
+        "records_workspace_root": str(workspace_root),
+        "run_profile": run_profile,
+        "passed": 0,
+        "inspection_only": 0,
+        "failed": 1,
+        "total": 1,
+        "verdict": "fail",
+        "source": "verification_workspace_tampering",
+        "failure_kind": "verification_workspace_tampering",
+        "tampered_workspace_files": changed,
+        "repair_brief": {
+            "failure_kind": "verification_workspace_tampering",
+            "repairable": False,
+            "repair_prompt": "",
+            "message": message,
+        },
+        "markdown": message,
+        "recorded_at": now,
+    }
+    saved = save_verification(workspace_root, plan_id, payload)
+    payload["saved_path"] = saved["path"]
+    save_mission_progress(
+        workspace_root,
+        mission_id,
+        stage="verification_failed",
+        stage_label="Verification failed",
+        verification_verdict="fail",
+        blocker="verification_workspace_tampering",
+        activity="",
+        activity_command="",
+        activity_started_at="",
+    )
+    return payload
+
+
 def run_dispatch_verification(
     *,
     workspace_root: Path,
@@ -1512,6 +2144,7 @@ def run_dispatch_verification(
     worktree_base: str | None = None,
     allow_test_edits: bool = False,
     timeout_seconds: float = 900.0,
+    trusted_workspace_snapshot: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     verification_workspace_path = (verification_workspace_root or workspace_root).expanduser().resolve()
     progress_mission_id = str(mission_id or plan_id)
@@ -1529,6 +2162,29 @@ def run_dispatch_verification(
         activity_started_at=verification_activity_started_at if test_command else None,
     )
     now = datetime.now(timezone.utc).isoformat()
+
+    scope_failure = _scope_violation_verification(
+        workspace_root=workspace_root,
+        verification_workspace_root=verification_workspace_path,
+        plan_id=plan_id,
+        mission_id=progress_mission_id,
+        repo_root=Path(repo_root),
+        run_profile=run_profile,
+        worktree_base=worktree_base,
+    )
+    if scope_failure is not None:
+        return scope_failure
+    workspace_tamper = _workspace_tamper_verification(
+        workspace_root=workspace_root,
+        verification_workspace_root=verification_workspace_path,
+        plan_id=plan_id,
+        mission_id=progress_mission_id,
+        repo_root=Path(repo_root),
+        run_profile=run_profile,
+        trusted_workspace_snapshot=trusted_workspace_snapshot,
+    )
+    if workspace_tamper is not None:
+        return workspace_tamper
 
     # Command gate: when a test/build command is given, it IS the acceptance
     # (works on any project, no authored workflows). It is deterministic and
@@ -1748,7 +2404,7 @@ def build_repair_brief(*, workspace_root: Path, failure_evidence_builder: Any = 
             from .repair import build_failure_evidence_pack
 
             builder = build_failure_evidence_pack
-        evidence = builder(workspace_root, max_chars=12000)
+        evidence = builder(workspace_root, max_chars=32768)
     except Exception as exc:
         return {
             "status": "unavailable",
@@ -1756,6 +2412,7 @@ def build_repair_brief(*, workspace_root: Path, failure_evidence_builder: Any = 
             "message": f"{type(exc).__name__}: {exc}",
         }
     failed_step = evidence.get("failed_step") if isinstance(evidence.get("failed_step"), dict) else {}
+    raw_evidence = json.dumps(scrub_secrets(evidence), ensure_ascii=False, indent=2)
     return {
         "status": str(evidence.get("status") or ""),
         "source": "diagnose-latest-failure",
@@ -1764,6 +2421,7 @@ def build_repair_brief(*, workspace_root: Path, failure_evidence_builder: Any = 
         "failed_step": failed_step,
         "repair_prompt": str(evidence.get("repair_prompt") or ""),
         "message": str(evidence.get("message") or ""),
+        "raw_evidence_tail": raw_evidence[-32768:],
     }
 
 
@@ -2446,6 +3104,8 @@ def _run_worker_attempt(
     stdin_text: str | None = None,
     env: dict[str, str] | None = None,
     backend: dict[str, Any] | None = None,
+    command_metadata: dict[str, Any] | None = None,
+    dispatch_mode: str = "tracked",
 ) -> dict[str, Any]:
     started = monotonic()
     progress_mission_id = str(mission_id or plan_id)
@@ -2504,6 +3164,8 @@ def _run_worker_attempt(
     blocked_reason = _worker_blocked_reason(stdout_tail=stdout_tail, stderr_tail=stderr_tail, log_path=log_path)
     if blocked_reason:
         status = "blocked"
+    stdout_log_path = str(result.get("stdout_log_path") or "").strip()
+    stderr_log_path = str(result.get("stderr_log_path") or "").strip()
     record = {
         "schema_version": 1,
         "plan_id": plan_id,
@@ -2518,10 +3180,35 @@ def _run_worker_attempt(
         "log_path": str(log_path),
         "stdout_tail": stdout_tail,
         "stderr_tail": stderr_tail,
+        "dispatch_mode": dispatch_mode,
     }
+    if stdout_log_path:
+        record["stdout_log_path"] = stdout_log_path
+    if stderr_log_path:
+        record["stderr_log_path"] = stderr_log_path
+    metadata = command_metadata if isinstance(command_metadata, dict) else {}
+    for key in (
+        "resolved_model",
+        "resolved_reasoning_effort",
+        "model_source",
+        "reasoning_effort_source",
+        "resolved_sandbox",
+        "sandbox_source",
+        "resolved_approval",
+        "approval_source",
+        "session_mode",
+    ):
+        value = metadata.get(key)
+        if value not in {None, ""}:
+            record[key] = value
     if blocked_reason:
         record["blocked_reason"] = blocked_reason
-    usage = _extract_worker_usage(str(track.get("agent") or ""), log_path, str(result.get("stdout_tail") or ""))
+    usage = _extract_worker_usage(
+        str(track.get("agent") or ""),
+        log_path,
+        str(result.get("stdout_tail") or ""),
+        stdout_log_path=Path(stdout_log_path) if stdout_log_path else None,
+    )
     if usage:
         # On a cheap external backend, the CLI-reported cost is priced at Claude
         # rates but the real spend is the backend's credits, so it counts as
@@ -2575,14 +3262,32 @@ def _worker_blocked_reason(*, stdout_tail: str, stderr_tail: str, log_path: Path
     return ""
 
 
-def _extract_worker_usage(agent: str, log_path: Path, stdout_tail: str) -> dict[str, Any] | None:
+def _extract_worker_usage(
+    agent: str,
+    log_path: Path,
+    stdout_tail: str,
+    *,
+    stdout_log_path: Path | None = None,
+) -> dict[str, Any] | None:
     """Pull real cost/token usage from a worker run.
 
     Claude Code's ``-p --output-format json`` emits a result object with
     ``total_cost_usd`` and a ``usage`` block. Recording it gives DevPacer a real
     budget ledger instead of an estimate.
     """
-    if canonical_agent_name(agent) != "claude-code":
+    canonical = canonical_agent_name(agent)
+    if canonical == "codex":
+        from .codex_exec import read_codex_usage
+
+        usage = read_codex_usage(stdout_log_path, stdout_tail) if stdout_log_path is not None else None
+        if not usage:
+            usage = read_codex_usage(log_path, stdout_tail)
+        if not usage:
+            return None
+        normalized = dict(usage)
+        normalized["cache_read_input_tokens"] = int(normalized.get("cached_input_tokens") or 0)
+        return normalized
+    if canonical != "claude-code":
         return None
     text = ""
     try:
@@ -2620,6 +3325,10 @@ def _extract_worker_usage(agent: str, log_path: Path, stdout_tail: str) -> dict[
     return {key: value for key, value in ledger.items() if value is not None}
 
 
+def _worker_stream_sidecar_path(log_path: Path, stream: str) -> Path:
+    return log_path.with_name(f"{log_path.stem}.{stream}{log_path.suffix}")
+
+
 def run_process_capture(
     argv: list[str],
     cwd: Path,
@@ -2630,6 +3339,8 @@ def run_process_capture(
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    stdout_log_path = _worker_stream_sidecar_path(log_path, "stdout")
+    stderr_log_path = _worker_stream_sidecar_path(log_path, "stderr")
     run_env = None
     if env:
         run_env = {**os.environ, **{str(k): str(v) for k, v in env.items()}}
@@ -2637,16 +3348,23 @@ def run_process_capture(
     stderr_parts: list[str] = []
     lock = threading.Lock()
 
+    def append_captured_text(target: list[str], stream_name: str, chunk: str) -> None:
+        stream_log_path = stdout_log_path if stream_name == "stdout" else stderr_log_path
+        with lock:
+            target.append(chunk)
+            with stream_log_path.open("a", encoding="utf-8", errors="replace") as handle:
+                handle.write(chunk)
+                handle.flush()
+            with log_path.open("a", encoding="utf-8", errors="replace") as handle:
+                handle.write(chunk)
+                handle.flush()
+
     def append_stream(stream: Any, target: list[str], stream_name: str) -> None:
         try:
             for chunk in iter(stream.readline, ""):
                 if not chunk:
                     break
-                with lock:
-                    target.append(chunk)
-                    with log_path.open("a", encoding="utf-8", errors="replace") as handle:
-                        handle.write(chunk)
-                        handle.flush()
+                append_captured_text(target, stream_name, chunk)
                 if progress_callback is not None:
                     try:
                         progress_callback({"event": "output", "stream": stream_name, "chunk": chunk})
@@ -2660,15 +3378,17 @@ def run_process_capture(
 
     try:
         log_path.write_text("", encoding="utf-8")
+        stdout_log_path.write_text("", encoding="utf-8")
+        stderr_log_path.write_text("", encoding="utf-8")
         proc = subprocess.Popen(
-            argv,
+            prepare_subprocess_command(argv),
             cwd=str(cwd),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.PIPE if stdin_text is not None else None,
             text=True,
             env=run_env,
-            **hidden_subprocess_kwargs(),
+            **isolated_process_group_kwargs(),
         )
         assert proc.stdout is not None
         assert proc.stderr is not None
@@ -2685,12 +3405,9 @@ def run_process_capture(
         try:
             return_code = proc.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            terminate_process_tree(proc)
             return_code = 124
-            with lock:
-                stderr_parts.append(f"Timed out after {timeout_seconds:.0f}s\n")
-                with log_path.open("a", encoding="utf-8", errors="replace") as handle:
-                    handle.write(f"\nTimed out after {timeout_seconds:.0f}s\n")
+            append_captured_text(stderr_parts, "stderr", f"\nTimed out after {timeout_seconds:.0f}s\n")
         stdout_thread.join(timeout=1.0)
         stderr_thread.join(timeout=1.0)
         stdout = "".join(stdout_parts)
@@ -2699,14 +3416,20 @@ def run_process_capture(
             "exit_code": return_code,
             "stdout_tail": stdout[-2000:],
             "stderr_tail": stderr[-2000:],
+            "stdout_log_path": str(stdout_log_path),
+            "stderr_log_path": str(stderr_log_path),
         }
     except OSError as exc:
         stderr = f"{type(exc).__name__}: {exc}"
         log_path.write_text(stderr, encoding="utf-8", errors="replace")
+        stdout_log_path.write_text("", encoding="utf-8", errors="replace")
+        stderr_log_path.write_text(stderr, encoding="utf-8", errors="replace")
         return {
             "exit_code": 127,
             "stdout_tail": "",
             "stderr_tail": stderr[-2000:],
+            "stdout_log_path": str(stdout_log_path),
+            "stderr_log_path": str(stderr_log_path),
         }
 
 
@@ -3318,7 +4041,7 @@ def prepare_worktree_workspace(*, source_workspace: Path, target_workspace: Path
     source = source_workspace.resolve()
     target = target_workspace.resolve()
     if source == target:
-        return {"status": "shared", "path": str(target)}
+        return {"status": "shared", "path": str(target), "trusted_snapshot": _trusted_workspace_snapshot(target)}
     try:
         target.mkdir(parents=True, exist_ok=True)
         manifest = source / "workspace.json"
@@ -3326,16 +4049,54 @@ def prepare_worktree_workspace(*, source_workspace: Path, target_workspace: Path
             shutil.copyfile(manifest, target / "workspace.json")
         for dirname in ("workflows", "inputs", "fixtures"):
             source_dir = source / dirname
+            target_dir = target / dirname
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
             if not source_dir.exists():
                 continue
-            shutil.copytree(source_dir, target / dirname, dirs_exist_ok=True)
+            shutil.copytree(source_dir, target_dir)
     except OSError as exc:
         return {
             "status": "failed",
             "path": str(target),
             "reason": f"Could not prepare worktree workspace: {type(exc).__name__}: {exc}",
         }
-    return {"status": "prepared", "path": str(target)}
+    return {
+        "status": "prepared",
+        "path": str(target),
+        "trusted_snapshot": _trusted_workspace_snapshot(target),
+    }
+
+
+def _trusted_workspace_snapshot(workspace_root: Path) -> dict[str, str]:
+    root = Path(workspace_root).expanduser().resolve()
+    candidates: list[Path] = []
+    manifest = root / "workspace.json"
+    if manifest.is_file():
+        candidates.append(manifest)
+    for dirname in ("workflows", "inputs", "fixtures"):
+        directory = root / dirname
+        if directory.is_dir():
+            candidates.extend(path for path in directory.rglob("*") if path.is_file())
+    snapshot: dict[str, str] = {}
+    for path in sorted(candidates, key=lambda item: item.as_posix()):
+        try:
+            relative = path.relative_to(root).as_posix()
+            snapshot[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            snapshot[path.name] = "unreadable"
+    return snapshot
+
+
+def _trusted_workspace_changes(workspace_root: Path, expected: dict[str, str] | None) -> list[str]:
+    if not isinstance(expected, dict):
+        return []
+    current = _trusted_workspace_snapshot(workspace_root)
+    return sorted(
+        path
+        for path in set(expected) | set(current)
+        if str(expected.get(path) or "") != str(current.get(path) or "")
+    )
 
 
 def git_dirty_files(repo_root: Path, *, ignored_prefixes: tuple[str, ...] = ()) -> list[str]:
@@ -3658,6 +4419,22 @@ def preflight_to_markdown(preflight: Any, *, heading: str = "## Preflight") -> s
             ]
         )
         lines.append(_preflight_table_row("command_safety", str(command_safety.get("status") or ""), detail))
+    execution_alignment = (
+        preflight.get("execution_alignment")
+        if isinstance(preflight.get("execution_alignment"), dict)
+        else {}
+    )
+    if execution_alignment:
+        issues = execution_alignment.get("issues") if isinstance(execution_alignment.get("issues"), list) else []
+        codes = ", ".join(str(item.get("code") or "") for item in issues[:5] if isinstance(item, dict))
+        detail = f"issues={execution_alignment.get('issue_count') or 0}" + (f"; codes={codes}" if codes else "")
+        lines.append(
+            _preflight_table_row(
+                "execution_alignment",
+                str(execution_alignment.get("status") or ""),
+                detail,
+            )
+        )
     return "\n".join(lines).rstrip()
 
 

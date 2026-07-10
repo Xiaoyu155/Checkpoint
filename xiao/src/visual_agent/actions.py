@@ -1,10 +1,64 @@
 from __future__ import annotations
 
-import pyautogui
+import importlib
+from types import ModuleType
+from typing import Any
+
 import pyperclip
 
 from .models import ActionResult, ActionStatus, Point, ProviderKind, Target
 from .security import text_metadata
+
+
+class _LazyPyAutoGUI:
+    """Delay GUI backend initialization until a desktop action actually runs."""
+
+    def __init__(self) -> None:
+        self._module: ModuleType | None = None
+        self._pause = 0.15
+
+    @property
+    def PAUSE(self) -> float:
+        return self._pause
+
+    @PAUSE.setter
+    def PAUSE(self, value: float) -> None:
+        self._pause = float(value)
+        if self._module is not None:
+            self._module.PAUSE = self._pause
+
+    def _backend(self) -> ModuleType:
+        if self._module is None:
+            try:
+                self._module = importlib.import_module("pyautogui")
+            except Exception as exc:
+                raise RuntimeError(
+                    "Desktop automation is unavailable in this environment. "
+                    "Configure a graphical session or use browser/API workflow actions."
+                ) from exc
+            self._module.PAUSE = self._pause
+        return self._module
+
+    def click(self, *args: Any, **kwargs: Any) -> Any:
+        return self._backend().click(*args, **kwargs)
+
+    def hotkey(self, *args: Any, **kwargs: Any) -> Any:
+        return self._backend().hotkey(*args, **kwargs)
+
+    def keyUp(self, *args: Any, **kwargs: Any) -> Any:
+        return self._backend().keyUp(*args, **kwargs)
+
+    def mouseUp(self, *args: Any, **kwargs: Any) -> Any:
+        return self._backend().mouseUp(*args, **kwargs)
+
+    def press(self, *args: Any, **kwargs: Any) -> Any:
+        return self._backend().press(*args, **kwargs)
+
+    def write(self, *args: Any, **kwargs: Any) -> Any:
+        return self._backend().write(*args, **kwargs)
+
+
+pyautogui = _LazyPyAutoGUI()
 
 
 class DesktopActions:

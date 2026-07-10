@@ -1,6 +1,6 @@
 import json
 import warnings
-from threading import Thread
+from threading import Event, Thread
 from time import time
 from time import sleep as sleep_seconds
 
@@ -97,3 +97,42 @@ def test_run_lock_wait_times_out(tmp_path) -> None:
             raise AssertionError("Expected queued lock acquisition to time out.")
     finally:
         first.release()
+
+
+def test_run_lock_does_not_delete_lock_while_first_owner_is_initializing(tmp_path, monkeypatch) -> None:
+    write_started = Event()
+    allow_write = Event()
+    acquired = Event()
+    first = RunLock(tmp_path)
+    real_dump = json.dump
+
+    def delayed_dump(*args, **kwargs):
+        write_started.set()
+        assert allow_write.wait(2.0)
+        return real_dump(*args, **kwargs)
+
+    monkeypatch.setattr("visual_agent.locks.json.dump", delayed_dump)
+
+    def acquire_first() -> None:
+        first.acquire(owner="first")
+        acquired.set()
+
+    thread = Thread(target=acquire_first)
+    thread.start()
+    assert write_started.wait(2.0)
+    lock_path = tmp_path / "workflow.lock"
+    assert lock_path.exists()
+
+    try:
+        RunLock(tmp_path).acquire(owner="second")
+    except RuntimeError as exc:
+        assert "Run lock is active" in str(exc)
+    else:
+        raise AssertionError("An initializing lock must block a second owner.")
+
+    assert lock_path.exists()
+    allow_write.set()
+    thread.join(timeout=2.0)
+    assert acquired.is_set()
+    assert read_lock(lock_path).owner == "first"
+    first.release()

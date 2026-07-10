@@ -38,6 +38,24 @@ def test_inspect_model_credentials_prefers_xiaomimimo_when_available(tmp_path) -
     assert "plain-password" not in text
 
 
+def test_inspect_model_credentials_redacts_mimo_plan_tokens(tmp_path) -> None:
+    path = tmp_path / "keys.txt"
+    old_token = "tp-old-mimo-plan-token-1234567890"
+    new_token = "tp-new-mimo-plan-token-0987654321"
+    path.write_text(
+        f"xiaomimimo plan: {old_token}\nnew plan key: {new_token}\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_model_credentials(source=path, preferred_provider="xiaomimimo")
+    text = json.dumps(result, ensure_ascii=False)
+
+    assert result["preferred_available"] is True
+    assert old_token not in text
+    assert new_token not in text
+    assert extract_secret_from_line(f"xiaomimimo plan: {new_token}") == new_token
+
+
 def test_inspect_model_credentials_reports_missing_preferred_without_fallback(tmp_path) -> None:
     path = tmp_path / "keys.txt"
     path.write_text("千问 sk-qwen-secret-value-123456\n", encoding="utf-8")
@@ -265,4 +283,5 @@ def test_extract_secret_from_line_ignores_comments_and_urls() -> None:
     assert extract_secret_from_line("xiaomimimo: https://api.example.com/v1") is None
     assert extract_secret_from_line("# Token based authentication") is None
     assert extract_secret_from_line("api_key: sk-abcdefghijklmnopqrstuv1234567890") == "sk-abcdefghijklmnopqrstuv1234567890"
+    assert extract_secret_from_line("mimo token: tp-abcdefghijklmnopqrstuv1234567890") == "tp-abcdefghijklmnopqrstuv1234567890"
     assert extract_secret_from_line("SECRET=abcdefghijklmnopqrstuvwxyz123456") == "abcdefghijklmnopqrstuvwxyz123456"

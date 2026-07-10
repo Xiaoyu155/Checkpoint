@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
 from visual_agent.chief_plans_store import (
     append_worker_record,
     list_plans,
@@ -44,14 +48,34 @@ def test_load_missing_plan_returns_none(tmp_path) -> None:
     assert load_plan(workspace, "does-not-exist") is None
 
 
-def test_make_plan_id_is_stable_for_same_objective() -> None:
+def test_make_plan_id_is_unique_for_same_objective_and_moment() -> None:
     from datetime import datetime, timezone
 
     moment = datetime(2026, 7, 2, 12, 0, 0, tzinfo=timezone.utc)
     first = make_plan_id("Fix checkout", now=moment)
     second = make_plan_id("Fix checkout", now=moment)
-    assert first == second
-    assert first.startswith("20260702-120000-")
+    assert first != second
+    assert first.startswith("20260702-120000-000000-")
+
+
+def test_concurrent_generated_plans_do_not_overwrite_each_other(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+
+    def save(index: int) -> dict[str, str]:
+        return save_plan({"objective": "Fix checkout", "index": index}, workspace_root=workspace)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        saved = list(pool.map(save, range(32)))
+
+    plan_ids = [item["plan_id"] for item in saved]
+    assert len(set(plan_ids)) == 32
+    assert sorted(load_plan(workspace, plan_id)["index"] for plan_id in plan_ids) == list(range(32))
+
+
+@pytest.mark.parametrize("plan_id", ["", ".", "..", "../escape", r"..\escape", "C:escape", "bad id"])
+def test_plan_storage_rejects_unsafe_ids(tmp_path, plan_id) -> None:
+    with pytest.raises(ValueError, match="plan_id"):
+        load_plan(tmp_path / ".agent-workspace", plan_id)
 
 
 def test_worker_records_and_verification_roundtrip(tmp_path) -> None:

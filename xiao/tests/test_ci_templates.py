@@ -141,11 +141,13 @@ def test_generate_ci_cli_can_write_file(tmp_path, capsys) -> None:
 
 
 def test_security_workflow_includes_python_and_node_audits() -> None:
-    workflow_path = Path(".github/workflows/security.yml")
+    workflow_path = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "security.yml"
 
     text = workflow_path.read_text(encoding="utf-8")
 
     assert workflow_path.exists()
     assert "name: Security" in text
+    assert "working-directory: xiao" in text
+    assert "cache-dependency-path: xiao/vscode-extension/package-lock.json" in text
     assert "pip-audit" in text
     assert "npm audit --audit-level=high" in text

@@ -9,10 +9,17 @@ from pathlib import Path
 
 from visual_agent.chief_plans_store import append_worker_record, save_plan, save_verification
 from visual_agent.commercial_config import CommercialConfig
-from visual_agent.dashboard.api import refine_goal_intake, run_chat
+from visual_agent.dashboard.api import (
+    get_model_config,
+    refine_goal_intake,
+    retry_mission,
+    run_chat,
+    save_model_config as save_dashboard_model_config,
+    set_active_workspace,
+)
 from visual_agent.dashboard import DASHBOARD_HTML, _bind_dashboard_server, build_dashboard_data, build_mission_detail, start_worker, stop_worker
 from visual_agent.mission_progress import save_mission_progress
-from visual_agent.missions import missions_dir, save_mission
+from visual_agent.missions import default_budget_policy, load_mission, missions_dir, save_mission
 from visual_agent.user_profile import LocalUserProfile
 from visual_agent.workbench_model_config import WorkbenchModelConfig
 
@@ -104,6 +111,41 @@ def test_dashboard_api_requires_json_content_type(tmp_path) -> None:
             assert exc.code == 415
         else:  # pragma: no cover - defensive failure path
             raise AssertionError("text/plain POST was not rejected")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_dashboard_refuses_non_loopback_bind(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    workspace.mkdir()
+
+    import pytest
+
+    with pytest.raises(ValueError, match="仅允许绑定"):
+        _bind_dashboard_server("0.0.0.0", 0, workspace)
+
+
+def test_dashboard_rejects_mission_id_path_traversal(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    workspace.mkdir()
+    server = _bind_dashboard_server("127.0.0.1", 0, workspace)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/mission?id=..%2F..%2Foutside",
+            method="GET",
+        )
+        try:
+            urllib.request.urlopen(request, timeout=5)
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
+            payload = json.loads(exc.read().decode("utf-8-sig"))
+            assert payload["ok"] is False
+        else:  # pragma: no cover - defensive failure path
+            raise AssertionError("mission_id traversal was not rejected")
     finally:
         server.shutdown()
         server.server_close()
@@ -262,7 +304,7 @@ def test_dashboard_core_readiness_focuses_on_product_loop(tmp_path, monkeypatch)
     )
     monkeypatch.setattr(
         "visual_agent.dashboard.data.worker_status",
-        lambda: {"running": True, "pid": 1234},
+        lambda _workspace_root: {"running": True, "pid": 1234},
     )
 
     data = build_dashboard_data(workspace)
@@ -539,6 +581,104 @@ def test_start_worker_uses_cli_module_entrypoint(tmp_path, monkeypatch) -> None:
     assert result["ok"] is True
     assert captured["cmd"][1:4] == ["-m", "visual_agent.cli", "mission"]
     assert captured["kwargs"]["creationflags"] == 12345
+
+
+def test_workspace_switch_is_blocked_while_worker_owns_current_project(tmp_path, monkeypatch) -> None:
+    workspace_a = tmp_path / "a" / ".agent-workspace"
+    workspace_b = tmp_path / "b" / ".agent-workspace"
+    workspace_a.mkdir(parents=True)
+    workspace_b.mkdir(parents=True)
+
+    class FakeProc:
+        pid = 2345
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr("visual_agent.dashboard.api.hidden_subprocess_kwargs", lambda *, detached=False: {})
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: FakeProc())
+
+    assert set_active_workspace(workspace_a)["ok"] is True
+    assert start_worker(workspace_a)["ok"] is True
+    try:
+        result = set_active_workspace(workspace_b)
+        assert result["ok"] is False
+        assert result["worker_workspace"] == str(workspace_a.resolve())
+    finally:
+        stop_worker()
+
+
+def test_model_config_endpoint_redacts_and_preserves_existing_key(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    saved = save_dashboard_model_config(
+        {
+            "base_url": "http://127.0.0.1:8788/v1",
+            "api_key": "sk-dashboard-secret",
+            "model": "gpt-test",
+        }
+    )
+    assert saved["ok"] is True
+
+    loaded = get_model_config()
+    assert loaded["api_key"] == "****"
+    assert loaded["api_key_configured"] is True
+    assert "sk-dashboard-secret" not in json.dumps(loaded)
+
+    updated = save_dashboard_model_config(
+        {
+            "base_url": "http://127.0.0.1:8788/v1",
+            "api_key": "****",
+            "model": "gpt-test-2",
+        }
+    )
+    assert updated["ok"] is True
+    config_text = (tmp_path / "model_api_keys.txt").read_text(encoding="utf-8")
+    assert "api_key=sk-dashboard-secret" in config_text
+    assert "model=gpt-test-2" in config_text
+
+
+def test_retry_mission_reuses_original_repo_and_becomes_idempotent(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    repo = tmp_path / "external-repo"
+    workspace.mkdir()
+    repo.mkdir()
+    save_mission(
+        workspace,
+        {
+            "mission_id": "retry-1",
+            "objective": "Fix checkout",
+            "repo_root": str(repo),
+            "status": "failed",
+            "stop_reason": "verification_failed",
+            "test_command": "npm test",
+            "agent": "codex",
+            "merge_policy": "auto",
+            "budget_policy": default_budget_policy(),
+        },
+    )
+    captured = {}
+
+    def fake_start(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "launch_id": "launch-retry-1"}
+
+    monkeypatch.setattr("visual_agent.dashboard.api.start_workbench_mission", fake_start)
+
+    first = retry_mission(workspace, "retry-1")
+    second = retry_mission(workspace, "retry-1")
+
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert captured["repo_root"] == str(repo)
+    assert captured["test_command"] == "npm test"
+    assert captured["merge_policy"] == "auto"
+    assert load_mission(workspace, "retry-1")["status"] == "retried"
 
 
 def test_dashboard_html_is_self_contained() -> None:

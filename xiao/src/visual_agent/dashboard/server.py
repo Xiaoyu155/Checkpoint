@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from ..missions import validate_mission_id
 from .api import (
     build_diagnostic_bundle,
     build_dashboard_data_cached,
@@ -126,7 +127,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             log_error("backend", f"GET {self.path} failed", repr(exc))
             try:
-                self._send_json({"ok": False, "error": f"服务器内部错误：{exc}"})
+                self._send_json({"ok": False, "error": "服务器内部错误，请查看 Dashboard 日志。"}, status=500)
             except OSError:
                 pass
 
@@ -162,7 +163,9 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/mission":
             from urllib.parse import parse_qs, urlparse
-            mission_id = (parse_qs(urlparse(self.path).query).get("id") or [""])[0]
+            mission_id = self._validated_mission_id((parse_qs(urlparse(self.path).query).get("id") or [""])[0])
+            if mission_id is None:
+                return
             self._send_json(build_mission_detail(root, mission_id))
             return
         if path == "/api/workspace":
@@ -247,7 +250,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             log_error("backend", f"POST {self.path} failed", repr(exc))
             try:
-                self._send_json({"ok": False, "error": f"服务器内部错误：{exc}"})
+                self._send_json({"ok": False, "error": "服务器内部错误，请查看 Dashboard 日志。"}, status=500)
             except OSError:
                 pass
 
@@ -275,6 +278,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 goal=str(payload.get("goal") or ""),
                 test_command=str(payload.get("test_command") or ""),
                 agent=str(payload.get("agent") or ""),
+                dispatch_mode=str(payload.get("dispatch_mode") or "tracked"),
                 execute=bool(payload.get("execute")),
                 merge_policy=str(payload.get("merge_policy") or "manual"),
                 allow_dirty=bool(payload.get("allow_dirty")),
@@ -285,18 +289,27 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(result)
         elif path == "/api/mission/merge":
             from ..workbench_board import merge_mission_now
-            result = merge_mission_now(root, str(payload.get("mission_id") or ""))
+            mission_id = self._validated_mission_id(payload.get("mission_id"))
+            if mission_id is None:
+                return
+            result = merge_mission_now(root, mission_id)
             self._send_json(result)
         elif path == "/api/mission/delete":
             from ..workbench_board import archive_mission_now
-            result = archive_mission_now(root, str(payload.get("mission_id") or ""))
+            mission_id = self._validated_mission_id(payload.get("mission_id"))
+            if mission_id is None:
+                return
+            result = archive_mission_now(root, mission_id)
             self._send_json(result)
         elif path == "/api/mission/delete-all":
             from ..workbench_board import archive_all_missions_now
             result = archive_all_missions_now(root)
             self._send_json(result)
         elif path == "/api/mission/retry":
-            result = retry_mission(root, str(payload.get("mission_id") or ""))
+            mission_id = self._validated_mission_id(payload.get("mission_id"))
+            if mission_id is None:
+                return
+            result = retry_mission(root, mission_id)
             self._send_json(result)
         elif path == "/api/worker/start":
             self._send_json(start_worker(root))
@@ -331,6 +344,13 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def _validated_mission_id(self, value: Any) -> str | None:
+        try:
+            return validate_mission_id(str(value or ""))
+        except ValueError:
+            self._send_json({"ok": False, "error": "mission_id 格式无效。"}, status=400)
+            return None
+
     def _api_request_block_reason(self, path: str, *, require_json: bool) -> str:
         if not self._host_is_loopback():
             return "Blocked request Host; Pacer API only accepts loopback hosts."
@@ -354,7 +374,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
     def _host_is_loopback(self) -> bool:
         host = str(self.headers.get("Host") or "").strip()
         if not host:
-            return True
+            return False
         return _is_loopback_hostname(_hostname_from_netloc(host))
 
     def _origin_is_allowed(self, value: str) -> bool:
@@ -381,7 +401,10 @@ class _DashboardServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], workspace_root: Path):
         super().__init__(address, _DashboardHandler)
         self.workspace_root = workspace_root
-        set_active_workspace(workspace_root)
+        result = set_active_workspace(workspace_root)
+        if not result.get("ok"):
+            self.server_close()
+            raise RuntimeError(str(result.get("error") or "无法激活 Dashboard 工作空间"))
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         exc = sys.exc_info()[1]
@@ -434,6 +457,8 @@ def _dashboard_event_signature(data: dict[str, Any]) -> str:
 
 
 def _bind_dashboard_server(host: str, port: int, root: Path) -> _DashboardServer:
+    if not _is_loopback_hostname(host):
+        raise ValueError("Dashboard 仅允许绑定 localhost、127.0.0.1 或 ::1；远程访问请使用受认证的 Cloud API。")
     candidates = [port, 8787, 8080, 8899, 9797, 0]
     seen: set[int] = set()
     last_error: Exception | None = None

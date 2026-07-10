@@ -203,7 +203,13 @@ def get_catalog_workflow(workspace_root: str | Path, workflow_id: str, *, org: s
     return None
 
 
-def delete_catalog_workflow(workspace_root: str | Path, workflow_id: str, *, org: str = "") -> dict[str, Any]:
+def delete_catalog_workflow(
+    workspace_root: str | Path,
+    workflow_id: str,
+    *,
+    org: str = "",
+    user_id: str = "",
+) -> dict[str, Any]:
     catalog = load_catalog(workspace_root, org=org)
     items = [item for item in catalog.get("workflows", []) if isinstance(item, dict)]
     withdrawn = _withdrawn_workflow_names(catalog)
@@ -219,6 +225,9 @@ def delete_catalog_workflow(workspace_root: str | Path, workflow_id: str, *, org
         remaining.append(dict(item))
     if removed is None:
         return {"status": "blocked", "reason": "workflow_not_found"}
+    owner_user_id = str(removed.get("owner_user_id") or "")
+    if owner_user_id and owner_user_id != str(user_id or ""):
+        return {"status": "blocked", "reason": "owner_forbidden"}
     catalog["workflows"] = remaining
     catalog["next_id"] = max(int(catalog.get("next_id") or 1), len(remaining) + 1)
     if removed.get("name"):
@@ -292,6 +301,8 @@ def publish_catalog_workflow(
     created_at = float(existing.get("created_at") or time()) if isinstance(existing, dict) else time()
     downloads = int(existing.get("downloads") or 0) if isinstance(existing, dict) else 0
     existing_owner_user_id = str(existing.get("owner_user_id") or "") if isinstance(existing, dict) else ""
+    if existing_owner_user_id and existing_owner_user_id != str(user_id or ""):
+        return {"status": "blocked", "reason": "owner_forbidden"}
     published_url = f"{catalog_url_base.rstrip('/')}/{catalog_id}"
     record = CatalogWorkflow(
         id=catalog_id,
@@ -311,7 +322,7 @@ def publish_catalog_workflow(
         published_url=published_url,
         source="publish",
         org=str(org or ""),
-        owner_user_id=str(user_id or payload.get("user_id") or payload.get("user") or existing_owner_user_id),
+        owner_user_id=str(user_id or existing_owner_user_id),
     ).to_dict()
     workflows[workflow.name] = record
     catalog["workflows"] = sorted(workflows.values(), key=lambda item: str(item.get("name") or ""))

@@ -8,12 +8,22 @@ from typing import Any
 from visual_agent.cloud_server import execute_cloud_run_request
 
 
-def execute_workflow_run(request: dict[str, Any], *, workspace_root: str | Path = ".agent-workspace") -> dict[str, Any]:
+def execute_workflow_run(
+    request: dict[str, Any],
+    *,
+    workspace_root: str | Path = ".agent-workspace",
+    max_run_profile: str | None = None,
+) -> dict[str, Any]:
     """Run a workflow with the same local semantics as the development cloud server."""
 
+    permitted_profile = str(
+        max_run_profile
+        or os.environ.get("VISUAL_AGENT_CLOUD_RUN_PROFILE")
+        or "dry-run"
+    ).strip() or "dry-run"
     server = SimpleNamespace(
         workspace_root=Path(workspace_root).resolve(),
-        default_run_profile=str(request.get("run_profile") or "dry-run"),
+        default_run_profile=permitted_profile,
         runs={},
         retention_max_reports=0,
         retention_days=0.0,

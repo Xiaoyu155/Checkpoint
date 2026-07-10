@@ -24,11 +24,12 @@ MissionRunner = Callable[..., dict[str, Any]]
 # Mission outcomes that map to a terminal program-task status.
 _MISSION_VERIFIED = {"verified"}
 _MISSION_FAILED = {"stopped", "failed", "worker_failed", "verification_failed"}
+_MISSION_TERMINAL_BLOCKED = {"verified_blocked"}
 # Task statuses the sync may update. "failed" stays syncable because a retried
 # mission can verify later (V5: task-001 failed four times, then verified);
 # only verified/done are final.
 _TASK_IN_FLIGHT = {"queued", "preview_created", "running"}
-_TASK_SYNCABLE = _TASK_IN_FLIGHT | {"failed"}
+_TASK_SYNCABLE = _TASK_IN_FLIGHT | {"failed", "blocked"}
 
 
 def sync_program_tasks(*, workspace_root: str | Path, program_id: str) -> dict[str, Any]:
@@ -63,7 +64,19 @@ def sync_program_tasks(*, workspace_root: str | Path, program_id: str) -> dict[s
         if mission_status in _MISSION_VERIFIED or stop_reason == "verified":
             task["status"] = "verified"
             task.pop("block_reason", None)
+            task.pop("terminal_outcome", None)
             updated.append({"task_id": task.get("task_id"), "status": "verified"})
+        elif mission_status in _MISSION_TERMINAL_BLOCKED:
+            task["status"] = "blocked"
+            task["block_reason"] = stop_reason or "verified_blocked"
+            task["terminal_outcome"] = "verified_blocked"
+            updated.append(
+                {
+                    "task_id": task.get("task_id"),
+                    "status": "blocked",
+                    "reason": task["block_reason"],
+                }
+            )
         elif (
             task_status in _TASK_IN_FLIGHT
             and mission_status in _MISSION_FAILED
@@ -72,11 +85,34 @@ def sync_program_tasks(*, workspace_root: str | Path, program_id: str) -> dict[s
             task["status"] = "failed"
             task["block_reason"] = stop_reason
             updated.append({"task_id": task.get("task_id"), "status": "failed", "reason": stop_reason})
-    if updated:
+    previous_program_status = str(program.get("status") or "")
+    terminal_blocked = any(
+        isinstance(task, dict) and str(task.get("terminal_outcome") or "") == "verified_blocked"
+        for task in tasks
+    )
+    completed = bool(tasks) and all(
+        isinstance(task, dict) and str(task.get("status") or "") in {"verified", "done"}
+        for task in tasks
+    )
+    if terminal_blocked:
+        program["status"] = "blocked"
+        program["next_action"] = "Review the verified_blocked mission before resuming this program."
+    elif completed:
+        program["status"] = "completed"
+        program["next_action"] = "All program tasks are verified."
+    elif previous_program_status in {"blocked", "completed"}:
+        program["status"] = "running" if any(
+            isinstance(task, dict) and str(task.get("status") or "") in _TASK_IN_FLIGHT for task in tasks
+        ) else "planning"
+    if updated or str(program.get("status") or "") != previous_program_status:
         program["tasks"] = tasks
         save_program(workspace_path, program)
-        append_program_event(workspace_path, program_id, {"event": "tasks_synced", "updated": updated})
-    return {"program_id": program_id, "updated": updated}
+        append_program_event(
+            workspace_path,
+            program_id,
+            {"event": "tasks_synced", "updated": updated, "program_status": program.get("status")},
+        )
+    return {"program_id": program_id, "updated": updated, "program_status": program.get("status")}
 
 
 def advance_program_for_mission(*, workspace_root: str | Path, mission_id: str) -> dict[str, Any] | None:
@@ -103,7 +139,8 @@ def advance_program_for_mission(*, workspace_root: str | Path, mission_id: str) 
         synced = sync_program_tasks(workspace_root=workspace_path, program_id=program_id)
         result: dict[str, Any] = {"program_id": program_id, "synced": synced.get("updated") or []}
         refreshed = load_program(workspace_path, program_id) or program
-        if ready_program_tasks(refreshed):
+        result["status"] = str(refreshed.get("status") or "")
+        if result["status"] not in {"blocked", "completed"} and ready_program_tasks(refreshed):
             started = start_program(workspace_root=workspace_path, program_id=program_id)
             result["queued_items"] = started.get("queued_items") or []
         else:
@@ -127,6 +164,23 @@ def start_program(
     # `program start` advances a sequential program past verified tasks.
     sync_program_tasks(workspace_root=workspace_path, program_id=program_id)
     program = load_program(workspace_path, program_id)
+    if str(program.get("status") or "") in {"blocked", "completed"}:
+        return {
+            "schema_version": 1,
+            "product": "DevPacer",
+            "kind": "program_start",
+            "program_id": program_id,
+            "status": program.get("status"),
+            "hourly_plan": {},
+            "created_missions": [],
+            "queued_items": [],
+            "blocked_tasks": [
+                {"task_id": task.get("task_id"), "reason": task.get("block_reason")}
+                for task in (program.get("tasks") or [])
+                if isinstance(task, dict) and str(task.get("status") or "") == "blocked"
+            ],
+            "program": program,
+        }
     hourly = refresh_daily_plan(workspace_path, program_id, hours=hours)
     scheduled = hourly.get("scheduled") if isinstance(hourly.get("scheduled"), list) else []
     tasks = program.get("tasks") if isinstance(program.get("tasks"), list) else []

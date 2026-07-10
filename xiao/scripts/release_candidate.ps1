@@ -30,33 +30,50 @@ function Invoke-Step {
     )
     Write-Host ""
     Write-Host "[$Name]"
-    & $Command
+    try {
+        & $Command
+    }
+    catch {
+        throw "[$Name] failed: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-NativeCommand {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList
+    )
+    & $FilePath @ArgumentList
+    $ExitCode = $LASTEXITCODE
+    if ($ExitCode -ne 0) {
+        throw "Command failed with exit code ${ExitCode}: $FilePath $($ArgumentList -join ' ')"
+    }
 }
 
 Invoke-Step "Python core tests" {
-    & $Python -m pytest tests\test_cli.py tests\test_workflow.py tests\test_validation.py tests\test_reports.py tests\test_verify.py tests\test_codex_check.py tests\test_playwright_env.py -q --tb=short
+    Invoke-NativeCommand $Python @("-m", "pytest", "tests\test_cli.py", "tests\test_workflow.py", "tests\test_validation.py", "tests\test_reports.py", "tests\test_verify.py", "tests\test_codex_check.py", "tests\test_playwright_env.py", "-q", "--tb=short")
 }
 
 Invoke-Step "Release smoke" {
-    & $Checkpoint release-smoke --run --workspace-root .agent-workspace --format markdown
+    Invoke-NativeCommand $Checkpoint @("release-smoke", "--run", "--workspace-root", ".agent-workspace", "--format", "markdown")
 }
 
 Invoke-Step "Public demo case" {
-    powershell -ExecutionPolicy Bypass -File scripts\public_demo_case.ps1 -SkipBootstrap
+    Invoke-NativeCommand "powershell" @("-ExecutionPolicy", "Bypass", "-File", "scripts\public_demo_case.ps1", "-SkipBootstrap")
 }
 
 if (-not $SkipPackageInstall) {
     Invoke-Step "Python build tools" {
-        & $Python -m pip install --upgrade build twine
+        Invoke-NativeCommand $Python @("-m", "pip", "install", "--upgrade", "build", "twine")
     }
 }
 
 Invoke-Step "Python package build" {
-    & $Python -m build
+    Invoke-NativeCommand $Python @("-m", "build")
 }
 
 Invoke-Step "Python package metadata check" {
-    & $Python -m twine check dist\*
+    Invoke-NativeCommand $Python @("-m", "twine", "check", "dist\*")
 }
 
 Invoke-Step "Clean temporary Python build directory" {
@@ -74,7 +91,7 @@ Invoke-Step "Clean temporary Python build directory" {
 Invoke-Step "VS Code extension tests" {
     Push-Location vscode-extension
     try {
-        npm test
+        Invoke-NativeCommand "npm" @("test")
     }
     finally {
         Pop-Location
@@ -84,7 +101,7 @@ Invoke-Step "VS Code extension tests" {
 Invoke-Step "VS Code extension package" {
     Push-Location vscode-extension
     try {
-        npm run package
+        Invoke-NativeCommand "npm" @("run", "package")
     }
     finally {
         Pop-Location

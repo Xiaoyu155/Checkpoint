@@ -388,7 +388,7 @@ def normalize_provider(value: str) -> str:
 
 def secret_references(line: str) -> list[dict[str, str]]:
     refs = []
-    for match in re.finditer(r"(sk-[A-Za-z0-9_-]{20,})", line):
+    for match in re.finditer(r"((?:sk|tp)-[A-Za-z0-9_-]{20,})", line):
         refs.append({"type": "api_key", "fingerprint": redact_secret(match.group(1))})
     assigned = re.search(
         r"(?:api[_-]?key|secret|token|password)\s*[:=]\s*([A-Za-z0-9_\-.]{32,})",
@@ -438,7 +438,7 @@ def load_provider_secret_from_env(provider: str) -> str | None:
 
 
 def extract_secret_from_line(line: str) -> str | None:
-    match = re.search(r"(sk-[A-Za-z0-9_-]{20,})", line)
+    match = re.search(r"((?:sk|tp)-[A-Za-z0-9_-]{20,})", line)
     if match:
         return match.group(1)
     match = re.search(
@@ -455,7 +455,7 @@ def extract_secret_from_line(line: str) -> str | None:
 
 def redact_credential_line(line: str) -> str:
     redacted = line
-    redacted = re.sub(r"sk-[A-Za-z0-9_-]{6,}", lambda item: redact_secret(item.group(0)), redacted)
+    redacted = re.sub(r"(?:sk|tp)-[A-Za-z0-9_-]{6,}", lambda item: redact_secret(item.group(0)), redacted)
     redacted = re.sub(
         r"(?i)(secret access key|api[_ -]?key|token|登录密码|密码)\s*[:=]\s*.+",
         lambda item: item.group(0).split(":", 1)[0].split("=", 1)[0] + ": ***",

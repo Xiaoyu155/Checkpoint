@@ -19,9 +19,6 @@ from typing import Any
 from .data import (
     _LAUNCHES,
     _LAUNCH_LOCK,
-    _WORKER_LOCK,
-    _WORKER_PROC,
-    _launch_snapshot,
     build_dashboard_data_cached,
     invalidate_dashboard_data_cache,
     worker_status,
@@ -52,6 +49,7 @@ from ..workbench_model_config import (
 
 _active_workspace: Path | None = None
 _active_workspace_lock = threading.Lock()
+_workspace_operation_lock = threading.Lock()
 
 
 def get_active_workspace(default: Path) -> Path:
@@ -71,12 +69,25 @@ def set_active_workspace(path: str | Path) -> dict[str, Any]:
         candidate = p / ".agent-workspace"
         if candidate.exists():
             p = candidate
-    if not p.exists():
+    if not p.is_dir():
         return {"ok": False, "error": f"路径不存在: {p}"}
     if p.name != ".agent-workspace":
         return {"ok": False, "error": f"不是有效的工作空间目录（应以 .agent-workspace 结尾）: {p}"}
-    with _active_workspace_lock:
-        _active_workspace = p
+    with _workspace_operation_lock:
+        state = worker_status()
+        if state.get("running"):
+            worker_root = str(state.get("workspace_root") or "")
+            with _active_workspace_lock:
+                current = _active_workspace
+            effective_worker_root = Path(worker_root).resolve() if worker_root else current
+            if effective_worker_root is None or effective_worker_root != p:
+                return {
+                    "ok": False,
+                    "error": "当前项目的 Worker 仍在运行，请先停止 Worker 再切换项目。",
+                    "worker_workspace": str(effective_worker_root or ""),
+                }
+        with _active_workspace_lock:
+            _active_workspace = p
     return {"ok": True, "workspace": str(p)}
 
 
@@ -123,72 +134,119 @@ def record_launch(launch_id: str, **fields: Any) -> None:
 
 def start_worker(workspace_root: Path) -> dict[str, Any]:
     import visual_agent.dashboard.data as _data_mod
-    with _data_mod._WORKER_LOCK:
-        if _data_mod._WORKER_PROC is not None and _data_mod._WORKER_PROC.poll() is None:
-            return {"ok": False, "error": "Worker 已在运行中", "pid": _data_mod._WORKER_PROC.pid}
-        cmd = [
-            sys.executable,
-            "-m",
-            "visual_agent.cli",
-            "mission",
-            "worker",
-            "--watch",
-            "--workspace-root",
-            str(workspace_root),
-        ]
-        try:
-            _data_mod._WORKER_PROC = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                **hidden_subprocess_kwargs(detached=True),
-            )
-        except OSError as exc:
-            return {"ok": False, "error": str(exc)}
-        return {"ok": True, "pid": _data_mod._WORKER_PROC.pid}
+    workspace_path = Path(workspace_root).expanduser().resolve()
+    with _workspace_operation_lock:
+        with _active_workspace_lock:
+            current = _active_workspace
+        if current is not None and current != workspace_path:
+            return {"ok": False, "error": "项目已切换，请刷新页面后再启动 Worker。"}
+        with _data_mod._WORKER_LOCK:
+            if _data_mod._WORKER_PROC is not None and _data_mod._WORKER_PROC.poll() is None:
+                return {
+                    "ok": False,
+                    "error": "Worker 已在运行中",
+                    "pid": _data_mod._WORKER_PROC.pid,
+                    "workspace_root": str(_data_mod._WORKER_WORKSPACE or ""),
+                }
+            cmd = [
+                sys.executable,
+                "-m",
+                "visual_agent.cli",
+                "mission",
+                "worker",
+                "--watch",
+                "--workspace-root",
+                str(workspace_path),
+            ]
+            try:
+                _data_mod._WORKER_PROC = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                    **hidden_subprocess_kwargs(detached=True),
+                )
+                _data_mod._WORKER_WORKSPACE = workspace_path
+            except OSError as exc:
+                return {"ok": False, "error": str(exc)}
+            return {"ok": True, "pid": _data_mod._WORKER_PROC.pid, "workspace_root": str(workspace_path)}
 
 
 def stop_worker() -> dict[str, Any]:
     import visual_agent.dashboard.data as _data_mod
-    with _data_mod._WORKER_LOCK:
-        if _data_mod._WORKER_PROC is None or _data_mod._WORKER_PROC.poll() is not None:
+    with _workspace_operation_lock:
+        with _data_mod._WORKER_LOCK:
+            if _data_mod._WORKER_PROC is None or _data_mod._WORKER_PROC.poll() is not None:
+                _data_mod._WORKER_PROC = None
+                _data_mod._WORKER_WORKSPACE = None
+                return {"ok": True, "was_running": False}
+            _data_mod._WORKER_PROC.terminate()
+            try:
+                _data_mod._WORKER_PROC.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _data_mod._WORKER_PROC.kill()
             _data_mod._WORKER_PROC = None
-            return {"ok": True, "was_running": False}
-        _data_mod._WORKER_PROC.terminate()
-        try:
-            _data_mod._WORKER_PROC.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _data_mod._WORKER_PROC.kill()
-        _data_mod._WORKER_PROC = None
-        return {"ok": True, "was_running": True}
+            _data_mod._WORKER_WORKSPACE = None
+            return {"ok": True, "was_running": True}
 
 
 # ---------------------------------------------------------------------------
 # Mission retry
 # ---------------------------------------------------------------------------
 
+_retry_lock = threading.Lock()
+
+
 def retry_mission(workspace_root: Path, mission_id: str) -> dict[str, Any]:
-    mission = load_mission(workspace_root, mission_id) or {}
-    if not mission:
-        return {"ok": False, "error": "找不到该 mission"}
-    status = str(mission.get("status") or "")
-    if status == "verified":
-        return {"ok": False, "error": "任务已验收，无需重试"}
-    goal = str(mission.get("objective") or "").strip()
-    if not goal:
-        return {"ok": False, "error": "原任务没有记录目标文本"}
-    agent = str(mission.get("agent") or "")
-    test_command = str(mission.get("test_command") or "")
-    return start_workbench_mission(
-        workspace_root=workspace_root,
-        repo_root=str(workspace_root.parent),
-        goal=goal,
-        test_command=test_command,
-        agent=agent,
-        execute=True,
-        intake=mission.get("requirement_contract") if isinstance(mission.get("requirement_contract"), dict) else None,
-    )
+    workspace_path = Path(workspace_root).expanduser().resolve()
+    with _retry_lock:
+        mission = load_mission(workspace_path, mission_id) or {}
+        if not mission:
+            return {"ok": False, "error": "找不到该 mission"}
+        status = str(mission.get("status") or "")
+        if status not in {"stopped", "failed"}:
+            return {"ok": False, "error": f"只有已停止或失败的任务才能重试，当前状态：{status or '未知'}"}
+        goal = str(mission.get("objective") or "").strip()
+        if not goal:
+            return {"ok": False, "error": "原任务没有记录目标文本"}
+        repo_root = str(mission.get("repo_root") or workspace_path.parent)
+        agent = str(mission.get("agent") or "")
+        test_command = str(mission.get("test_command") or "")
+        merge_policy = str(mission.get("merge_policy") or "manual")
+        stop_reason = str(mission.get("stop_reason") or "")
+        mission["status"] = "retrying"
+        mission["stop_reason"] = ""
+        save_mission(workspace_path, mission)
+
+    try:
+        result = start_workbench_mission(
+            workspace_root=workspace_path,
+            repo_root=repo_root,
+            goal=goal,
+            test_command=test_command,
+            agent=agent,
+            execute=True,
+            merge_policy=merge_policy,
+            intake=mission.get("requirement_contract") if isinstance(mission.get("requirement_contract"), dict) else None,
+        )
+    except Exception:
+        with _retry_lock:
+            mission["status"] = status
+            mission["stop_reason"] = stop_reason
+            save_mission(workspace_path, mission)
+        raise
+
+    with _retry_lock:
+        if result.get("ok"):
+            mission["status"] = "retried"
+            mission["retry_launch_id"] = str(result.get("launch_id") or "")
+            mission["retried_at"] = datetime.now(timezone.utc).isoformat()
+        else:
+            mission["status"] = status
+            mission["stop_reason"] = stop_reason
+        save_mission(workspace_path, mission)
+        invalidate_dashboard_data_cache(workspace_path)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -677,7 +735,8 @@ def get_model_config() -> dict[str, Any]:
         "ok": True,
         "enabled": config.configured,
         "base_url": config.base_url,
-        "api_key": config.api_key,
+        "api_key": "****" if config.api_key else "",
+        "api_key_configured": bool(config.api_key),
         "model": config.model,
         "reasoning_effort": config.reasoning_effort,
         "monthly_budget_usd": config.monthly_budget_usd,
@@ -691,15 +750,7 @@ def get_model_config() -> dict[str, Any]:
 
 def save_model_config(payload: dict[str, Any]) -> dict[str, Any]:
     enabled = bool(payload.get("enabled", True))
-    config = WorkbenchModelConfig(
-        base_url=str(payload.get("base_url") or "").strip(),
-        api_key=str(payload.get("api_key") or "").strip(),
-        model=str(payload.get("model") or "").strip(),
-        reasoning_effort=str(payload.get("reasoning_effort") or "").strip(),
-        monthly_budget_usd=_float_payload(payload, "monthly_budget_usd", 0.0),
-        per_mission_budget_usd=_float_payload(payload, "per_mission_budget_usd", 0.0),
-        auto_switch_quota_percent=_float_payload(payload, "auto_switch_quota_percent", 80.0),
-    )
+    config = _model_config_from_payload(payload)
     if not enabled:
         return {"ok": False, "error": "关闭优先使用 sub2api 后不会删除已有配置；如需停用，请在 Agent 下拉框选择 codex 或 claude-code。"}
     try:
@@ -716,17 +767,25 @@ def save_model_config(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_model_config(payload: dict[str, Any]) -> dict[str, Any]:
-    config = WorkbenchModelConfig(
+    config = _model_config_from_payload(payload)
+    result = probe_workbench_model_config(config)
+    return {"ok": bool(result.get("ok")), **result}
+
+
+def _model_config_from_payload(payload: dict[str, Any]) -> WorkbenchModelConfig:
+    existing = load_workbench_model_config()
+    api_key = str(payload.get("api_key") or "").strip()
+    if api_key == "****":
+        api_key = existing.api_key
+    return WorkbenchModelConfig(
         base_url=str(payload.get("base_url") or "").strip(),
-        api_key=str(payload.get("api_key") or "").strip(),
+        api_key=api_key,
         model=str(payload.get("model") or "").strip(),
         reasoning_effort=str(payload.get("reasoning_effort") or "").strip(),
         monthly_budget_usd=_float_payload(payload, "monthly_budget_usd", 0.0),
         per_mission_budget_usd=_float_payload(payload, "per_mission_budget_usd", 0.0),
         auto_switch_quota_percent=_float_payload(payload, "auto_switch_quota_percent", 80.0),
     )
-    result = probe_workbench_model_config(config)
-    return {"ok": bool(result.get("ok")), **result}
 
 
 def _float_payload(payload: dict[str, Any], key: str, default: float) -> float:
@@ -766,8 +825,7 @@ def build_diagnostic_bundle(workspace_root: Path) -> dict[str, Any]:
     except Exception as exc:
         missions_summary = [{"error": str(exc)}]
 
-    with _WORKER_LOCK:
-        worker_running = _WORKER_PROC is not None and _WORKER_PROC.poll() is None
+    worker = worker_status(workspace_root)
 
     return {
         "schema_version": 1,
@@ -778,7 +836,8 @@ def build_diagnostic_bundle(workspace_root: Path) -> dict[str, Any]:
         "workspace_root": str(workspace_root),
         "workspace_exists": workspace_root.exists(),
         "agents": agents,
-        "worker_running": worker_running,
+        "worker_running": bool(worker.get("running") and worker.get("active_for_workspace")),
+        "worker": worker,
         "missions_recent": missions_summary,
         "error_log_tail": _error_log_tail(),
     }
@@ -956,7 +1015,9 @@ def _build_pacer_evidence(
         "worker_records": len(worker_records),
         "agent": str(latest_worker.get("agent") or mission.get("agent") or ""),
         "backend": str(backend.get("name") or ""),
-        "model": str(backend.get("model") or ""),
+        "model": str(latest_worker.get("resolved_model") or backend.get("model") or ""),
+        "reasoning_effort": str(latest_worker.get("resolved_reasoning_effort") or ""),
+        "dispatch_mode": str(latest_worker.get("dispatch_mode") or mission.get("dispatch_mode") or "tracked"),
         "worktree": str(latest_worker.get("cwd") or ""),
         "log_path": log_path,
         "log_tail": _read_tail(Path(log_path), max_chars=1600) if log_path else "",
@@ -980,6 +1041,7 @@ def start_workbench_mission(
     goal: str,
     test_command: str,
     agent: str,
+    dispatch_mode: str = "tracked",
     execute: bool,
     merge_policy: str = "manual",
     allow_dirty: bool = False,
@@ -990,6 +1052,9 @@ def start_workbench_mission(
     goal = str(goal or "").strip()
     if not goal:
         return {"ok": False, "error": "请填写目标（goal）。"}
+    dispatch_mode = str(dispatch_mode or "tracked").strip().lower()
+    if dispatch_mode not in {"tracked", "delegated"}:
+        return {"ok": False, "error": "派工模式必须是 tracked 或 delegated。"}
     from ..verification_profiles import resolve_test_command
     from ..mission_pipeline import MissionPipeline, SpecValidator, mission_result_to_pipeline_state
     from ..mission_intake import is_manual_verification_goal, is_review_plan_goal
@@ -1050,12 +1115,14 @@ def start_workbench_mission(
             "repo_root": str(repo_root or "."),
             "test_command": resolved_test_command or "",
             "agent": str(agent or ""),
+            "dispatch_mode": str(dispatch_mode or "tracked"),
             "merge_policy": str(merge_policy or "manual"),
             "requirement_contract": requirement_contract,
         },
     )
     record_launch(
         launch_id,
+        workspace_root=str(Path(workspace_root).expanduser().resolve()),
         goal=goal,
         execute=bool(execute),
         test_command=resolved_test_command or "",
@@ -1088,6 +1155,7 @@ def start_workbench_mission(
                 allow_dirty=bool(allow_dirty),
                 merge=False,
                 requirement_contract=requirement_contract,
+                dispatch_mode=str(dispatch_mode or "tracked"),
             )
             mission = result.get("mission") if isinstance(result, dict) else {}
             status = str((result or {}).get("status") or "")
@@ -1099,6 +1167,7 @@ def start_workbench_mission(
                     saved_mission["test_command"] = resolved_test_command or requested_test_command or ""
                     saved_mission["agent"] = str(agent or "")
                     saved_mission["merge_policy"] = str(merge_policy or "manual")
+                    saved_mission["dispatch_mode"] = str(dispatch_mode or "tracked")
                     if requirement_contract:
                         saved_mission["requirement_contract"] = requirement_contract
                     save_mission(workspace_root, saved_mission)
@@ -1144,6 +1213,7 @@ def start_workbench_mission(
         "launch_id": launch_id,
         "execute": bool(execute),
         "merge_policy": str(merge_policy or "manual"),
+        "dispatch_mode": str(dispatch_mode or "tracked"),
         "test_command": resolved_test_command or "",
         "verification_profile": verification_profile or {},
         "manual_verification": manual_verification,

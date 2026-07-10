@@ -10,8 +10,10 @@ from visual_agent.chief_queue import (
     _release_worker_lock,
     _worker_lock_path,
     claim_next_mission_queue_item,
+    finish_mission_queue_item,
     list_mission_queue_items,
     load_mission_queue_item,
+    mission_queue_state_path,
     run_mission_queue_worker,
     submit_mission_queue_item,
 )
@@ -103,6 +105,43 @@ def test_claim_next_mission_queue_item_prevents_double_claim(tmp_path) -> None:
     saved = load_mission_queue_item(workspace, submitted.queue_id)
     assert saved is not None
     assert saved.status == "running"
+
+
+def test_expired_running_lease_is_reclaimed_and_old_worker_is_fenced(tmp_path) -> None:
+    workspace, mission = create_preview_mission(tmp_path)
+    submitted = submit_mission_queue_item(workspace_root=workspace, mission_id=mission["mission_id"])
+    first = claim_next_mission_queue_item(workspace, worker_id="worker-one")
+    assert first is not None and first.lease_id
+
+    queue_path = mission_queue_state_path(workspace)
+    state = json.loads(queue_path.read_text(encoding="utf-8"))
+    state["items"][0]["lease_expires_at"] = "2000-01-01T00:00:00+00:00"
+    queue_path.write_text(json.dumps(state), encoding="utf-8")
+
+    second = claim_next_mission_queue_item(workspace, worker_id="worker-two")
+
+    assert second is not None
+    assert second.queue_id == submitted.queue_id
+    assert second.attempts == 2
+    assert second.lease_owner == "worker-two"
+    assert second.lease_id != first.lease_id
+    with pytest.raises(RuntimeError, match="no longer owned"):
+        finish_mission_queue_item(
+            workspace,
+            submitted.queue_id,
+            result={"status": "verified", "stop_reason": "verified"},
+            lease_id=first.lease_id,
+        )
+
+    finished = finish_mission_queue_item(
+        workspace,
+        submitted.queue_id,
+        result={"status": "verified", "stop_reason": "verified"},
+        lease_id=second.lease_id,
+    )
+    assert finished.status == "success"
+    state = json.loads(queue_path.read_text(encoding="utf-8"))
+    assert any(entry["event"] == "lease_expired" for entry in state["history"])
 
 
 def test_run_mission_queue_worker_run_once_marks_success(tmp_path) -> None:

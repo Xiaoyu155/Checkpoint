@@ -696,10 +696,10 @@ def cleanup_temporary_workflow(path: Path | None) -> None:
 def validate_cloud_server_auth_config(*, host: str, api_key: str = "", required_org: str = "") -> None:
     if is_loopback_host(host):
         return
-    if api_key or required_org:
+    if api_key:
         return
     raise CloudServerConfigError(
-        "Refusing to start cloud server on a non-loopback host without api_key or required_org. "
+        "Refusing to start cloud server on a non-loopback host without api_key. "
         "Bind to 127.0.0.1 for local-only development, or configure authentication."
     )
 

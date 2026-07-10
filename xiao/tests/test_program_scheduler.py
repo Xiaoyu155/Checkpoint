@@ -99,6 +99,28 @@ def test_advance_program_for_mission_queues_next_task(tmp_path) -> None:
     assert [q.get("task_id") for q in advanced["queued_items"]] == ["task-002"]
 
 
+def test_verified_blocked_mission_terminates_program_without_queuing_dependency(tmp_path) -> None:
+    workspace, program = _sequential_program(tmp_path)
+    start_program(workspace_root=workspace.root, program_id=program["program_id"], hours=5)
+    mission_id = _mark_first_task_mission(
+        workspace.root,
+        program["program_id"],
+        "verified_blocked",
+        stop_reason="worker_toolchain_violation",
+    )
+
+    advanced = advance_program_for_mission(workspace_root=workspace.root, mission_id=mission_id)
+
+    assert advanced is not None
+    assert advanced["status"] == "blocked"
+    assert advanced["queued_items"] == []
+    saved = load_program(workspace.root, program["program_id"])
+    assert saved["status"] == "blocked"
+    assert saved["tasks"][0]["status"] == "blocked"
+    assert saved["tasks"][0]["terminal_outcome"] == "verified_blocked"
+    assert saved["tasks"][1]["status"] == "pending"
+
+
 def test_sync_promotes_failed_task_when_retried_mission_verifies(tmp_path) -> None:
     """V5 live finding: a task that failed earlier must flip to verified after a retry succeeds."""
     workspace, program = _sequential_program(tmp_path)

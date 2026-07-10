@@ -20,6 +20,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any
 
+from .security import redact_secret_text
 from .subprocess_window import hidden_subprocess_kwargs
 from .verification_profiles import conditional_test_command_short_circuit
 
@@ -262,11 +263,13 @@ def run_command_verification(
         elapsed_seconds = max(0.0, monotonic() - started)
         effective_timeout = float(timeout_seconds)
         reason = str(timeout_reason or "").strip()
+        timeout_output = redact_secret_text(_decode(exc.stdout) + "\n" + _decode(exc.stderr))
         return {
             "verdict": "fail",
             "command": cmd,
             "exit_code": 124,
-            "output_tail": (_decode(exc.stdout) + "\n" + _decode(exc.stderr))[-4000:],
+            "output_tail": timeout_output[-4000:],
+            "raw_output_tail": timeout_output[-32768:],
             "reason": f"test command timed out after {effective_timeout:.0f}s",
             "failure_kind": "command_timeout",
             "classification_confidence": "definitive",
@@ -278,11 +281,13 @@ def run_command_verification(
             "suggested_timeout_seconds": _suggested_timeout_seconds(effective_timeout, elapsed_seconds),
         }
     except OSError as exc:
+        launch_output = redact_secret_text(str(exc))
         return {
             "verdict": "fail",
             "command": cmd,
             "exit_code": -1,
-            "output_tail": str(exc)[:2000],
+            "output_tail": launch_output[:2000],
+            "raw_output_tail": launch_output[-32768:],
             "reason": "could not launch test command",
             "failure_kind": "command_launch_error",
             "classification_confidence": "definitive",
@@ -291,6 +296,7 @@ def run_command_verification(
     combined = (stdout + ("\n" if stdout and stderr else "") + stderr).strip()
     if exit_code != 0:
         combined = _append_referenced_log_tails(combined, root)
+    combined = redact_secret_text(combined)
     classification = (
         {"failure_kind": "", "classification_confidence": ""}
         if exit_code == 0
@@ -305,6 +311,7 @@ def run_command_verification(
         "command": cmd,
         "exit_code": exit_code,
         "output_tail": combined[-4000:],
+        "raw_output_tail": combined[-32768:],
         "failure_kind": classification.get("failure_kind") or "",
     }
     if classification.get("classification_confidence"):

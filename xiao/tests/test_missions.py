@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
 
 from visual_agent.cli import main
 from visual_agent.missions import (
@@ -10,6 +13,8 @@ from visual_agent.missions import (
     list_missions,
     load_mission,
     load_rounds,
+    make_mission_id,
+    mission_dir,
     write_final_report,
 )
 
@@ -58,6 +63,40 @@ def test_default_budget_policy_caps_first_repair_round() -> None:
     # The first executable loop only supports one automatic repair round.
     assert budget["max_repair_rounds"] == 1
     assert budget["model_policy"]["visual_review"] == "multimodal"
+
+
+def test_mission_ids_are_unique_for_same_objective_and_moment() -> None:
+    from datetime import datetime, timezone
+
+    moment = datetime(2026, 7, 2, 12, 0, 0, tzinfo=timezone.utc)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        mission_ids = list(pool.map(lambda _index: make_mission_id("Fix checkout", now=moment), range(64)))
+
+    assert len(set(mission_ids)) == 64
+    assert all(item.startswith("20260702-120000-000000-") for item in mission_ids)
+
+
+def test_create_mission_refuses_to_overwrite_explicit_id(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    _seed_mission(workspace, tmp_path, "m1", "First objective")
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        _seed_mission(workspace, tmp_path, "m1", "Replacement objective")
+
+    assert load_mission(workspace, "m1")["objective"] == "First objective"
+
+
+@pytest.mark.parametrize(
+    "mission_id",
+    ["", ".", "..", "../escape", r"..\escape", "/absolute", r"C:\absolute", "bad id", "bad:id"],
+)
+def test_mission_storage_rejects_unsafe_ids(tmp_path, mission_id) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    with pytest.raises(ValueError, match="mission_id"):
+        mission_dir(workspace, mission_id)
+    with pytest.raises(ValueError, match="mission_id"):
+        load_mission(workspace, mission_id)
+    assert not (tmp_path / "escape").exists()
 
 
 def test_chief_missions_list_limit_applies_to_json(tmp_path, capsys) -> None:

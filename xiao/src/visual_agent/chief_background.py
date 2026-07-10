@@ -11,8 +11,10 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .chief_run import run_chief_mission
+from .locks import RunLock
 from .missions import append_round, load_mission, load_rounds, mission_dir, save_mission
 from .models import to_jsonable
 from .mission_progress import save_mission_progress
@@ -43,13 +45,70 @@ def start_background_chief_run(
             "stop_reason": "missing_mission",
             "message": f"No saved mission found: {mission_id}",
         }
+    directory = mission_dir(workspace_path, mission_id)
+    launch_lock = RunLock(directory, name="background-launch.lock", ttl_seconds=30.0)
+    try:
+        launch_lock.acquire(owner=f"background-launch:{mission_id}")
+    except RuntimeError:
+        return _background_already_running_payload(mission, load_background_record(workspace_path, mission_id))
+    try:
+        existing = load_background_record(workspace_path, mission_id)
+        if _background_record_is_alive(existing):
+            return _background_already_running_payload(mission, existing)
+        return _start_background_chief_run_locked(
+            workspace_root=workspace_path,
+            mission_id=mission_id,
+            agents=agents,
+            run_profile=run_profile,
+            include_slow=include_slow,
+            max_workflows=max_workflows,
+            timeout_seconds=timeout_seconds,
+            allow_dirty=allow_dirty,
+            allow_coverage_gap=allow_coverage_gap,
+            test_command=test_command,
+            allow_test_edits=allow_test_edits,
+            merge=merge,
+        )
+    finally:
+        launch_lock.release()
+
+
+def _start_background_chief_run_locked(
+    *,
+    workspace_root: str | Path,
+    mission_id: str,
+    agents: tuple[str, ...] = (),
+    run_profile: str = "dry-run",
+    include_slow: bool = False,
+    max_workflows: int = 10,
+    timeout_seconds: float = 1800.0,
+    allow_dirty: bool = False,
+    allow_coverage_gap: bool = False,
+    test_command: str | None = None,
+    allow_test_edits: bool = False,
+    merge: bool = False,
+) -> dict[str, Any]:
+    workspace_path = Path(workspace_root).expanduser().resolve()
+    mission = load_mission(workspace_path, mission_id)
+    if mission is None:
+        return {
+            "schema_version": 1,
+            "status": "blocked",
+            "stop_reason": "missing_mission",
+            "message": f"No saved mission found: {mission_id}",
+        }
 
     directory = mission_dir(workspace_path, mission_id)
     logs_dir = directory / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    launch_time = datetime.now(timezone.utc)
+    stamp = launch_time.strftime("%Y%m%d-%H%M%S-%f")
+    launch_id = uuid4().hex
     stdout_path = logs_dir / f"chief-run-background-{stamp}.out.log"
     stderr_path = logs_dir / f"chief-run-background-{stamp}.err.log"
+    effective_test_command = str(test_command or mission.get("test_command") or "").strip()
+    effective_allow_test_edits = bool(allow_test_edits or mission.get("allow_test_edits"))
+    effective_merge = bool(merge or mission.get("merge"))
     argv = [
         sys.executable,
         "-m",
@@ -78,11 +137,11 @@ def start_background_chief_run(
         argv.append("--allow-dirty")
     if allow_coverage_gap:
         argv.append("--allow-coverage-gap")
-    if test_command:
-        argv.extend(["--test-command", str(test_command)])
-    if allow_test_edits:
+    if effective_test_command:
+        argv.extend(["--test-command", effective_test_command])
+    if effective_allow_test_edits:
         argv.append("--allow-test-edits")
-    if merge:
+    if effective_merge:
         argv.append("--merge")
 
     env = os.environ.copy()
@@ -116,18 +175,20 @@ def start_background_chief_run(
     record = {
         "schema_version": 1,
         "status": "running",
+        "launch_id": launch_id,
         "pid": int(process.pid),
         "argv": argv,
         "cwd": str(cwd),
         "stdout_log": str(stdout_path),
         "stderr_log": str(stderr_path),
-        "started_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": launch_time.isoformat(),
+        "budget_started_at": str(mission.get("budget_started_at") or launch_time.isoformat()),
         "agents": [str(agent) for agent in agents if str(agent or "").strip()],
-        "test_command": str(test_command or ""),
-        "allow_test_edits": bool(allow_test_edits),
-        "merge": bool(merge),
+        "test_command": effective_test_command,
+        "allow_test_edits": effective_allow_test_edits,
+        "merge": effective_merge,
     }
-    (directory / "background.json").write_text(json.dumps(to_jsonable(record), ensure_ascii=False, indent=2), encoding="utf-8")
+    save_background_record(workspace_path, mission_id, record)
     save_mission_progress(
         workspace_path,
         mission_id,
@@ -153,6 +214,11 @@ def start_background_chief_run(
     )
     mission["status"] = "background_running"
     mission["stop_reason"] = ""
+    mission.setdefault("budget_started_at", record["budget_started_at"])
+    if effective_test_command:
+        mission["test_command"] = effective_test_command
+    mission["allow_test_edits"] = effective_allow_test_edits
+    mission["merge"] = effective_merge
     save_mission(workspace_path, mission)
     return {
         "schema_version": 1,
@@ -427,8 +493,39 @@ def save_background_record(workspace_root: str | Path, mission_id: str, record: 
     directory = mission_dir(workspace_root, mission_id)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "background.json"
-    path.write_text(json.dumps(to_jsonable(record), ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(to_jsonable(record), ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
     return {"path": str(path), "record": dict(record)}
+
+
+def _background_record_is_alive(record: dict[str, Any] | None) -> bool:
+    if not isinstance(record, dict) or str(record.get("status") or "") not in {"starting", "running"}:
+        return False
+    pid = int(record.get("worker_pid") or record.get("pid") or 0)
+    return bool(process_status(pid).get("alive"))
+
+
+def _background_already_running_payload(
+    mission: dict[str, Any],
+    background: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "product": "Pacer",
+        "verification_engine": "Checkpoint",
+        "status": "blocked",
+        "stop_reason": "background_already_running",
+        "message": "This mission already has a background launch or live worker.",
+        "mission": mission,
+        "background": background or {"status": "starting"},
+    }
 
 
 def _background_watchdog_loop(
@@ -520,7 +617,15 @@ def mission_wall_budget_exceeded(mission: dict[str, Any], background: dict[str, 
     max_minutes = float(budget.get("max_wall_minutes") or 0)
     if max_minutes <= 0:
         return False
-    started = parse_iso_datetime(str(background.get("started_at") or mission.get("created_at") or ""))
+    started = parse_iso_datetime(
+        str(
+            mission.get("budget_started_at")
+            or background.get("budget_started_at")
+            or background.get("started_at")
+            or mission.get("created_at")
+            or ""
+        )
+    )
     if started is None:
         return False
     elapsed = datetime.now(timezone.utc) - started

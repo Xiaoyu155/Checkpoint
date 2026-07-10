@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
@@ -84,7 +85,8 @@ def run_chief_mission(
     agents: tuple[str, ...] = (),
     answers: tuple[str, ...] = (),
     interview: bool = False,
-    max_rounds: int = 2,
+    max_rounds: int = 3,
+    max_repair_rounds: int | None = 2,
     max_wall_minutes: int = 60,
     max_worker_minutes: int = 45,
     execute: bool = False,
@@ -104,42 +106,15 @@ def run_chief_mission(
     ground_vague_goals: bool = True,
     grounding_runner: Callable[..., dict[str, Any]] | None = None,
     requirement_contract: dict[str, Any] | None = None,
+    reasoning_effort: str | None = None,
+    dispatch_mode: str | None = None,
+    prompt_style: str | None = None,
+    repair_strategy: str | None = None,
 ) -> dict[str, Any]:
     started = monotonic()
-    original_goal = str(goal or "")
+    run_started_at = datetime.now(timezone.utc).isoformat()
     workspace_path = Path(workspace_root).expanduser().resolve()
-    repo_path = Path(repo_root).expanduser().resolve()
-    agent_for_contract = str(agents[0]) if agents else ""
-    contract_payload = normalize_requirement_contract(
-        requirement_contract,
-        goal=original_goal,
-        answers=answers,
-        repo_root=repo_path,
-        test_command=test_command,
-        agent=agent_for_contract,
-    )
-    contract_goal = str(contract_payload.get("final_goal") or "").strip()
-    if contract_goal:
-        goal = contract_goal
-    planning_answers = _planning_answers(answers, contract_payload)
-    raw_test_command = str(test_command or "").strip()
-    resolved_test_command, verification_profile = resolve_test_command(test_command, repo_root=repo_path)
-    test_command_unresolved = bool(raw_test_command) and not str(resolved_test_command or "").strip()
-    test_command = raw_test_command if test_command_unresolved else resolved_test_command
-    if test_command and not workspace_path.exists():
-        init_workspace(workspace_path, with_demo=False)
-    budget = default_budget_policy(
-        max_rounds=max_rounds,
-        max_wall_minutes=max_wall_minutes,
-        max_worker_minutes=max_worker_minutes,
-    )
-    requested_verification_env = _merge_verification_env(
-        normalize_verification_env(verification_env),
-        verification_env_from_required_names(require_env),
-    )
-    runner = dispatch_runner or dispatch_chief_plan
     mission: dict[str, Any] | None = None
-    grounding_payload: dict[str, Any] | None = None
     if resume_mission_id:
         mission = load_mission(workspace_path, resume_mission_id)
         if mission is None:
@@ -152,25 +127,56 @@ def run_chief_mission(
                 message=f"No saved mission found: {resume_mission_id}",
                 started=started,
             )
+    repo_path = Path(
+        str((mission or {}).get("repo_root") or repo_root)
+    ).expanduser().resolve()
+    if mission is not None:
         plan_id = str(mission.get("plan_id") or plan_id or "")
         goal = str(mission.get("objective") or goal or "")
-        repo_path = Path(str(mission.get("repo_root") or repo_path)).expanduser().resolve()
-        if not contract_payload and isinstance(mission.get("requirement_contract"), dict):
-            contract_payload = normalize_requirement_contract(
-                mission.get("requirement_contract"),
-                goal=str(goal or ""),
-                answers=answers,
-                repo_root=repo_path,
-                test_command=test_command,
-                agent=agent_for_contract,
-            )
-            planning_answers = _planning_answers(answers, contract_payload)
+    original_goal = str(goal or "")
+    requested_test_command = str(test_command or "").strip()
+    if not requested_test_command and mission is not None:
+        requested_test_command = str(mission.get("test_command") or "").strip()
+    resolved_test_command, verification_profile = resolve_test_command(
+        requested_test_command or None,
+        repo_root=repo_path,
+    )
+    test_command_unresolved = bool(requested_test_command) and not str(resolved_test_command or "").strip()
+    test_command = requested_test_command if test_command_unresolved else resolved_test_command
+    if test_command and not workspace_path.exists():
+        init_workspace(workspace_path, with_demo=False)
+    agent_for_contract = str(agents[0]) if agents else ""
+    contract_source = requirement_contract
+    if contract_source is None and isinstance((mission or {}).get("requirement_contract"), dict):
+        contract_source = mission.get("requirement_contract")
+    contract_payload = normalize_requirement_contract(
+        contract_source,
+        goal=original_goal,
+        answers=answers,
+        repo_root=repo_path,
+        test_command=test_command,
+        agent=agent_for_contract,
+    )
+    contract_goal = str(contract_payload.get("final_goal") or "").strip()
+    if contract_goal:
+        goal = contract_goal
+    planning_answers = _planning_answers(answers, contract_payload)
+    budget = default_budget_policy(
+        max_rounds=max_rounds,
+        max_wall_minutes=max_wall_minutes,
+        max_worker_minutes=max_worker_minutes,
+        max_repair_rounds=max_repair_rounds,
+    )
+    requested_verification_env = _merge_verification_env(
+        normalize_verification_env((mission or {}).get("verification_env")),
+        normalize_verification_env(verification_env),
+        verification_env_from_required_names(require_env),
+    )
+    runner = dispatch_runner or dispatch_chief_plan
+    grounding_payload: dict[str, Any] | None = None
+    if mission is not None:
         if isinstance(mission.get("budget_policy"), dict):
             budget = dict(mission["budget_policy"])
-        requested_verification_env = _merge_verification_env(
-            normalize_verification_env(mission.get("verification_env")),
-            requested_verification_env,
-        )
 
     plan_payload = load_plan(workspace_path, plan_id) if plan_id else None
     if resume_mission_id and (not plan_id or plan_payload is None):
@@ -283,12 +289,25 @@ def run_chief_mission(
         plan_payload["verification_profile"] = verification_profile
         if plan_id:
             save_plan(plan_payload, workspace_root=workspace_path, plan_id=str(plan_id))
-    effective_allow_test_edits = allow_test_edits or _plan_requests_test_edits(
+    effective_allow_test_edits = bool((mission or {}).get("allow_test_edits")) or allow_test_edits or _plan_requests_test_edits(
         original_goal=original_goal,
         goal=str(goal or ""),
         plan=plan_payload,
         grounding=grounding_payload,
     )
+    effective_merge = bool(merge or (mission or {}).get("merge"))
+    saved_reasoning_effort = str((mission or {}).get("reasoning_effort") or "").strip()
+    dispatch_reasoning_effort: str | None
+    if reasoning_effort is not None:
+        dispatch_reasoning_effort = str(reasoning_effort).strip() or "inherit"
+    elif saved_reasoning_effort and saved_reasoning_effort.lower() != "inherit":
+        dispatch_reasoning_effort = saved_reasoning_effort
+    else:
+        dispatch_reasoning_effort = None
+    effective_reasoning_effort = dispatch_reasoning_effort or "inherit"
+    effective_dispatch_mode = str(dispatch_mode or (mission or {}).get("dispatch_mode") or "tracked")
+    effective_prompt_style = str(prompt_style or (mission or {}).get("prompt_style") or "expanded")
+    effective_repair_strategy = str(repair_strategy or (mission or {}).get("repair_strategy") or "resume")
     if effective_allow_test_edits and not allow_test_edits:
         plan_payload["test_edit_policy"] = {
             "allow_test_edits": True,
@@ -309,7 +328,18 @@ def run_chief_mission(
             status="created",
             requirement_contract=contract_payload,
             verification_env=requested_verification_env,
+            test_command=test_command,
+            allow_test_edits=effective_allow_test_edits,
+            merge=effective_merge,
+            reasoning_effort=effective_reasoning_effort,
+            dispatch_mode=effective_dispatch_mode,
+            prompt_style=effective_prompt_style,
+            repair_strategy=effective_repair_strategy,
         )
+        if execute and not dry_run:
+            mission["budget_started_at"] = run_started_at
+            mission["status"] = "running"
+            mission = save_mission(workspace_path, mission)["mission"]
         write_mission_state(
             workspace_path,
             str(mission["mission_id"]),
@@ -354,6 +384,15 @@ def run_chief_mission(
     elif execute and not dry_run:
         if requested_verification_env:
             mission["verification_env"] = requested_verification_env
+        if test_command:
+            mission["test_command"] = str(test_command)
+        mission["allow_test_edits"] = bool(effective_allow_test_edits)
+        mission["merge"] = effective_merge
+        mission["reasoning_effort"] = effective_reasoning_effort
+        mission["dispatch_mode"] = effective_dispatch_mode
+        mission["prompt_style"] = effective_prompt_style
+        mission["repair_strategy"] = effective_repair_strategy
+        mission.setdefault("budget_started_at", run_started_at)
         mission["status"] = "running"
         mission["stop_reason"] = ""
         save_mission(workspace_path, mission)
@@ -372,7 +411,7 @@ def run_chief_mission(
             event="chief_run_resume_executing",
             plan_id=str(plan_id or ""),
         )
-    if _elapsed_minutes(started) > budget["max_wall_minutes"]:
+    if _mission_budget_elapsed_minutes(mission, started) > float(budget["max_wall_minutes"]):
         return _finish(
             workspace_root=workspace_path,
             mission=mission,
@@ -512,10 +551,16 @@ def run_chief_mission(
         include_slow=include_slow,
         max_workflows=max_workflows,
         timeout_seconds=min(float(timeout_seconds), float(budget["max_worker_minutes"]) * 60.0),
+        delegated_timeout_seconds=min(float(timeout_seconds) * 2.0, float(budget["max_worker_minutes"]) * 60.0),
         allow_dirty=allow_dirty,
         allow_coverage_gap=allow_coverage_gap,
         auto_repair_once=False,
+        max_repair_rounds=0,
         model_policy=budget.get("model_policy") if isinstance(budget, dict) else None,
+        reasoning_effort=dispatch_reasoning_effort,
+        dispatch_mode=effective_dispatch_mode,
+        prompt_style=effective_prompt_style,
+        repair_strategy=effective_repair_strategy,
         test_command=test_command,
         allow_test_edits=effective_allow_test_edits,
         verification_env=requested_verification_env,
@@ -565,7 +610,9 @@ def run_chief_mission(
             dispatch_payload=preview,
         )
 
-    if budget["max_rounds"] < 1:
+    used_execution_rounds = _used_execution_rounds(workspace_path, str(mission["mission_id"]))
+    remaining_rounds = max(0, int(budget.get("max_rounds") or 0) - used_execution_rounds)
+    if remaining_rounds < 1:
         return _finish(
             workspace_root=workspace_path,
             mission=mission,
@@ -577,7 +624,11 @@ def run_chief_mission(
             dispatch_payload=preview,
         )
 
-    auto_repair_once = bool(budget["max_rounds"] > 1 and budget["max_repair_rounds"] > 0)
+    repair_rounds = min(
+        max(0, remaining_rounds - 1),
+        max(0, int(budget.get("max_repair_rounds") or 0)),
+    )
+    auto_repair_once = bool(repair_rounds > 0)
     save_mission_progress(
         workspace_path,
         str(mission["mission_id"]),
@@ -586,6 +637,8 @@ def run_chief_mission(
         status="running",
         plan_id=str(plan_id or ""),
     )
+    worker_timeout_seconds = min(float(timeout_seconds), float(budget["max_worker_minutes"]) * 60.0)
+    delegated_timeout_seconds = min(float(timeout_seconds) * 2.0, float(budget["max_worker_minutes"]) * 60.0)
     dispatch = runner(
         workspace_root=workspace_path,
         plan_id=str(plan_id),
@@ -595,14 +648,20 @@ def run_chief_mission(
         run_profile=run_profile,
         include_slow=include_slow,
         max_workflows=max_workflows,
-        timeout_seconds=min(float(timeout_seconds), float(budget["max_worker_minutes"]) * 60.0),
+        timeout_seconds=worker_timeout_seconds,
+        delegated_timeout_seconds=delegated_timeout_seconds,
         allow_dirty=allow_dirty,
         allow_coverage_gap=allow_coverage_gap,
         auto_repair_once=auto_repair_once,
+        max_repair_rounds=repair_rounds,
         model_policy=budget.get("model_policy") if isinstance(budget, dict) else None,
+        reasoning_effort=dispatch_reasoning_effort,
+        dispatch_mode=effective_dispatch_mode,
+        prompt_style=effective_prompt_style,
+        repair_strategy=effective_repair_strategy,
         test_command=test_command,
         allow_test_edits=effective_allow_test_edits,
-        merge=merge,
+        merge=effective_merge,
         verification_env=requested_verification_env,
         allow_prior_verified_evidence=_allow_prior_verified_evidence_for_resume(
             mission,
@@ -610,7 +669,8 @@ def run_chief_mission(
         ),
     )
     _record_dispatch_attempts(workspace_path, mission["mission_id"], dispatch, start_round=_next_round_number(workspace_path, mission["mission_id"]))
-    stop_reason = _stop_reason_from_dispatch(dispatch, budget)
+    remaining_budget = {**budget, "max_rounds": remaining_rounds}
+    stop_reason = _stop_reason_from_dispatch(dispatch, remaining_budget)
     dispatch_status = str(dispatch.get("status") or "")
     status = (
         "verified"
@@ -797,6 +857,7 @@ def _apply_agent_override_to_track(track: dict[str, Any], agent: str) -> None:
     track["model"] = str(config.get("model") or "")
     track["sandbox"] = config.get("sandbox") or {}
     track["approval"] = config.get("approval") or {}
+    track["reasoning_effort"] = str(config.get("reasoning_effort") or "inherit")
     track["parallelism_hint"] = str(config.get("parallelism_hint") or "")
     track.pop("command", None)
     track.pop("command_template", None)
@@ -1243,6 +1304,27 @@ def _elapsed_minutes(started: float) -> float:
     return (monotonic() - started) / 60.0
 
 
+def _mission_budget_elapsed_minutes(mission: dict[str, Any], current_run_started: float) -> float:
+    value = str(mission.get("budget_started_at") or "").strip()
+    if not value:
+        return _elapsed_minutes(current_run_started)
+    try:
+        started_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return _elapsed_minutes(current_run_started)
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - started_at.astimezone(timezone.utc)).total_seconds() / 60.0)
+
+
+def _used_execution_rounds(workspace_root: Path, mission_id: str) -> int:
+    return sum(
+        1
+        for item in load_rounds(workspace_root, mission_id)
+        if str(item.get("type") or "") in {"verification", "dispatch"}
+    )
+
+
 def chief_run_to_markdown(payload: dict[str, Any]) -> str:
     mission = payload.get("mission") if isinstance(payload.get("mission"), dict) else {}
     plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
@@ -1489,14 +1571,14 @@ def _next_step_commands(
         for name in _missing_env_names(dispatch_payload, command_verification) or ["QWEN_API_KEY"]:
             commands.append((f"设置环境变量 {name}", f"$env:{name} = \"<value>\""))
         if mission_id:
-            commands.append(("重试任务", f"checkpoint mission start --resume {_ps_quote(mission_id)} --execute"))
+            commands.append(("重试任务", f"checkpoint mission resume --mission {_ps_quote(mission_id)} --execute"))
     elif stop_reason == "test_command_unresolved":
         if mission_id:
-            commands.append(("带明确验收命令重试", f"checkpoint mission start --resume {_ps_quote(mission_id)} --execute --test-command \"<your test command>\""))
+            commands.append(("带明确验收命令重试", f"checkpoint mission resume --mission {_ps_quote(mission_id)} --execute --test-command \"<your test command>\""))
     elif stop_reason == "command_timeout":
         suggested = command_verification.get("suggested_timeout_seconds") or 1800
         if mission_id:
-            commands.append(("增加超时后重试", f"checkpoint mission start --resume {_ps_quote(mission_id)} --execute --timeout-seconds {suggested:g}"))
+            commands.append(("增加超时后重试", f"checkpoint mission resume --mission {_ps_quote(mission_id)} --execute --timeout-seconds {suggested:g}"))
     elif stop_reason == "verified":
         branch = str(merge.get("branch") or worktree.get("branch") or "")
         if str(merge.get("status") or "") in {"merged", "nothing_to_merge"}:
@@ -1509,7 +1591,7 @@ def _next_step_commands(
     else:
         if mission_id:
             commands.append(("查看任务状态", f"checkpoint mission status --mission {_ps_quote(mission_id)}"))
-            commands.append(("按原任务重试", f"checkpoint mission start --resume {_ps_quote(mission_id)} --execute"))
+            commands.append(("按原任务重试", f"checkpoint mission resume --mission {_ps_quote(mission_id)} --execute"))
     if not commands:
         commands.append(("列出任务", "checkpoint mission list"))
     return commands
@@ -1596,7 +1678,7 @@ def _status_next_action(mission: dict[str, Any]) -> str:
     if status == "background_running":
         return "Background run is active. Check the progress field for stage, activity, product changes, and verification state."
     if status == "preview" and stop_reason == "preview_only":
-        return "Run `mission start --resume <mission_id> --execute` to execute this previewed mission."
+        return "Run `checkpoint mission resume --mission <mission_id> --execute` to execute this previewed mission."
     if status == "verified":
         return "Mission verified. Run `checkpoint mission list` to review, or `git log` to see the merged commit."
     if status == "verified_blocked":

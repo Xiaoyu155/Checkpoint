@@ -21,6 +21,7 @@ class TestBoardColumn:
     def test_running_is_in_progress(self):
         assert board_column("running") == "in_progress"
         assert board_column("preview_running") == "in_progress"
+        assert board_column("background_running") == "in_progress"
 
     def test_verified_unmerged_is_pending_merge(self):
         assert board_column("verified") == "pending_merge"

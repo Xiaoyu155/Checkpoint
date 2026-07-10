@@ -2,7 +2,8 @@ services:
   - type: web
     name: visual-agent-cloud-api
     env: docker
-    dockerfilePath: ./cloud_api/Dockerfile
+    dockerfilePath: ./xiao/cloud_api/Dockerfile
+    dockerContext: .
     plan: starter
     healthCheckPath: /api/health
     envVars:
@@ -16,7 +17,8 @@ services:
   - type: worker
     name: visual-agent-cloud-worker
     env: docker
-    dockerfilePath: ./cloud_api/Dockerfile
+    dockerfilePath: ./xiao/cloud_api/Dockerfile
+    dockerContext: .
     plan: starter
     startCommand: celery -A cloud_api.worker.celery_app worker --loglevel=info
     envVars:

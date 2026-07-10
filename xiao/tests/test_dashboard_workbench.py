@@ -573,6 +573,8 @@ def test_dashboard_html_has_mission_desk_and_relay_rail():
     assert "deleteAllMissions" in DASHBOARD_HTML
     assert "清理非运行任务" in DASHBOARD_HTML
     assert "mergeMission" in DASHBOARD_HTML
+    assert "确认把这个已验收任务合并到主分支" in DASHBOARD_HTML
+    assert "重试会再次消耗模型额度" in DASHBOARD_HTML
     assert "diffSection" in DASHBOARD_HTML
 
 

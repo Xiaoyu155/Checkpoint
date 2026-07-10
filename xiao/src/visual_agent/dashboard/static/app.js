@@ -37,7 +37,8 @@ const STOP_REASON = {
 function srInfo(code){ return STOP_REASON[code] || { zh: code||'', fix:'' }; }
 
 const STATUS_ZH = {
-  created:'待执行', running:'执行中', preview_running:'预览中', preview:'预览完成',
+  created:'待执行', running:'执行中', background_running:'后台执行中', preview_running:'预览中', preview:'预览完成',
+  retrying:'重试派发中', retried:'已重新派发',
   verified:'验收通过', verified_blocked:'验收通过但阻断', merged:'已合并', archived:'已删除', stopped:'已停止', failed:'失败',
 };
 const zh = s => STATUS_ZH[s] || s;
@@ -68,7 +69,7 @@ function stClass(s){
   const t=(s||'').toLowerCase();
   if(t==='verified') return 'st-verified';
   if(t==='verified_blocked') return 'st-stopped';
-  if(t==='running'||t==='preview_running') return 'st-running';
+  if(t==='running'||t==='background_running'||t==='preview_running'||t==='retrying') return 'st-running';
   if(t==='stopped'||t==='failed') return 'st-stopped';
   if(t==='merged') return 'st-merged';
   if(t==='preview') return 'st-preview';
@@ -201,14 +202,16 @@ async function toggleWorker(){
   await load();
 }
 function updateWorker(w){
-  _workerRunning = !!(w&&w.running);
+  const elsewhere = !!(w&&w.running&&w.active_for_workspace===false);
+  _workerRunning = !!(w&&w.running&&!elsewhere);
   const dot = document.getElementById('wDot');
   const lbl = document.getElementById('wLabel');
   const btn = document.getElementById('btnWorker');
-  dot.className = 'wdot' + (_workerRunning?' on':'');
-  lbl.textContent = _workerRunning ? 'Worker 运行中' : 'Worker 已停止';
-  btn.textContent = _workerRunning ? '停止' : '启动 Worker';
+  dot.className = 'wdot' + ((w&&w.running)?' on':'');
+  lbl.textContent = elsewhere ? 'Worker 正在其他项目运行' : (_workerRunning ? 'Worker 运行中' : 'Worker 已停止');
+  btn.textContent = elsewhere ? '先切回原项目' : (_workerRunning ? '停止' : '启动 Worker');
   btn.className = _workerRunning ? 'danger' : 'ghost';
+  btn.disabled = elsewhere;
 }
 
 // ---------- 项目切换 ----------
@@ -293,6 +296,7 @@ async function startMission(execute){
   const repoRoot = document.getElementById('fRepo').value.trim() || _inferRepoFromGoal(goal) || '';
   const testCommand = document.getElementById('fTest').value.trim();
   const agent = document.getElementById('fAgent').value;
+  const dispatchMode = document.getElementById('fDispatchMode').value || 'tracked';
   const intakeAnswers = (_mainIntakeState.answers || []).filter(Boolean);
   const intakeContract = intake ? {...intake, answers: intakeAnswers} : null;
   if(execute && !testCommand && !_isFieldVerificationGoal(goal) && !/review|plan|审查|计划/i.test(goal)){
@@ -310,6 +314,7 @@ async function startMission(execute){
     repo_root: repoRoot,
     test_command: testCommand,
     agent,
+    dispatch_mode: dispatchMode,
     merge_policy: document.getElementById('fAutoMerge').checked ? 'auto' : 'manual',
     execute: !!execute,
     intake: intakeContract,
@@ -642,6 +647,7 @@ function applyMainDraftToMission(){
 // ---------- 合并 / 重试 ----------
 async function mergeMission(ev, id){
   ev.stopPropagation();
+  if(!confirm('确认把这个已验收任务合并到主分支？合并会直接修改当前项目的主分支。')) return;
   const btn = ev.target; btn.disabled=true; btn.textContent='合并中…';
   try{
     const r = await (await fetch('/api/mission/merge',{method:'POST',
@@ -654,6 +660,7 @@ async function mergeMission(ev, id){
 
 async function retryMission(ev, id){
   ev.stopPropagation();
+  if(!confirm('确认使用原仓库、目标和验收命令重新派发？重试会再次消耗模型额度。')) return;
   const btn = ev.target; btn.disabled=true; btn.textContent='重试中…';
   try{
     const r = await (await fetch('/api/mission/retry',{method:'POST',
@@ -674,6 +681,7 @@ async function loadMissionToComposer(ev, id){
     document.getElementById('fRepo').value = m.repo_root || '';
     document.getElementById('fTest').value = _userFacingTestCommand(m.test_command || evd.verification_command || '');
     if(m.agent) document.getElementById('fAgent').value = m.agent;
+    if(m.dispatch_mode) document.getElementById('fDispatchMode').value = m.dispatch_mode;
     closeDrawer();
     switchWorkbenchView('mission-control', '#fGoal');
     toast('已填回任务合同，可以补验收命令后预览或派发');
@@ -717,7 +725,7 @@ async function deleteAllMissions(ev){
   }catch(e){ toast('全部删除失败：'+e, false); }
   finally{
     btn.disabled = false;
-    btn.textContent = '全部删除';
+    btn.textContent = '清理非运行任务';
   }
   load();
 }
@@ -772,7 +780,7 @@ function toggleMissionDetails(ev, id){
 function missionCard(m){
   const sr = srInfo(m.stop_reason);
   const isStopped = m.status==='stopped'||m.status==='failed';
-  const canDelete = !['running','preview_running','starting','verified','merged','archived'].includes(String(m.status||''));
+  const canDelete = !['running','background_running','preview_running','retrying','starting','verified','merged','archived'].includes(String(m.status||''));
   const eff = m.efficiency || {};
   const ev = m.pacer_evidence || {};
   const commandMode = String(m.verification_mode || ev.verification_mode || '').toLowerCase() === 'command';
@@ -783,7 +791,7 @@ function missionCard(m){
     ? `<button class="act-merge" onclick="mergeMission(event,'${esc(m.mission_id)}')">✓ 合并</button>` : '';
   const retryBtn = isStopped && hasStop
     ? `<button class="act-retry" onclick="retryMission(event,'${esc(m.mission_id)}')">↺ 重试</button>` : '';
-  const loadBtn = !['running','preview_running','starting','merged','archived'].includes(String(m.status||''))
+  const loadBtn = !['running','background_running','preview_running','retrying','starting','merged','archived'].includes(String(m.status||''))
     ? `<button class="act-retry" onclick="loadMissionToComposer(event,'${esc(m.mission_id)}')">填回</button>` : '';
   const deleteBtn = canDelete
     ? `<button class="act-delete" onclick="deleteMission(event,'${esc(m.mission_id)}')">删除</button>` : '';
@@ -828,7 +836,7 @@ function missionRow(m){
   const sr = srInfo(m.stop_reason);
   const status = String(m.status || '');
   const isStopped = status==='stopped'||status==='failed';
-  const canDelete = !['running','preview_running','starting','verified','merged','archived'].includes(status);
+  const canDelete = !['running','background_running','preview_running','retrying','starting','verified','merged','archived'].includes(status);
   const eff = m.efficiency || {};
   const ev = m.pacer_evidence || {};
   const commandMode = String(m.verification_mode || ev.verification_mode || '').toLowerCase() === 'command';
@@ -837,7 +845,7 @@ function missionRow(m){
   const activity = _activityBlock(m);
   const mergeBtn = m.can_merge ? `<button class="act-merge" onclick="mergeMission(event,'${esc(m.mission_id)}')">合并</button>` : '';
   const retryBtn = isStopped && hasStop ? `<button class="act-retry" onclick="retryMission(event,'${esc(m.mission_id)}')">重试</button>` : '';
-  const loadBtn = !['running','preview_running','starting','merged','archived'].includes(status)
+  const loadBtn = !['running','background_running','preview_running','retrying','starting','merged','archived'].includes(status)
     ? `<button class="act-retry" onclick="loadMissionToComposer(event,'${esc(m.mission_id)}')">填回</button>` : '';
   const deleteBtn = canDelete ? `<button class="act-delete" onclick="deleteMission(event,'${esc(m.mission_id)}')">删除</button>` : '';
   const clarifyBtn = (!commandMode && (m.stop_reason==='needs_clarification' || m.stop_reason==='coverage_gap'))
@@ -1349,7 +1357,7 @@ async function detail(id){
   const commandMode = String(m.verification_mode || ev.verification_mode || '').toLowerCase() === 'command';
   const hasStop=m.stop_reason&&m.stop_reason!=='verified'&&!(commandMode&&m.stop_reason==='coverage_gap');
   const canRetry=isStopped&&hasStop;
-  const canDelete=!['running','preview_running','starting','verified','merged','archived'].includes(String(m.status||''));
+  const canDelete=!['running','background_running','preview_running','retrying','starting','verified','merged','archived'].includes(String(m.status||''));
 
   const mergeBtn=d.can_merge?`<button class="act-merge" style="padding:6px 14px;font-size:12px;" onclick="mergeMission(event,'${esc(m.mission_id)}')">✓ 合并到主分支</button>`:'';
   const clarifyBtn=(!commandMode&&(m.stop_reason==='needs_clarification'||m.stop_reason==='coverage_gap'))?`<button class="act-retry" style="padding:6px 14px;font-size:12px;" onclick="openTaskIntake('${jsq(m.objective||'')}')">继续确认任务</button>`:'';
@@ -1379,6 +1387,7 @@ async function detail(id){
     ? `<h3>执行证据</h3><div class="detail-evidence">
         <div class="evi"><span>Worker</span><code>${esc(ev.worker_status||'-')}${ev.worker_exit_code!==undefined&&ev.worker_exit_code!==null?` exit ${esc(ev.worker_exit_code)}`:''}</code></div>
         <div class="evi"><span>后端 / 模型</span><code>${esc(ev.backend||ev.agent||'-')} ${esc(ev.model||'')}</code></div>
+        <div class="evi"><span>派工 / 推理</span><code>${esc(ev.dispatch_mode||m.dispatch_mode||'tracked')} · ${esc(ev.reasoning_effort||'inherit')}</code></div>
         <div class="evi"><span>验收结果</span><code>${esc(ev.verification_verdict||'-')}</code></div>
         <div class="evi"><span>验收命令</span><code>${esc(ev.verification_command||rv.command||'')}</code></div>
         <div class="evi wide"><span>Worktree</span><code>${esc(ev.worktree||'')}</code></div>

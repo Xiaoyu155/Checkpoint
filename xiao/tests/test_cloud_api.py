@@ -13,6 +13,28 @@ from visual_agent.visual_status import append_cloud_run_history, read_run_histor
 from visual_agent.workspace import init_workspace
 
 
+def configure_cloud_identity(
+    monkeypatch,
+    *,
+    org: str = "team-a",
+    user_id: str = "alice",
+    run_profile: str = "dry-run",
+    key=None,
+):
+    key = key or generate_api_key(salt="test-salt")
+    monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY_SHA256", key.sha256)
+    monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY_SALT", key.salt)
+    monkeypatch.setenv("VISUAL_AGENT_CLOUD_ORG", org)
+    monkeypatch.setenv("VISUAL_AGENT_CLOUD_USER", user_id)
+    monkeypatch.setenv("VISUAL_AGENT_CLOUD_RUN_PROFILE", run_profile)
+    headers = {
+        "Authorization": f"Bearer {key.token}",
+        "X-Visual-Agent-Org": org,
+        "X-Visual-Agent-User": user_id,
+    }
+    return key, headers
+
+
 def test_cloud_api_run_request_accepts_workflow_alias_and_normalizes_inputs() -> None:
     request = RunRequest.from_payload(
         {
@@ -113,8 +135,79 @@ def test_cloud_api_token_issuer_is_disabled_by_default(tmp_path, monkeypatch) ->
     assert "token_issuer_disabled" in text
 
 
+def test_cloud_api_protected_endpoints_fail_closed_without_auth_config(tmp_path, monkeypatch) -> None:
+    for name in (
+        "VISUAL_AGENT_CLOUD_API_KEY_SHA256",
+        "VISUAL_AGENT_CLOUD_API_KEY_SALT",
+        "VISUAL_AGENT_CLOUD_ORG",
+        "VISUAL_AGENT_CLOUD_USER",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    called = False
+
+    def unexpected_execution(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("unauthenticated workflow execution must not be reached")
+
+    monkeypatch.setattr("cloud_api.main.execute_workflow_run", unexpected_execution)
+    client = TestClient(create_app(workspace_root=workspace.root))
+    health = client.get("/api/health")
+    public_catalog = client.get("/api/workflows")
+    run = client.post(
+        "/api/runs",
+        json={"workflow_yaml": "schema_version: 1\nname: forbidden\nsteps: []", "run_profile": "approved"},
+    )
+
+    assert health.status_code == 200
+    assert public_catalog.status_code == 200
+    assert run.status_code == 503
+    assert called is False
+
+
+def test_cloud_api_request_cannot_raise_server_run_profile(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    _, headers = configure_cloud_identity(monkeypatch, run_profile="dry-run")
+    client = TestClient(create_app(workspace_root=workspace.root))
+    response = client.post(
+        "/api/runs",
+        headers=headers,
+        json={
+            "workflow_yaml": "schema_version: 1\nname: forbidden\nversion: 1\nsteps: []",
+            "workflow_source": "inline",
+            "run_profile": "approved",
+        },
+    )
+
+    assert response.status_code == 403
+    assert "exceeds server-permitted" in response.json()["detail"]
+    assert not (workspace.workflows_dir / ".cloud_inline").exists()
+    assert list(workspace.reports_dir.glob("*.json")) == []
+
+
+def test_cloud_api_rejects_conflicting_payload_identity(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    _, headers = configure_cloud_identity(monkeypatch, org="team-a", user_id="alice")
+    client = TestClient(create_app(workspace_root=workspace.root))
+    response = client.post(
+        "/api/runs",
+        headers=headers,
+        json={
+            "workflow_name": "missing",
+            "org": "team-b",
+            "user_id": "bob",
+            "run_profile": "dry-run",
+        },
+    )
+
+    assert response.status_code == 403
+    assert list(workspace.reports_dir.glob("*.json")) == []
+
+
 def test_cloud_api_writes_redacted_audit_log(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("VISUAL_AGENT_CLOUD_ENABLE_TOKEN_ISSUER", "1")
+    _, headers = configure_cloud_identity(monkeypatch)
     app = create_app(workspace_root=tmp_path / "workspace", audit_log=tmp_path / "audit" / "cloud_api.jsonl")
     assert app is not None
 
@@ -123,7 +216,7 @@ def test_cloud_api_writes_redacted_audit_log(tmp_path, monkeypatch) -> None:
 
     client = TestClient(app)
     assert client.get("/api/health").status_code == 200
-    token_response = client.post("/api/auth/token")
+    token_response = client.post("/api/auth/token", headers=headers)
     assert token_response.status_code == 200
     token = token_response.json()["token"]
 
@@ -160,21 +253,19 @@ steps:
     text: Ready
   - id: assert_no_error
     action: assert_no_error
-""".strip()
+    """.strip()
     workflow_path = workspace.workflows_dir / "public_profile.yaml"
     workflow_path.write_text(workflow_yaml, encoding="utf-8")
+    _, headers = configure_cloud_identity(monkeypatch)
     app = create_app(workspace_root=workspace.root, audit_log=tmp_path / "audit" / "cloud_api.jsonl")
     client = TestClient(app)
 
     listed = client.get("/api/workflows")
     searched = client.get("/api/workflows/search", params={"q": "profile"})
 
-    key = generate_api_key(salt="test-salt")
-    monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY_SHA256", key.sha256)
-    monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY_SALT", "test-salt")
     published = client.post(
         "/api/workflows/publish",
-        headers={"Authorization": f"Bearer {key.token}"},
+        headers=headers,
         json={"workflow_yaml": workflow_yaml, "min_quality_score": 0.6},
     )
     reloaded = TestClient(create_app(workspace_root=workspace.root, audit_log=tmp_path / "audit" / "cloud_api.jsonl"))
@@ -198,7 +289,7 @@ steps:
     assert download.json()["workflow_yaml"].strip().startswith("schema_version: 1")
     deleted = client.delete(
         f"/api/workflows/{published.json().get('id')}",
-        headers={"Authorization": f"Bearer {key.token}"},
+        headers=headers,
     )
     after_delete = reloaded.get("/api/workflows")
     assert listed_after_restart.status_code == 200
@@ -235,35 +326,32 @@ steps:
   - id: assert_no_error
     action: assert_no_error
 """.strip()
-    app = create_app(workspace_root=workspace.root, audit_log=tmp_path / "audit" / "cloud_api.jsonl")
-    client = TestClient(app)
-    key = generate_api_key(salt="test-salt")
-    monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY_SHA256", key.sha256)
-    monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY_SALT", "test-salt")
+    key, headers_a = configure_cloud_identity(monkeypatch, org="team-a", user_id="alice")
+    client_a = TestClient(create_app(workspace_root=workspace.root, audit_log=tmp_path / "audit" / "cloud_api.jsonl"))
 
-    headers_a = {
-        "Authorization": f"Bearer {key.token}",
-        "X-Visual-Agent-Org": "team-a",
-        "X-Visual-Agent-User": "alice",
-    }
-    headers_b = {
-        "Authorization": f"Bearer {key.token}",
-        "X-Visual-Agent-Org": "team-b",
-        "X-Visual-Agent-User": "bob",
-    }
-
-    published_a = client.post(
+    published_a = client_a.post(
         "/api/workflows/publish",
         headers=headers_a,
         json={"workflow_yaml": workflow_yaml, "min_quality_score": 0.6},
     )
-    listed_a = client.get("/api/workflows", headers=headers_a)
-    listed_b = client.get("/api/workflows", headers=headers_b)
-    detail_a = client.get(f"/api/workflows/{published_a.json().get('id')}", headers=headers_a)
-    detail_b = client.get(f"/api/workflows/{published_a.json().get('id')}", headers=headers_b)
-    deleted_a = client.delete(f"/api/workflows/{published_a.json().get('id')}", headers=headers_a)
-    listed_a_after_delete = client.get("/api/workflows", headers=headers_a)
-    listed_b_after_delete = client.get("/api/workflows", headers=headers_b)
+    listed_a = client_a.get("/api/workflows", headers=headers_a)
+    detail_a = client_a.get(f"/api/workflows/{published_a.json().get('id')}", headers=headers_a)
+    forged_scope = client_a.get(
+        "/api/workflows",
+        headers={
+            "Authorization": f"Bearer {key.token}",
+            "X-Visual-Agent-Org": "team-b",
+            "X-Visual-Agent-User": "bob",
+        },
+    )
+
+    _, headers_b = configure_cloud_identity(monkeypatch, org="team-b", user_id="bob", key=key)
+    client_b = TestClient(create_app(workspace_root=workspace.root, audit_log=tmp_path / "audit" / "cloud_api.jsonl"))
+    listed_b = client_b.get("/api/workflows", headers=headers_b)
+    detail_b = client_b.get(f"/api/workflows/{published_a.json().get('id')}", headers=headers_b)
+    deleted_a = client_a.delete(f"/api/workflows/{published_a.json().get('id')}", headers=headers_a)
+    listed_a_after_delete = client_a.get("/api/workflows", headers=headers_a)
+    listed_b_after_delete = client_b.get("/api/workflows", headers=headers_b)
 
     assert published_a.status_code == 200
     assert published_a.json()["status"] == "published"
@@ -273,6 +361,7 @@ steps:
     assert listed_a.json()["workflows"][0]["org"] == "team-a"
     assert listed_b.status_code == 200
     assert listed_b.json()["workflows"] == []
+    assert forged_scope.status_code == 403
     assert detail_a.status_code == 200
     assert detail_a.json()["workflow"]["name"] == "team_shared_profile"
     assert detail_b.status_code == 404
@@ -302,22 +391,8 @@ steps:
     action: assert_text
     text: Ready
 """.strip()
-    app = create_app(workspace_root=workspace.root, audit_log=tmp_path / "audit" / "cloud_api.jsonl")
-    client = TestClient(app)
-    key = generate_api_key(salt="test-salt")
-    monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY_SHA256", key.sha256)
-    monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY_SALT", "test-salt")
-
-    headers_a = {
-        "Authorization": f"Bearer {key.token}",
-        "X-Visual-Agent-Org": "team-a",
-        "X-Visual-Agent-User": "alice",
-    }
-    headers_b = {
-        "Authorization": f"Bearer {key.token}",
-        "X-Visual-Agent-Org": "team-b",
-        "X-Visual-Agent-User": "bob",
-    }
+    key, headers_a = configure_cloud_identity(monkeypatch, org="team-a", user_id="alice")
+    client = TestClient(create_app(workspace_root=workspace.root, audit_log=tmp_path / "audit" / "cloud_api.jsonl"))
 
     published = client.post(
         "/api/workflows/publish",
@@ -326,7 +401,18 @@ steps:
     )
     listed_a = client.get("/api/workflows", headers=headers_a)
     searched_a = client.get("/api/workflows/search", headers=headers_a, params={"q": "private"})
-    listed_b = client.get("/api/workflows", headers=headers_b)
+    anonymous_list = client.get("/api/workflows")
+    anonymous_search = client.get("/api/workflows/search", params={"q": "private"})
+    anonymous_detail = client.get(f"/api/workflows/{published.json().get('id')}")
+    anonymous_download = client.get(f"/api/workflows/{published.json().get('id')}/download")
+    forged_scope = client.get(
+        "/api/workflows",
+        headers={
+            "Authorization": f"Bearer {key.token}",
+            "X-Visual-Agent-Org": "team-b",
+            "X-Visual-Agent-User": "bob",
+        },
+    )
 
     assert published.status_code == 200
     assert published.json()["visibility"] == "private"
@@ -337,8 +423,66 @@ steps:
     assert listed_a.json()["workflows"][0]["owner_user_id"] == "alice"
     assert searched_a.status_code == 200
     assert searched_a.json()["workflows"][0]["name"] == "team_private_profile"
-    assert listed_b.status_code == 200
-    assert listed_b.json()["workflows"] == []
+    assert anonymous_list.json()["workflows"] == []
+    assert anonymous_search.json()["workflows"] == []
+    assert anonymous_detail.status_code == 404
+    assert anonymous_download.status_code == 404
+    assert forged_scope.status_code == 403
+
+
+def test_cloud_api_owner_checks_protect_publish_delete_and_private_run(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    workflow_yaml = """
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: owner_private_profile
+version: 1
+description: Owner protected private workflow
+tags: [verification, private]
+visibility: private
+author: visual-agent-team
+license: cc-by-4.0
+steps:
+  - id: observe
+    action: observe_html
+    path: fixtures/profile.html
+  - id: assert_ready
+    action: assert_text
+    text: Ready
+""".strip()
+    key, alice_headers = configure_cloud_identity(monkeypatch, org="team-a", user_id="alice")
+    alice = TestClient(create_app(workspace_root=workspace.root))
+    published = alice.post(
+        "/api/workflows/publish",
+        headers=alice_headers,
+        json={"workflow_yaml": workflow_yaml, "visibility": "private", "min_quality_score": 0.1},
+    )
+    assert published.status_code == 200
+    workflow_id = published.json()["id"]
+
+    _, bob_headers = configure_cloud_identity(monkeypatch, org="team-a", user_id="bob", key=key)
+    bob = TestClient(create_app(workspace_root=workspace.root))
+    republish = bob.post(
+        "/api/workflows/publish",
+        headers=bob_headers,
+        json={"workflow_yaml": workflow_yaml, "visibility": "private", "min_quality_score": 0.1},
+    )
+    delete = bob.delete(f"/api/workflows/{workflow_id}", headers=bob_headers)
+    run = bob.post(
+        "/api/runs",
+        headers=bob_headers,
+        json={
+            "workflow_name": "owner_private_profile",
+            "workflow_source": "marketplace",
+            "workflow_id": workflow_id,
+            "run_profile": "dry-run",
+        },
+    )
+
+    assert republish.status_code == 403
+    assert delete.status_code == 403
+    assert run.status_code == 403
+    assert alice.get(f"/api/workflows/{workflow_id}", headers=alice_headers).status_code == 200
 
 
 def test_cloud_api_catalog_migrates_legacy_fields(tmp_path) -> None:
@@ -399,8 +543,14 @@ def test_cloud_api_runs_are_scoped_by_org_and_user(tmp_path, monkeypatch) -> Non
     (workspace.workflows_dir / "ready.yaml").write_text(
         """
 schema_version: 1
+min_runtime_version: "0.1.0"
 name: ready
 version: 1
+description: Ready marketplace workflow
+tags: [verification]
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
 steps:
   - id: observe
     action: observe_html
@@ -411,17 +561,8 @@ steps:
 """.strip(),
         encoding="utf-8",
     )
-    app = create_app(workspace_root=workspace.root, audit_log=tmp_path / "audit" / "cloud_api.jsonl")
-    client = TestClient(app)
-    key = generate_api_key(salt="test-salt")
-    monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY_SHA256", key.sha256)
-    monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY_SALT", "test-salt")
-
-    headers_a = {
-        "Authorization": f"Bearer {key.token}",
-        "X-Visual-Agent-Org": "team-a",
-        "X-Visual-Agent-User": "alice",
-    }
+    key, headers_a = configure_cloud_identity(monkeypatch, org="team-a", user_id="alice")
+    client = TestClient(create_app(workspace_root=workspace.root, audit_log=tmp_path / "audit" / "cloud_api.jsonl"))
     headers_b = {
         "Authorization": f"Bearer {key.token}",
         "X-Visual-Agent-Org": "team-b",
@@ -445,9 +586,9 @@ steps:
     assert same_scope.status_code == 200
     assert same_scope.json()["org"] == "team-a"
     assert same_scope.json()["user_id"] == "alice"
-    assert cross_scope.status_code == 404
+    assert cross_scope.status_code == 403
     assert same_scope_artifacts.status_code == 200
-    assert cross_scope_artifacts.status_code == 404
+    assert cross_scope_artifacts.status_code == 403
 
 
 def test_cloud_api_run_response_preserves_workflow_source_and_id(tmp_path, monkeypatch) -> None:
@@ -456,8 +597,14 @@ def test_cloud_api_run_response_preserves_workflow_source_and_id(tmp_path, monke
     (workspace.workflows_dir / "ready.yaml").write_text(
         """
 schema_version: 1
+min_runtime_version: "0.1.0"
 name: ready
 version: 1
+description: Ready marketplace workflow
+tags: [verification]
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
 steps:
   - id: observe
     action: observe_html
@@ -468,24 +615,18 @@ steps:
 """.strip(),
         encoding="utf-8",
     )
-    app = create_app(workspace_root=workspace.root, audit_log=tmp_path / "audit" / "cloud_api.jsonl")
-    client = TestClient(app)
-    key = generate_api_key(salt="test-salt")
-    monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY_SHA256", key.sha256)
-    monkeypatch.setenv("VISUAL_AGENT_CLOUD_API_KEY_SALT", "test-salt")
-
-    headers = {
-        "Authorization": f"Bearer {key.token}",
-        "X-Visual-Agent-Org": "team-a",
-        "X-Visual-Agent-User": "alice",
-    }
+    _, headers = configure_cloud_identity(monkeypatch, org="team-a", user_id="alice")
+    client = TestClient(create_app(workspace_root=workspace.root, audit_log=tmp_path / "audit" / "cloud_api.jsonl"))
+    catalog = client.get("/api/workflows")
+    assert catalog.status_code == 200
+    assert catalog.json()["workflows"][0]["id"] == "ready"
     created = client.post(
         "/api/runs",
         headers=headers,
         json={
             "workflow_name": "ready",
             "workflow_source": "marketplace",
-            "workflow_id": "wf_000123",
+            "workflow_id": "ready",
             "workspace": str(workspace.root),
             "run_profile": "dry-run",
         },
@@ -495,7 +636,7 @@ steps:
 
     assert created.status_code == 200
     assert created.json()["workflow_source"] == "marketplace"
-    assert created.json()["workflow_id"] == "wf_000123"
+    assert created.json()["workflow_id"] == "ready"
     assert fetched.status_code == 200
     assert fetched.json()["workflow_source"] == "marketplace"
-    assert fetched.json()["workflow_id"] == "wf_000123"
+    assert fetched.json()["workflow_id"] == "ready"

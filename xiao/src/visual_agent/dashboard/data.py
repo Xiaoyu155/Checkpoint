@@ -175,7 +175,7 @@ def _build_dashboard_data_uncached(root: Path) -> dict[str, Any]:
     subscription_summary = quota_summary(subscription_snapshot)
     commercial_config = load_commercial_config()
     status = _read_status(root)
-    worker = worker_status()
+    worker = worker_status(root)
     value = _build_value(root, missions, plans)
 
     counts: dict[str, int] = {}
@@ -217,7 +217,7 @@ def _build_dashboard_data_uncached(root: Path) -> dict[str, Any]:
         "plans": plans,
         "queue": queue,
         "programs": programs,
-        "launches": _launch_snapshot(),
+        "launches": _launch_snapshot(root),
         "work_traces": _build_work_traces(root, missions=missions, plans=plans, queue=queue, programs=programs),
         "worker": worker,
         "core_readiness": _build_core_readiness(
@@ -710,7 +710,7 @@ def _build_work_traces(
             }
         )
 
-    for launch in sorted(_launch_snapshot(), key=lambda item: str(item.get("started_at") or ""), reverse=True)[:10]:
+    for launch in sorted(_launch_snapshot(root), key=lambda item: str(item.get("started_at") or ""), reverse=True)[:10]:
         launch_id = str(launch.get("launch_id") or "")
         state = str(launch.get("state") or "starting")
         goal = str(launch.get("goal") or "未命名任务")
@@ -954,20 +954,34 @@ _LAUNCHES: dict[str, dict[str, Any]] = {}
 _LAUNCH_LOCK = threading.Lock()
 
 _WORKER_PROC: subprocess.Popen[bytes] | None = None
+_WORKER_WORKSPACE: Path | None = None
 _WORKER_LOCK = threading.Lock()
 
 
-def _launch_snapshot() -> list[dict[str, Any]]:
+def _launch_snapshot(workspace_root: str | Path | None = None) -> list[dict[str, Any]]:
+    expected = str(Path(workspace_root).expanduser().resolve()) if workspace_root is not None else ""
     with _LAUNCH_LOCK:
-        return [dict(item) for item in _LAUNCHES.values()]
+        return [
+            dict(item)
+            for item in _LAUNCHES.values()
+            if not expected or str(item.get("workspace_root") or "") == expected
+        ]
 
 
-def worker_status() -> dict[str, Any]:
-    global _WORKER_PROC
+def worker_status(workspace_root: str | Path | None = None) -> dict[str, Any]:
+    global _WORKER_PROC, _WORKER_WORKSPACE
+    expected = Path(workspace_root).expanduser().resolve() if workspace_root is not None else None
     with _WORKER_LOCK:
         if _WORKER_PROC is None:
-            return {"running": False, "pid": None}
+            return {"running": False, "pid": None, "workspace_root": "", "active_for_workspace": False}
         if _WORKER_PROC.poll() is not None:
             _WORKER_PROC = None
-            return {"running": False, "pid": None}
-        return {"running": True, "pid": _WORKER_PROC.pid}
+            _WORKER_WORKSPACE = None
+            return {"running": False, "pid": None, "workspace_root": "", "active_for_workspace": False}
+        worker_root = _WORKER_WORKSPACE.resolve() if _WORKER_WORKSPACE is not None else None
+        return {
+            "running": True,
+            "pid": _WORKER_PROC.pid,
+            "workspace_root": str(worker_root or ""),
+            "active_for_workspace": expected is None or worker_root == expected,
+        }

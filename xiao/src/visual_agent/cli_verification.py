@@ -5,6 +5,7 @@ from typing import Any
 
 from .codex_check import codex_check_to_markdown, run_codex_check
 from .connect import connect_platform, connect_result_to_dict
+from .execution_alignment import build_worker_prompt_alignment_check
 from .models import to_jsonable
 from .workspace import open_workspace
 
@@ -74,8 +75,22 @@ def handle_verification_command(args: Any, *, codex_runner: Any = None) -> int:
             run_profile=args.run_profile,
             from_step=args.from_step,
         )
+        execution_alignment = (
+            build_worker_prompt_alignment_check()
+            if getattr(args, "strict", False)
+            else None
+        )
         if args.format == "markdown":
             print(codex_check_to_markdown(result))
+            if execution_alignment is not None:
+                print(
+                    "[codex-check] Worker prompt alignment: "
+                    + str(execution_alignment.get("status") or "")
+                    + f" ({execution_alignment.get('issue_count') or 0} issue(s))"
+                )
+                for issue in execution_alignment.get("issues", [])[:5]:
+                    if isinstance(issue, dict):
+                        print(f"  {issue.get('code')}: {issue.get('message')}")
         else:
             payload = to_jsonable(result)
             payload.update(
@@ -87,8 +102,12 @@ def handle_verification_command(args: Any, *, codex_runner: Any = None) -> int:
                     "verdict": result.verdict,
                 }
             )
+            if execution_alignment is not None:
+                payload["execution_alignment"] = execution_alignment
             print(json.dumps(payload, ensure_ascii=False, indent=2))
         if result.failed:
+            return 1
+        if execution_alignment is not None and execution_alignment.get("status") == "blocked":
             return 1
         if getattr(args, "strict", False) and result.verdict == "coverage_gap":
             return 1

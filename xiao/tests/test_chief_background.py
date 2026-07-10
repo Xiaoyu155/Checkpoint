@@ -103,6 +103,43 @@ def test_start_background_chief_run_records_process(tmp_path, monkeypatch) -> No
     assert saved["merge"] is True
 
 
+def test_start_background_chief_run_blocks_duplicate_live_process(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    write_verification_workflow(workspace, "checkout", affects="src/payment/")
+    monkeypatch.setattr("visual_agent.chief_engineer.changed_files", lambda **_kwargs: ["src/payment/checkout.py"])
+    preview = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        dispatch_runner=preview_payload,
+    )
+    mission_id = preview["mission"]["mission_id"]
+    launches = []
+
+    class FakeProcess:
+        pid = 43210
+
+    def fake_popen(argv, **kwargs):
+        launches.append((argv, kwargs))
+        return FakeProcess()
+
+    monkeypatch.setattr("visual_agent.chief_background.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "visual_agent.chief_background.process_status",
+        lambda pid: {"pid": pid, "alive": pid == 43210, "exit_code": None},
+    )
+
+    first = start_background_chief_run(workspace_root=workspace.root, mission_id=mission_id)
+    saved_before = (workspace.root / "missions" / mission_id / "background.json").read_text(encoding="utf-8")
+    second = start_background_chief_run(workspace_root=workspace.root, mission_id=mission_id)
+
+    assert first["status"] == "background_started"
+    assert second["status"] == "blocked"
+    assert second["stop_reason"] == "background_already_running"
+    assert len(launches) == 1
+    assert (workspace.root / "missions" / mission_id / "background.json").read_text(encoding="utf-8") == saved_before
+
+
 def test_run_background_worker_writes_completion_receipt(tmp_path, monkeypatch) -> None:
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     write_verification_workflow(workspace, "checkout", affects="src/payment/")

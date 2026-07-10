@@ -51,6 +51,71 @@ def test_codex_check_cli_returns_zero_when_all_selected_workflows_pass(tmp_path,
     assert payload["inspection_only"] == 0
 
 
+def test_codex_check_strict_blocks_worker_prompt_alignment_regression(tmp_path, monkeypatch, capsys) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+    monkeypatch.setattr(
+        "visual_agent.cli.run_codex_check",
+        lambda *_args, **_kwargs: CodexCheckResult(
+            changed_files=["src/app.py"],
+            selected_workflows=["app"],
+            skipped_slow_workflows=[],
+            results=[CodexWorkflowCheck(name="app", status="passed", step_count=1, elapsed_seconds=0.01)],
+        ),
+    )
+    monkeypatch.setattr(
+        "visual_agent.cli_verification.build_worker_prompt_alignment_check",
+        lambda: {
+            "status": "blocked",
+            "issue_count": 1,
+            "issues": [{"code": "repository_scan_ban", "message": "Do not restrict exploration."}],
+        },
+    )
+
+    code = main(
+        [
+            "codex-check",
+            "--workspace-root",
+            str(workspace.root),
+            "--strict",
+            "--format",
+            "json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert code == 1
+    assert payload["verdict"] == "pass"
+    assert payload["execution_alignment"]["status"] == "blocked"
+    assert payload["execution_alignment"]["issues"][0]["code"] == "repository_scan_ban"
+
+
+def test_chief_dispatch_cli_defaults_to_two_repairs_and_keeps_once_alias(tmp_path, monkeypatch, capsys) -> None:
+    calls = []
+
+    def fake_dispatch(**kwargs):
+        calls.append(kwargs)
+        return {"status": "preview", "plan_id": kwargs["plan_id"]}
+
+    monkeypatch.setattr("visual_agent.chief_dispatch.dispatch_chief_plan", fake_dispatch)
+    base_args = [
+        "chief-dispatch",
+        "--workspace-root",
+        str(tmp_path),
+        "--plan",
+        "plan-1",
+        "--format",
+        "json",
+    ]
+
+    assert main(base_args) == 0
+    capsys.readouterr()
+    assert calls[-1]["max_repair_rounds"] == 2
+
+    assert main([*base_args, "--auto-repair-once"]) == 0
+    capsys.readouterr()
+    assert calls[-1]["max_repair_rounds"] == 1
+
+
 def test_verify_now_cli_runs_default_verification_path(tmp_path, capsys, monkeypatch) -> None:
     workspace = init_workspace(tmp_path / "workspace", with_demo=False)
     workflow = workspace.workflows_dir / "checkout.yaml"
@@ -225,6 +290,14 @@ def test_portfolio_dashboard_cli_invokes_server(tmp_path, monkeypatch) -> None:
     assert captured["project_roots"] == [str(tmp_path / "a"), str(tmp_path / "b")]
     assert captured["port"] == 9999
     assert captured["open_browser"] is False
+
+
+def test_dashboard_cli_rejects_non_loopback_host(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["dashboard", "--host", "0.0.0.0", "--no-open"])
+
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_codex_check_cli_returns_one_when_any_workflow_fails(tmp_path, capsys, monkeypatch) -> None:

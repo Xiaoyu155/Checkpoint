@@ -196,7 +196,9 @@ function Write-McpConfig {
     if (-not (Test-Path $VenvPython)) {
         Ensure-Venv
     }
-    $configDir = Join-Path $RepoRoot "examples\mcp_config"
+    # Generated configs contain machine-specific absolute paths. Keep them in
+    # the ignored runtime workspace instead of overwriting tracked examples.
+    $configDir = Join-Path $WorkspacePath "mcp_config"
     New-Item -ItemType Directory -Force -Path $configDir | Out-Null
     $srcPath = Join-Path $RepoRoot "src"
     $server = [ordered]@{
@@ -220,6 +222,7 @@ function Write-McpConfig {
     Write-Host "Wrote MCP configs:"
     Write-Host "  $claudePath"
     Write-Host "  $cursorPath"
+    Write-Host "These files are machine-specific and remain under the local workspace."
 }
 
 function Run-OnboardingSmoke {

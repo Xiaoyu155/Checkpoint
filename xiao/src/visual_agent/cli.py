@@ -719,7 +719,12 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     chief_dispatch.add_argument("--test-command", default=None, help="Run this test/build command as the acceptance gate (works on any project, no workflow needed), e.g. 'pytest -q' or 'npm test'.")
     chief_dispatch.add_argument("--allow-test-edits", action="store_true", help="Let the worker modify test files without failing verification (only for tasks explicitly about changing tests).")
     chief_dispatch.add_argument("--merge", action="store_true", help="After verification passes, merge the worker's isolated branch back into the current branch. Only merges when verified; aborts on conflict.")
-    chief_dispatch.add_argument("--auto-repair-once", action="store_true", help="If verification fails, send one repair prompt to the same Codex worktree.")
+    chief_dispatch.add_argument("--auto-repair-once", action="store_true", help="Compatibility alias for --max-repair-rounds 1.")
+    chief_dispatch.add_argument("--max-repair-rounds", type=int, default=None, help="Maximum repair rounds. Default: 2; use 0 to disable repair.")
+    chief_dispatch.add_argument("--reasoning-effort", default=None, help="Codex reasoning override. Default: inherit config.toml.")
+    chief_dispatch.add_argument("--dispatch-mode", choices=["tracked", "delegated"], default="tracked", help="Worker prompt mode. Default: tracked.")
+    chief_dispatch.add_argument("--prompt-style", choices=["expanded", "legacy"], default="expanded", help="Prompt compatibility style. Default: expanded.")
+    chief_dispatch.add_argument("--repair-strategy", choices=["resume", "fresh"], default="resume", help="Repair session strategy. Default: resume.")
     chief_dispatch.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     chief_run = subparsers.add_parser("chief-run", help="Run a bounded DevPacer mission around planning, dispatch, verification, and repair.")
@@ -733,7 +738,8 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     chief_run.add_argument("--agent", action="append", default=[], help="Worker/inspection agent label, for example codex or gemini. Can be repeated.")
     chief_run.add_argument("--answer", action="append", default=[], help="Answer to a clarifying question. Repeat to add several.")
     chief_run.add_argument("--interview", action="store_true", help="Surface clarifying questions when the goal is vague.")
-    chief_run.add_argument("--max-rounds", type=int, default=2, help="Maximum worker/verification rounds. Default: 2 (initial plus one repair).")
+    chief_run.add_argument("--max-rounds", type=int, default=3, help="Maximum worker/verification rounds. Default: 3 (initial plus two repairs).")
+    chief_run.add_argument("--max-repair-rounds", type=int, default=2, help="Maximum repair rounds within --max-rounds. Default: 2.")
     chief_run.add_argument("--max-wall-minutes", type=int, default=60, help="Mission wall-clock budget. Default: 60.")
     chief_run.add_argument("--max-worker-minutes", type=int, default=45, help="Worker process budget per attempt. Default: 45.")
     chief_run.add_argument("--dry-run", action="store_true", help="Preview only. This is also the default unless --execute is passed.")
@@ -749,6 +755,10 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     chief_run.add_argument("--require-env", action="append", default=[], help="Require an environment variable before running the verification command. Can be repeated.")
     chief_run.add_argument("--allow-test-edits", action="store_true", help="Let the worker modify test files without failing verification (only for tasks explicitly about changing tests).")
     chief_run.add_argument("--merge", action="store_true", help="After verification passes, merge the worker's isolated branch back into the current branch. Only merges when verified; aborts on conflict.")
+    chief_run.add_argument("--reasoning-effort", default=None, help="Codex reasoning override. Default: inherit config.toml.")
+    chief_run.add_argument("--dispatch-mode", choices=["tracked", "delegated"], default=None, help="Worker prompt mode. Default: tracked or the saved mission value.")
+    chief_run.add_argument("--prompt-style", choices=["expanded", "legacy"], default=None, help="Prompt compatibility style. Default: expanded.")
+    chief_run.add_argument("--repair-strategy", choices=["resume", "fresh"], default=None, help="Repair session strategy. Default: resume.")
     chief_run.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     chief_run_demo = subparsers.add_parser("chief-run-demo", help="Run a deterministic DevPacer checkout mission in an isolated demo git repo.")
@@ -845,7 +855,8 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     mission.add_argument("--agent", action="append", default=[], help="Worker/inspection agent label. Can be repeated.")
     mission.add_argument("--answer", action="append", default=[], help="Answer to a clarifying question. Can be repeated.")
     mission.add_argument("--interview", action="store_true", help="Surface clarifying questions when the goal is vague.")
-    mission.add_argument("--max-rounds", type=int, default=2, help="Maximum worker/verification rounds. Default: 2.")
+    mission.add_argument("--max-rounds", type=int, default=3, help="Maximum worker/verification rounds. Default: 3.")
+    mission.add_argument("--max-repair-rounds", type=int, default=2, help="Maximum repair rounds. Default: 2.")
     mission.add_argument("--max-wall-minutes", type=int, default=60, help="Mission wall-clock budget. Default: 60.")
     mission.add_argument("--max-worker-minutes", type=int, default=45, help="Worker process budget per attempt. Default: 45.")
     mission.add_argument("--execute", action="store_true", help="Actually launch the Codex worker adapter.")
@@ -861,6 +872,10 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     mission.add_argument("--test-command", default=None, help="Run this test/build command as the acceptance gate (works on any project, no workflow needed), e.g. 'pytest -q' or 'npm test'.")
     mission.add_argument("--allow-test-edits", action="store_true", help="Let the worker modify test files without failing verification (only for tasks explicitly about changing tests).")
     mission.add_argument("--merge", action="store_true", help="After verification passes, merge the worker's isolated branch back into the current branch. Only merges when verified; aborts on conflict.")
+    mission.add_argument("--reasoning-effort", default=None, help="Codex reasoning override. Default: inherit config.toml.")
+    mission.add_argument("--dispatch-mode", choices=["tracked", "delegated"], default=None, help="Worker prompt mode.")
+    mission.add_argument("--prompt-style", choices=["expanded", "legacy"], default=None, help="Prompt compatibility style.")
+    mission.add_argument("--repair-strategy", choices=["resume", "fresh"], default=None, help="Repair session strategy.")
     mission.add_argument("--merge-policy", choices=["manual", "auto", "never"], default="manual", help="Import/queue merge behavior after verification. Default: manual.")
     mission.add_argument("--priority", type=int, default=0, help="Queue priority for mission queue. Default: 0.")
     mission.add_argument("--force", action="store_true", help="Force queueing a non-runnable mission after review.")
@@ -920,6 +935,10 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     chief_queue.add_argument("--test-command", default=None, help="Test/build command to use as this queued mission's acceptance gate.")
     chief_queue.add_argument("--allow-test-edits", action="store_true", help="Let the worker modify test files for this queued mission.")
     chief_queue.add_argument("--merge-policy", choices=["manual", "auto", "never"], default="manual", help="Queue merge behavior after verification. Default: manual.")
+    chief_queue.add_argument("--reasoning-effort", default=None, help="Codex reasoning override for this queue item.")
+    chief_queue.add_argument("--dispatch-mode", choices=["tracked", "delegated"], default=None, help="Worker prompt mode for this queue item.")
+    chief_queue.add_argument("--prompt-style", choices=["expanded", "legacy"], default=None, help="Prompt style for this queue item.")
+    chief_queue.add_argument("--repair-strategy", choices=["resume", "fresh"], default=None, help="Repair strategy for this queue item.")
     chief_queue.add_argument("--force", action="store_true", help="Submit a mission even if its current status is not normally runnable.")
     chief_queue.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
@@ -954,7 +973,12 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
 
     dashboard_cmd = subparsers.add_parser("dashboard", help="Serve a local web dashboard: missions, plans, verification status, installed agents.")
     dashboard_cmd.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root to visualize.")
-    dashboard_cmd.add_argument("--host", default="127.0.0.1", help="Bind host. Default: 127.0.0.1 (local only).")
+    dashboard_cmd.add_argument(
+        "--host",
+        choices=["127.0.0.1", "localhost", "::1"],
+        default="127.0.0.1",
+        help="Local-only bind host. Default: 127.0.0.1.",
+    )
     dashboard_cmd.add_argument("--port", type=int, default=8787, help="Bind port. Default: 8787.")
     dashboard_cmd.add_argument("--no-open", action="store_true", help="Do not auto-open the browser.")
 

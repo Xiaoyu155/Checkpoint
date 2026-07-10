@@ -40,6 +40,11 @@ _INTAKE_BACKENDS = [
         "base_url": "https://api.deepseek.com/v1",
         "endpoint": "/chat/completions",
         "key_re": r"sk-[A-Za-z0-9_\-]{20,}",
+        "env_names": (
+            "CHECKPOINT_DEEPSEEK_API_KEY",
+            "VISUAL_AGENT_DEEPSEEK_API_KEY",
+            "DEEPSEEK_API_KEY",
+        ),
         "max_tokens": 600,
     },
     {
@@ -48,6 +53,14 @@ _INTAKE_BACKENDS = [
         "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
         "endpoint": "/chat/completions",
         "key_re": r"(?:sk|tp)-[A-Za-z0-9_\-]{16,}",
+        "env_names": (
+            "CHECKPOINT_MIMO_TOKEN",
+            "CHECKPOINT_MIMO_API_KEY",
+            "CHECKPOINT_XIAOMIMIMO_API_KEY",
+            "VISUAL_AGENT_XIAOMIMIMO_API_KEY",
+            "XIAOMIMIMO_API_KEY",
+            "MIMO_API_KEY",
+        ),
         "max_tokens": 1200,
     },
 ]
@@ -89,6 +102,25 @@ def resolve_cheap_backends(order: tuple[str, ...] = ()) -> list[dict[str, Any]]:
     )
     resolved: list[dict[str, Any]] = []
     seen_models: set[str] = set()
+    for spec in specs:
+        api_key = next(
+            (
+                os.environ[name].strip()
+                for name in spec.get("env_names", ())
+                if os.environ.get(name, "").strip()
+            ),
+            "",
+        )
+        if not api_key or not re.fullmatch(spec["key_re"], api_key):
+            continue
+        seen_models.add(spec["model_id"])
+        resolved.append({
+            "model_id": spec["model_id"],
+            "api_key": api_key,
+            "base_url": spec["base_url"],
+            "endpoint": spec["endpoint"],
+            "max_tokens": spec["max_tokens"],
+        })
     for candidate in _credential_candidates():
         try:
             text = candidate.read_text(encoding="utf-8-sig")

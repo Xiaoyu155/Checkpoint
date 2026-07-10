@@ -80,6 +80,18 @@ def test_auto_intake_backend_none_without_file(tmp_path, monkeypatch):
     assert auto_intake_backend() is None
 
 
+def test_auto_intake_backend_prefers_mimo_environment_token(tmp_path, monkeypatch):
+    token = "tp-new-mimo-plan-token-1234567890"
+    monkeypatch.setenv("CHECKPOINT_MIMO_TOKEN", token)
+    monkeypatch.setenv("CHECKPOINT_MODEL_CREDENTIALS", str(tmp_path / "missing.txt"))
+
+    backend = goal_intake.resolve_cheap_backend(("mimo",))
+
+    assert backend is not None
+    assert backend["model_id"] == "xiaomimimo:mimo-v2.5"
+    assert backend["api_key"] == token
+
+
 def test_intake_markdown_renders():
     r = refine_goal("改一下", enable_model=False)
     text = intake_to_markdown(r)

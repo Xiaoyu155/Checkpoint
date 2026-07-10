@@ -89,6 +89,10 @@ def recommend_worker_config(profile: dict[str, Any], *, task_kind: str = "implem
     sandbox = _select_mode(profile.get("sandbox_modes"), task_kind=task_kind)
     approval = _select_mode(profile.get("approval_modes"), task_kind=task_kind, prefer_first=True)
     parallelism = profile.get("parallelism") if isinstance(profile.get("parallelism"), list) else []
+    reasoning = profile.get("reasoning") if isinstance(profile.get("reasoning"), dict) else {}
+    if not reasoning and isinstance(profile.get("reasoning_config"), dict):
+        reasoning = profile["reasoning_config"]
+    reasoning_effort = str(reasoning.get("default_strategy") or "inherit").strip() or "inherit"
     parallel_hint = ""
     if parallelism:
         first = parallelism[0]
@@ -99,6 +103,7 @@ def recommend_worker_config(profile: dict[str, Any], *, task_kind: str = "implem
         "model_flag": _fill_model_flag(profile.get("model_flag"), model),
         "sandbox": sandbox,
         "approval": approval,
+        "reasoning_effort": reasoning_effort,
         "parallelism_hint": parallel_hint,
     }
 

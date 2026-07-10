@@ -10,40 +10,60 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+
+from .models import to_jsonable
 
 
 PLANS_DIRNAME = "chief_plans"
+_SAFE_PLAN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
 
 
 def plans_dir(workspace_root: str | Path) -> Path:
     return Path(workspace_root).expanduser().resolve() / PLANS_DIRNAME
 
 
+def validate_plan_id(plan_id: str) -> str:
+    value = str(plan_id or "")
+    if not value or value != value.strip():
+        raise ValueError("plan_id must be a non-empty, trimmed identifier")
+    if value in {".", ".."} or "/" in value or "\\" in value or Path(value).is_absolute():
+        raise ValueError(f"Unsafe plan_id: {value!r}")
+    if not _SAFE_PLAN_ID.fullmatch(value):
+        raise ValueError(f"Unsafe plan_id: {value!r}")
+    return value
+
+
 def plan_dir(workspace_root: str | Path, plan_id: str) -> Path:
-    return plans_dir(workspace_root) / str(plan_id)
+    return plans_dir(workspace_root) / validate_plan_id(plan_id)
 
 
 def make_plan_id(objective: str, *, now: datetime | None = None) -> str:
     moment = now or datetime.now(timezone.utc)
-    stamp = moment.strftime("%Y%m%d-%H%M%S")
+    stamp = moment.strftime("%Y%m%d-%H%M%S-%f")
     digest = hashlib.sha1(str(objective).strip().encode("utf-8")).hexdigest()[:6]
-    return f"{stamp}-{digest}"
+    return f"{stamp}-{digest}-{uuid4().hex[:8]}"
 
 
 def save_plan(plan: dict[str, Any], *, workspace_root: str | Path, plan_id: str | None = None) -> dict[str, Any]:
     """Persist a plan dict. Returns {plan_id, path}."""
     objective = str(plan.get("objective") or "")
-    pid = plan_id or make_plan_id(objective)
-    directory = plans_dir(workspace_root) / pid
-    directory.mkdir(parents=True, exist_ok=True)
+    if plan_id is None:
+        pid, directory = _reserve_plan_directory(workspace_root, objective=objective)
+    else:
+        pid = validate_plan_id(plan_id)
+        directory = plan_dir(workspace_root, pid)
+        directory.mkdir(parents=True, exist_ok=True)
     record = dict(plan)
     record["plan_id"] = pid
     record.setdefault("saved_at", datetime.now(timezone.utc).isoformat())
     path = directory / "plan.json"
-    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    _atomic_write_json(path, record)
     return {"plan_id": pid, "path": str(path)}
 
 
@@ -89,6 +109,17 @@ def append_worker_record(workspace_root: str | Path, plan_id: str, record: dict[
     path = directory / "workers.jsonl"
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return {"path": str(path), "record": entry}
+
+
+def append_dispatch_record(workspace_root: str | Path, plan_id: str, record: dict[str, Any]) -> dict[str, Any]:
+    directory = plan_dir(workspace_root, plan_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    entry = dict(record)
+    entry.setdefault("recorded_at", datetime.now(timezone.utc).isoformat())
+    path = directory / "dispatches.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(to_jsonable(entry), ensure_ascii=False) + "\n")
     return {"path": str(path), "record": entry}
 
 
@@ -139,3 +170,32 @@ def list_plans_to_markdown(summaries: list[dict[str, Any]]) -> str:
         lines.append(f"- `{item['plan_id']}` [{item['status']}] {item['objective']}")
         lines.append(f"  saved: {item.get('saved_at', '')} · workflows: {workflows}")
     return "\n".join(lines)
+
+
+def _reserve_plan_directory(workspace_root: str | Path, *, objective: str) -> tuple[str, Path]:
+    root = plans_dir(workspace_root)
+    root.mkdir(parents=True, exist_ok=True)
+    for _ in range(20):
+        plan_id = make_plan_id(objective)
+        directory = root / plan_id
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            continue
+        return plan_id, directory
+    raise RuntimeError("Unable to allocate a unique plan id")
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass

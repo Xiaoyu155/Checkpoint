@@ -18,6 +18,7 @@ from typing import Any
 from .chief_dispatch import dispatch_chief_plan
 from .chief_run import chief_run_to_markdown, run_chief_mission
 from .models import to_jsonable
+from .resources import bundled_path
 from .workspace import init_workspace
 
 
@@ -145,7 +146,7 @@ def create_checkout_demo_repo(demo_root: Path) -> dict[str, Any]:
         return {"status": "failed", "reason": f"Could not create demo repo: {type(exc).__name__}: {exc}"}
 
     try:
-        source_html = Path(__file__).resolve().parent.parent.parent / "examples" / "web" / "checkout_verification_demo.html"
+        source_html = bundled_path("examples", "web", "checkout_verification_demo.html")
         target_html = repo_root / "examples" / "web" / "checkout_verification_demo.html"
         target_html.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source_html, target_html)

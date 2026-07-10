@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .auth import bearer_token, generate_api_key, verify_api_key
-from .context import CloudRequestContext, resolve_cloud_context
+from .context import CloudIdentityError, CloudRequestContext, resolve_cloud_context
 from .marketplace import (
     delete_catalog_workflow,
     get_catalog_workflow,
@@ -17,6 +17,7 @@ from .marketplace import (
     sync_workspace_public_workflows,
 )
 from .models import RunRequest, RunStatus, run_result_from_cloud_payload
+from visual_agent.cloud_server import CloudRequestError
 from visual_agent.security import scrub_secrets
 from .worker import execute_workflow_run
 
@@ -31,14 +32,27 @@ def create_app(*, workspace_root: str | Path = ".agent-workspace", audit_log: st
     runs_by_scope: dict[str, dict[str, dict[str, Any]]] = {}
     root = Path(workspace_root).resolve()
     audit_path = Path(audit_log).resolve() if audit_log else None
+    api_key_sha256 = str(os.environ.get("VISUAL_AGENT_CLOUD_API_KEY_SHA256") or "").strip()
+    api_key_salt = str(os.environ.get("VISUAL_AGENT_CLOUD_API_KEY_SALT") or "").strip()
     default_org = str(os.environ.get("VISUAL_AGENT_CLOUD_ORG") or "").strip()
-    default_user_id = str(os.environ.get("VISUAL_AGENT_CLOUD_USER") or "").strip()
+    default_user_id = str(os.environ.get("VISUAL_AGENT_CLOUD_USER") or "service-account").strip() or "service-account"
+    max_run_profile = str(os.environ.get("VISUAL_AGENT_CLOUD_RUN_PROFILE") or "dry-run").strip() or "dry-run"
 
     def require_auth(authorization: str = "") -> None:
-        expected = os.environ.get("VISUAL_AGENT_CLOUD_API_KEY_SHA256", "")
-        salt = os.environ.get("VISUAL_AGENT_CLOUD_API_KEY_SALT", "")
-        if expected and not verify_api_key(bearer_token(authorization), expected_sha256=expected, salt=salt):
+        if not api_key_sha256 or not api_key_salt:
+            raise HTTPException(status_code=503, detail="Cloud API authentication is not configured.")
+        if not verify_api_key(
+            bearer_token(authorization),
+            expected_sha256=api_key_sha256,
+            salt=api_key_salt,
+        ):
             raise HTTPException(status_code=401, detail="Missing or invalid bearer token.")
+
+    def optional_auth(authorization: str = "") -> bool:
+        if not str(authorization or "").strip():
+            return False
+        require_auth(authorization)
+        return True
 
     def token_issuer_enabled() -> bool:
         return str(os.environ.get("VISUAL_AGENT_CLOUD_ENABLE_TOKEN_ISSUER") or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -69,12 +83,34 @@ def create_app(*, workspace_root: str | Path = ".agent-workspace", audit_log: st
             headers["x-visual-agent-org"] = org
         if user_id:
             headers["x-visual-agent-user"] = user_id
-        return resolve_cloud_context(
-            headers=headers,
-            payload=payload,
-            default_org=default_org,
-            default_user_id=default_user_id,
-        )
+        try:
+            return resolve_cloud_context(
+                headers=headers,
+                payload=payload,
+                default_org=default_org,
+                default_user_id=default_user_id,
+            )
+        except CloudIdentityError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    def require_workflow_access(
+        workflow: dict[str, Any],
+        *,
+        authenticated: bool,
+        context: CloudRequestContext,
+        require_owner: bool = False,
+    ) -> None:
+        visibility = str(workflow.get("visibility") or "public").strip().lower()
+        if visibility == "private" and not authenticated:
+            raise HTTPException(status_code=404, detail="Workflow id was not found.")
+        owner_user_id = str(workflow.get("owner_user_id") or "")
+        if require_owner and owner_user_id and owner_user_id != context.user_id:
+            raise HTTPException(status_code=403, detail="Workflow is owned by another user.")
+
+    def anonymous_projection(workflow: dict[str, Any]) -> dict[str, Any]:
+        projected = dict(workflow)
+        projected.pop("owner_user_id", None)
+        return projected
 
     def scope_runs(context: CloudRequestContext) -> dict[str, dict[str, Any]]:
         return runs_by_scope.setdefault(context.scope_key, {})
@@ -91,8 +127,7 @@ def create_app(*, workspace_root: str | Path = ".agent-workspace", audit_log: st
         if not token_issuer_enabled():
             audit_event({"method": "POST", "path": "/api/auth/token", "status": "blocked", "reason": "token_issuer_disabled", "http_status": 403, "user_id": ""})
             raise HTTPException(status_code=403, detail="Token issuer is disabled. Set VISUAL_AGENT_CLOUD_ENABLE_TOKEN_ISSUER=1 only during controlled setup.")
-        if os.environ.get("VISUAL_AGENT_CLOUD_API_KEY_SHA256"):
-            require_auth(authorization)
+        require_auth(authorization)
         key = generate_api_key()
         payload = {
             "status": "success",
@@ -106,6 +141,7 @@ def create_app(*, workspace_root: str | Path = ".agent-workspace", audit_log: st
 
     @app.get("/api/workflows")
     def list_workflows(
+        authorization: str = Header(default=""),
         x_visual_agent_org: str = Header(default="", alias="X-Visual-Agent-Org"),
         x_visual_agent_user: str = Header(default="", alias="X-Visual-Agent-User"),
         visibility: str = "all",
@@ -114,9 +150,21 @@ def create_app(*, workspace_root: str | Path = ".agent-workspace", audit_log: st
         limit: int = 50,
         cursor: str = "",
     ) -> dict[str, Any]:
+        authenticated = optional_auth(authorization)
         context = request_context(org=x_visual_agent_org, user_id=x_visual_agent_user)
         sync_workspace_public_workflows(root, org=context.org)
-        items = list_catalog_workflows(root, org=context.org, visibility=visibility, category=category, tags=tag, limit=limit, cursor=cursor)
+        effective_visibility = visibility if authenticated else "public"
+        items = list_catalog_workflows(
+            root,
+            org=context.org,
+            visibility=effective_visibility,
+            category=category,
+            tags=tag,
+            limit=limit,
+            cursor=cursor,
+        )
+        if not authenticated:
+            items = [anonymous_projection(item) for item in items]
         payload = {"schema_version": 1, "workflows": items, "next_cursor": None}
         audit_event(
             {
@@ -133,14 +181,25 @@ def create_app(*, workspace_root: str | Path = ".agent-workspace", audit_log: st
     @app.get("/api/workflows/search")
     def search_public_workflows(
         q: str,
+        authorization: str = Header(default=""),
         x_visual_agent_org: str = Header(default="", alias="X-Visual-Agent-Org"),
         x_visual_agent_user: str = Header(default="", alias="X-Visual-Agent-User"),
         visibility: str = "all",
         limit: int = 20,
     ) -> dict[str, Any]:
+        authenticated = optional_auth(authorization)
         context = request_context(org=x_visual_agent_org, user_id=x_visual_agent_user)
         sync_workspace_public_workflows(root, org=context.org)
-        items = search_catalog_workflows(root, q, org=context.org, visibility=visibility, limit=max(0, min(int(limit), 50)))
+        effective_visibility = visibility if authenticated else "public"
+        items = search_catalog_workflows(
+            root,
+            q,
+            org=context.org,
+            visibility=effective_visibility,
+            limit=max(0, min(int(limit), 50)),
+        )
+        if not authenticated:
+            items = [anonymous_projection(item) for item in items]
         payload = {"schema_version": 1, "query": q, "workflows": items, "next_cursor": None}
         audit_event(
             {
@@ -157,14 +216,19 @@ def create_app(*, workspace_root: str | Path = ".agent-workspace", audit_log: st
     @app.get("/api/workflows/{workflow_id}")
     def get_public_workflow(
         workflow_id: str,
+        authorization: str = Header(default=""),
         x_visual_agent_org: str = Header(default="", alias="X-Visual-Agent-Org"),
         x_visual_agent_user: str = Header(default="", alias="X-Visual-Agent-User"),
     ) -> dict[str, Any]:
+        authenticated = optional_auth(authorization)
         context = request_context(org=x_visual_agent_org, user_id=x_visual_agent_user)
         sync_workspace_public_workflows(root, org=context.org)
         workflow = get_catalog_workflow(root, workflow_id, org=context.org)
         if workflow is None:
             raise HTTPException(status_code=404, detail="Workflow id was not found.")
+        require_workflow_access(workflow, authenticated=authenticated, context=context)
+        if not authenticated:
+            workflow = anonymous_projection(workflow)
         payload = {"schema_version": 1, "workflow": workflow}
         audit_event(
             {
@@ -181,14 +245,17 @@ def create_app(*, workspace_root: str | Path = ".agent-workspace", audit_log: st
     @app.get("/api/workflows/{workflow_id}/download")
     def download_public_workflow(
         workflow_id: str,
+        authorization: str = Header(default=""),
         x_visual_agent_org: str = Header(default="", alias="X-Visual-Agent-Org"),
         x_visual_agent_user: str = Header(default="", alias="X-Visual-Agent-User"),
     ) -> dict[str, Any]:
+        authenticated = optional_auth(authorization)
         context = request_context(org=x_visual_agent_org, user_id=x_visual_agent_user)
         sync_workspace_public_workflows(root, org=context.org)
         workflow = get_catalog_workflow(root, workflow_id, org=context.org)
         if workflow is None:
             raise HTTPException(status_code=404, detail="Workflow id was not found.")
+        require_workflow_access(workflow, authenticated=authenticated, context=context)
         payload = {
             "schema_version": 1,
             "workflow_id": str(workflow.get("id") or workflow_id),
@@ -216,8 +283,12 @@ def create_app(*, workspace_root: str | Path = ".agent-workspace", audit_log: st
     ) -> dict[str, Any]:
         require_auth(authorization)
         context = request_context(org=x_visual_agent_org, user_id=x_visual_agent_user)
-        result = delete_catalog_workflow(root, workflow_id, org=context.org)
-        status = 200 if result.get("status") == "deleted" else 404 if result.get("reason") == "workflow_not_found" else 400
+        workflow = get_catalog_workflow(root, workflow_id, org=context.org)
+        if workflow is None:
+            raise HTTPException(status_code=404, detail="Workflow id was not found.")
+        require_workflow_access(workflow, authenticated=True, context=context, require_owner=True)
+        result = delete_catalog_workflow(root, workflow_id, org=context.org, user_id=context.user_id)
+        status = 200 if result.get("status") == "deleted" else 403 if result.get("reason") == "owner_forbidden" else 404 if result.get("reason") == "workflow_not_found" else 400
         audit_event(
             {
                 "method": "DELETE",
@@ -234,6 +305,8 @@ def create_app(*, workspace_root: str | Path = ".agent-workspace", audit_log: st
                 "workflow_id": str(result.get("workflow_id") or workflow_id),
                 "workflow": result.get("workflow"),
             }
+        if status == 403:
+            raise HTTPException(status_code=403, detail="Workflow is owned by another user.")
         raise HTTPException(status_code=status, detail="Workflow id was not found." if status == 404 else "Unable to delete workflow.")
 
     @app.post("/api/workflows/publish")
@@ -253,7 +326,7 @@ def create_app(*, workspace_root: str | Path = ".agent-workspace", audit_log: st
             min_quality_score=float(payload.get("min_quality_score") or 0.6) if payload.get("min_quality_score") is not None else 0.6,
             catalog_url_base=str(payload.get("catalog_url_base") or "https://visualagent.local/workflows"),
         )
-        status = 200 if result.get("status") == "published" else 400
+        status = 200 if result.get("status") == "published" else 403 if result.get("reason") == "owner_forbidden" else 400
         audit_event(
             {
                 "method": "POST",
@@ -278,6 +351,8 @@ def create_app(*, workspace_root: str | Path = ".agent-workspace", audit_log: st
                 "quality_score": result.get("quality_score"),
                 "url": result.get("url"),
             }
+        if status == 403:
+            raise HTTPException(status_code=403, detail="Workflow is owned by another user.")
         return {
             "status": "blocked",
             "reason": result.get("reason"),
@@ -297,16 +372,55 @@ def create_app(*, workspace_root: str | Path = ".agent-workspace", audit_log: st
         require_auth(authorization)
         context = request_context(org=x_visual_agent_org, user_id=x_visual_agent_user, payload=payload)
         request = RunRequest.from_payload({**payload, "org": context.org, "user_id": context.user_id})
-        run_payload = execute_workflow_run(
-            {
-                **request.to_dict(),
-                "workspace": request.workspace or str(root),
-                "workflow_name": request.workflow_name,
-                "org": context.org,
-                "user_id": context.user_id,
-            },
-            workspace_root=root,
-        )
+        execution_payload = {
+            **request.to_dict(),
+            "workspace": request.workspace or str(root),
+            "workflow_name": request.workflow_name,
+            "org": context.org,
+            "user_id": context.user_id,
+        }
+        if request.workflow_source == "marketplace":
+            catalog_workflow = get_catalog_workflow(
+                root,
+                request.workflow_id or request.workflow_name,
+                org=context.org,
+            )
+            if catalog_workflow is None:
+                raise HTTPException(status_code=404, detail="Marketplace workflow id was not found.")
+            require_workflow_access(
+                catalog_workflow,
+                authenticated=True,
+                context=context,
+                require_owner=str(catalog_workflow.get("visibility") or "") == "private",
+            )
+            execution_payload.update(
+                {
+                    "workflow_name": str(catalog_workflow.get("name") or request.workflow_name),
+                    "workflow_yaml": str(catalog_workflow.get("workflow_yaml") or ""),
+                    "workflow_source": "marketplace",
+                    "workflow_id": str(catalog_workflow.get("id") or request.workflow_id),
+                }
+            )
+        try:
+            run_payload = execute_workflow_run(
+                execution_payload,
+                workspace_root=root,
+                max_run_profile=max_run_profile,
+            )
+        except CloudRequestError as exc:
+            status = 403 if exc.reason in {"run_profile_forbidden", "workspace_forbidden"} else 400
+            audit_event(
+                {
+                    "method": "POST",
+                    "path": "/api/runs",
+                    "status": "rejected",
+                    "reason": exc.reason,
+                    "http_status": status,
+                    "org": context.org,
+                    "user_id": context.user_id,
+                }
+            )
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
         result = run_result_from_cloud_payload(run_payload)
         response = {
             **result.to_dict(),

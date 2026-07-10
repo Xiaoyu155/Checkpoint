@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from visual_agent.chief_dispatch import build_worker_command
@@ -173,6 +174,13 @@ def repeated_failure_payload(**kwargs):
         "verification_attempts": [attempt, attempt],
         "latest_verification": attempt,
     }
+
+
+def single_failure_payload(**kwargs):
+    payload = repeated_failure_payload(**kwargs)
+    if kwargs.get("execute"):
+        payload["verification_attempts"] = payload["verification_attempts"][:1]
+    return payload
 
 
 def missing_verification_environment_payload(**kwargs):
@@ -490,7 +498,7 @@ def test_agent_override_recomputes_codex_specific_track_config(tmp_path) -> None
         verification_command="python -m visual_agent.cli codex-check",
     )
     argv = cmd["argv"]
-    assert argv[:2] == ["codex", "exec"]
+    assert argv[:4] == ["codex", "--sandbox", "workspace-write", "exec"]
     assert "--model" not in argv
     assert "--permission-mode" not in argv
     assert "--sandbox" in argv and "workspace-write" in argv
@@ -909,6 +917,8 @@ def test_chief_run_stops_on_missing_verification_environment(tmp_path, monkeypat
     assert "验证环境" in payload["message"]
     report = Path(payload["final_report_path"]).read_text(encoding="utf-8")
     assert "verification_environment_missing" in report
+    assert f"checkpoint mission resume --mission '{payload['mission']['mission_id']}' --execute" in report
+    assert "mission start --resume" not in report
     assert "Classification confidence: `heuristic`" in report
     assert "建议人工确认" in report
 
@@ -968,6 +978,145 @@ def test_chief_run_resume_executes_existing_preview_mission(tmp_path, monkeypatc
     assert rounds[-1]["status"] == "pass"
 
 
+def test_chief_run_resume_restores_repo_and_test_command(tmp_path, monkeypatch) -> None:
+    workspace = ready_workspace(tmp_path, monkeypatch)
+    preview = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        test_command="python -c pass",
+        dispatch_runner=preview_payload,
+    )
+    mission_id = preview["mission"]["mission_id"]
+    calls = []
+
+    def capture_dispatch(**kwargs):
+        calls.append(kwargs)
+        return verified_payload(**kwargs)
+
+    wrong_repo = tmp_path / "wrong-repo"
+    wrong_repo.mkdir()
+    resumed = run_chief_mission(
+        workspace_root=workspace.root,
+        repo_root=wrong_repo,
+        resume_mission_id=mission_id,
+        execute=True,
+        dry_run=False,
+        dispatch_runner=capture_dispatch,
+    )
+
+    assert resumed["status"] == "verified"
+    assert Path(resumed["mission"]["repo_root"]) == tmp_path.resolve()
+    assert resumed["mission"]["test_command"] == "python -c pass"
+    assert calls and all(call["test_command"] == "python -c pass" for call in calls)
+
+
+def test_chief_run_preserves_absent_reasoning_override_for_track_resolution(tmp_path, monkeypatch) -> None:
+    workspace = ready_workspace(tmp_path, monkeypatch)
+    calls = []
+
+    def capture_dispatch(**kwargs):
+        calls.append(kwargs)
+        return preview_payload(**kwargs)
+
+    result = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        dispatch_runner=capture_dispatch,
+    )
+
+    assert result["mission"]["reasoning_effort"] == "inherit"
+    assert calls[0]["reasoning_effort"] is None
+
+
+def test_chief_run_forwards_explicit_reasoning_override(tmp_path, monkeypatch) -> None:
+    workspace = ready_workspace(tmp_path, monkeypatch)
+    calls = []
+
+    def capture_dispatch(**kwargs):
+        calls.append(kwargs)
+        return preview_payload(**kwargs)
+
+    run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        reasoning_effort="high",
+        dispatch_runner=capture_dispatch,
+    )
+
+    assert calls[0]["reasoning_effort"] == "high"
+
+
+def test_chief_run_resume_uses_remaining_round_budget(tmp_path, monkeypatch) -> None:
+    workspace = ready_workspace(tmp_path, monkeypatch)
+    preview = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        max_rounds=2,
+        dispatch_runner=preview_payload,
+    )
+    mission_id = preview["mission"]["mission_id"]
+
+    first = run_chief_mission(
+        workspace_root=workspace.root,
+        resume_mission_id=mission_id,
+        execute=True,
+        dry_run=False,
+        dispatch_runner=single_failure_payload,
+    )
+    second_calls = []
+
+    def second_failure(**kwargs):
+        second_calls.append(kwargs)
+        return single_failure_payload(**kwargs)
+
+    second = run_chief_mission(
+        workspace_root=workspace.root,
+        resume_mission_id=mission_id,
+        execute=True,
+        dry_run=False,
+        dispatch_runner=second_failure,
+    )
+
+    assert first["stop_reason"] == "verification_failed"
+    assert second["stop_reason"] == "budget_exhausted"
+    execution_calls = [call for call in second_calls if call.get("execute")]
+    assert execution_calls and execution_calls[0]["auto_repair_once"] is False
+    rounds = load_rounds(workspace.root, mission_id)
+    assert len([item for item in rounds if item.get("type") == "verification"]) == 2
+
+
+def test_chief_run_resume_preserves_wall_clock_budget_start(tmp_path, monkeypatch) -> None:
+    workspace = ready_workspace(tmp_path, monkeypatch)
+    preview = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        max_wall_minutes=1,
+        dispatch_runner=preview_payload,
+    )
+    mission = load_mission(workspace.root, preview["mission"]["mission_id"])
+    mission["budget_started_at"] = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+    save_mission(workspace.root, mission)
+
+    def should_not_dispatch(**_kwargs):
+        raise AssertionError("expired mission budget must stop before dispatch")
+
+    resumed = run_chief_mission(
+        workspace_root=workspace.root,
+        resume_mission_id=mission["mission_id"],
+        execute=True,
+        dry_run=False,
+        dispatch_runner=should_not_dispatch,
+    )
+
+    assert resumed["status"] == "stopped"
+    assert resumed["stop_reason"] == "budget_exhausted"
+
+
 def test_mission_status_payload_reports_next_action(tmp_path, monkeypatch) -> None:
     workspace = ready_workspace(tmp_path, monkeypatch)
     preview = run_chief_mission(
@@ -980,7 +1129,7 @@ def test_mission_status_payload_reports_next_action(tmp_path, monkeypatch) -> No
     payload = mission_status_payload(workspace_root=workspace.root, mission_id=preview["mission"]["mission_id"])
 
     assert payload["status"] == "preview"
-    assert "--resume" in payload["message"]
+    assert "checkpoint mission resume --mission" in payload["message"]
     assert payload["rounds"][0]["type"] == "dispatch_preview"
     assert payload["progress"]["stage"] == "dispatch_ready"
     assert "changed_product_file_count" in payload["progress"]

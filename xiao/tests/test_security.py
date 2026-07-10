@@ -23,6 +23,13 @@ def test_redact_secret_text_scrubs_known_patterns_and_extra_values() -> None:
     assert contains_secret_text("Authorization: bearer abcdefghijklmnop") is True
 
 
+def test_secret_redaction_does_not_corrupt_ask_for_approval_flag() -> None:
+    flag = "--ask-for-approval"
+
+    assert redact_secret_text(flag) == flag
+    assert contains_secret_text(flag) is False
+
+
 def test_scrub_secrets_redacts_sensitive_keys_and_string_values() -> None:
     payload = scrub_secrets(
         {"password": "plain", "message": "token=abc12345", "nested": [{"value": "plain-recorded-password"}]},
