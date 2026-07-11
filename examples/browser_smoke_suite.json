@@ -1,0 +1,27 @@
+{
+  "name": "Local browser smoke suite",
+  "defaults": {
+    "min_text_length": 1,
+    "min_interactive": 1,
+    "wait_timeout_seconds": 2
+  },
+  "cases": [
+    {
+      "id": "login_page_loads",
+      "name": "Login page loads",
+      "url": "web/login_demo.html",
+      "expect_text": ["登录"],
+      "expect_url_contains": ["login_demo.html"]
+    },
+    {
+      "id": "login_submit_url_changes",
+      "name": "Login submit changes URL",
+      "url": "web/login_demo.html",
+      "fill": ["用户名=demo_user", "密码=demo_password"],
+      "click_text": "登录",
+      "require_change_after_click": true,
+      "wait_for_url_contains_after": ["username=demo_user"],
+      "expect_url_contains_after": ["password=demo_password"]
+    }
+  ]
+}

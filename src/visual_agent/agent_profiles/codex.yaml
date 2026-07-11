@@ -1,0 +1,148 @@
+schema_version: 1
+agent: codex
+display_name: OpenAI Codex CLI
+executable: codex
+version_command: codex --version
+verified_on: "2026-07-10"
+verified_version: "codex-cli 0.144.0"
+source: https://developers.openai.com/codex/cli
+summary: >-
+  Codex is OpenAI's terminal coding agent. It runs interactively or headless,
+  isolates file changes behind sandbox modes, and can run several tasks in
+  parallel (locally via git worktrees or in Codex Cloud).
+
+headless:
+  command: codex exec -
+  json_command: codex exec --json -
+  prompt_transport: stdin
+  why: >-
+    Run one task non-interactively so an orchestrator can launch it, capture
+    output, and detect completion instead of driving a chat UI by hand.
+
+resume_headless:
+  supported: true
+  command: "codex exec resume --json <SESSION_ID> -"
+  last_command: "codex exec resume --json --last -"
+  prompt_transport: stdin
+  session_event: thread.started
+  session_id_field: thread_id
+  notes: >-
+    UUID resume and stdin prompt delivery were exercised successfully on
+    0.144.0. The --last syntax and cwd-filtering semantics were verified from
+    the installed CLI help; --last was not used for a live model turn.
+
+json_output:
+  supported: true
+  flag: --json
+  format: jsonl
+  session_event: thread.started
+  session_id_field: thread_id
+  usage_event: turn.completed
+  usage_field: usage
+  usage_keys:
+    - input_tokens
+    - cached_input_tokens
+    - output_tokens
+    - reasoning_output_tokens
+  notes: >-
+    The JSONL event stream does not expose the resolved model, reasoning
+    effort, or sandbox. Record those separately from resolved configuration
+    and argv, and parse stdout line by line while retaining stderr separately.
+
+reasoning_config:
+  supported: true
+  default_strategy: inherit
+  flag_template: "-c model_reasoning_effort=<value>"
+  verified_live_override: high
+  verified_model: gpt-5.6-sol
+  supported_values_for_verified_model:
+    - low
+    - medium
+    - high
+    - xhigh
+    - max
+    - ultra
+  notes: >-
+    The value list comes from the bundled 0.144.0 model catalog. A real exec
+    turn verified the high override. The user's config selected ultra during
+    the probe, but Pacer should omit the flag when the strategy is inherit.
+
+delegation:
+  supported: true
+  feature: multi_agent
+  feature_stage: stable
+  feature_effective: true
+  proactive_activation: "model_reasoning_effort=ultra"
+  model_catalog_version: v2
+  notes: >-
+    Debug prompt-input showed proactive delegation instructions at ultra and a
+    do-not-spawn-unless-requested policy at high. No delegated benchmark task
+    was run during this capability probe.
+
+model_flag: "--model <id>"
+models: []
+model_default_strategy: inherit
+model_behavior:
+  explicit_model_supported: true
+  verified_model: gpt-5.6-sol
+  verified_account_type: ChatGPT/Codex subscription
+  notes: >-
+    A real exec resume turn accepted -m gpt-5.6-sol on the probed account.
+    This does not establish access to arbitrary model ids.
+models_note: >-
+  Pacer omits --model by default and lets codex exec inherit the user's
+  $CODEX_HOME/config.toml selection. Explicit gpt-5.6-sol selection was
+  accepted on the probed subscription account, but inherit remains the safer
+  default across accounts and future model catalogs.
+
+sandbox_modes:
+  - name: read-only
+    flag: "--sandbox read-only"
+    when: inspection or planning only, no writes
+    risk: none
+  - name: workspace-write
+    flag: "--sandbox workspace-write"
+    when: default for implementing a change inside the repo
+    risk: low
+  - name: danger-full-access
+    flag: "--sandbox danger-full-access"
+    when: only when the task genuinely needs network or system access
+    risk: high
+
+approval_modes: []
+approval_note: >-
+  In codex-cli 0.144.0, --ask-for-approval is a root option and must appear
+  before exec. The probe exercised `codex -a never ... exec`. Pacer keeps this
+  profile list empty until approval policy becomes an explicit worker setting;
+  isolated worktrees and Checkpoint verification remain the safety gate.
+
+parallelism:
+  - name: local_worktrees
+    how: >-
+      Launch one codex instance per git worktree to run competing or parallel
+      implementation tracks without them colliding in one working tree.
+  - name: cloud_tasks
+    how: >-
+      Codex Cloud can run multiple tasks in parallel from your prompts and
+      report diffs back for review.
+
+context_files: [AGENTS.md]
+integrations:
+  - id: mcp
+    how: >-
+      Codex speaks MCP; connect Checkpoint's MCP server so the agent can run
+      real product verification instead of guessing.
+  - id: resume
+    how: >-
+      `codex exec resume --json <SESSION_ID> -` continues a headless session;
+      read the UUID from the `thread.started.thread_id` JSONL event.
+
+capabilities_often_missed:
+  - Non-interactive `codex exec` for scripting and orchestration.
+  - Headless session resume with JSONL thread and token-usage events.
+  - Model-specific reasoning overrides with inherit as the safe default.
+  - Proactive multi-agent delegation at gpt-5.6-sol ultra reasoning effort.
+  - Per-run sandbox selection for isolated worker runs.
+  - Running several instances in parallel git worktrees for competing solutions.
+  - MCP tool servers (such as Checkpoint) for real verification evidence.
+  - Codex Cloud parallel tasks for fan-out work.

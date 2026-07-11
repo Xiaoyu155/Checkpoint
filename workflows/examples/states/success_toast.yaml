@@ -1,0 +1,25 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: success_toast
+version: 1
+description: Verify a successful action shows a toast.
+tags: [verification, fast, states, toast, example]
+category: states
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
+steps:
+  - id: observe_settings
+    action: observe_browser
+    url: "http://localhost:3000/settings"
+  - id: browser_ready
+    action: assert_browser_ready
+    min_text_length: 1
+    min_interactive: 1
+  - id: save_settings
+    action: click
+    target: { text: "Save", role: button }
+    browser_post_action_observe: true
+  - id: verify_toast
+    action: assert_text
+    text: "Saved"
