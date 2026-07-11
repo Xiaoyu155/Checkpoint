@@ -1,0 +1,33 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: contact_form
+version: 1
+description: Verify a contact form can be submitted.
+tags: [verification, fast, forms, example]
+category: forms
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
+steps:
+  - id: observe_contact
+    action: observe_browser
+    url: "http://localhost:3000/contact"
+  - id: browser_ready
+    action: assert_browser_ready
+    min_text_length: 1
+    min_interactive: 1
+  - id: fill_name
+    action: type
+    target: { label: "Name", role: input }
+    value: "Demo User"
+  - id: fill_message
+    action: type
+    target: { label: "Message", role: textbox }
+    value: "Please contact me about Visual Agent."
+  - id: submit_contact
+    action: click
+    target: { text: "Send", role: button }
+    browser_post_action_observe: true
+  - id: verify_sent
+    action: assert_text
+    text: "Message sent"
