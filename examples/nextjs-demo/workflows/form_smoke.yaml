@@ -1,0 +1,19 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: nextjs_demo_form_smoke
+version: 1
+description: Smoke test the Next.js form page.
+tags: [verification, fast, nextjs_demo]
+visibility: private
+author: visual-agent-team
+license: ""
+steps:
+  - id: observe_form
+    action: observe_browser
+    url: http://localhost:3000/form
+  - id: assert_ready
+    action: assert_browser_ready
+    min_text_length: 1
+  - id: assert_form_header
+    action: assert_text
+    text: Contact form

@@ -1,0 +1,28 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: nextjs_demo_list_regression
+version: 1
+description: Regression test Next.js list filtering and search.
+tags: [verification, regression, nextjs_demo]
+visibility: private
+author: visual-agent-team
+license: ""
+steps:
+  - id: observe_list
+    action: observe_browser
+    url: http://localhost:3000/list
+  - id: assert_ready
+    action: assert_browser_ready
+    min_text_length: 1
+  - id: search_items
+    action: type
+    target:
+      selector: input[aria-label="Search items"]
+    value: Starter
+  - id: assert_filtered_item
+    action: assert_text
+    text: Starter plan - active
+  - id: assert_filtered_out
+    action: assert_text_contract
+    forbidden_any:
+      - Archived order - archived
