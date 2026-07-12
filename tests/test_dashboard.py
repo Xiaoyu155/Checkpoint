@@ -17,7 +17,15 @@ from visual_agent.dashboard.api import (
     save_model_config as save_dashboard_model_config,
     set_active_workspace,
 )
-from visual_agent.dashboard import DASHBOARD_HTML, _bind_dashboard_server, build_dashboard_data, build_mission_detail, start_worker, stop_worker
+from visual_agent.dashboard import (
+    DASHBOARD_HTML,
+    _bind_dashboard_server,
+    build_dashboard_data,
+    build_five_pillars_data,
+    build_mission_detail,
+    start_worker,
+    stop_worker,
+)
 from visual_agent.mission_progress import save_mission_progress
 from visual_agent.missions import default_budget_policy, load_mission, missions_dir, save_mission
 from visual_agent.user_profile import LocalUserProfile
@@ -34,11 +42,9 @@ def test_dashboard_data_on_empty_workspace(tmp_path) -> None:
     assert data["engine"] == "Checkpoint"
     assert data["missions"] == []
     assert data["plans"] == []
-    # Value panel is always present so the user can see benefit accrue.
     assert data["value"]["verified"] == 0
     assert data["value"]["tier_counts"] == {"cheap": 0, "standard": 0, "strong": 0}
     assert data["value"]["spent_usd"] == 0.0
-    # MiMo efficiency metrics are present even when empty.
     me = data["value"]["mimo_efficiency"]
     assert me["mimo_runs"] == 0
     assert me["saved_usd"] == 0.0
@@ -54,8 +60,77 @@ def test_dashboard_data_on_empty_workspace(tmp_path) -> None:
     assert "checks" in data["core_readiness"]
     assert any(check["id"] == "intake" for check in data["core_readiness"]["checks"])
     assert "labels" in me
-    # agents doctor always reports the known profiles (installed or not).
     assert {a["agent"] for a in data["agents"]} >= {"codex", "claude-code"}
+
+
+def test_five_pillars_uses_dispatch_provider_and_upstream_memory(tmp_path, monkeypatch) -> None:
+    tasks = [
+        {"task_id": "task-001", "mission_id": "mission-one", "status": "verified"},
+        {"task_id": "task-002", "mission_id": "mission-two", "status": "verified"},
+    ]
+    program = {
+        "program_id": "program-five",
+        "objective": "Five pillar proof",
+        "status": "completed",
+        "updated_at": "2026-07-12T00:00:00+00:00",
+        "source_plan": "plan.md",
+        "source_plan_sha256": "abc123",
+        "tasks": tasks,
+    }
+    monkeypatch.setattr("visual_agent.dashboard.api.list_programs", lambda _root: [{"program_id": "program-five"}])
+    monkeypatch.setattr("visual_agent.dashboard.api.load_program", lambda _root, _program_id: program)
+    monkeypatch.setattr(
+        "visual_agent.dashboard.api.load_mission",
+        lambda _root, mission_id: {"mission_id": mission_id, "plan_id": f"plan-{mission_id}", "status": "verified"},
+    )
+    monkeypatch.setattr("visual_agent.dashboard.api.load_worker_records", lambda _root, _plan_id: [{"resolved_model": "gpt-5.5"}])
+    monkeypatch.setattr(
+        "visual_agent.dashboard.api._load_verification_payload",
+        lambda _root, _plan_id: {"verdict": "pass", "command_verification": {"command": "pytest tests", "verdict": "pass"}},
+    )
+
+    def fake_dispatches(path: Path) -> list[dict]:
+        memory_ids = ["mission:mission-one"] if "mission-two" in str(path) else []
+        return [{
+            "resolved_provider": "custom",
+            "resolved_model": "gpt-5.5",
+            "worker_attempts": 1,
+            "repair_rounds": 0,
+            "project_memory_usage": {"dispatch_memory_ids": memory_ids},
+        }]
+
+    monkeypatch.setattr("visual_agent.dashboard.api._read_jsonl", fake_dispatches)
+
+    payload = build_five_pillars_data(tmp_path)
+
+    assert payload["program"]["provider"] == "custom"
+    assert payload["program"]["model"] == "gpt-5.5"
+    assert payload["program"]["upstream_memory_id"] == "mission:mission-one"
+    assert [item["status"] for item in payload["pillars"]] == ["passed"] * 5
+
+
+def test_five_pillars_page_and_api_are_served(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    workspace.mkdir()
+    server = _bind_dashboard_server("127.0.0.1", 0, workspace)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        with urllib.request.urlopen(base + "/five-pillars") as response:
+            html = response.read().decode("utf-8")
+        with urllib.request.urlopen(base + "/api/five-pillars") as response:
+            payload = json.loads(response.read().decode("utf-8-sig"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert "Pacer 五项闭环" in html
+    assert 'id="pillarList"' in html
+    assert payload["ok"] is True
+    assert payload["program"] is None
+    assert "五项闭环实证" in DASHBOARD_HTML
 
 
 def test_dashboard_api_rejects_cross_site_post(tmp_path) -> None:

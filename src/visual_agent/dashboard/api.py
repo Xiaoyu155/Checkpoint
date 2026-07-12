@@ -30,7 +30,7 @@ from ..goal_intake import intake_dialogue_lines, refine_goal
 from ..mission_contract import normalize_requirement_contract
 from ..mission_progress import build_mission_progress
 from ..missions import list_missions, load_mission, save_mission
-from ..programs import list_programs
+from ..programs import list_programs, load_program
 from ..subprocess_window import hidden_subprocess_kwargs
 from ..user_profile import load_user_profile, profile_from_payload, save_user_profile
 from ..workbench_board import attach_board_fields, archive_mission_now, merge_mission_now, mission_review_payload
@@ -871,6 +871,133 @@ def log_error(source: str, message: str, detail: str = "") -> None:
             fh.write(line.replace("\n", " ⏎ ")[:4000] + "\n")
     except OSError:
         pass
+
+
+def build_five_pillars_data(workspace_root: str | Path) -> dict[str, Any]:
+    """Build the five-pillar view from durable Program and dispatch records."""
+    root = Path(workspace_root).expanduser().resolve()
+    candidates: list[dict[str, Any]] = []
+    for summary in list_programs(root):
+        program_id = str(summary.get("program_id") or "")
+        program = load_program(root, program_id) if program_id else None
+        tasks = program.get("tasks") if isinstance(program, dict) and isinstance(program.get("tasks"), list) else []
+        if (
+            isinstance(program, dict)
+            and str(program.get("status") or "") == "completed"
+            and len(tasks) >= 2
+            and all(str(task.get("status") or "") == "verified" for task in tasks if isinstance(task, dict))
+        ):
+            candidates.append(program)
+    candidates.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+    if not candidates:
+        return {"ok": True, "workspace_root": str(root), "program": None, "missions": [], "pillars": []}
+
+    program = candidates[0]
+    task_rows = [task for task in program.get("tasks") or [] if isinstance(task, dict)][:2]
+    missions = [_five_pillars_mission(root, task) for task in task_rows]
+    closed_loop = ((program.get("autonomy_policy") or {}).get("closed_loop") or {})
+    providers = _unique_text(row.get("provider") for row in missions)
+    models = _unique_text(row.get("model") for row in missions)
+    verdicts = _unique_text(row.get("verification_verdict") for row in missions)
+    commands = _unique_text(row.get("verification_command") for row in missions)
+    upstream_id = str(task_rows[0].get("mission_id") or "") if task_rows else ""
+    recalled_ids = [
+        memory_id
+        for row in missions[1:]
+        for memory_id in row.get("memory_ids") or []
+        if memory_id == f"mission:{upstream_id}"
+    ]
+    summary = {
+        "program_id": str(program.get("program_id") or ""),
+        "status": str(program.get("status") or ""),
+        "objective": str(program.get("objective") or ""),
+        "source_plan": str(program.get("source_plan") or ""),
+        "source_plan_sha256": str(program.get("source_plan_sha256") or closed_loop.get("source_plan_sha256") or ""),
+        "provider": ", ".join(providers),
+        "model": ", ".join(models),
+        "worker_count": sum(int(row.get("worker_count") or 0) for row in missions),
+        "repair_count": sum(int(row.get("repair_count") or 0) for row in missions),
+        "verification_verdict": ", ".join(verdicts),
+        "verification_command": " | ".join(commands),
+        "upstream_memory_id": recalled_ids[0] if recalled_ids else "",
+        "task_sequence": [
+            {
+                "task_id": str(task.get("task_id") or ""),
+                "mission_id": str(task.get("mission_id") or ""),
+                "status": str(task.get("status") or ""),
+            }
+            for task in task_rows
+        ],
+    }
+    all_verified = len(task_rows) >= 2 and all(str(task.get("status") or "") == "verified" for task in task_rows)
+    all_passed = bool(verdicts) and all(value == "pass" for value in verdicts)
+    pillars = [
+        _pillar("routing", "Codex 路由", bool(providers and models), f"{summary['provider']} / {summary['model']}", "中转 provider 与模型来自真实 dispatch 审计"),
+        _pillar("memory", "本地记忆", bool(recalled_ids), summary["upstream_memory_id"] or "未召回直接上游", "阶段 2实际可见的上游 mission memory ID"),
+        _pillar("managed", "托管开发", all_verified, f"{len(task_rows)} 个任务已验收", "依赖任务按顺序自动创建、执行并收口"),
+        _pillar("acceptance", "强验收", all_passed, summary["verification_verdict"] or "无验收结论", summary["verification_command"] or "无验收命令"),
+        _pillar("dogfood", "路线锁定", bool(summary["source_plan_sha256"]), summary["source_plan_sha256"] or "缺少路线 SHA", summary["source_plan"] or "缺少路线文件"),
+    ]
+    return {
+        "ok": True,
+        "workspace_root": str(root),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "program": summary,
+        "missions": missions,
+        "pillars": pillars,
+    }
+
+
+def _five_pillars_mission(root: Path, task: dict[str, Any]) -> dict[str, Any]:
+    mission_id = str(task.get("mission_id") or "")
+    mission = load_mission(root, mission_id) or {}
+    plan_id = str(mission.get("plan_id") or "")
+    workers = load_worker_records(root, plan_id) if plan_id else []
+    verification = _load_verification_payload(root, plan_id) if plan_id else {}
+    command_result = verification.get("command_verification") if isinstance(verification.get("command_verification"), dict) else {}
+    dispatches = _read_jsonl(plan_dir(root, plan_id) / "dispatches.jsonl") if plan_id else []
+    dispatch = dispatches[-1] if dispatches else {}
+    memory_usage = dispatch.get("project_memory_usage") if isinstance(dispatch.get("project_memory_usage"), dict) else {}
+    return {
+        "task_id": str(task.get("task_id") or ""),
+        "mission_id": mission_id,
+        "status": str(mission.get("status") or task.get("status") or ""),
+        "plan_id": plan_id,
+        "provider": str(dispatch.get("resolved_provider") or (workers[-1].get("resolved_provider") if workers else "")),
+        "model": str(dispatch.get("resolved_model") or (workers[-1].get("resolved_model") if workers else "")),
+        "worker_count": int(dispatch.get("worker_attempts") or len(workers)),
+        "repair_count": int(dispatch.get("repair_rounds") or 0),
+        "verification_verdict": str(verification.get("verdict") or command_result.get("verdict") or ""),
+        "verification_command": str(command_result.get("command") or mission.get("test_command") or task.get("test_command") or ""),
+        "memory_ids": list(memory_usage.get("dispatch_memory_ids") or memory_usage.get("injected_memory_ids") or []),
+    }
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def _unique_text(values: Any) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _pillar(pillar_id: str, title: str, passed: bool, metric: str, evidence: str) -> dict[str, str]:
+    return {"id": pillar_id, "title": title, "status": "passed" if passed else "attention", "metric": metric, "evidence": evidence}
 
 
 # ---------------------------------------------------------------------------

@@ -85,6 +85,9 @@ def test_start_program_advances_past_verified_task(tmp_path) -> None:
     saved = load_program(workspace.root, program["program_id"])
     assert saved["tasks"][0]["status"] == "verified"
     assert saved["tasks"][1]["status"] == "queued"
+    second = load_mission(workspace.root, str(saved["tasks"][1]["mission_id"]))
+    assert second is not None
+    assert f"upstream_mission_ids={saved['tasks'][0]['mission_id']}" in second["objective"]
 
 
 def test_advance_program_for_mission_queues_next_task(tmp_path) -> None:
@@ -243,6 +246,8 @@ def test_autonomous_program_delegates_all_internal_tasks_with_wide_budget(tmp_pa
     assert all(call["max_repair_rounds"] == 7 for call in calls)
     assert all(call["ground_vague_goals"] is False for call in calls)
     assert all("Explore the repository" in call["goal"] for call in calls)
+    assert all(f"program_id={program['program_id']}" in call["goal"] for call in calls)
+    assert "task_id=task-001" in calls[0]["goal"]
     assert calls[0]["model_policy"]["implementation"] == "inherit"
     assert calls[1]["model_policy"]["implementation"] == "gpt-5.6-luna"
     assert calls[0]["execution_policy"]["program_id"] == program["program_id"]

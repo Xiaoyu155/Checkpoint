@@ -22,6 +22,7 @@ from ..missions import validate_mission_id
 from .api import (
     build_diagnostic_bundle,
     build_dashboard_data_cached,
+    build_five_pillars_data,
     build_mission_detail,
     get_active_workspace,
     get_commercial_config,
@@ -139,11 +140,20 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         if path in {"/", "/index.html", "/工作台", "/workbench", "/dashboard"}:
             self._serve_static(_STATIC_DIR / "index.html", "text/html; charset=utf-8")
             return
+        if path in {"/five-pillars", "/five-pillars.html"}:
+            self._serve_static(_STATIC_DIR / "five-pillars.html", "text/html; charset=utf-8")
+            return
         if path == "/app.js":
             self._serve_static(_STATIC_DIR / "app.js", "application/javascript; charset=utf-8")
             return
         if path == "/style.css":
             self._serve_static(_STATIC_DIR / "style.css", "text/css; charset=utf-8")
+            return
+        if path == "/five-pillars.js":
+            self._serve_static(_STATIC_DIR / "five-pillars.js", "application/javascript; charset=utf-8")
+            return
+        if path == "/five-pillars.css":
+            self._serve_static(_STATIC_DIR / "five-pillars.css", "text/css; charset=utf-8")
             return
 
         # API endpoints
@@ -154,6 +164,9 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 return
         if path == "/api/data":
             self._send_json(build_dashboard_data_cached(root))
+            return
+        if path == "/api/five-pillars":
+            self._send_json(build_five_pillars_data(root))
             return
         if path == "/api/events":
             self._stream_events(root)

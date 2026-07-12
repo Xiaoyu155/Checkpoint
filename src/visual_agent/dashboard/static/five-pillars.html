@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pacer 五项闭环</title>
+<link rel="stylesheet" href="/five-pillars.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/dashboard">Pacer <small>五项闭环</small></a>
+  <div class="workspace" id="workspacePath"></div>
+  <div class="spacer"></div>
+  <button class="icon-button" id="refreshButton" type="button" title="刷新证据" aria-label="刷新证据"><span aria-hidden="true">↻</span></button>
+</header>
+<main class="page">
+  <section class="program-head" aria-label="闭环总览">
+    <div class="program-title">
+      <div class="eyebrow">最新完成的托管闭环</div>
+      <h1 id="programTitle">正在读取本地证据</h1>
+      <div class="program-state"><span class="status-dot"></span><span id="programStatus">读取中</span></div>
+    </div>
+    <div class="summary-grid">
+      <div><span>Program</span><b id="programId">-</b></div>
+      <div><span>Mission</span><b id="missionIds">-</b></div>
+      <div><span>Provider / Model</span><b id="providerModel">-</b></div>
+      <div><span>Worker / Repair</span><b id="workerRepair">-</b></div>
+    </div>
+  </section>
+
+  <section class="flow" aria-label="闭环顺序">
+    <span>路线锁定</span><i>→</i><span>本地记忆</span><i>→</i><span>模型路由</span><i>→</i><span>托管执行</span><i>→</i><span>严格验收</span>
+  </section>
+
+  <section class="toolbar" aria-label="状态筛选">
+    <div class="segments" id="filterSegments">
+      <button class="active" type="button" data-filter="all">全部</button>
+      <button type="button" data-filter="passed">已通过</button>
+      <button type="button" data-filter="attention">需关注</button>
+    </div>
+    <div class="acceptance" id="acceptanceLine"></div>
+  </section>
+
+  <section class="evidence-layout">
+    <div class="pillar-list" id="pillarList" aria-label="五项状态"></div>
+    <aside class="evidence-panel" id="evidencePanel" aria-live="polite"></aside>
+  </section>
+</main>
+<script src="/five-pillars.js"></script>
+</body>
+</html>
