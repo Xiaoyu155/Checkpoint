@@ -1,0 +1,26 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: desktop_click_visual
+version: 1
+description: "Desktop visual automation demo using OmniParser-compatible detection."
+tags: [example, verification, desktop, fast]
+category: desktop_vision
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
+steps:
+  - id: observe_desktop
+    action: observe_screen
+    window:
+      title_contains: Notepad
+      bring_to_front: true
+    post_action_observe:
+      wait_seconds: 0.2
+  - id: click_save
+    action: click_visual
+    description: "Save button"
+    provider: omniparser
+  - id: assert_saved_text
+    action: assert_visual_text
+    text: "Save"
+    provider: omniparser
