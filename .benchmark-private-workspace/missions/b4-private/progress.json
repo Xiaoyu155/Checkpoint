@@ -1,0 +1,9 @@
+{
+  "stage": "worker_running",
+  "stage_label": "Worker running",
+  "status": "running",
+  "heartbeat_at": "2026-07-10T07:06:41.886305+00:00",
+  "schema_version": 1,
+  "mission_id": "b4-private",
+  "updated_at": "2026-07-10T07:06:41.894313+00:00"
+}
