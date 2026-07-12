@@ -1,0 +1,63 @@
+{
+  "provider": "dom",
+  "source": "fixture://login_page",
+  "width": 1280,
+  "height": 720,
+  "elements": [
+    {
+      "tag": "h1",
+      "role": "heading",
+      "selector": "h1",
+      "text": "客户管理系统",
+      "bounds": {
+        "left": 80,
+        "top": 64,
+        "width": 320,
+        "height": 48
+      }
+    },
+    {
+      "tag": "input",
+      "role": "input",
+      "selector": "#username",
+      "text": "",
+      "placeholder": "请输入用户名",
+      "name": "username",
+      "bounds": {
+        "left": 460,
+        "top": 240,
+        "width": 360,
+        "height": 44
+      }
+    },
+    {
+      "tag": "input",
+      "role": "input",
+      "selector": "#password",
+      "text": "",
+      "placeholder": "请输入密码",
+      "name": "password",
+      "bounds": {
+        "left": 460,
+        "top": 292,
+        "width": 360,
+        "height": 44
+      }
+    },
+    {
+      "tag": "button",
+      "role": "button",
+      "selector": "#login",
+      "text": "登录",
+      "bounds": {
+        "left": 520,
+        "top": 340,
+        "width": 240,
+        "height": 48
+      }
+    }
+  ],
+  "metadata": {
+    "title": "客户管理系统"
+  }
+}

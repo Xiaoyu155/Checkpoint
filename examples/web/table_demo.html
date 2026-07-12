@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>订单列表</title>
+  </head>
+  <body>
+    <main>
+      <h1>订单列表</h1>
+      <table>
+        <thead>
+          <tr>
+            <th>订单号</th>
+            <th>客户</th>
+            <th>金额</th>
+            <th>下载</th>
+            <th>查看</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr data-order-id="A1001">
+            <td>A1001</td>
+            <td>Acme</td>
+            <td>128.50</td>
+            <td><button data-testid="row-action">下载</button></td>
+            <td><button data-testid="row-action">查看</button></td>
+          </tr>
+          <tr data-order-id="A1002">
+            <td>A1002</td>
+            <td>Globex</td>
+            <td>256.00</td>
+            <td><button data-testid="row-action">下载</button></td>
+            <td><button data-testid="row-action">查看</button></td>
+          </tr>
+        </tbody>
+      </table>
+      <output id="status" aria-label="操作状态"></output>
+    </main>
+    <script>
+      for (const button of document.querySelectorAll('[data-testid="row-action"]')) {
+        button.addEventListener("click", async () => {
+          const row = button.closest("tr");
+          const orderId = row.dataset.orderId;
+          const action = button.textContent.trim() === "查看" ? "view" : "download";
+          const response = await fetch(`/api/orders/${orderId}/${action}`, { method: "POST" });
+          document.getElementById("status").textContent = response.ok ? `${orderId} ${action} 请求成功` : "请求失败";
+        });
+      }
+    </script>
+  </body>
+</html>

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "visual-agent": {
+      "command": "python",
+      "args": [
+        "-m",
+        "visual_agent.mcp_server",
+        "--workspace-root",
+        ".agent-workspace"
+      ],
+      "cwd": "."
+    }
+  }
+}

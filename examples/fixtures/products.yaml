@@ -1,0 +1,11 @@
+schema_version: 1
+name: products_standard
+type: standard
+page: /products
+description: Standard product catalog fixture template.
+data:
+  products: []
+  filters: {}
+metadata:
+  source: examples/fixtures/products.yaml
+  fixture_type: standard
