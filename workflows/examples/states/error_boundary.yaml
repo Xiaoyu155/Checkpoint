@@ -1,0 +1,23 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: error_boundary
+version: 1
+description: Verify error boundary renders a recoverable error message.
+tags: [verification, fast, states, error, example]
+category: states
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
+steps:
+  - id: observe_error
+    action: observe_browser
+    url: "http://localhost:3000/error-demo"
+  - id: browser_ready
+    action: assert_browser_ready
+    min_text_length: 1
+  - id: verify_error_copy
+    action: assert_text
+    text: "Something went wrong"
+  - id: verify_retry_action
+    action: assert_text
+    text: "Try again"

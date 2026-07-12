@@ -1,0 +1,21 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: product_detail
+version: 1
+description: Verify a product detail page shows purchase actions.
+tags: [verification, fast, ecommerce, detail, example]
+category: ecommerce
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
+steps:
+  - id: observe_product
+    action: observe_browser
+    url: "http://localhost:3000/products/demo"
+  - id: browser_ready
+    action: assert_browser_ready
+    min_text_length: 1
+    min_interactive: 1
+  - id: verify_add_to_cart
+    action: assert_text
+    text: "Add to cart"

@@ -1,0 +1,22 @@
+{
+  "engine": "tesseract",
+  "amount_value": "REPLACE_WITH_VALUE_TO_TYPE",
+  "approve_text": "REPLACE_WITH_VISIBLE_CLICK_TEXT",
+  "expected_amount_text": "REPLACE_WITH_TYPED_VALUE_VISIBLE_AFTER_INPUT",
+  "expected_after_text": "REPLACE_WITH_VISIBLE_RESULT_TEXT",
+  "required_before": [
+    "REPLACE_WITH_VISIBLE_BUSINESS_TEXT",
+    "REPLACE_WITH_VISIBLE_INPUT_TEXT",
+    "REPLACE_WITH_VISIBLE_CLICK_TEXT"
+  ],
+  "forbidden_before": [
+    "REPLACE_WITH_TEXT_THAT_MUST_NOT_BE_VISIBLE_BEFORE_CLICK"
+  ],
+  "required_after": [
+    "REPLACE_WITH_VISIBLE_RESULT_TEXT"
+  ],
+  "forbidden_after": [
+    "REPLACE_WITH_TEXT_THAT_MUST_NOT_BE_VISIBLE_AFTER_SUCCESS"
+  ],
+  "wait_seconds": 0.5
+}

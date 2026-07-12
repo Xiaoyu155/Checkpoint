@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "id": "B4",
+  "title": "Do not confuse a recycled PID with the mission background worker",
+  "category": "exploration_required",
+  "status": "defined_not_run",
+  "source": {
+    "kind": "benchmark_design",
+    "observed_on": null,
+    "failure": null
+  },
+  "objective": "Find the path that decides whether a background mission worker is still alive. A recycled PID that now belongs to an unrelated process must not be reported as the mission worker. Preserve the current result for a live matching worker and define a conservative result for legacy status records that lack identity metadata. Add deterministic tests using mocked or injected process metadata rather than real long-running processes.",
+  "acceptance_criteria": [
+    "A live PID with matching persisted identity is reported as running.",
+    "A live PID with mismatched identity is reported as stale or stopped.",
+    "A missing PID is reported as stopped.",
+    "Legacy records without identity metadata follow an explicitly tested conservative policy.",
+    "Tests do not launch or sleep on real background workers."
+  ],
+  "likely_relevant_files": [],
+  "target": {
+    "kind": "repository_snapshot_patch",
+    "base_revision": "e8583099bd8ab073d578fcbe0c6199ab289bcb0e",
+    "seed_patch": "tests/benchmarks/fixtures/common_target_seed.patch",
+    "seed_patch_sha256": "bfec72342daef270757f32b51f76e2970ea8e778e756f1a8665d544b158b32d2"
+  },
+  "verification": {
+    "commands": [
+      "python -m pytest tests/test_chief_background.py",
+      "python -m pytest tests/test_locks.py"
+    ]
+  },
+  "operator_verification": {
+    "kind": "operator_private_verifier",
+    "verifier": "tests/benchmarks/private_verifiers/b4_background_worker_pid_identity.py",
+    "verifier_sha256": "9074082ccb61fac178393c7223e55ea8cb52f7ee5fcdeca5a03817f2fa2cca85",
+    "command_template": "python tests/benchmarks/private_verifiers/b4_background_worker_pid_identity.py {target_root}",
+    "additional_acceptance": "Injected process metadata distinguishes a matching worker from a recycled PID and treats identity-less legacy records conservatively."
+  },
+  "protocol": {
+    "max_worker_turns": 1,
+    "requires_isolated_worktree": true,
+    "baseline_snapshot": "record_commit_and_dirty_patch_digest_before_run",
+    "prompt_must_not_add_file_hints": true,
+    "allow_test_edits": true
+  }
+}

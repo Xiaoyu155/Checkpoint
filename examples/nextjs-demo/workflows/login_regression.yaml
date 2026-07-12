@@ -1,0 +1,32 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: nextjs_demo_login_regression
+version: 1
+description: Regression test the Next.js login validation and success state.
+tags: [verification, regression, nextjs_demo]
+visibility: private
+author: visual-agent-team
+license: ""
+steps:
+  - id: observe_login
+    action: observe_browser
+    url: http://localhost:3000/login
+  - id: assert_ready
+    action: assert_browser_ready
+    min_text_length: 1
+  - id: fill_email
+    action: type
+    target:
+      selector: input[name="email"]
+    value: demo@example.com
+  - id: fill_password
+    action: type
+    target:
+      selector: input[name="password"]
+    value_from: input.password
+  - id: submit_login
+    action: click_text
+    text: Sign in
+  - id: assert_login_success
+    action: assert_text
+    text: Signed in successfully
