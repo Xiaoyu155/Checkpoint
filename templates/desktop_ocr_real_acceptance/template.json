@@ -1,0 +1,8 @@
+{
+  "id": "desktop_ocr_real_acceptance",
+  "name": "Desktop OCR Real Acceptance",
+  "description": "Live desktop OCR workflow skeleton: observe real screen text, click an OCR target, and verify post-action text.",
+  "workflow": "desktop_ocr_real_acceptance.yaml",
+  "inputs": "desktop_ocr_real_acceptance_inputs.json",
+  "tags": ["verification", "desktop", "ocr", "real-acceptance"]
+}

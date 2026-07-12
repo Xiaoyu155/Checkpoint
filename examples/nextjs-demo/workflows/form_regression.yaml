@@ -1,0 +1,38 @@
+﻿schema_version: 1
+min_runtime_version: "0.1.0"
+name: nextjs_demo_form_regression
+version: 1
+description: Regression test the Next.js contact form save state.
+tags: [verification, regression, nextjs_demo]
+visibility: private
+author: visual-agent-team
+license: ""
+steps:
+  - id: observe_form
+    action: observe_browser
+    url: http://localhost:3000/form
+  - id: assert_ready
+    action: assert_browser_ready
+    min_text_length: 1
+  - id: fill_name
+    action: type
+    target:
+      selector: input[name="name"]
+    value: Ada Lovelace
+  - id: fill_email
+    action: type
+    target:
+      selector: input[name="contact-email"]
+    value: ada@example.com
+  - id: fill_message
+    action: type
+    target:
+      selector: textarea[name="message"]
+    value: Checkpoint demo message
+  - id: save_draft
+    action: click_text
+    text: Save draft
+  - id: assert_saved
+    action: assert_text
+    text: Draft saved successfully
+

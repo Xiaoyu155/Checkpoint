@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Support Tickets Sandbox</title>
+  </head>
+  <body>
+    <main>
+      <h1>Tickets</h1>
+      <label for="ticket-search">Ticket Search</label>
+      <input id="ticket-search" data-testid="ticket-search" />
+      <table aria-label="Priority Tickets">
+        <thead>
+          <tr>
+            <th>Ticket</th>
+            <th>Customer</th>
+            <th>Priority</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>TK-1001</td>
+            <td>Demo Retail</td>
+            <td>Normal</td>
+            <td><button data-testid="ticket-open">Open</button></td>
+          </tr>
+          <tr>
+            <td>TK-1002</td>
+            <td>Sample Logistics</td>
+            <td>Priority</td>
+            <td><button data-testid="ticket-open">Open</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </main>
+  </body>
+</html>

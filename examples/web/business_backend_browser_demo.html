@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>订单运营后台 - 浏览器组合验证</title>
+  </head>
+  <body>
+    <main>
+      <h1>订单运营后台</h1>
+      <section aria-label="SPA 状态">
+        <div id="spa-status" role="status">SPA 页面已加载：订单列表</div>
+      </section>
+
+      <section aria-label="筛选条件">
+        <label for="customer-filter">客户名称</label>
+        <input id="customer-filter" name="customer" placeholder="输入客户名称" />
+        <label for="order-filter">订单号</label>
+        <input id="order-filter" name="order_id" placeholder="输入订单号" />
+        <button id="search-orders">查询</button>
+      </section>
+
+      <section aria-label="订单分页">
+        <div id="page-status" role="status">第 2 页，共 8 页</div>
+        <button id="prev-page">上一页</button>
+        <button id="next-page">下一页</button>
+      </section>
+
+      <table aria-label="订单列表">
+        <thead>
+          <tr>
+            <th>订单号</th>
+            <th>客户</th>
+            <th>状态</th>
+            <th>下载</th>
+            <th>处理</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr data-order-id="A2001">
+            <td>A2001</td>
+            <td>Acme</td>
+            <td>待处理</td>
+            <td><a data-testid="row-action" href="/exports/A2001.csv">下载</a></td>
+            <td><button data-testid="row-action">处理</button></td>
+          </tr>
+          <tr data-order-id="A2002">
+            <td>A2002</td>
+            <td>Globex</td>
+            <td>异常</td>
+            <td><a data-testid="row-action" href="/exports/A2002.csv">下载</a></td>
+            <td><button data-testid="row-action">处理</button></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <dialog id="error-dialog" role="dialog" aria-label="异常提示">
+        <h2>异常弹窗</h2>
+        <p>订单 A2002 缺少收货地址，请人工复核。</p>
+        <button id="dismiss-error">我知道了</button>
+      </dialog>
+    </main>
+
+    <script>
+      document.getElementById("next-page").addEventListener("click", () => {
+        document.getElementById("page-status").textContent = "第 3 页，共 8 页";
+        document.getElementById("spa-status").textContent = "SPA 页面已更新：第 3 页";
+      });
+
+      document.getElementById("dismiss-error").addEventListener("click", () => {
+        document.getElementById("error-dialog").close();
+        document.getElementById("spa-status").textContent = "异常弹窗已关闭";
+      });
+
+      for (const button of document.querySelectorAll("button[data-testid='row-action']")) {
+        button.addEventListener("click", async () => {
+          const row = button.closest("tr");
+          const orderId = row.dataset.orderId;
+          await fetch(`/api/orders/${orderId}/process`, { method: "POST" });
+          if (orderId === "A2002") {
+            document.getElementById("spa-status").textContent = "订单 A2002 缺少收货地址";
+            document.getElementById("error-dialog").showModal();
+          } else {
+            document.getElementById("spa-status").textContent = `${orderId} 已处理`;
+          }
+        });
+      }
+    </script>
+  </body>
+</html>

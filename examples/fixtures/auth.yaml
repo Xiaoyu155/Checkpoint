@@ -1,0 +1,11 @@
+schema_version: 1
+name: auth_standard
+type: standard
+page: /login
+description: Standard authentication fixture template.
+data:
+  users: []
+  sessions: []
+metadata:
+  source: examples/fixtures/auth.yaml
+  fixture_type: standard
