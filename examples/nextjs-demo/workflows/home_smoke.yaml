@@ -1,0 +1,23 @@
+﻿schema_version: 1
+min_runtime_version: "0.1.0"
+name: nextjs_demo_home_smoke
+version: 1
+description: Smoke test the Next.js demo home page.
+tags: [verification, fast, nextjs_demo]
+visibility: private
+author: visual-agent-team
+license: ""
+steps:
+  - id: observe_home
+    action: observe_browser
+    url: http://localhost:3000
+  - id: assert_ready
+    action: assert_browser_ready
+    min_text_length: 1
+  - id: assert_brand
+    action: assert_text
+    text: Checkpoint Next.js demo
+  - id: assert_status
+    action: assert_text
+    text: Next.js SSR demo ready
+
