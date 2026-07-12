@@ -1,0 +1,35 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: demo_app_login_regression
+version: 1
+description: Regression test the login tab validation and success state.
+tags: [verification, regression, demo_app]
+visibility: private
+author: visual-agent-team
+license: ""
+steps:
+  - id: observe_home
+    action: observe_browser
+    url: http://localhost:4173
+  - id: assert_ready
+    action: assert_browser_ready
+    min_text_length: 1
+  - id: open_login
+    action: click_text
+    text: Login
+  - id: fill_email
+    action: type
+    target:
+      selector: input[name="email"]
+    value: demo@example.com
+  - id: fill_password
+    action: type
+    target:
+      selector: input[name="password"]
+    value_from: input.password
+  - id: submit_login
+    action: click_text
+    text: Sign in
+  - id: assert_login_success
+    action: assert_text
+    text: Signed in successfully

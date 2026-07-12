@@ -1,0 +1,26 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: pacer_workbench_static_acceptance
+version: 1
+description: Validate the Pacer workbench static shell exposes mission intake, value metrics, and requirement-contract evidence.
+tags: [verification, fast, pacer, dashboard, workbench]
+affects:
+  - .gitignore
+  - examples/workflows/
+  - src/visual_agent/
+  - tests/
+  - xiao/.gitignore
+  - xiao/examples/workflows/
+  - xiao/src/visual_agent/
+  - xiao/tests/
+visibility: private
+author: visual-agent-team
+license: ""
+steps:
+  - id: dashboard_static_acceptance
+    action: run_command
+    command: python -m visual_agent.dashboard_static_acceptance
+    dry_run: false
+    expect_text: '"status": "success"'
+    timeout_seconds: 30
+    description: Verify Pacer dashboard static workbench acceptance signals.
