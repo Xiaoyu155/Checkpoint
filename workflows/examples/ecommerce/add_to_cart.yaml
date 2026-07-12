@@ -1,0 +1,25 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: add_to_cart
+version: 1
+description: Verify adding a product updates the cart.
+tags: [verification, fast, ecommerce, cart, example]
+category: ecommerce
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
+steps:
+  - id: observe_product
+    action: observe_browser
+    url: "http://localhost:3000/products/demo"
+  - id: browser_ready
+    action: assert_browser_ready
+    min_text_length: 1
+    min_interactive: 1
+  - id: add_item
+    action: click
+    target: { text: "Add to cart", role: button }
+    browser_post_action_observe: true
+  - id: verify_cart_updated
+    action: assert_text
+    text: "Cart"

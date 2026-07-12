@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+REPO_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+PYTHON="$REPO_ROOT/.venv/Scripts/python.exe"
+if [ ! -x "$PYTHON" ]; then
+  PYTHON="python"
+fi
+
+cd "$REPO_ROOT"
+
+"$PYTHON" -m visual_agent.cli verify --workspace-root .agent-workspace --tags fast --max-workflows 5 --run-profile dry-run --wait-lock --format json
+"$PYTHON" -m visual_agent.cli quality-gate --profile ci --workspace-root .agent-workspace --run --fail-on-risk-policy-error --fail-on-secret-leak --ci --junit-output .runs/quality_gates/junit.xml
