@@ -260,7 +260,17 @@ def start_program(
             task["block_reason"] = "research/doc only in current quota window"
             blocked.append({"task_id": task.get("task_id"), "reason": task["block_reason"], "reference_pack_path": saved_pack["path"]})
             continue
-        task_goal = _dispatch_goal_for_task(task, autonomous=autonomous_mode)
+        upstream_mission_ids = [
+            str(by_id.get(str(dependency), {}).get("mission_id") or "")
+            for dependency in task.get("depends_on") or []
+            if str(by_id.get(str(dependency), {}).get("mission_id") or "")
+        ]
+        task_goal = _dispatch_goal_for_task(
+            task,
+            autonomous=autonomous_mode,
+            program_id=str(program.get("program_id") or ""),
+            upstream_mission_ids=upstream_mission_ids,
+        )
         mission_options: dict[str, Any] = {}
         if autonomous_mode:
             route_mode = mode
@@ -498,10 +508,20 @@ def _roadmap_integrity_block(program: dict[str, Any], autonomy_policy: dict[str,
     return ""
 
 
-def _dispatch_goal_for_task(task: dict[str, Any], *, autonomous: bool = False) -> str:
+def _dispatch_goal_for_task(
+    task: dict[str, Any],
+    *,
+    autonomous: bool = False,
+    program_id: str = "",
+    upstream_mission_ids: list[str] | None = None,
+) -> str:
     objective = str(task.get("objective") or "").strip()
     test_command = str(task.get("test_command") or "").strip()
     parts = [objective]
+    context = [f"program_id={program_id}" if program_id else "", f"task_id={task.get('task_id') or ''}"]
+    if upstream_mission_ids:
+        context.append("upstream_mission_ids=" + ",".join(upstream_mission_ids))
+    parts.append("Closed-loop context: " + "; ".join(item for item in context if item))
     if autonomous:
         parts.append(
             "Own this task end to end. Explore the repository, choose the implementation path, and delegate or reorganize work as needed."
