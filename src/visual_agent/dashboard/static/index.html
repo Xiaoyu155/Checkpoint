@@ -12,7 +12,7 @@
   <span class="hdr-sep">/</span>
   <button class="ghost" onclick="openProjModal()">切换项目</button>
   <div id="projPath" title="当前工作空间">未选择工作空间</div>
-  <select id="mobileViewNav" class="mobile-view-nav" aria-label="板块导航" onchange="switchWorkbenchView(this.value)">
+  <select id="mobileViewNav" class="mobile-view-nav" aria-label="板块导航" onchange="this.value==='five-pillars-link' ? (window.location.href='/five-pillars') : switchWorkbenchView(this.value)">
     <option value="mission-control">新建任务</option>
     <option value="core-readiness-panel">产品可用度</option>
     <option value="mission-desk">任务列表</option>
@@ -24,6 +24,7 @@
     <option value="value-panel">低成本效率</option>
     <option value="autopilot-panel">托管闭环</option>
     <option value="readiness-panel">推广就绪</option>
+    <option value="five-pillars-link">五项闭环实证</option>
   </select>
   <div class="spc"></div>
   <div id="agentsRow"></div>
@@ -61,6 +62,7 @@
         <button data-nav-view="core-readiness-panel" onclick="focusWorkbenchPanel('core-readiness-panel')">产品可用度</button>
         <button data-nav-view="autopilot-panel" onclick="focusWorkbenchPanel('autopilot-panel')">托管闭环</button>
         <button data-nav-view="readiness-panel" onclick="focusWorkbenchPanel('readiness-panel')">推广就绪</button>
+        <button onclick="window.location.href='/five-pillars'">五项闭环实证</button>
         <button onclick="toggleWorker()">启动 / 停止 Worker</button>
         <button onclick="openProjModal()">切换项目</button>
         <button onclick="openSettings()">模型与通知设置</button>
