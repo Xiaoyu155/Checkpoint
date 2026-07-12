@@ -1,0 +1,22 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: external_readonly_probe
+version: 1
+steps:
+  - id: observe_external_page
+    action: observe_browser
+    url_from: input.url
+    headed: false
+    routes:
+      - url: "**/*"
+        status: 200
+        content_type: text/html
+        body_from_file: fixtures/external_readonly_probe.html
+  - id: assert_expected_text
+    action: assert_text
+    text_from: input.assert_text
+  - id: wait_expected_text
+    action: wait_for
+    condition: text
+    text_from: input.assert_text
+    timeout_seconds: 1

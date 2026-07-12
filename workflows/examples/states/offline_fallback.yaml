@@ -1,0 +1,20 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: offline_fallback
+version: 1
+description: Verify offline fallback content is visible.
+tags: [verification, fast, states, offline, example]
+category: states
+visibility: public
+author: visual-agent-team
+license: cc-by-4.0
+steps:
+  - id: observe_offline
+    action: observe_browser
+    url: "http://localhost:3000/offline"
+  - id: browser_ready
+    action: assert_browser_ready
+    min_text_length: 1
+  - id: verify_offline_message
+    action: assert_text
+    text: "You are offline"
