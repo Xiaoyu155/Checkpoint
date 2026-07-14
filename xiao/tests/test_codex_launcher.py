@@ -67,6 +67,8 @@ def _assert_native_control(prompt: str, *, task: str | None = None) -> None:
     assert "Do not enumerate ALL_TOOLS" in prompt
     assert "mcp__pacer__begin_pacer_task" in prompt
     assert prompt.count("mcp__pacer__begin_pacer_task") == 1
+    assert codex_launcher.PACER_BEGIN_TASK_TEMPLATE in prompt
+    assert "the field is goal, never task" in prompt
     assert "mcp__pacer__get_pacer_memory" in prompt
     assert "mcp__pacer__complete_pacer_task" in prompt
     assert prompt.count("mcp__pacer__complete_pacer_task") == 1
@@ -127,6 +129,21 @@ def test_launch_codex_forwards_terminal_and_arguments(tmp_path, monkeypatch) -> 
         "model_auto_compact_token_limit=96000",
         "-c",
         'model_auto_compact_token_limit_scope="total"',
+        "-c",
+        "mcp_servers.pacer.command="
+        + json.dumps(os.path.abspath(codex_launcher.sys.executable), ensure_ascii=False),
+        "-c",
+        'mcp_servers.pacer.args=["-m", "visual_agent.mcp_server"]',
+        "-c",
+        "mcp_servers.pacer.env_vars="
+        + json.dumps(
+            [
+                "PACER_LAUNCH_ID",
+                "PACER_PRELAUNCH_TASK_REQUIRED",
+                "PACER_PRELAUNCH_TASK_CONTRACT_DIGEST",
+                "PACER_PRELAUNCH_SOURCE_BASELINE_DIGEST",
+            ]
+        ),
         "resume",
         "--last",
     ]
@@ -654,6 +671,55 @@ def test_pacer_codex_args_preserves_explicit_auto_compact_override() -> None:
     arguments = ["-c", "model_auto_compact_token_limit=120000", "resume", "--last"]
 
     assert codex_launcher._pacer_codex_args(arguments) == arguments
+
+
+def test_pacer_mcp_config_overrides_user_transport_and_forwards_launch_trust() -> None:
+    configured = codex_launcher._inject_pacer_mcp_config(
+        ["-c", 'mcp_servers.pacer.command="stale-python"', "exec", "修复错误"]
+    )
+
+    command_configs = [configured[index + 1] for index, value in enumerate(configured) if value == "-c"]
+    expected_command = "mcp_servers.pacer.command=" + json.dumps(
+        os.path.abspath(codex_launcher.sys.executable),
+        ensure_ascii=False,
+    )
+    expected_environment = "mcp_servers.pacer.env_vars=" + json.dumps(
+        [
+            "PACER_LAUNCH_ID",
+            "PACER_PRELAUNCH_TASK_REQUIRED",
+            "PACER_PRELAUNCH_TASK_CONTRACT_DIGEST",
+            "PACER_PRELAUNCH_SOURCE_BASELINE_DIGEST",
+        ]
+    )
+    assert command_configs == [
+        'mcp_servers.pacer.command="stale-python"',
+        expected_command,
+        'mcp_servers.pacer.args=["-m", "visual_agent.mcp_server"]',
+        expected_environment,
+    ]
+    assert configured[-2:] == ["exec", "修复错误"]
+
+
+def test_failed_prelaunch_registration_does_not_forward_stale_parent_digests(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls = []
+    _stub_native_codex(monkeypatch, calls)
+    monkeypatch.setenv("PACER_PRELAUNCH_TASK_CONTRACT_DIGEST", "a" * 64)
+    monkeypatch.setenv("PACER_PRELAUNCH_SOURCE_BASELINE_DIGEST", "b" * 64)
+    monkeypatch.setattr(
+        codex_launcher,
+        "_pre_register_pacer_task",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("registration failed")),
+    )
+
+    assert codex_launcher.launch_codex(["exec", "修复登录错误"], cwd=tmp_path) == 0
+
+    environment = calls[0][1]["env"]
+    assert environment["PACER_PRELAUNCH_TASK_REQUIRED"] == "1"
+    assert "PACER_PRELAUNCH_TASK_CONTRACT_DIGEST" not in environment
+    assert "PACER_PRELAUNCH_SOURCE_BASELINE_DIGEST" not in environment
 
 
 def test_effective_auto_compact_limit_reads_inline_long_config() -> None:

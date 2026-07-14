@@ -52,6 +52,9 @@ PACER_SKILL_INVOCATION = "$pacer:pacer-native"
 PACER_NATIVE_CONTROL_MARKER = "PACER_NATIVE_CONTROL_V1"
 PACER_BOOTSTRAP_MEMORY_MARKER = "PACER_BOOTSTRAP_MEMORY_V1"
 PACER_USER_TASK_MARKER = "PACER_USER_TASK_V1"
+PACER_BEGIN_TASK_TEMPLATE = (
+    '{"workspace_root":".agent-workspace","repo_root":".","goal":"<exact user task>"}'
+)
 PACER_COMPLETE_TASK_TEMPLATE = (
     '{"workspace_root":".agent-workspace","repo_root":".","goal":"<task>",'
     '"summary":"<result>","completion_evidence":{"result_kind":"change","claims":['
@@ -359,6 +362,7 @@ def launch_codex(argv: Sequence[str] = (), *, cwd: str | Path = ".") -> int:
         argv,
         launch_id=launch_id,
     )
+    prepared_argv = _inject_pacer_mcp_config(prepared_argv)
     raw_stdin = sys.stdin.read() if read_prompt_from_stdin else None
     stdin_prompt = (
         _pacer_control_prompt(str(raw_stdin or ""), launch_id=launch_id)
@@ -425,6 +429,12 @@ def launch_codex(argv: Sequence[str] = (), *, cwd: str | Path = ".") -> int:
     environment = os.environ.copy()
     # Keep MCP completion pinned even when local launch telemetry could not be written.
     environment["PACER_LAUNCH_ID"] = launch_id
+    for name in (
+        PRELAUNCH_TASK_REQUIRED_ENV,
+        PRELAUNCH_TASK_CONTRACT_DIGEST_ENV,
+        PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV,
+    ):
+        environment.pop(name, None)
     if launch:
         _apply_managed_python_environment(environment, launch)
     if launch and task_text:
@@ -961,6 +971,28 @@ def _prepare_pacer_invocation(
     return _pacer_codex_args(activated), prepend_skill_to_stdin
 
 
+def _inject_pacer_mcp_config(argv: Sequence[str]) -> list[str]:
+    """Pin Codex to this Pacer install and forward per-launch trust evidence."""
+    arguments = [str(item) for item in argv]
+    positionals = _codex_positional_indices(arguments)
+    insert_at = positionals[0] if positionals else len(arguments)
+    environment_names = [
+        "PACER_LAUNCH_ID",
+        PRELAUNCH_TASK_REQUIRED_ENV,
+        PRELAUNCH_TASK_CONTRACT_DIGEST_ENV,
+        PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV,
+    ]
+    config = [
+        "-c",
+        "mcp_servers.pacer.command=" + json.dumps(os.path.abspath(sys.executable), ensure_ascii=False),
+        "-c",
+        "mcp_servers.pacer.args=" + json.dumps(["-m", "visual_agent.mcp_server"]),
+        "-c",
+        "mcp_servers.pacer.env_vars=" + json.dumps(environment_names),
+    ]
+    return [*arguments[:insert_at], *config, *arguments[insert_at:]]
+
+
 def _codex_launch_mode(argv: Sequence[str]) -> str:
     arguments = [str(item) for item in argv]
     positionals = _codex_positional_indices(arguments)
@@ -1305,8 +1337,9 @@ def _pacer_control_prompt(
         "Do not read or load any Pacer SKILL.md or plugin skill. Do not enumerate ALL_TOOLS, MCP resources, "
         "resource templates, servers, or tool schemas, and do not run `codex mcp list`.",
             "After a real task is known, before reading, scanning, or modifying the repository, call "
-            "`mcp__pacer__begin_pacer_task` exactly once with the exact user task. Use its immutable task_contract "
-            "and requirement IDs for all later completion claims. Without a successful begin call, do not work.",
+            "`mcp__pacer__begin_pacer_task` exactly once with the exact user task using this payload (the field is "
+            f"goal, never task): {PACER_BEGIN_TASK_TEMPLATE}. Use its immutable task_contract and requirement IDs "
+            "for all later completion claims. Without a successful begin call, do not work.",
             f"If {PACER_BOOTSTRAP_MEMORY_MARKER} is present, use it and do not fetch Memory again. Otherwise, after "
             "begin_pacer_task succeeds, call `mcp__pacer__get_pacer_memory` exactly once with detail=compact.",
             "Keep tool rounds compact: batch independent reads, do not repeat unchanged file/status/diff reads, "

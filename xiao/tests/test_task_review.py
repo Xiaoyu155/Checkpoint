@@ -590,6 +590,126 @@ def test_task_contract_classifies_read_only_test_run_and_documentation() -> None
 @pytest.mark.parametrize(
     "goal",
     [
+        "修复 calculator.py 中 add 函数的错误，使 tests/test_calculator.py 通过",
+        "修复登录逻辑，让现有测试通过",
+        "Fix the parser so that tests/test_parser.py passes",
+    ],
+)
+def test_task_contract_treats_passing_tests_as_implementation_acceptance(goal) -> None:
+    requirement = build_task_contract(goal)["requirements"][0]
+
+    assert requirement["intent"] == "implementation"
+    assert requirement["requires_source_change"] is True
+    assert requirement["required_artifact_role"] == "implementation"
+
+
+def test_task_review_accepts_implementation_fix_verified_by_unchanged_existing_test(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = repo / "calculator.py"
+    source.write_text(
+        "def add(left: int, right: int) -> int:\n    return left - right\n",
+        encoding="utf-8",
+    )
+    tests = repo / "tests" / "test_calculator.py"
+    tests.parent.mkdir()
+    tests.write_text(
+        "from calculator import add\n\ndef test_add():\n    assert add(2, 3) == 5\n",
+        encoding="utf-8",
+    )
+    baseline = capture_task_source_baseline(repo)
+    source.write_text(
+        "def add(left: int, right: int) -> int:\n    return left + right\n",
+        encoding="utf-8",
+    )
+    goal = (
+        "修复 calculator.py 中 add 函数的错误，使 tests/test_calculator.py 通过；"
+        "只修改 calculator.py，并使用 python -m unittest discover -s tests -v 验证。"
+    )
+    contract = build_task_contract(goal)
+    implementation, test_run = contract["requirements"]
+    steps = [
+        {
+            "name": "tests",
+            "argv": ["python", "-m", "unittest", "discover", "-s", "tests", "-v"],
+        }
+    ]
+    evidence = {
+        "result_kind": "change",
+        "claims": [
+            {
+                "kind": "change",
+                "requirement_ids": [implementation["id"]],
+                "requirement": implementation["text"],
+                "result": "add 现在返回 left + right，满足正整数相加行为并由指定 unittest 测试验证。",
+                "files": [{"path": "calculator.py", "state": "modified"}],
+                "verification_steps": ["tests"],
+            },
+            {
+                "kind": "change",
+                "requirement_ids": [test_run["id"]],
+                "requirement": test_run["text"],
+                "result": "变更清单仅包含 calculator.py；指定 unittest discover 命令作为原子验收步骤执行。",
+                "files": [{"path": "calculator.py", "state": "modified"}],
+                "verification_steps": ["tests"],
+            },
+        ],
+        "unresolved_items": [],
+        "known_risks": [],
+    }
+    review = audit_task_completion(
+        launch_goal=goal,
+        submitted_goal=goal,
+        summary="已修复 add 的运算错误，并使用指定命令完成验证。",
+        completion_evidence=evidence,
+        requested_steps=steps,
+        repo_root=repo,
+        task_contract=contract,
+        source_baseline=baseline,
+        verification={
+            "status": "passed",
+            "records": [
+                {
+                    "name": "tests",
+                    "status": "passed",
+                    "exit_code": 0,
+                    "elapsed_seconds": 0.1,
+                }
+            ],
+        },
+    )
+
+    assert review["valid"] is True
+    assert review["trust"] == "yes"
+    assert review["warnings"] == []
+    assert review["user_report"]["can_trust"] == "yes"
+
+
+def test_task_review_keeps_low_overlap_warning_for_unrelated_result(tmp_path) -> None:
+    repo, baseline = _repo(tmp_path)
+    evidence = _evidence()
+    evidence["claims"][0]["result"] = "fix payment checkout"
+    review = audit_task_completion(
+        launch_goal="修复登录错误",
+        submitted_goal="修复登录错误",
+        summary="登录失败状态已经修复",
+        completion_evidence=evidence,
+        requested_steps=_steps(),
+        repo_root=repo,
+        source_baseline=baseline,
+        verification=_verification(),
+    )
+
+    assert review["valid"] is True
+    assert review["trust"] == "with_limits"
+    assert "claim_result_low_overlap" in {
+        str(item.get("code") or "") for item in review["warnings"]
+    }
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
         "修复登录错误与增加超时测试",
         "修复登录错误和增加超时测试",
         "fix login bug & add timeout tests",

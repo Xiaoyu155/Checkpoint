@@ -284,7 +284,21 @@ def _goal_intent(goal: str) -> tuple[str, bool, str]:
             "fix", "add", "write", "update", "extend",
         )
     )
-    if any(marker in normalized for marker in add_test_markers) or (has_test and test_change_action):
+    test_is_acceptance_target = bool(
+        re.search(
+            r"(?:使|让|确保|以便|直到).{0,80}(?:测试|用例|tests?|spec).{0,40}(?:通过|成功|pass(?:es|ed)?)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        or re.search(
+            r"\bso(?:\s+that)?\b.{0,80}\b(?:tests?|specs?)\b.{0,40}\bpass(?:es|ed)?\b",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    )
+    if any(marker in normalized for marker in add_test_markers) or (
+        has_test and test_change_action and not test_is_acceptance_target
+    ):
         return "test_change", True, "test"
     if has_documentation and has_mutation:
         return "documentation_change", True, "documentation"
@@ -1265,7 +1279,23 @@ def _result_matches_requirement(result: str, requirement: str) -> bool:
     normalized_requirement = _normalize_text(requirement)
     if len(normalized_requirement) >= 4 and normalized_requirement in normalized_result:
         return True
-    return _text_related(result, requirement)
+    if _text_related(result, requirement):
+        return True
+    shared = _semantic_tokens(normalized_result) & _semantic_tokens(normalized_requirement)
+    generic = {
+        "add", "build", "change", "complete", "fix", "implement", "modify", "pass",
+        "test", "tests", "update", "write", "修改", "修复", "实现", "完成", "测试", "通过", "验证",
+    }
+    if shared - generic:
+        return True
+    code_identifiers = set(
+        re.findall(
+            r"\b([a-z_][a-z0-9_.-]*)\b(?=\s*(?:函数|方法|类|模块|function\b|method\b|class\b|module\b))",
+            normalized_requirement,
+            flags=re.IGNORECASE,
+        )
+    )
+    return bool(shared & code_identifiers)
 
 
 def _semantic_tokens(value: str) -> set[str]:
