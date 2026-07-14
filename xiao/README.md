@@ -23,13 +23,36 @@ The Cloud extra includes the FastAPI service, Celery worker, and Redis
 transport. Browser binaries are installed separately with
 `python -m playwright install chromium` after installing the `web` extra.
 
+## Commercial API Gateway
+
+The Cloud API now includes a single-node OpenAI-compatible paid gateway with
+tenant keys, balance reservations, token billing, upstream failover, request
+ledgers, and an operator workbench. Initialize it with
+`python -m cloud_api.setup_gateway`, then use
+`docker compose -f docker-compose.gateway.yml up -d --build` and open
+`http://127.0.0.1:8000/gateway`.
+
+See [Pacer 商业中转站](docs/中转站_商业网关.md) for the supported billing loop,
+security model, and the explicit boundary between manual paid pilots and an
+automated payment-provider integration.
+
 ## Quick Start
 
 ```console
-checkpoint init-workspace --root .agent-workspace
-checkpoint doctor
-checkpoint dashboard --workspace-root .agent-workspace
+pacer
+Pacer> Fix the login error and run the relevant tests
+Pacer> /provider subscription
+Pacer> /provider relay custom
+Pacer> Continue with boundary tests
 ```
+
+Pacer initializes its local workspace, runs Codex in a verified delegated
+mission, and merges only after acceptance passes and the target branch is clean.
+Execution remains inside Codex CLI: use the logged-in subscription or select a
+relay provider already configured in Codex. Pacer does not store relay keys or
+silently fall back to another model backend.
+Use `checkpoint dashboard --workspace-root .agent-workspace` when you want the
+full evidence and queue view.
 
 The project is in alpha. Use `dry-run` for inspection, and explicitly select a
 supervised or approved run profile before allowing workflows to mutate external

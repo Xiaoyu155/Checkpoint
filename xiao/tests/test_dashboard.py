@@ -17,11 +17,50 @@ from visual_agent.dashboard.api import (
     save_model_config as save_dashboard_model_config,
     set_active_workspace,
 )
-from visual_agent.dashboard import DASHBOARD_HTML, _bind_dashboard_server, build_dashboard_data, build_mission_detail, start_worker, stop_worker
+from visual_agent.dashboard import (
+    DASHBOARD_HTML,
+    _bind_dashboard_server,
+    build_dashboard_data,
+    build_five_pillars_data,
+    build_mission_detail,
+    start_worker,
+    stop_worker,
+)
 from visual_agent.mission_progress import save_mission_progress
 from visual_agent.missions import default_budget_policy, load_mission, missions_dir, save_mission
 from visual_agent.user_profile import LocalUserProfile
 from visual_agent.workbench_model_config import WorkbenchModelConfig
+
+
+def _verification_summary(
+    run_id: str,
+    *,
+    launch_id: str = "launch-dashboard",
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "pacer_verification_batch",
+        "source_tool": "run_pacer_verification",
+        "policy_version": 1,
+        "run_id": run_id,
+        "launch_id": launch_id,
+        "status": "passed",
+        "requested_steps": 1,
+        "executed_steps": 1,
+        "skipped_steps": [],
+        "passed": 1,
+        "failed": 0,
+        "timed_out": 0,
+        "not_applicable": 0,
+        "step_classes": ["test"],
+        "records": [
+            {
+                "status": "passed",
+                "command": ["python", "-m", "pytest", "-q"],
+                "exit_code": 0,
+            }
+        ],
+    }
 
 
 def test_dashboard_data_on_empty_workspace(tmp_path) -> None:
@@ -34,11 +73,9 @@ def test_dashboard_data_on_empty_workspace(tmp_path) -> None:
     assert data["engine"] == "Checkpoint"
     assert data["missions"] == []
     assert data["plans"] == []
-    # Value panel is always present so the user can see benefit accrue.
     assert data["value"]["verified"] == 0
     assert data["value"]["tier_counts"] == {"cheap": 0, "standard": 0, "strong": 0}
     assert data["value"]["spent_usd"] == 0.0
-    # MiMo efficiency metrics are present even when empty.
     me = data["value"]["mimo_efficiency"]
     assert me["mimo_runs"] == 0
     assert me["saved_usd"] == 0.0
@@ -54,8 +91,519 @@ def test_dashboard_data_on_empty_workspace(tmp_path) -> None:
     assert "checks" in data["core_readiness"]
     assert any(check["id"] == "intake" for check in data["core_readiness"]["checks"])
     assert "labels" in me
-    # agents doctor always reports the known profiles (installed or not).
     assert {a["agent"] for a in data["agents"]} >= {"codex", "claude-code"}
+
+
+def test_five_pillars_dashboard_uses_reconciled_orphan_status(tmp_path, monkeypatch) -> None:
+    from visual_agent.pacer_launch_context import (
+        initialize_active_launch,
+        read_reconciled_active_launch,
+    )
+
+    workspace = tmp_path / ".agent-workspace"
+    native = workspace / "pacer_native"
+    manifest = native / "launches" / "launch-orphan.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    (native / "history.jsonl").write_text(
+        json.dumps(
+            {
+                "repo_root": str(tmp_path.resolve()),
+                "recorded_at": "2026-07-13T10:00:00+00:00",
+                "goal": "show orphan",
+                "summary": "launcher disappeared",
+                "verification": "not run",
+                "status": "failed",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    initialize_active_launch(
+        workspace_root=workspace,
+        manifest_path=manifest,
+        launch={
+            "launch_id": "launch-orphan",
+            "repo_root": str(tmp_path.resolve()),
+            "launcher_pid": 424242,
+        },
+    )
+    probes: list[int] = []
+
+    def reconciled(root):
+        return read_reconciled_active_launch(
+            root,
+            process_probe=lambda pid: probes.append(pid) or False,
+            reconcile_interval_seconds=0,
+        )
+
+    monkeypatch.setattr("visual_agent.pacer_support.read_reconciled_active_launch", reconciled)
+    monkeypatch.setattr(
+        "visual_agent.pacer_support.inspect_codex_account",
+        lambda: {"installed": True, "authenticated": True, "auth_method": "subscription"},
+    )
+    monkeypatch.setattr("visual_agent.pacer_support.load_codex_user_defaults", lambda: {})
+
+    payload = build_five_pillars_data(workspace)
+
+    assert probes == [424242]
+    assert payload["program"]["lifecycle_status"] == "orphaned"
+    assert payload["active_launch"]["lifecycle_status"] == "orphaned"
+    assert payload["active_launch"]["liveness"]["monitoring"] is False
+
+
+def test_dashboard_data_uses_repo_inferred_from_external_workspace_ledger(tmp_path, monkeypatch) -> None:
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "external" / ".agent-workspace"
+    native = workspace / "pacer_native"
+    repo.mkdir()
+    native.mkdir(parents=True)
+    (native / "history.jsonl").write_text(
+        json.dumps(
+            {
+                "repo_root": str(repo.resolve()),
+                "recorded_at": "2026-07-13T20:00:00+00:00",
+                "goal": "dashboard external workspace",
+                "summary": "repo inferred",
+                "verification": "review",
+                "status": "failed",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "visual_agent.pacer_support.inspect_codex_account",
+        lambda: {"installed": True, "authenticated": True, "auth_method": "api_key", "status": "authenticated"},
+    )
+
+    data = build_dashboard_data(workspace)
+
+    assert data["repo_root"] == str(repo.resolve())
+    assert data["pacer_support"]["memory"]["latest"]["goal"] == "dashboard external workspace"
+
+
+def test_five_pillars_uses_dispatch_provider_and_upstream_memory(tmp_path, monkeypatch) -> None:
+    tasks = [
+        {"task_id": "task-001", "mission_id": "mission-one", "status": "verified"},
+        {"task_id": "task-002", "mission_id": "mission-two", "status": "verified"},
+    ]
+    program = {
+        "program_id": "program-five",
+        "objective": "Five pillar proof",
+        "status": "completed",
+        "updated_at": "2026-07-12T00:00:00+00:00",
+        "source_plan": "plan.md",
+        "source_plan_sha256": "abc123",
+        "tasks": tasks,
+    }
+    monkeypatch.setattr("visual_agent.dashboard.api.list_programs", lambda _root: [{"program_id": "program-five"}])
+    monkeypatch.setattr("visual_agent.dashboard.api.load_program", lambda _root, _program_id: program)
+    monkeypatch.setattr(
+        "visual_agent.dashboard.api.load_mission",
+        lambda _root, mission_id: {"mission_id": mission_id, "plan_id": f"plan-{mission_id}", "status": "verified"},
+    )
+    monkeypatch.setattr("visual_agent.dashboard.api.load_worker_records", lambda _root, _plan_id: [{"resolved_model": "gpt-5.5"}])
+    monkeypatch.setattr(
+        "visual_agent.dashboard.api._load_verification_payload",
+        lambda _root, _plan_id: {"verdict": "pass", "command_verification": {"command": "pytest tests", "verdict": "pass"}},
+    )
+
+    def fake_dispatches(path: Path) -> list[dict]:
+        memory_ids = ["mission:mission-one"] if "mission-two" in str(path) else []
+        return [{
+            "resolved_provider": "custom",
+            "resolved_model": "gpt-5.5",
+            "worker_attempts": 1,
+            "repair_rounds": 0,
+            "project_memory_usage": {"dispatch_memory_ids": memory_ids},
+        }]
+
+    monkeypatch.setattr("visual_agent.dashboard.api._read_jsonl", fake_dispatches)
+
+    payload = build_five_pillars_data(tmp_path)
+
+    assert payload["program"]["provider"] == "custom"
+    assert payload["program"]["model"] == "gpt-5.5"
+    assert payload["program"]["upstream_memory_id"] == "mission:mission-one"
+    assert [item["status"] for item in payload["pillars"]] == ["passed"] * 5
+
+
+def test_five_pillars_page_and_api_are_served(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    workspace.mkdir()
+    server = _bind_dashboard_server("127.0.0.1", 0, workspace)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        with urllib.request.urlopen(base + "/five-pillars") as response:
+            html = response.read().decode("utf-8")
+        with urllib.request.urlopen(base + "/api/five-pillars") as response:
+            payload = json.loads(response.read().decode("utf-8-sig"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert "Pacer 五项闭环" in html
+    assert 'id="pillarList"' in html
+    assert 'id="telemetryMetric"' in html
+    assert payload["ok"] is True
+    assert payload["program"] is None
+    assert "五项闭环实证" in DASHBOARD_HTML
+
+
+def test_five_pillars_prefers_native_pacer_evidence(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    native = workspace / "pacer_native"
+    native.mkdir(parents=True)
+    run_id = "20260713-140000-dash1234"
+    (native / "history.jsonl").write_text(
+        json.dumps(
+            {
+                "repo_root": str(tmp_path.resolve()),
+                "recorded_at": "2026-07-13T14:00:00+00:00",
+                "goal": "dashboard native proof",
+                "summary": "complete",
+                "verification": f"run_id={run_id}",
+                "status": "completed",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    run_dir = native / "commands" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "summary.json").write_text(
+        json.dumps(_verification_summary(run_id)),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "visual_agent.pacer_support.inspect_codex_account",
+        lambda: {"installed": True, "authenticated": True, "auth_method": "api_key", "status": "authenticated"},
+    )
+
+    payload = build_five_pillars_data(workspace)
+
+    assert payload["mode"] == "native"
+    assert payload["program"]["objective"] == "dashboard native proof"
+    assert payload["program"]["verification_verdict"] == "passed"
+    assert [item["status"] for item in payload["pillars"][:4]] == ["passed"] * 4
+
+
+def test_five_pillars_rejects_legacy_passed_summary_and_stale_mechanical_green(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    native = workspace / "pacer_native"
+    native.mkdir(parents=True)
+    run_id = "20260713-140100-legacy"
+    (native / "history.jsonl").write_text(
+        json.dumps(
+            {
+                "repo_root": str(tmp_path.resolve()),
+                "recorded_at": "2026-07-13T14:01:00+00:00",
+                "goal": "legacy false green",
+                "summary": "old summary lacks provenance",
+                "verification": f"run_id={run_id}",
+                "status": "completed",
+                "evidence_level": "verified_batch",
+                "batch_run_id": run_id,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    run_dir = native / "commands" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "status": "passed",
+                "requested_steps": 1,
+                "executed_steps": 1,
+                "passed": 1,
+                "failed": 0,
+                "timed_out": 0,
+                "not_applicable": 0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (native / "active_launch.json").write_text(
+        json.dumps(
+            {
+                "launch_id": "legacy-launch",
+                "status": "completed",
+                "pillars": {
+                    name: {"active": True, "state": "verified"}
+                    for name in ("routing", "memory", "managed", "acceptance", "dogfood")
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "visual_agent.pacer_support.inspect_codex_account",
+        lambda: {"installed": True, "authenticated": True, "auth_method": "api_key"},
+    )
+
+    payload = build_five_pillars_data(workspace)
+    pillars = {item["id"]: item for item in payload["pillars"]}
+
+    assert payload["program"]["verification_verdict"] == "evidence incomplete"
+    assert payload["support"]["commands"]["verified_runs"] == 0
+    assert pillars["managed"]["status"] == "attention"
+    assert pillars["acceptance"]["status"] == "attention"
+    assert pillars["dogfood"]["status"] == "attention"
+    assert "可信验收校验" in pillars["acceptance"]["evidence"]
+
+
+def test_five_pillars_mechanical_launch_blocks_legacy_false_green(tmp_path, monkeypatch) -> None:
+    from visual_agent.pacer_launch_context import write_launch_liveness
+
+    workspace = tmp_path / ".agent-workspace"
+    native = workspace / "pacer_native"
+    native.mkdir(parents=True)
+    run_id = "20260713-140000-legacygreen"
+    (native / "history.jsonl").write_text(
+        json.dumps({
+            "repo_root": str(tmp_path.resolve()), "recorded_at": "2026-07-13T14:00:00+00:00",
+            "goal": "legacy green", "summary": "complete", "verification": f"run_id={run_id}",
+            "status": "completed", "evidence_level": "verified_batch", "batch_run_id": run_id,
+        }) + "\n",
+        encoding="utf-8",
+    )
+    run_dir = native / "commands" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "summary.json").write_text(
+        json.dumps({"run_id": run_id, "status": "passed", "executed_steps": 1, "passed": 1}),
+        encoding="utf-8",
+    )
+    (native / "active_launch.json").write_text(
+        json.dumps({
+            "launch_id": "current-launch",
+            "status": "running",
+            "pillars": {
+                name: {"active": False, "state": "not_verified"}
+                for name in ("routing", "memory", "managed", "acceptance", "dogfood")
+            },
+        }),
+        encoding="utf-8",
+    )
+    write_launch_liveness(
+        workspace,
+        "current-launch",
+        {
+            "state": "stalled",
+            "monitoring": True,
+            "lifecycle_status": "running",
+            "destructive_action": False,
+        },
+    )
+    monkeypatch.setattr(
+        "visual_agent.pacer_support.inspect_codex_account",
+        lambda: {"installed": True, "authenticated": True, "auth_method": "api_key", "status": "authenticated"},
+    )
+    payload = build_five_pillars_data(workspace)
+    assert [item["status"] for item in payload["pillars"]] == ["attention"] * 5
+    assert all("launch=current-launch" in item["evidence"] for item in payload["pillars"])
+    assert payload["program"]["lifecycle_status"] == "running"
+    assert payload["program"]["liveness_state"] == "stalled"
+    assert payload["active_launch"]["liveness"]["destructive_action"] is False
+
+
+def test_five_pillars_rejects_failed_outcome_even_when_bound_batch_passed(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    native = workspace / "pacer_native"
+    native.mkdir(parents=True)
+    previous_run_id = "20260713-140000-completed"
+    run_id = "20260713-141000-failed"
+    (native / "history.jsonl").write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                {
+                    "repo_root": str(tmp_path.resolve()),
+                    "recorded_at": "2026-07-13T14:00:00+00:00",
+                    "goal": "historical completed outcome",
+                    "summary": "previously completed",
+                    "verification": f"run_id={previous_run_id}",
+                    "status": "completed",
+                },
+                {
+                    "repo_root": str(tmp_path.resolve()),
+                    "recorded_at": "2026-07-13T14:10:00+00:00",
+                    "goal": "failed native outcome",
+                    "summary": "verification ran but the outcome failed",
+                    "verification": f"run_id={run_id}",
+                    "status": "failed",
+                    "evidence_level": "verified_batch",
+                    "batch_run_id": run_id,
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    for passed_run_id in (previous_run_id, run_id):
+        run_dir = native / "commands" / passed_run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "summary.json").write_text(
+            json.dumps({"run_id": passed_run_id, "status": "passed", "executed_steps": 1, "passed": 1}),
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(
+        "visual_agent.pacer_support.inspect_codex_account",
+        lambda: {"installed": True, "authenticated": True, "auth_method": "api_key", "status": "authenticated"},
+    )
+
+    payload = build_five_pillars_data(workspace)
+    pillars = {item["id"]: item for item in payload["pillars"]}
+
+    assert payload["program"]["status"] == "failed"
+    assert payload["program"]["verification_verdict"] == "evidence incomplete"
+    assert pillars["managed"]["status"] == "attention"
+    assert pillars["acceptance"]["status"] == "attention"
+    assert "状态为 failed" in pillars["acceptance"]["evidence"]
+    assert pillars["dogfood"]["status"] == "attention"
+
+
+def test_five_pillars_uses_bound_batch_instead_of_unrelated_latest_run(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    native = workspace / "pacer_native"
+    native.mkdir(parents=True)
+    bound_run_id = "20260713-142000-bound"
+    (native / "history.jsonl").write_text(
+        json.dumps(
+            {
+                "repo_root": str(tmp_path.resolve()),
+                "recorded_at": "2026-07-13T14:20:00+00:00",
+                "goal": "completed native outcome",
+                "summary": "bound verification passed",
+                "verification": f"run_id={bound_run_id}",
+                "status": "completed",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    summaries = (
+        _verification_summary(bound_run_id),
+        {"run_id": "20260713-143000-unrelated", "status": "failed", "executed_steps": 1, "failed": 1},
+    )
+    for summary in summaries:
+        run_dir = native / "commands" / summary["run_id"]
+        run_dir.mkdir(parents=True)
+        (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+    monkeypatch.setattr(
+        "visual_agent.pacer_support.inspect_codex_account",
+        lambda: {"installed": True, "authenticated": True, "auth_method": "api_key", "status": "authenticated"},
+    )
+
+    payload = build_five_pillars_data(workspace)
+    pillars = {item["id"]: item for item in payload["pillars"]}
+
+    assert payload["program"]["program_id"] == bound_run_id
+    assert payload["program"]["verification_verdict"] == "passed"
+    assert pillars["acceptance"]["status"] == "passed"
+
+
+def test_five_pillars_rejects_unmatched_batch_even_when_latest_run_passed(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    native = workspace / "pacer_native"
+    native.mkdir(parents=True)
+    (native / "history.jsonl").write_text(
+        json.dumps(
+            {
+                "repo_root": str(tmp_path.resolve()),
+                "recorded_at": "2026-07-13T14:30:00+00:00",
+                "goal": "unmatched native outcome",
+                "summary": "claims a missing batch",
+                "verification": "run_id=missing-run",
+                "status": "completed",
+                "evidence_level": "verified_batch",
+                "batch_run_id": "missing-run",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    run_dir = native / "commands" / "20260713-144000-unrelated"
+    run_dir.mkdir(parents=True)
+    (run_dir / "summary.json").write_text(
+        json.dumps({"run_id": run_dir.name, "status": "passed", "executed_steps": 1, "passed": 1}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "visual_agent.pacer_support.inspect_codex_account",
+        lambda: {"installed": True, "authenticated": True, "auth_method": "api_key", "status": "authenticated"},
+    )
+
+    payload = build_five_pillars_data(workspace)
+    pillars = {item["id"]: item for item in payload["pillars"]}
+
+    assert payload["program"]["program_id"] == "missing-run"
+    assert payload["program"]["verification_verdict"] == "evidence incomplete"
+    assert pillars["acceptance"]["status"] == "attention"
+    assert "missing-run" in pillars["acceptance"]["evidence"]
+
+
+def test_five_pillars_rejects_conflicted_canonical_and_legacy_batch(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    canonical = workspace / "pacer_native"
+    legacy = tmp_path / "pacer_native"
+    canonical.mkdir(parents=True)
+    legacy.mkdir(parents=True)
+    run_id = "20260713-145000-conflict"
+    (canonical / "history.jsonl").write_text(
+        json.dumps(
+            {
+                "repo_root": str(tmp_path.resolve()),
+                "recorded_at": "2026-07-13T14:50:00+00:00",
+                "goal": "conflicted dashboard outcome",
+                "summary": "must not pass",
+                "verification": f"run_id={run_id}",
+                "status": "completed",
+                "evidence_level": "verified_batch",
+                "batch_run_id": run_id,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    for native, status in ((canonical, "passed"), (legacy, "failed")):
+        run_dir = native / "commands" / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "summary.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "status": status,
+                    "executed_steps": 1,
+                    "passed": 1 if status == "passed" else 0,
+                    "failed": 1 if status == "failed" else 0,
+                }
+            ),
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(
+        "visual_agent.pacer_support.inspect_codex_account",
+        lambda: {"installed": True, "authenticated": True, "auth_method": "api_key", "status": "authenticated"},
+    )
+
+    payload = build_five_pillars_data(workspace)
+    pillars = {item["id"]: item for item in payload["pillars"]}
+
+    assert payload["support"]["storage"]["status"] == "inconsistent"
+    assert payload["support"]["storage"]["conflicted_run_ids"] == [run_id]
+    assert payload["support"]["commands"]["latest"]["status"] == "passed"
+    assert payload["program"]["verification_verdict"] == "evidence incomplete"
+    assert pillars["managed"]["status"] == "attention"
+    assert pillars["acceptance"]["status"] == "attention"
 
 
 def test_dashboard_api_rejects_cross_site_post(tmp_path) -> None:
@@ -554,6 +1102,8 @@ def test_dashboard_data_and_detail_propagate_activity_fields(tmp_path) -> None:
 
 def test_start_worker_uses_cli_module_entrypoint(tmp_path, monkeypatch) -> None:
     captured = {}
+    workspace = tmp_path / ".agent-workspace"
+    workspace.mkdir()
 
     class FakeProc:
         pid = 1234
@@ -575,7 +1125,8 @@ def test_start_worker_uses_cli_module_entrypoint(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("visual_agent.dashboard.api.hidden_subprocess_kwargs", lambda *, detached=False: {"creationflags": 12345})
     monkeypatch.setattr("subprocess.Popen", fake_popen)
 
-    result = start_worker(tmp_path / ".agent-workspace")
+    assert set_active_workspace(workspace)["ok"] is True
+    result = start_worker(workspace)
     stop_worker()
 
     assert result["ok"] is True

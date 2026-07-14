@@ -27,6 +27,7 @@ from .api import (
     save_notifications_config,
     test_notification,
     build_diagnostic_bundle,
+    build_five_pillars_data,
     start_worker,
     stop_worker,
     log_error,
@@ -37,6 +38,11 @@ from .data import (
     get_agents_cached,
     _launch_snapshot,
     worker_status,
+)
+from .observability import (
+    get_observability_launch,
+    get_observability_timeline,
+    list_observability_launches,
 )
 
 
@@ -73,6 +79,7 @@ __all__ = [
     "save_notifications_config",
     "test_notification",
     "build_diagnostic_bundle",
+    "build_five_pillars_data",
     "start_worker",
     "stop_worker",
     "log_error",
@@ -80,4 +87,7 @@ __all__ = [
     "get_agents_cached",
     "_launch_snapshot",
     "worker_status",
+    "list_observability_launches",
+    "get_observability_launch",
+    "get_observability_timeline",
 ]

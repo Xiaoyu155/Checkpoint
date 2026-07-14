@@ -41,6 +41,17 @@ def test_scrub_secrets_redacts_sensitive_keys_and_string_values() -> None:
     assert "plain-recorded-password" not in str(payload)
 
 
+def test_scrub_secrets_preserves_token_usage_statistics() -> None:
+    payload = scrub_secrets({
+        "auto_compact_token_limit": 96000,
+        "uncached_input_tokens": 54463,
+        "current_context_input_tokens": 80000,
+        "accumulated_uncached_input_tokens": 500000,
+    })
+    assert payload["current_context_input_tokens"] == 80000
+    assert payload["accumulated_uncached_input_tokens"] == 500000
+
+
 def test_extract_secret_does_not_match_comments() -> None:
     from visual_agent.model_credentials import extract_secret_from_line
 

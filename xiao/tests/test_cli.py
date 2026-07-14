@@ -12,7 +12,14 @@ from types import SimpleNamespace
 import pytest
 
 from visual_agent.cloud_server import create_cloud_server
-from visual_agent.cli import generate_from_diff_cli_markdown, load_inputs, main, run_workflow_with_progress, verify_impl_cli_markdown
+from visual_agent.cli import (
+    expand_natural_language_task_argv,
+    generate_from_diff_cli_markdown,
+    load_inputs,
+    main,
+    run_workflow_with_progress,
+    verify_impl_cli_markdown,
+)
 from visual_agent.codex_check import CodexCheckResult, CodexWorkflowCheck
 from visual_agent.session import load_agent_session, record_cloud_run_usage, update_agent_session
 from visual_agent.verification_status import enrich_verification_payload, write_verification_status
@@ -200,6 +207,50 @@ def test_empty_cli_prints_concise_getting_started(capsys) -> None:
     assert "DevPacer" in output
     assert "checkpoint init --root .agent-workspace" in output
     assert "Run checkpoint --help for the full command list." in output
+
+
+def test_pacer_entrypoint_delegates_all_arguments_to_codex(monkeypatch) -> None:
+    from visual_agent import codex_launcher
+
+    calls = []
+    monkeypatch.setattr(sys, "argv", [r"C:\Python\Scripts\pacer.exe", "resume", "--last"])
+    monkeypatch.setattr(codex_launcher, "launch_codex", lambda argv: calls.append(argv) or 37)
+
+    assert main() == 37
+    assert calls == [["resume", "--last"]]
+
+
+def test_pacer_entrypoint_intercepts_management_commands(monkeypatch) -> None:
+    from visual_agent import pacer_management
+
+    calls = []
+    monkeypatch.setattr(sys, "argv", [r"C:\Python\Scripts\pacer.exe", "status", "--json"])
+    monkeypatch.setattr(pacer_management, "handle_pacer_management", lambda argv: calls.append(argv) or 19)
+
+    assert main() == 19
+    assert calls == [["status", "--json"]]
+
+
+def test_natural_language_task_expands_to_managed_golden_path() -> None:
+    expanded, simple = expand_natural_language_task_argv(
+        ["修复登录错误并运行测试"],
+        ["mission", "dashboard", "init"],
+    )
+
+    assert simple is True
+    assert expanded[:4] == ["mission", "start", "--goal", "修复登录错误并运行测试"]
+    assert "--execute" in expanded
+    assert "--merge" in expanded
+    assert "--allow-dirty" in expanded
+    assert "--dispatch-mode" in expanded
+    assert expanded[expanded.index("--dispatch-mode") + 1] == "delegated"
+    assert expanded[expanded.index("--max-rounds") + 1] == "8"
+
+
+def test_existing_subcommand_is_not_rewritten_as_natural_language() -> None:
+    argv = ["mission", "list"]
+
+    assert expand_natural_language_task_argv(argv, ["mission", "dashboard"]) == (argv, False)
 
 
 def test_quickstart_cli_prints_same_getting_started(capsys) -> None:

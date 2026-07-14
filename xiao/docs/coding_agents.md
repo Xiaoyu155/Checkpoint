@@ -172,6 +172,35 @@ The queue marks an item `success` only when the mission result is `verified`;
 other stop reasons are recorded as `failed` with the mission stop reason and
 final report path.
 
+## Autonomous Programs
+
+Use autonomous mode when Pacer should own task import, prioritization, quota
+allocation, delegated implementation, repair, and queue management:
+
+```powershell
+checkpoint autopilot --file docs/dev_plan.md --workspace-root .agent-workspace --repo-root . --autonomous
+checkpoint mission worker --workspace-root .agent-workspace --watch
+```
+
+`--autonomous` imports every actionable task instead of stopping at the normal
+12-task cap, removes the default sequential dependency chain, ignores Pacer's
+conservative 45-minute quota reserve and 82% pause threshold, and sends each
+internal task through `delegated` mode. Missions receive an eight-round budget
+with up to seven repair rounds and longer wall/worker timeouts. These are
+process-health bounds, not exploration or task-scope limits.
+
+Autonomous mode does not bypass production/external-access classification,
+credential requirements, restricted-path and test-tamper checks, verification,
+or the manual merge gate. Those protect the repository and external systems;
+they are independent of Pacer's freedom to plan and spend the available model
+quota.
+
+Because autonomous execution always uses an isolated worktree, callers may add
+`--allow-dirty` to overlay the current dirty repository state into that
+worktree. This is explicit because ignored secret-like files must never be
+copied by default. Pacer never cleans or resets the source checkout, and merge
+remains manual.
+
 ## DevPacer Project Memory
 
 Project memory is derived from durable evidence (`missions/`, `chief_plans/`,
@@ -187,6 +216,13 @@ coverage before dispatching similar work" or "inspect the repeated failure
 before spending another run." `chief-plan` also reads this memory and injects a
 short project-memory block into worker handoff prompts, so a new mission can
 reuse evidence from earlier missions.
+
+Memory use is auditable. Saved plans expose `project_memory.usage`, including
+`retrieval_invoked`, `injected_memory_ids`, and injected character counts. The
+actual dispatch path regenerates the bounded memory block and records
+`dispatch_injected` / `dispatch_memory_ids`; completed dispatches copy this into
+`dispatches.jsonl`. This distinguishes "memory was indexed" from "the worker
+actually received this memory in its prompt."
 
 Run the deterministic checkout mission demo when auditing the loop without
 spending coding-agent tokens:

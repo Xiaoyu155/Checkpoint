@@ -930,10 +930,49 @@ def test_chief_dispatch_codex_quota_does_not_fall_over_to_claude(tmp_path, monke
     assert calls[0]["argv"][0] == "codex"
     assert payload["failover_worker_record"] is None
     assert payload["worker"].get("failover_disabled") == (
-        "Codex was explicitly requested; automatic MiMo failover is disabled. "
-        "Retry explicitly with --agent mimo if you want MiMo."
+        "No alternate Codex provider is configured for automatic failover."
     )
     assert payload["quota_exhausted"] is True
+
+
+def test_chief_dispatch_codex_quota_fails_over_to_alternate_codex_provider(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch, agents=("codex",))
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.create_worktree",
+        lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]},
+    )
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: name if name == "codex" else None)
+    calls = []
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None, stdin_text=None, progress_callback=None):
+        calls.append(list(argv))
+        if len(calls) == 1:
+            log_path.write_text("usage limit reached", encoding="utf-8")
+            return {"exit_code": 1, "stdout_tail": "", "stderr_tail": "usage limit reached"}
+        log_path.write_text("completed through relay", encoding="utf-8")
+        return {"exit_code": 0, "stdout_tail": "completed through relay", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        codex_runner=passing_codex_result,
+        execution_policy={
+            "codex_provider": "openai",
+            "codex_failover_provider": "custom",
+        },
+    )
+
+    assert len(calls) == 2
+    assert "model_provider='openai'" in calls[0]
+    assert "model_provider='custom'" in calls[1]
+    assert payload["failover_worker_record"]["status"] == "completed"
+    assert payload["failover_worker_record"]["resolved_provider"] == "custom"
+    assert payload["quota_exhausted"] is False
 
 
 def test_chief_dispatch_codex_quota_does_not_auto_fall_over_to_mimo_patch_worker(tmp_path, monkeypatch) -> None:
@@ -977,8 +1016,7 @@ def test_chief_dispatch_codex_quota_does_not_auto_fall_over_to_mimo_patch_worker
     assert calls[0]["argv"][0] == "codex"
     assert payload["failover_worker_record"] is None
     assert payload["worker"].get("failover_disabled") == (
-        "Codex was explicitly requested; automatic MiMo failover is disabled. "
-        "Retry explicitly with --agent mimo if you want MiMo."
+        "No alternate Codex provider is configured for automatic failover."
     )
     assert payload["quota_exhausted"] is True
     assert payload["status"] == "worker_failed"
@@ -2209,6 +2247,8 @@ def test_create_worktree_overlays_nested_untracked_project_when_dirty_allowed(tm
     (nested / "pyproject.toml").write_text("[project]\nname='xiao'\n", encoding="utf-8")
     (nested / "tests").mkdir()
     (nested / "tests" / "test_dashboard_browser.py").write_text("def test_smoke():\n    assert True\n", encoding="utf-8")
+    (nested / "model_api_keys.txt").write_text("mimo=dummy-secret\n", encoding="utf-8")
+    (nested / "tests" / ".env.local").write_text("TOKEN=dummy-secret\n", encoding="utf-8")
     (nested / ".agent-workspace").mkdir()
     (nested / ".agent-workspace" / "state.json").write_text("{}", encoding="utf-8")
 
@@ -2220,6 +2260,8 @@ def test_create_worktree_overlays_nested_untracked_project_when_dirty_allowed(tm
     assert result["dirty_overlay_commit"] == "created"
     assert (worktree / "pyproject.toml").exists()
     assert (worktree / "tests" / "test_dashboard_browser.py").exists()
+    assert not (worktree / "model_api_keys.txt").exists()
+    assert not (worktree / "tests" / ".env.local").exists()
     assert not (worktree / ".agent-workspace").exists()
     status = subprocess.run(
         ["git", "-C", str(worktree), "status", "--porcelain"],
@@ -2432,6 +2474,78 @@ def test_worker_prompt_allows_exploration_and_delegated_omits_file_guidance(tmp_
         assert "conserve model budget" not in lowered
 
 
+def test_concrete_model_policy_overrides_codex_config_for_implementation(tmp_path, monkeypatch) -> None:
+    from visual_agent.chief_dispatch import build_worker_command
+
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch._codex_user_defaults",
+        lambda: {"model": "gpt-5.6-sol", "reasoning_effort": "medium"},
+    )
+    command = build_worker_command(
+        plan={"objective": "Update docs", "plan_id": "plan-model"},
+        track={"id": "track_1_codex", "agent": "codex", "track_kind": "implementation"},
+        worktree=tmp_path,
+        verification_command="python -m pytest",
+        model_policy={"implementation": "gpt-5.5", "repair": "gpt-5.5"},
+    )
+
+    assert command["argv"][-3:] == ["--model", "gpt-5.5", "-"]
+    assert command["resolved_model"] == "gpt-5.5"
+    assert command["model_source"] == "command"
+
+
+def test_codex_provider_override_is_explicit_and_audited(tmp_path, monkeypatch) -> None:
+    from visual_agent.chief_dispatch import build_worker_command
+
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch._codex_user_defaults",
+        lambda: {"model": "gpt-5.6-sol", "provider": "custom"},
+    )
+    command = build_worker_command(
+        plan={"objective": "Update docs", "plan_id": "plan-provider"},
+        track={"id": "track_1_codex", "agent": "codex", "track_kind": "implementation"},
+        worktree=tmp_path,
+        verification_command="python -m pytest",
+        codex_provider="openai",
+    )
+
+    assert "model_provider='openai'" in command["argv"]
+    assert command["resolved_provider"] == "openai"
+    assert command["provider_source"] == "command"
+
+
+def test_strict_acceptance_blocks_marker_only_command(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        test_command="rg ONLY_A_MARKER docs/report.md",
+        execution_policy={"acceptance_policy": "strict"},
+    )
+
+    assert payload["status"] == "preflight_blocked"
+    assert payload["reason"] == "weak_command_gate"
+
+
+def test_memory_disabled_is_visible_in_dispatch_preview(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execution_policy={"memory_mode": "disabled"},
+    )
+
+    assert payload["worker"]["memory_mode"] == "disabled"
+    assert payload["project_memory_usage"]["dispatch_injected"] is False
+    assert payload["project_memory_usage"]["dispatch_memory_ids"] == []
+
+
 def test_delegated_dispatch_uses_one_session_long_timeout_and_shared_gate(tmp_path, monkeypatch) -> None:
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
     monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
@@ -2559,6 +2673,30 @@ def test_scope_gate_rejects_tracked_agent_workspace_records(tmp_path) -> None:
     assert payload["verdict"] == "fail"
     assert payload["failure_kind"] == "scope_violation"
     assert payload["restricted_worker_files"] == [".agent-workspace/chief_plans/plan.json"]
+
+
+def test_scope_gate_ignores_pacer_workspace_runtime_config(tmp_path) -> None:
+    from visual_agent.chief_dispatch import _restricted_worker_changes
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "pacer@example.local"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Pacer"], cwd=repo, check=True)
+    record = repo / ".agent-workspace" / "workspace.json"
+    record.parent.mkdir(parents=True)
+    record.write_text('{"status":"initial"}\n', encoding="utf-8")
+    subprocess.run(["git", "add", "-f", ".agent-workspace/workspace.json"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    record.write_text('{"status":"prepared-by-pacer"}\n', encoding="utf-8")
+
+    restricted, error = _restricted_worker_changes(repo_root=repo, base_ref=base)
+
+    assert error == ""
+    assert restricted == []
 
 
 def test_verification_workspace_snapshot_rejects_worker_tampering(tmp_path) -> None:

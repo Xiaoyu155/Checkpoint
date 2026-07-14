@@ -32,6 +32,13 @@ REQUIRED_INDEX_TEXT = (
     "任务列表",
     "工作痕迹",
     "派发执行",
+    "Pacer 可观测性",
+    "Actual added",
+    "Raw ledger",
+    "逐轮 token",
+    "Agent 父子树",
+    "Tool / MCP 时间线",
+    "闭环证据",
 )
 
 REQUIRED_APP_TEXT = (
@@ -56,6 +63,11 @@ REQUIRED_APP_TEXT = (
     "_commercialConfigBody",
     "/api/commercial-config",
     "connectEventStream",
+    "OBSERVABILITY_API",
+    "loadObservabilityLaunches",
+    "_loadObservabilityDetail",
+    "_loadObservabilityTimeline",
+    "Reasoning 已包含于 Output",
 )
 
 REQUIRED_STYLE_TEXT = (
@@ -69,6 +81,11 @@ REQUIRED_STYLE_TEXT = (
     ".workbench-view:not(.is-active-view)",
     "flex-direction:column",
     "width:min(100%,1080px)",
+    ".observability-workbench",
+    ".obs-token-stack",
+    ".obs-agent-tree",
+    ".obs-timeline",
+    ".obs-evidence-grid",
 )
 
 

@@ -44,6 +44,11 @@ SAFE_SECRETISH_KEYS = {
     "cache_read_input_tokens",
     "cache_creation_input_tokens",
     "reasoning_output_tokens",
+    "auto_compact_token_limit",
+    "uncached_input_tokens",
+    "current_context_input_tokens",
+    "current_context_total_tokens",
+    "accumulated_uncached_input_tokens",
 }
 SECRET_TEXT_PATTERNS = (
     re.compile(r"(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{8,}"),

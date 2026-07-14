@@ -141,6 +141,7 @@ function switchWorkbenchView(key, focusSelector=''){
   try{ localStorage.setItem(WORKBENCH_VIEW_KEY, key); }catch(e){}
   if(!alreadyActive || focusSelector) _scrollViewTarget(target);
   _focusViewTarget(focusSelector);
+  if(key === 'observability-panel') ensureObservabilityLoaded();
 }
 
 function _prefersReducedMotion(){
@@ -1024,6 +1025,682 @@ function renderTrace(d){
       ${path?`<div class="trace-path">${path}</div>`:''}
     </div>`;
   }).join('');
+}
+
+// ---------- Pacer 可观测性 ----------
+const OBSERVABILITY_API = '/api/observability';
+const _obsState = {
+  loaded:false,
+  loading:false,
+  launches:[],
+  launchId:'',
+  sessionId:'',
+  detail:null,
+  timeline:[],
+  nextCursor:null,
+  timelineTotal:0,
+  detailRequest:0,
+  timelineRequest:0,
+};
+
+function _obsRecord(value){
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function _obsArray(payload, keys){
+  if(Array.isArray(payload)) return payload;
+  const source = _obsRecord(payload);
+  for(const key of keys){
+    if(Array.isArray(source[key])) return source[key];
+  }
+  return [];
+}
+
+function _obsNumber(source, keys, fallback=0){
+  const obj = _obsRecord(source);
+  for(const key of keys){
+    if(obj[key] === '' || obj[key] === null || obj[key] === undefined) continue;
+    const value = Number(obj[key]);
+    if(Number.isFinite(value)) return Math.max(0, value);
+  }
+  return fallback;
+}
+
+function _obsHasTokenFields(value){
+  if(typeof value === 'number') return Number.isFinite(value);
+  const source = _obsRecord(value);
+  return [
+    'input_tokens','cached_input_tokens','cache_read_input_tokens','uncached_input_tokens',
+    'output_tokens','reasoning_output_tokens','reasoning_tokens','total_tokens','total',
+  ].some(key=>source[key] !== null && source[key] !== undefined && Number.isFinite(Number(source[key])));
+}
+
+function _obsUsage(value){
+  const usage = _obsRecord(value);
+  const rawValue = usage.raw_ledger ?? usage.raw_usage ?? usage.raw;
+  const raw = _obsRecord(rawValue);
+  const actualValue = usage.deduplicated_actual ?? usage.actual_added ?? usage.actual_usage ?? usage.actual;
+  const actual = _obsRecord(actualValue && typeof actualValue === 'object' ? actualValue : usage);
+  const rawAvailable = _obsHasTokenFields(rawValue) || _obsHasTokenFields({
+    total_tokens:usage.raw_total_tokens,
+    input_tokens:usage.raw_input_tokens,
+    output_tokens:usage.raw_output_tokens,
+  });
+  const actualAvailable = _obsHasTokenFields(actualValue) ||
+    (actualValue === undefined && _obsHasTokenFields(usage));
+
+  const rawInput = _obsNumber(raw, ['input_tokens','input'], _obsNumber(usage, ['raw_input_tokens'], 0));
+  const rawCached = _obsNumber(raw, ['cached_input_tokens','cache_read_input_tokens','cached_tokens'], _obsNumber(usage, ['raw_cached_input_tokens'], 0));
+  const rawOutput = _obsNumber(raw, ['output_tokens','output'], _obsNumber(usage, ['raw_output_tokens'], 0));
+  const rawReasoning = _obsNumber(raw, ['reasoning_output_tokens','reasoning_tokens'], _obsNumber(usage, ['raw_reasoning_tokens'], 0));
+  const rawTotal = _obsNumber(raw, ['total_tokens','total'], _obsNumber(usage, ['raw_total_tokens'], rawInput + rawOutput));
+
+  const input = _obsNumber(actual, ['input_tokens','input'], _obsNumber(usage, ['actual_input_tokens'], 0));
+  const cached = _obsNumber(actual, ['cached_input_tokens','cache_read_input_tokens','cached_tokens'], _obsNumber(usage, ['actual_cached_input_tokens'], 0));
+  const uncached = _obsNumber(usage, ['uncached_input_tokens'], _obsNumber(actual, ['uncached_input_tokens','uncached_tokens'], Math.max(0, input - cached)));
+  const output = _obsNumber(actual, ['output_tokens','output'], _obsNumber(usage, ['actual_output_tokens'], 0));
+  const reasoning = _obsNumber(actual, ['reasoning_output_tokens','reasoning_tokens'], _obsNumber(usage, ['reasoning_output_tokens','reasoning_tokens'], 0));
+  const scalarActual = Number(actualValue);
+  const total = Number.isFinite(scalarActual)
+    ? Math.max(0, scalarActual)
+    : _obsNumber(actual, ['total_tokens','total'], _obsNumber(usage, ['actual_added_tokens','deduplicated_total_tokens'], input + output));
+
+  return {rawAvailable,actualAvailable,rawInput,rawCached,rawOutput,rawReasoning,rawTotal,input,cached,uncached,output,reasoning,total};
+}
+
+function _obsToken(value){
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? Math.max(0, Math.round(number)).toLocaleString('zh-CN') : '0';
+}
+
+function _obsPercent(value){
+  const number = Number(value);
+  if(!Number.isFinite(number)) return '未采集';
+  const percent = number >= 0 && number <= 1 ? number * 100 : number;
+  return `${Math.max(0, Math.min(100, percent)).toFixed(1)}%`;
+}
+
+function _obsConfidence(value){
+  const text = String(value ?? '').trim();
+  if(!text) return '未采集';
+  return Number.isFinite(Number(text)) ? _obsPercent(Number(text)) : text;
+}
+
+function _obsDuration(value, startedAt, completedAt){
+  let ms = Number(value);
+  if(!Number.isFinite(ms) && startedAt && completedAt){
+    const start = new Date(startedAt).getTime();
+    const end = new Date(completedAt).getTime();
+    if(Number.isFinite(start) && Number.isFinite(end)) ms = Math.max(0, end - start);
+  }
+  if(!Number.isFinite(ms) || ms < 0) return '';
+  if(ms < 1000) return `${Math.round(ms)} ms`;
+  if(ms < 60000) return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`;
+  return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
+}
+
+function _obsStatusLevel(status){
+  const value = String(status || '').toLowerCase();
+  if(value.includes('fail') || value.includes('error') || value.includes('blocked')) return 'fail';
+  if(value.includes('running') || value.includes('pending') || value.includes('start')) return 'running';
+  if(value.includes('warn') || value.includes('compact') || value.includes('partial')) return 'warn';
+  if(value.includes('pass') || value.includes('complete') || value.includes('success') || value.includes('verified')) return 'ok';
+  return 'idle';
+}
+
+function _setObsStatus(text, level='idle'){
+  const el = document.getElementById('obsStatus');
+  if(!el) return;
+  el.textContent = text;
+  el.className = `obs-status is-${level}`;
+}
+
+function _setObsLoadState(text, level='idle', visible=true){
+  const el = document.getElementById('obsLoadState');
+  if(!el) return;
+  el.textContent = text;
+  el.dataset.level = level;
+  el.hidden = !visible;
+}
+
+function _obsErrorText(error, subject){
+  if(error && error.status === 404) return `${subject} API 尚未启用，其他工作台功能不受影响。`;
+  if(error && error.status) return `${subject}加载失败（HTTP ${error.status}）。`;
+  return `${subject}加载失败，请检查 Dashboard 服务状态。`;
+}
+
+async function _obsFetch(path){
+  const response = await fetch(path, {headers:{Accept:'application/json'}, cache:'no-store'});
+  let payload = null;
+  try{ payload = await response.json(); }catch(e){ payload = null; }
+  if(!response.ok || (payload && payload.ok === false)){
+    const error = new Error('observability request failed');
+    error.status = response.status || 500;
+    throw error;
+  }
+  return payload || {};
+}
+
+function _obsLaunchId(launch){
+  const item = _obsRecord(launch);
+  return String(item.launch_id || item.id || '').trim();
+}
+
+function _obsSessionId(session){
+  const item = _obsRecord(session);
+  return String(item.session_id || item.id || '').trim();
+}
+
+function _obsShortId(value, size=14){
+  const text = String(value || '');
+  if(text.length <= size + 5) return text;
+  return `${text.slice(0, size)}...${text.slice(-4)}`;
+}
+
+function _obsLaunchOption(launch){
+  const item = _obsRecord(launch);
+  const id = _obsLaunchId(item);
+  const runtime = _obsRecord(item.runtime);
+  const stamp = fmtTime(item.started_at || item.created_at || item.timestamp);
+  const parts = [_obsShortId(id), item.status || 'unknown', runtime.model || '', stamp].filter(Boolean);
+  return parts.join(' · ');
+}
+
+function _fillObsLaunches(launches, selectedId){
+  const select = document.getElementById('obsLaunchSelect');
+  if(!select) return;
+  select.innerHTML = launches.map(item=>{
+    const id = _obsLaunchId(item);
+    return `<option value="${esc(id)}"${id===selectedId?' selected':''}>${esc(_obsLaunchOption(item))}</option>`;
+  }).join('');
+  select.disabled = !launches.length;
+}
+
+function _fillObsSessions(sessions, selectedId){
+  const select = document.getElementById('obsSessionSelect');
+  if(!select) return;
+  if(!sessions.length){
+    select.innerHTML = '<option value="">该 launch 暂无 session</option>';
+    select.disabled = true;
+    return;
+  }
+  select.innerHTML = sessions.map((session,index)=>{
+    const item = _obsRecord(session);
+    const id = _obsSessionId(item);
+    const label = item.role || item.agent || item.name || `Session ${index + 1}`;
+    const count = Number(item.turn_count || 0);
+    return `<option value="${esc(id)}"${id===selectedId?' selected':''}>${esc(label)} · ${esc(_obsShortId(id))} · ${count} 轮</option>`;
+  }).join('');
+  select.disabled = false;
+}
+
+function _renderObsLaunch(detail){
+  const payload = _obsRecord(detail);
+  const summary = _obsState.launches.find(item=>_obsLaunchId(item) === _obsState.launchId) || {};
+  const launch = {..._obsRecord(summary), ..._obsRecord(payload.launch || payload)};
+  const runtime = _obsRecord(launch.runtime);
+  const usageSource = launch.usage || payload.usage || {};
+  const usage = _obsUsage(usageSource);
+
+  setText('obsLedgerTitle', _obsShortId(_obsState.launchId, 24) || '未命名 launch');
+  setText('obsActualAdded', usage.actualAvailable ? _obsToken(usage.total) : '未索引');
+  setText('obsRawLedger', usage.rawAvailable ? _obsToken(usage.rawTotal) : '未索引');
+  setText('obsCached', usage.actualAvailable ? _obsToken(usage.cached) : '未索引');
+  setText('obsUncached', usage.actualAvailable ? _obsToken(usage.uncached) : '未索引');
+  setText('obsOutput', usage.actualAvailable ? _obsToken(usage.output) : '未索引');
+  setText('obsReasoning', usage.actualAvailable ? _obsToken(usage.reasoning) : '未索引');
+
+  const status = String(launch.status || 'unknown');
+  const started = fmtTime(launch.started_at || launch.created_at);
+  const completed = fmtTime(launch.completed_at || launch.updated_at);
+  const runtimeBits = [
+    `<span class="obs-runtime-state is-${_obsStatusLevel(status)}">${esc(status)}</span>`,
+    launch.project_name ? `<span>${esc(launch.project_name)}</span>` : '',
+    runtime.provider ? `<span>${esc(runtime.provider)}</span>` : '',
+    runtime.model ? `<span>${esc(runtime.model)}</span>` : '',
+    runtime.reasoning_effort ? `<span>reasoning ${esc(runtime.reasoning_effort)}</span>` : '',
+    started ? `<span>${esc(started)}${completed ? ` - ${esc(completed)}` : ''}</span>` : '',
+  ].filter(Boolean);
+  document.getElementById('obsRuntimeMeta').innerHTML = runtimeBits.join('<i></i>');
+
+  const usageMeta = _obsRecord(usageSource);
+  const metaBits = [
+    `缓存率 ${_obsPercent(usageMeta.cache_ratio)}`,
+    `归因置信度 ${_obsConfidence(launch.attribution_confidence)}`,
+    `${Number(launch.session_count || (payload.sessions||[]).length || 0)} sessions`,
+    `${Number(launch.agent_count || (payload.agents||[]).length || 0)} agents`,
+    `${Number(launch.compaction_count || 0)} compactions`,
+    'Reasoning 已包含于 Output',
+  ];
+  document.getElementById('obsUsageMeta').innerHTML = metaBits.map(bit=>`<span>${esc(bit)}</span>`).join('');
+  document.getElementById('obsContent').hidden = false;
+  _renderObsAgents(payload);
+  _renderObsEvidence();
+}
+
+function _obsAgentRows(detail){
+  const payload = _obsRecord(detail);
+  const source = _obsArray(payload, ['agents']);
+  const rows = source.length ? source : _obsArray(payload, ['sessions']);
+  const normalized = rows.map((value,index)=>{
+    const item = _obsRecord(value);
+    const id = String(item.agent_id || item.session_id || item.id || `agent-${index + 1}`);
+    const parent = String(item.parent_agent_id || item.parent_session_id || item.parent_id || '');
+    return {item,id,parent,index};
+  });
+  const byId = new Map(normalized.map(row=>[row.id,row]));
+  const children = new Map();
+  normalized.forEach(row=>{
+    const parent = byId.has(row.parent) ? row.parent : '';
+    if(!children.has(parent)) children.set(parent, []);
+    children.get(parent).push(row);
+  });
+  const ordered = [];
+  const visited = new Set();
+  function visit(row, depth){
+    if(visited.has(row.id)) return;
+    visited.add(row.id);
+    ordered.push({...row,depth:Math.min(depth, 6)});
+    (children.get(row.id) || []).forEach(child=>visit(child, depth + 1));
+  }
+  (children.get('') || []).forEach(row=>visit(row, 0));
+  normalized.forEach(row=>visit(row, 0));
+  return ordered;
+}
+
+function _renderObsAgents(detail){
+  const rows = _obsAgentRows(detail);
+  setText('obsAgentCount', `${rows.length} 个`);
+  const el = document.getElementById('obsAgentTree');
+  if(!rows.length){
+    el.innerHTML = '<div class="obs-inline-state">该 launch 暂无 agent 归因数据。</div>';
+    return;
+  }
+  el.innerHTML = rows.map(row=>{
+    const item = row.item;
+    const usage = _obsUsage(item.usage || {});
+    const name = item.role || item.agent || item.name || (row.depth ? 'Child agent' : 'Root agent');
+    const duration = _obsDuration(item.duration_ms, item.started_at, item.completed_at);
+    const counts = [
+      item.turn_count !== undefined ? `${Number(item.turn_count || 0)} 轮` : '',
+      item.tool_count !== undefined ? `${Number(item.tool_count || 0)} tools` : '',
+      usage.total ? `${_obsToken(usage.total)} tokens` : '',
+      duration,
+    ].filter(Boolean).join(' · ');
+    const status = String(item.status || 'unknown');
+    return `<div class="obs-agent-row" style="--depth:${row.depth}">
+      <span class="obs-agent-branch" aria-hidden="true"></span>
+      <div class="obs-agent-main"><b>${esc(name)}</b><code title="${esc(row.id)}">${esc(_obsShortId(row.id,18))}</code></div>
+      <span class="obs-event-status is-${_obsStatusLevel(status)}">${esc(status)}</span>
+      <small>${esc(counts || '暂无用量')}</small>
+    </div>`;
+  }).join('');
+}
+
+function _obsEventKey(event, index){
+  const item = _obsRecord(event);
+  return String(item.event_id || item.id || `${item.timestamp||''}|${item.kind||''}|${item.label||''}|${index}`);
+}
+
+function _obsHasUsage(event){
+  const item = _obsRecord(event);
+  if(!item.usage_delta && !item.usage) return false;
+  const usage = _obsUsage(item.usage_delta || item.usage);
+  return [usage.total,usage.rawTotal,usage.cached,usage.uncached,usage.output,usage.reasoning].some(value=>value > 0);
+}
+
+function _obsStack(usage){
+  const total = Math.max(usage.cached + usage.uncached + usage.output, 1);
+  const cached = usage.cached / total * 100;
+  const uncached = usage.uncached / total * 100;
+  const output = usage.output / total * 100;
+  const reasoning = usage.output > 0 ? Math.min(100, usage.reasoning / usage.output * 100) : 0;
+  const label = `Cached ${_obsToken(usage.cached)}，Uncached ${_obsToken(usage.uncached)}，Output ${_obsToken(usage.output)}，其中 Reasoning ${_obsToken(usage.reasoning)}`;
+  return `<div class="obs-token-stack" aria-label="${esc(label)}" title="${esc(label)}">
+    <span class="cached" style="width:${cached.toFixed(3)}%"></span>
+    <span class="uncached" style="width:${uncached.toFixed(3)}%"></span>
+    <span class="output" style="width:${output.toFixed(3)}%"><i style="width:${reasoning.toFixed(3)}%"></i></span>
+  </div>`;
+}
+
+function _renderObsTurns(){
+  const events = _obsState.timeline.filter(_obsHasUsage);
+  setText('obsTurnCount', `${events.length} 轮`);
+  const body = document.getElementById('obsTurnsBody');
+  const state = document.getElementById('obsTurnsState');
+  if(!events.length){
+    body.innerHTML = '';
+    state.hidden = false;
+    state.textContent = _obsState.sessionId ? '该 session 暂无逐轮 token 增量。' : '选择 session 后显示逐轮 token。';
+    return;
+  }
+  state.hidden = true;
+  body.innerHTML = events.map((value,index)=>{
+    const event = _obsRecord(value);
+    const usage = _obsUsage(event.usage_delta || event.usage);
+    const label = event.label || event.kind || `Turn ${index + 1}`;
+    return `<tr>
+      <td><b>${index + 1}</b><span title="${esc(label)}">${esc(String(label).slice(0,64))}</span></td>
+      <td>${esc(fmtTime(event.timestamp) || '-')}</td>
+      <td>${usage.actualAvailable?_obsToken(usage.total):'-'}</td>
+      <td>${usage.rawAvailable?_obsToken(usage.rawTotal):'-'}</td>
+      <td>${usage.actualAvailable?_obsToken(usage.cached):'-'}</td>
+      <td>${usage.actualAvailable?_obsToken(usage.uncached):'-'}</td>
+      <td>${usage.actualAvailable?_obsToken(usage.output):'-'}</td>
+      <td>${usage.actualAvailable?_obsToken(usage.reasoning):'-'}</td>
+      <td>${_obsStack(usage)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function _obsIsToolEvent(event){
+  const item = _obsRecord(event);
+  const kind = String(item.kind || item.type || '').toLowerCase();
+  const label = String(item.label || '').toLowerCase();
+  return kind.includes('tool') || kind.includes('mcp') || kind.includes('command') || label.startsWith('mcp__');
+}
+
+function _obsRedactText(value){
+  let text = String(value ?? '');
+  text = text.replace(/[A-Za-z]:[\\/](?:[^\\/\s"'<>]+[\\/])*[^\\/\s"'<>]*/g, '[路径已隐藏]');
+  return text;
+}
+
+function _obsSafePreview(value){
+  if(typeof value === 'string') return _obsRedactText(value).slice(0, 4000);
+  try{
+    return _obsRedactText(JSON.stringify(value, (key,item)=>{
+      if(/^(repo_root|path|cwd|prompt|response|raw_prompt|raw_response)$/i.test(key)) return '[已隐藏]';
+      return item;
+    }, 2)).slice(0, 4000);
+  }catch(e){ return '安全预览不可解析。'; }
+}
+
+function _obsPreviewBlock(event){
+  const item = _obsRecord(event);
+  if(item.safe_preview === undefined || item.safe_preview === null || item.safe_preview === '') return '';
+  return `<div class="obs-preview-wrap">
+    <button class="obs-preview-toggle" onclick="toggleObservabilityPreview(this)" aria-expanded="false">展开安全预览</button>
+    <pre class="obs-safe-preview" hidden>${esc(_obsSafePreview(item.safe_preview))}</pre>
+  </div>`;
+}
+
+function toggleObservabilityPreview(button){
+  if(!button || !button.parentElement) return;
+  const preview = button.parentElement.querySelector('.obs-safe-preview');
+  if(!preview) return;
+  const opening = preview.hidden;
+  preview.hidden = !opening;
+  button.textContent = opening ? '收起安全预览' : '展开安全预览';
+  button.setAttribute('aria-expanded', opening ? 'true' : 'false');
+}
+
+function _renderObsTools(message=''){
+  const events = _obsState.timeline.filter(_obsIsToolEvent);
+  setText('obsToolCount', `${events.length} 条`);
+  const el = document.getElementById('obsToolTimeline');
+  if(!events.length){
+    el.innerHTML = `<div class="obs-inline-state">${esc(message || (_obsState.sessionId ? '该 session 暂无 Tool / MCP 事件。' : '选择 session 后显示 Tool / MCP 时间线。'))}</div>`;
+  }else{
+    el.innerHTML = events.map(value=>{
+      const event = _obsRecord(value);
+      const kind = String(event.kind || 'tool');
+      const status = String(event.status || 'unknown');
+      const duration = _obsDuration(event.duration_ms, event.started_at, event.completed_at);
+      const label = String(event.label || '未命名调用').slice(0, 120);
+      return `<div class="obs-timeline-item">
+        <time>${esc(fmtTime(event.timestamp) || '-')}</time>
+        <div class="obs-timeline-body">
+          <div class="obs-event-line"><span class="obs-event-kind">${esc(kind)}</span><b title="${esc(label)}">${esc(label)}</b><span class="obs-event-status is-${_obsStatusLevel(status)}">${esc(status)}</span></div>
+          ${duration?`<small>${esc(duration)}</small>`:''}
+          ${_obsPreviewBlock(event)}
+        </div>
+      </div>`;
+    }).join('');
+  }
+  const more = document.getElementById('obsLoadMore');
+  more.hidden = _obsState.nextCursor === null || _obsState.nextCursor === undefined || _obsState.nextCursor === '';
+  more.disabled = false;
+}
+
+function _obsEvidenceCategory(kind){
+  const value = String(kind || '').toLowerCase();
+  if(value.includes('compact')) return 'compaction';
+  if(value.includes('memory') || value.includes('receipt') || value.includes('recovery')) return 'memory';
+  if(value.includes('verif') || value.includes('test') || value.includes('check') || value.includes('acceptance')) return 'verification';
+  if(value.includes('outcome') || value.includes('complete') || value.includes('result') ||
+     value.includes('managed') || value.includes('dogfood') || value.includes('routing')) return 'outcome';
+  return '';
+}
+
+function _obsEvidenceItems(){
+  const detail = _obsRecord(_obsState.detail);
+  const items = _obsArray(detail, ['evidence']).slice();
+  const launch = _obsRecord(detail.launch);
+  const compactionCount = Number(launch.compaction_count || 0);
+  if(compactionCount > 0 && !items.some(item=>_obsEvidenceCategory(_obsRecord(item).kind) === 'compaction')){
+    items.push({kind:'compaction',status:'recorded',label:`观测到 ${compactionCount} 次 compaction`,timestamp:launch.completed_at || launch.started_at});
+  }
+  if(launch.status && !items.some(item=>String(_obsRecord(item).kind || '').toLowerCase().includes('outcome'))){
+    items.push({kind:'outcome',status:launch.status,label:`Launch 终态：${launch.status}`,timestamp:launch.completed_at || launch.started_at});
+  }
+  _obsState.timeline.forEach(event=>{
+    if(_obsEvidenceCategory(_obsRecord(event).kind)) items.push(event);
+  });
+  const seen = new Set();
+  return items.filter((item,index)=>{
+    const value = _obsRecord(item);
+    const key = String(value.event_id || value.id || `${value.kind||''}|${value.timestamp||''}|${value.label||''}|${index}`);
+    if(seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function _obsEvidenceDetail(value){
+  if(value === null || value === undefined || value === '') return '';
+  if(typeof value === 'object'){
+    try{
+      return _obsRedactText(JSON.stringify(value, (key,item)=>{
+        if(/(path|repo_root|cwd|prompt|response)/i.test(key)) return undefined;
+        return item;
+      })).slice(0, 220);
+    }catch(e){ return ''; }
+  }
+  return _obsRedactText(value).slice(0, 220);
+}
+
+function _renderObsEvidenceList(category, id, emptyText){
+  const items = _obsEvidenceItems().filter(item=>_obsEvidenceCategory(_obsRecord(item).kind) === category);
+  const el = document.getElementById(id);
+  if(!items.length){
+    el.innerHTML = `<div class="obs-evidence-empty">${esc(emptyText)}</div>`;
+    return;
+  }
+  el.innerHTML = items.map(value=>{
+    const item = _obsRecord(value);
+    const status = String(item.status || 'recorded');
+    const detail = _obsEvidenceDetail(item.detail);
+    return `<div class="obs-evidence-item">
+      <div><span class="obs-evidence-dot is-${_obsStatusLevel(status)}"></span><b>${esc(String(item.label || item.kind || '证据').slice(0,100))}</b></div>
+      <small>${esc([status,fmtTime(item.timestamp)].filter(Boolean).join(' · '))}</small>
+      ${detail?`<p>${esc(detail)}</p>`:''}
+      ${_obsPreviewBlock(item)}
+    </div>`;
+  }).join('');
+}
+
+function _renderObsEvidence(){
+  _renderObsEvidenceList('compaction', 'obsEvidenceCompaction', '无 compaction 事件');
+  _renderObsEvidenceList('memory', 'obsEvidenceMemory', '无 memory 证据');
+  _renderObsEvidenceList('verification', 'obsEvidenceVerification', '无 verification 证据');
+  _renderObsEvidenceList('outcome', 'obsEvidenceOutcome', '无 outcome 证据');
+}
+
+function _resetObsTimeline(message='选择 session 后显示事件。'){
+  _obsState.timeline = [];
+  _obsState.nextCursor = null;
+  _obsState.timelineTotal = 0;
+  _renderObsTurns();
+  _renderObsTools(message);
+  _renderObsEvidence();
+}
+
+async function _loadObservabilityTimeline(append=false){
+  const sessionId = _obsState.sessionId;
+  if(!sessionId){
+    _resetObsTimeline();
+    return;
+  }
+  const request = ++_obsState.timelineRequest;
+  const cursor = append ? _obsState.nextCursor : null;
+  const more = document.getElementById('obsLoadMore');
+  if(more) more.disabled = true;
+  if(!append) _resetObsTimeline('正在加载 Tool / MCP 事件...');
+  _setObsStatus('加载 timeline', 'running');
+  try{
+    let url = `${OBSERVABILITY_API}/sessions/${encodeURIComponent(sessionId)}/timeline?launch_id=${encodeURIComponent(_obsState.launchId)}&limit=100`;
+    if(cursor !== null && cursor !== undefined && cursor !== '') url += `&cursor=${encodeURIComponent(cursor)}`;
+    const payload = await _obsFetch(url);
+    if(request !== _obsState.timelineRequest || sessionId !== _obsState.sessionId) return;
+    const incoming = _obsArray(payload, ['events','items','timeline']);
+    const existing = append ? _obsState.timeline.slice() : [];
+    const seen = new Set(existing.map(_obsEventKey));
+    incoming.forEach((event,index)=>{
+      const key = _obsEventKey(event,index);
+      if(!seen.has(key)){
+        seen.add(key);
+        existing.push(event);
+      }
+    });
+    _obsState.timeline = existing;
+    _obsState.nextCursor = payload.next_cursor ?? null;
+    _obsState.timelineTotal = Number(payload.total ?? existing.length) || existing.length;
+    _renderObsTurns();
+    _renderObsTools();
+    _renderObsEvidence();
+    _setObsStatus(`已同步 ${existing.length}/${_obsState.timelineTotal} 条`, 'ok');
+  }catch(error){
+    if(request !== _obsState.timelineRequest) return;
+    const message = _obsErrorText(error, 'Session timeline');
+    const turnState = document.getElementById('obsTurnsState');
+    turnState.hidden = false;
+    turnState.textContent = message;
+    _renderObsTools(message);
+    _setObsStatus(error.status === 404 ? 'Timeline 未启用' : 'Timeline 异常', error.status === 404 ? 'warn' : 'fail');
+  }finally{
+    if(more) more.disabled = false;
+  }
+}
+
+async function _loadObservabilityDetail(launchId){
+  const request = ++_obsState.detailRequest;
+  _setObsStatus('加载 launch', 'running');
+  _setObsLoadState('正在读取 launch 总账与证据...', 'loading', true);
+  try{
+    const payload = await _obsFetch(`${OBSERVABILITY_API}/launches/${encodeURIComponent(launchId)}`);
+    if(request !== _obsState.detailRequest || launchId !== _obsState.launchId) return;
+    _obsState.detail = payload;
+    const sessions = _obsArray(payload, ['sessions']);
+    const currentExists = sessions.some(item=>_obsSessionId(item) === _obsState.sessionId);
+    _obsState.sessionId = currentExists ? _obsState.sessionId : (sessions[0] ? _obsSessionId(sessions[0]) : '');
+    _fillObsSessions(sessions, _obsState.sessionId);
+    _renderObsLaunch(payload);
+    _setObsLoadState('', 'ok', false);
+    if(_obsState.sessionId) await _loadObservabilityTimeline(false);
+    else{
+      _resetObsTimeline('该 launch 暂无 session 事件。');
+      _setObsStatus('Launch 暂无 session', 'warn');
+    }
+  }catch(error){
+    if(request !== _obsState.detailRequest) return;
+    _obsState.detail = {};
+    _fillObsSessions([], '');
+    _renderObsLaunch({launch:_obsState.launches.find(item=>_obsLaunchId(item) === launchId) || {launch_id:launchId}});
+    _resetObsTimeline('Launch detail 不可用。');
+    const message = _obsErrorText(error, 'Launch detail');
+    _setObsLoadState(message, error.status === 404 ? 'warn' : 'fail', true);
+    _setObsStatus(error.status === 404 ? 'Detail 未启用' : 'Detail 异常', error.status === 404 ? 'warn' : 'fail');
+  }
+}
+
+async function loadObservabilityLaunches(force=false){
+  if(_obsState.loading && !force) return;
+  _obsState.loading = true;
+  const previousLaunch = _obsState.launchId;
+  const refresh = document.getElementById('obsRefresh');
+  if(refresh) refresh.disabled = true;
+  _setObsStatus('加载 launches', 'running');
+  _setObsLoadState('正在读取 Pacer launch 索引...', 'loading', true);
+  try{
+    const payload = await _obsFetch(`${OBSERVABILITY_API}/launches`);
+    const launches = _obsArray(payload, ['launches','items']);
+    _obsState.launches = launches;
+    _obsState.loaded = true;
+    if(!launches.length){
+      _obsState.launchId = '';
+      _obsState.sessionId = '';
+      _obsState.detail = null;
+      _fillObsLaunches([], '');
+      _fillObsSessions([], '');
+      document.getElementById('obsContent').hidden = true;
+      _setObsLoadState('暂无可观测 launch。运行一次 Pacer 任务后，此处会出现 token、agent 与闭环证据。', 'empty', true);
+      _setObsStatus('暂无数据', 'idle');
+      return;
+    }
+    const selected = launches.some(item=>_obsLaunchId(item) === previousLaunch) ? previousLaunch : _obsLaunchId(launches[0]);
+    _obsState.launchId = selected;
+    if(selected !== previousLaunch) _obsState.sessionId = '';
+    _fillObsLaunches(launches, selected);
+    await _loadObservabilityDetail(selected);
+  }catch(error){
+    _obsState.loaded = true;
+    _obsState.launches = [];
+    _obsState.launchId = '';
+    _obsState.sessionId = '';
+    _fillObsLaunches([], '');
+    _fillObsSessions([], '');
+    document.getElementById('obsContent').hidden = true;
+    const message = _obsErrorText(error, 'Observability launches');
+    _setObsLoadState(message, error.status === 404 ? 'warn' : 'fail', true);
+    _setObsStatus(error.status === 404 ? 'API 未启用' : '加载失败', error.status === 404 ? 'warn' : 'fail');
+  }finally{
+    _obsState.loading = false;
+    if(refresh) refresh.disabled = false;
+  }
+}
+
+function ensureObservabilityLoaded(){
+  if(!_obsState.loaded && !_obsState.loading) loadObservabilityLaunches(false);
+}
+
+function refreshObservability(){
+  return loadObservabilityLaunches(true);
+}
+
+function selectObservabilityLaunch(launchId){
+  const id = String(launchId || '').trim();
+  if(!id || id === _obsState.launchId) return;
+  _obsState.launchId = id;
+  _obsState.sessionId = '';
+  _obsState.timelineRequest += 1;
+  _fillObsLaunches(_obsState.launches, id);
+  _fillObsSessions([], '');
+  _resetObsTimeline('选择 session 后显示事件。');
+  _loadObservabilityDetail(id);
+}
+
+function selectObservabilitySession(sessionId){
+  const id = String(sessionId || '').trim();
+  if(!id || id === _obsState.sessionId) return;
+  _obsState.sessionId = id;
+  _obsState.timelineRequest += 1;
+  _loadObservabilityTimeline(false);
+}
+
+function loadMoreObservabilityTimeline(){
+  if(_obsState.nextCursor === null || _obsState.nextCursor === undefined || _obsState.nextCursor === '') return;
+  return _loadObservabilityTimeline(true);
 }
 
 let _eventSource = null;

@@ -19,21 +19,21 @@ from typing import Any
 from .data import (
     _LAUNCHES,
     _LAUNCH_LOCK,
-    build_dashboard_data_cached,
+    build_dashboard_data_cached as build_dashboard_data_cached,
     invalidate_dashboard_data_cache,
     worker_status,
 )
-from ..chief_plans_store import list_plans, load_plan, load_worker_records, plan_dir
+from ..chief_plans_store import load_plan, load_worker_records, plan_dir
 from ..commercial_config import commercial_config_from_payload, load_commercial_config, save_commercial_config as save_commercial_config_file
-from ..chief_queue import list_mission_queue_items
 from ..goal_intake import intake_dialogue_lines, refine_goal
 from ..mission_contract import normalize_requirement_contract
 from ..mission_progress import build_mission_progress
 from ..missions import list_missions, load_mission, save_mission
-from ..programs import list_programs
+from ..programs import list_programs, load_program
+from ..pacer_support import build_pacer_support_snapshot
 from ..subprocess_window import hidden_subprocess_kwargs
 from ..user_profile import load_user_profile, profile_from_payload, save_user_profile
-from ..workbench_board import attach_board_fields, archive_mission_now, merge_mission_now, mission_review_payload
+from ..workbench_board import attach_board_fields, mission_review_payload
 from ..workbench_model_config import (
     WorkbenchModelConfig,
     load_workbench_model_config,
@@ -861,7 +861,6 @@ def _error_log_tail(max_lines: int = 200) -> list[str]:
 
 
 def log_error(source: str, message: str, detail: str = "") -> None:
-    import os
     try:
         line = f"{datetime.now(timezone.utc).isoformat()} [{source}] {message}"
         if detail:
@@ -871,6 +870,309 @@ def log_error(source: str, message: str, detail: str = "") -> None:
             fh.write(line.replace("\n", " ⏎ ")[:4000] + "\n")
     except OSError:
         pass
+
+
+def build_five_pillars_data(workspace_root: str | Path) -> dict[str, Any]:
+    """Build the five-pillar view from durable Program and dispatch records."""
+    root = Path(workspace_root).expanduser().resolve()
+    support = build_pacer_support_snapshot(root)
+    memory = support.get("memory") if isinstance(support.get("memory"), dict) else {}
+    commands = support.get("commands") if isinstance(support.get("commands"), dict) else {}
+    if int(memory.get("total_outcomes") or 0) or int(commands.get("total_runs") or 0):
+        return _native_five_pillars_data(root, support)
+    candidates: list[dict[str, Any]] = []
+    for summary in list_programs(root):
+        program_id = str(summary.get("program_id") or "")
+        program = load_program(root, program_id) if program_id else None
+        tasks = program.get("tasks") if isinstance(program, dict) and isinstance(program.get("tasks"), list) else []
+        if (
+            isinstance(program, dict)
+            and str(program.get("status") or "") == "completed"
+            and len(tasks) >= 2
+            and all(str(task.get("status") or "") == "verified" for task in tasks if isinstance(task, dict))
+        ):
+            candidates.append(program)
+    candidates.sort(key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""), reverse=True)
+    if not candidates:
+        return {
+            "ok": True,
+            "workspace_root": str(root),
+            "program": None,
+            "missions": [],
+            "pillars": [],
+            "support": support,
+        }
+
+    program = candidates[0]
+    task_rows = [task for task in program.get("tasks") or [] if isinstance(task, dict)][:2]
+    missions = [_five_pillars_mission(root, task) for task in task_rows]
+    closed_loop = ((program.get("autonomy_policy") or {}).get("closed_loop") or {})
+    providers = _unique_text(row.get("provider") for row in missions)
+    models = _unique_text(row.get("model") for row in missions)
+    verdicts = _unique_text(row.get("verification_verdict") for row in missions)
+    commands = _unique_text(row.get("verification_command") for row in missions)
+    upstream_id = str(task_rows[0].get("mission_id") or "") if task_rows else ""
+    recalled_ids = [
+        memory_id
+        for row in missions[1:]
+        for memory_id in row.get("memory_ids") or []
+        if memory_id == f"mission:{upstream_id}"
+    ]
+    summary = {
+        "program_id": str(program.get("program_id") or ""),
+        "status": str(program.get("status") or ""),
+        "objective": str(program.get("objective") or ""),
+        "source_plan": str(program.get("source_plan") or ""),
+        "source_plan_sha256": str(program.get("source_plan_sha256") or closed_loop.get("source_plan_sha256") or ""),
+        "provider": ", ".join(providers),
+        "model": ", ".join(models),
+        "worker_count": sum(int(row.get("worker_count") or 0) for row in missions),
+        "repair_count": sum(int(row.get("repair_count") or 0) for row in missions),
+        "verification_verdict": ", ".join(verdicts),
+        "verification_command": " | ".join(commands),
+        "upstream_memory_id": recalled_ids[0] if recalled_ids else "",
+        "task_sequence": [
+            {
+                "task_id": str(task.get("task_id") or ""),
+                "mission_id": str(task.get("mission_id") or ""),
+                "status": str(task.get("status") or ""),
+            }
+            for task in task_rows
+        ],
+    }
+    all_verified = len(task_rows) >= 2 and all(str(task.get("status") or "") == "verified" for task in task_rows)
+    all_passed = bool(verdicts) and all(value == "pass" for value in verdicts)
+    pillars = [
+        _pillar("routing", "Codex 路由", bool(providers and models), f"{summary['provider']} / {summary['model']}", "中转 provider 与模型来自真实 dispatch 审计"),
+        _pillar("memory", "本地记忆", bool(recalled_ids), summary["upstream_memory_id"] or "未召回直接上游", "阶段 2实际可见的上游 mission memory ID"),
+        _pillar("managed", "托管开发", all_verified, f"{len(task_rows)} 个任务已验收", "依赖任务按顺序自动创建、执行并收口"),
+        _pillar("acceptance", "强验收", all_passed, summary["verification_verdict"] or "无验收结论", summary["verification_command"] or "无验收命令"),
+        _pillar("dogfood", "路线锁定", bool(summary["source_plan_sha256"]), summary["source_plan_sha256"] or "缺少路线 SHA", summary["source_plan"] or "缺少路线文件"),
+    ]
+    return {
+        "ok": True,
+        "workspace_root": str(root),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "program": summary,
+        "missions": missions,
+        "pillars": pillars,
+        "support": support,
+    }
+
+
+def _native_five_pillars_data(root: Path, support: dict[str, Any]) -> dict[str, Any]:
+    account = support.get("account") if isinstance(support.get("account"), dict) else {}
+    runtime = support.get("runtime") if isinstance(support.get("runtime"), dict) else {}
+    memory = support.get("memory") if isinstance(support.get("memory"), dict) else {}
+    commands = support.get("commands") if isinstance(support.get("commands"), dict) else {}
+    latest = memory.get("latest") if isinstance(memory.get("latest"), dict) else {}
+    recent = support.get("recent_outcomes") if isinstance(support.get("recent_outcomes"), list) else []
+    batch_run_id = str(latest.get("batch_run_id") or "")
+    raw_verified_run_ids = commands.get("verified_run_ids")
+    verified_run_id_rows = raw_verified_run_ids if isinstance(raw_verified_run_ids, list) else []
+    verified_run_ids = {
+        str(run_id)
+        for run_id in verified_run_id_rows
+        if str(run_id)
+    }
+    verification_errors = (
+        latest.get("verification_errors")
+        if isinstance(latest.get("verification_errors"), list)
+        else []
+    )
+    verified_outcome = (
+        str(latest.get("status") or "") == "completed"
+        and str(latest.get("evidence_level") or "") == "verified_batch"
+        and bool(batch_run_id)
+        and batch_run_id in verified_run_ids
+    )
+    if verified_outcome:
+        verification_evidence = f"最新 completed outcome 已绑定通过批次 {batch_run_id}"
+    elif str(latest.get("status") or "") != "completed":
+        verification_evidence = f"最新 outcome 状态为 {latest.get('status') or 'unknown'}，仅 completed 可通过"
+    elif verification_errors:
+        verification_evidence = (
+            f"绑定批次 {batch_run_id or 'unknown'} 未通过可信验收校验："
+            f"{verification_errors[0]}"
+        )
+    elif str(latest.get("evidence_level") or "") != "verified_batch":
+        verification_evidence = (
+            f"绑定批次 {batch_run_id} 没有可信 verified_batch 证据"
+            if batch_run_id
+            else "最新 completed outcome 没有 verified_batch 证据"
+        )
+    elif not batch_run_id:
+        verification_evidence = "最新 completed outcome 没有绑定 batch_run_id"
+    else:
+        verification_evidence = f"绑定批次 {batch_run_id} 不存在、未执行或未通过"
+    profile = support.get("profile") if isinstance(support.get("profile"), dict) else {}
+    program = {
+        "program_id": batch_run_id or "native-pacer",
+        "status": str(latest.get("status") or "observed"),
+        "objective": str(latest.get("goal") or "Pacer native development evidence"),
+        "provider": str(runtime.get("provider") or "inherited"),
+        "model": str(runtime.get("model") or "Codex default"),
+        "worker_count": int(commands.get("total_runs") or 0),
+        "repair_count": int(memory.get("failed_or_blocked") or 0),
+        "verification_verdict": "passed" if verified_outcome else "evidence incomplete",
+        "verification_command": str(latest.get("verification") or ""),
+        "upstream_memory_id": f"{memory.get('total_outcomes') or 0} local outcomes",
+        "source_plan": "Pacer native outcome ledger",
+        "source_plan_sha256": "",
+        "task_sequence": [
+            {
+                "task_id": f"outcome-{index + 1:03d}",
+                "mission_id": str(item.get("batch_run_id") or "local-memory"),
+                "status": str(item.get("status") or ""),
+            }
+            for index, item in enumerate(recent[:5])
+            if isinstance(item, dict)
+        ],
+    }
+    authenticated = bool(account.get("authenticated"))
+    total_outcomes = int(memory.get("total_outcomes") or 0)
+    verified_runs = int(commands.get("verified_runs") or 0)
+    total_runs = int(commands.get("total_runs") or 0)
+    completed = int(memory.get("completed") or 0)
+    launches = support.get("launches") if isinstance(support.get("launches"), dict) else {}
+    active_launch = launches.get("active") if isinstance(launches.get("active"), dict) else {}
+    liveness = active_launch.get("liveness") if isinstance(active_launch.get("liveness"), dict) else {}
+    program["lifecycle_status"] = str(active_launch.get("status") or program["status"])
+    program["liveness_state"] = str(liveness.get("state") or "unknown")
+    mechanical = active_launch.get("pillars") if isinstance(active_launch.get("pillars"), dict) else {}
+    use_mechanical = all(isinstance(mechanical.get(name), dict) for name in ("routing", "memory", "managed", "acceptance", "dogfood"))
+
+    def mechanical_active(name: str, fallback: bool) -> bool:
+        active = bool(mechanical[name].get("active")) if use_mechanical else fallback
+        if name in {"managed", "acceptance", "dogfood"}:
+            return active and verified_outcome and (fallback if name == "dogfood" else True)
+        return active
+
+    def mechanical_evidence(name: str, fallback: str) -> str:
+        if not use_mechanical:
+            return "legacy evidence: " + fallback
+        item = mechanical[name]
+        state = str(item.get("state") or "unknown")
+        if name in {"managed", "acceptance", "dogfood"} and not verified_outcome:
+            return (
+                f"launch={active_launch.get('launch_id') or 'unknown'}; state={state}; "
+                f"{verification_evidence}"
+            )
+        return f"launch={active_launch.get('launch_id') or 'unknown'}; state={state}"
+
+    pillars = [
+        _pillar(
+            "routing",
+            "Codex 运行身份",
+            mechanical_active("routing", authenticated),
+            f"{runtime.get('provider') or 'inherited'} / {runtime.get('model') or 'default'}",
+            mechanical_evidence("routing", f"认证类型：{account.get('auth_method') or 'unknown'}；不会读取或展示凭证"),
+        ),
+        _pillar(
+            "memory",
+            "本地记忆",
+            mechanical_active("memory", total_outcomes > 0),
+            f"{total_outcomes} 条 outcome",
+            mechanical_evidence("memory", str(memory.get("path") or "没有 native history")),
+        ),
+        _pillar(
+            "managed",
+            "托管开发",
+            mechanical_active("managed", verified_outcome),
+            f"{completed} 个完成记录 / {total_runs} 个命令批次",
+            (
+                f"批量执行累计 {float(commands.get('elapsed_seconds') or 0.0):.1f} 秒；"
+                f"{mechanical_evidence('managed', verification_evidence)}"
+            ),
+        ),
+        _pillar(
+            "acceptance",
+            "真实验收",
+            mechanical_active("acceptance", verified_outcome),
+            f"{verified_runs}/{total_runs} 批次通过可信验收",
+            mechanical_evidence("acceptance", verification_evidence),
+        ),
+        _pillar(
+            "dogfood",
+            "开发纪律",
+            mechanical_active("dogfood", verified_outcome and bool(latest.get("goal")) and bool(latest.get("summary"))),
+            "有验收交接" if verified_outcome else "缺少机械路线证据",
+            mechanical_evidence("dogfood", "已保存目标、结果和验收批次" if verified_outcome else verification_evidence),
+        ),
+    ]
+    return {
+        "ok": True,
+        "mode": "native",
+        "workspace_root": str(root),
+        "generated_at": support.get("generated_at"),
+        "program": program,
+        "missions": recent,
+        "pillars": pillars,
+        "support": support,
+        "active_launch": {
+            "launch_id": str(active_launch.get("launch_id") or ""),
+            "lifecycle_status": str(active_launch.get("status") or ""),
+            "liveness": liveness,
+        },
+        "account_summary": {
+            "codex_authenticated": authenticated,
+            "auth_method": str(account.get("auth_method") or "none"),
+            "profile_configured": bool(profile.get("configured")),
+            "profile_email": str(profile.get("email") or ""),
+        },
+    }
+
+
+def _five_pillars_mission(root: Path, task: dict[str, Any]) -> dict[str, Any]:
+    mission_id = str(task.get("mission_id") or "")
+    mission = load_mission(root, mission_id) or {}
+    plan_id = str(mission.get("plan_id") or "")
+    workers = load_worker_records(root, plan_id) if plan_id else []
+    verification = _load_verification_payload(root, plan_id) if plan_id else {}
+    command_result = verification.get("command_verification") if isinstance(verification.get("command_verification"), dict) else {}
+    dispatches = _read_jsonl(plan_dir(root, plan_id) / "dispatches.jsonl") if plan_id else []
+    dispatch = dispatches[-1] if dispatches else {}
+    memory_usage = dispatch.get("project_memory_usage") if isinstance(dispatch.get("project_memory_usage"), dict) else {}
+    return {
+        "task_id": str(task.get("task_id") or ""),
+        "mission_id": mission_id,
+        "status": str(mission.get("status") or task.get("status") or ""),
+        "plan_id": plan_id,
+        "provider": str(dispatch.get("resolved_provider") or (workers[-1].get("resolved_provider") if workers else "")),
+        "model": str(dispatch.get("resolved_model") or (workers[-1].get("resolved_model") if workers else "")),
+        "worker_count": int(dispatch.get("worker_attempts") or len(workers)),
+        "repair_count": int(dispatch.get("repair_rounds") or 0),
+        "verification_verdict": str(verification.get("verdict") or command_result.get("verdict") or ""),
+        "verification_command": str(command_result.get("command") or mission.get("test_command") or task.get("test_command") or ""),
+        "memory_ids": list(memory_usage.get("dispatch_memory_ids") or memory_usage.get("injected_memory_ids") or []),
+    }
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
+def _unique_text(values: Any) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _pillar(pillar_id: str, title: str, passed: bool, metric: str, evidence: str) -> dict[str, str]:
+    return {"id": pillar_id, "title": title, "status": "passed" if passed else "attention", "metric": metric, "evidence": evidence}
 
 
 # ---------------------------------------------------------------------------

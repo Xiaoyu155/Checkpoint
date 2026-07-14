@@ -77,7 +77,7 @@ from .workspace import (
 
 
 DEFAULT_CLI_NAME = "visual-agent"
-CLI_ALIASES = {"visual-agent", "checkpoint"}
+CLI_ALIASES = {"visual-agent", "checkpoint", "pacer"}
 
 if TYPE_CHECKING:
     from .workflow import WorkflowRuntime
@@ -117,17 +117,22 @@ def build_welcome_message(cli_name: str = "checkpoint") -> str:
         [
             "DevPacer / Checkpoint — AI coding assistant orchestrator.",
             "",
+            "直接开发：",
+            f"  {cli_name}",
+            "  Pacer> 修复登录错误并运行测试",
+            "  Pacer> 继续补边界测试",
+            "",
             "Start here (one-time per project):",
             f"  {cli_name} init --root .agent-workspace",
             f"  {cli_name} agents doctor",
             "",
             "Run a task (safe preview — no code changed):",
             f'  {cli_name} mission start --goal "Add a slugify function and tests" \\',
-            f"    --test-command \"pytest -q\" --agent codex",
+            "    --test-command \"pytest -q\" --agent codex",
             "",
             "Add --execute to actually run, --merge to auto-merge when verified:",
             f'  {cli_name} mission start --goal "..." --test-command "pytest -q" \\',
-            f"    --agent codex --execute --merge",
+            "    --agent codex --execute --merge",
             "",
             "Queue & watch multiple tasks:",
             f"  {cli_name} mission worker --watch",
@@ -137,7 +142,7 @@ def build_welcome_message(cli_name: str = "checkpoint") -> str:
             f"  {cli_name} mission list",
             f"  {cli_name} quota",
             "",
-            f"  See docs/五分钟上手.md for a 5-minute walkthrough.",
+            "  See docs/五分钟上手.md for a 5-minute walkthrough.",
             f"  Run {cli_name} --help for the full command list.",
         ]
     )
@@ -211,6 +216,45 @@ def _subcommand_names(parser: argparse.ArgumentParser) -> list[str]:
         if getattr(action, "choices", None) and isinstance(action.choices, dict):
             names.extend(str(name) for name in action.choices.keys())
     return sorted(dict.fromkeys(names))
+
+
+def expand_natural_language_task_argv(argv: list[str], commands: list[str]) -> tuple[list[str], bool]:
+    """Turn `pacer "goal"` into the safe, fully managed mission command."""
+    if not argv or argv[0].startswith("-") or argv[0] in commands:
+        return list(argv), False
+    if any(item.startswith("-") for item in argv[1:]):
+        return list(argv), False
+    goal = " ".join(str(item).strip() for item in argv if str(item).strip())
+    if not goal:
+        return list(argv), False
+    return [
+        "mission",
+        "start",
+        "--goal",
+        goal,
+        "--workspace-root",
+        ".agent-workspace",
+        "--repo-root",
+        ".",
+        "--agent",
+        "codex",
+        "--execute",
+        "--merge",
+        "--allow-dirty",
+        "--allow-coverage-gap",
+        "--run-profile",
+        "supervised",
+        "--dispatch-mode",
+        "delegated",
+        "--prompt-style",
+        "expanded",
+        "--repair-strategy",
+        "resume",
+        "--max-rounds",
+        "8",
+        "--max-repair-rounds",
+        "7",
+    ], True
 
 
 def build_completion_script(shell: str, commands: list[str]) -> str:
@@ -899,6 +943,20 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     program.add_argument("--test-command", default="auto", help="Default acceptance command for program tasks. Default: auto.")
     program.add_argument("--limit", type=int, default=12, help="Maximum tasks to import. Default: 12.")
     program.add_argument("--parallel", action="store_true", help="Do not chain imported tasks sequentially.")
+    program.add_argument(
+        "--autonomous",
+        action="store_true",
+        help="Let Pacer schedule all imported tasks, use delegated workers, and allocate quota without conservative reserves.",
+    )
+    program.add_argument("--allow-dirty", action="store_true", help="Explicitly overlay the current dirty checkout into autonomous worktrees.")
+    program.add_argument("--model", default=None, help="Explicit Codex model for every program task, for example gpt-5.5.")
+    program.add_argument("--strong-model", default=None, help="Model override for strong-worker tasks.")
+    program.add_argument("--cheap-model", default=None, help="Model override for cheap-worker tasks. Autonomous default: gpt-5.6-luna.")
+    program.add_argument("--research-model", default=None, help="Model override for research/doc tasks. Autonomous default: gpt-5.6-luna.")
+    program.add_argument("--codex-provider", default=None, help="Codex provider override, for example openai or custom.")
+    program.add_argument("--codex-failover-provider", default=None, help="Alternate Codex provider used after quota/rate-limit failure.")
+    program.add_argument("--memory-mode", choices=["enabled", "disabled"], default="enabled", help="Inject local project memory into workers. Default: enabled.")
+    program.add_argument("--acceptance-policy", choices=["strict", "standard"], default=None, help="Acceptance strength. Autonomous default: strict.")
     program.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     autopilot = subparsers.add_parser("autopilot", help="Create and start a Project Autopilot program from a plan file.")
@@ -911,6 +969,20 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     autopilot.add_argument("--test-command", default="auto", help="Default acceptance command. Default: auto.")
     autopilot.add_argument("--limit", type=int, default=12, help="Maximum tasks to import. Default: 12.")
     autopilot.add_argument("--parallel", action="store_true", help="Do not chain imported tasks sequentially.")
+    autopilot.add_argument(
+        "--autonomous",
+        action="store_true",
+        help="Enable unrestricted Pacer orchestration while keeping verification, external-access, and merge gates.",
+    )
+    autopilot.add_argument("--allow-dirty", action="store_true", help="Explicitly overlay the current dirty checkout into autonomous worktrees.")
+    autopilot.add_argument("--model", default=None, help="Explicit Codex model for every program task, for example gpt-5.5.")
+    autopilot.add_argument("--strong-model", default=None, help="Model override for strong-worker tasks.")
+    autopilot.add_argument("--cheap-model", default=None, help="Model override for cheap-worker tasks. Autonomous default: gpt-5.6-luna.")
+    autopilot.add_argument("--research-model", default=None, help="Model override for research/doc tasks. Autonomous default: gpt-5.6-luna.")
+    autopilot.add_argument("--codex-provider", default=None, help="Codex provider override, for example openai or custom.")
+    autopilot.add_argument("--codex-failover-provider", default=None, help="Alternate Codex provider used after quota/rate-limit failure.")
+    autopilot.add_argument("--memory-mode", choices=["enabled", "disabled"], default="enabled", help="Inject local project memory into workers. Default: enabled.")
+    autopilot.add_argument("--acceptance-policy", choices=["strict", "standard"], default=None, help="Acceptance strength. Autonomous default: strict.")
     autopilot.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
 
     chief_status = subparsers.add_parser("chief-status", help="Show the current status of a saved DevPacer mission.")
@@ -1474,16 +1546,35 @@ def doctor_priority(name: str, *, dependency: str = "", required: bool = False, 
 
 
 def main(argv: list[str] | None = None) -> int:
+    system_invocation = argv is None
     prog = current_cli_name() if argv is None else DEFAULT_CLI_NAME
+    welcome_cli = "pacer" if prog == "pacer" else "checkpoint"
     if argv is None:
         argv = sys.argv[1:]
+    if system_invocation and prog == "pacer":
+        from .pacer_management import handle_pacer_management
+
+        managed = handle_pacer_management(argv)
+        if managed is not None:
+            return managed
+        from .codex_launcher import launch_codex
+
+        return launch_codex(argv)
     if not argv:
-        print(build_welcome_message("checkpoint"))
+        print(build_welcome_message(welcome_cli))
         return 0
     if "--version" in argv:
         print(build_version_message(prog))
         return 0
-    args = build_parser(prog=prog).parse_args(argv)
+    parser = build_parser(prog=prog)
+    argv, simple_task = expand_natural_language_task_argv(argv, _subcommand_names(parser))
+    if simple_task:
+        from .simple_task import run_simple_managed_task, simple_result_to_markdown
+
+        payload = run_simple_managed_task(argv[3])
+        print(simple_result_to_markdown(payload))
+        return 0 if str(payload.get("status") or "") == "completed" else 1
+    args = parser.parse_args(argv)
     if args.command in RUNNER_COMMANDS:
         from .cli_runner import handle_runner_command
 
@@ -1912,7 +2003,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return main(target)
     if args.command == "quickstart":
-        print(build_welcome_message("checkpoint"))
+        print(build_welcome_message(welcome_cli))
         return 0
     if args.command in CHIEF_COMMANDS:
         from .cli_chief import handle_chief_command

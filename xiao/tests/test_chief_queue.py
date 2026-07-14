@@ -7,6 +7,7 @@ import pytest
 from visual_agent.cli import main
 from visual_agent.chief_queue import (
     _acquire_worker_lock,
+    _pid_is_running,
     _release_worker_lock,
     _worker_lock_path,
     claim_next_mission_queue_item,
@@ -222,9 +223,21 @@ def test_run_mission_queue_worker_marks_non_verified_result_failed(tmp_path) -> 
     assert saved.last_stop_reason == "coverage_gap"
 
 
-def test_worker_lock_blocks_second_watch_worker(tmp_path) -> None:
+def test_worker_pid_probe_delegates_to_process_status(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        "visual_agent.chief_background.process_status",
+        lambda pid: calls.append(pid) or {"pid": pid, "alive": True, "exit_code": None},
+    )
+
+    assert _pid_is_running(43210) is True
+    assert calls == [43210]
+
+
+def test_worker_lock_blocks_second_watch_worker(tmp_path, monkeypatch) -> None:
     workspace = tmp_path / ".agent-workspace"
     workspace.mkdir(parents=True)
+    monkeypatch.setattr("visual_agent.chief_queue._pid_is_running", lambda pid: pid == os.getpid())
     # Acquire lock as current process
     existing = _acquire_worker_lock(workspace)
     assert existing is None, "First acquire should succeed"
@@ -236,9 +249,10 @@ def test_worker_lock_blocks_second_watch_worker(tmp_path) -> None:
     assert not _worker_lock_path(workspace).exists()
 
 
-def test_stale_worker_lock_is_overwritten(tmp_path) -> None:
+def test_stale_worker_lock_is_overwritten(tmp_path, monkeypatch) -> None:
     workspace = tmp_path / ".agent-workspace"
     workspace.mkdir(parents=True)
+    monkeypatch.setattr("visual_agent.chief_queue._pid_is_running", lambda _pid: False)
     # Write a lock with a PID that cannot exist (max PID + 1 heuristic)
     stale = {"pid": 9999999, "started_at": "2000-01-01T00:00:00+00:00"}
     _worker_lock_path(workspace).write_text(json.dumps(stale), encoding="utf-8")
@@ -247,8 +261,9 @@ def test_stale_worker_lock_is_overwritten(tmp_path) -> None:
     _release_worker_lock(workspace)
 
 
-def test_watch_worker_blocked_by_existing_lock(tmp_path) -> None:
+def test_watch_worker_blocked_by_existing_lock(tmp_path, monkeypatch) -> None:
     workspace, mission = create_preview_mission(tmp_path)
+    monkeypatch.setattr("visual_agent.chief_queue._pid_is_running", lambda _pid: True)
     # Plant a fake lock from a non-existent PID so it looks live
     _worker_lock_path(workspace).write_text(
         json.dumps({"pid": os.getpid(), "started_at": "2026-01-01T00:00:00+00:00"}),

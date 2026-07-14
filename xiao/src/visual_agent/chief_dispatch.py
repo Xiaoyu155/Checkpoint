@@ -48,6 +48,7 @@ from .subprocess_window import (
 from .git_diff import changed_files
 from .llm_providers import LLMBackend, run_llm_completion
 from .models import to_jsonable
+from .project_memory import project_memory_handoff_notes
 from .repo_map import build_repo_map, render_repo_map, repo_map_cache_path
 from .security import redact_secret_text, scrub_secrets
 from .verification_profiles import (
@@ -120,7 +121,36 @@ def _resolved_or_inherited(value: str, field: str) -> str:
 
 
 def _allow_automatic_low_cost_failover(worker_agent_norm: str) -> bool:
-    return worker_agent_norm != "codex"
+    return False
+
+
+def _is_weak_command_gate(command: str) -> bool:
+    value = str(command or "").strip()
+    if not value:
+        return False
+    try:
+        words = shlex.split(value, posix=False)
+    except ValueError:
+        words = value.split()
+    executable = Path(str(words[0] if words else "")).name.lower()
+    if executable in {"rg", "rg.exe", "grep", "grep.exe", "findstr", "findstr.exe"}:
+        return not any(token in value for token in ("&&", "||", ";", "|"))
+    return False
+
+
+def _roadmap_context_prompt(policy: dict[str, Any]) -> str:
+    if str(policy.get("roadmap_mode") or "") != "locked":
+        return ""
+    return "\n".join(
+        [
+            "Roadmap contract (locked for this program task):",
+            f"- Program: {policy.get('program_id') or ''}",
+            f"- Task: {policy.get('task_id') or ''}",
+            f"- Source plan: {policy.get('source_plan') or ''}",
+            f"- Source plan SHA-256: {policy.get('source_plan_sha256') or ''}",
+            "Keep the implementation aligned with this task. Do not replace it with a new ad-hoc objective.",
+        ]
+    )
 
 
 def _coverage_changed_files(*, repo_root: Path, workspace_root: Path) -> list[str]:
@@ -214,6 +244,7 @@ def dispatch_chief_plan(
     repair_strategy: str = "resume",
     max_repair_rounds: int | None = 2,
     delegated_timeout_seconds: float | None = None,
+    execution_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Preview or execute one chief-engineer worker dispatch.
 
@@ -233,6 +264,32 @@ def dispatch_chief_plan(
     plan = load_plan(workspace_path, plan_id)
     if plan is None:
         return _blocked(plan_id=plan_id, reason=f"No saved plan found: {plan_id}")
+    closed_loop = dict(execution_policy) if isinstance(execution_policy, dict) else {}
+    memory_mode = str(closed_loop.get("memory_mode") or "enabled").strip().lower()
+    acceptance_policy = str(closed_loop.get("acceptance_policy") or "standard").strip().lower()
+    codex_provider = str(closed_loop.get("codex_provider") or "inherit").strip()
+    codex_failover_provider = str(closed_loop.get("codex_failover_provider") or "").strip()
+    if memory_mode == "disabled":
+        memory = plan.get("project_memory") if isinstance(plan.get("project_memory"), dict) else {}
+        usage = memory.get("usage") if isinstance(memory.get("usage"), dict) else {}
+        plan["project_memory"] = {
+            "usage": {
+                **usage,
+                "memory_mode": "disabled",
+                "dispatch_injected": False,
+                "dispatch_note_count": 0,
+                "dispatch_chars": 0,
+                "dispatch_memory_ids": [],
+            },
+            "entries": [],
+            "instruction_memory": {},
+        }
+    else:
+        memory = plan.get("project_memory") if isinstance(plan.get("project_memory"), dict) else {}
+        usage = memory.get("usage") if isinstance(memory.get("usage"), dict) else {}
+        usage["memory_mode"] = "enabled"
+        if memory:
+            memory["usage"] = usage
 
     selected_track = _select_track(plan, track_id=track_id)
     if selected_track is None:
@@ -284,6 +341,13 @@ def dispatch_chief_plan(
         timeout_info=timeout_info,
         command_safety=command_safety,
     )
+    if acceptance_policy == "strict" and command_mode and _is_weak_command_gate(effective_verification_command):
+        preflight["status"] = "blocked"
+        preflight["strict_acceptance"] = {
+            "status": "blocked",
+            "reason": "weak_command_gate",
+            "message": "Strict acceptance rejects marker/search-only commands as the sole verification gate.",
+        }
     if execute and not dry_run:
         execution_alignment = build_worker_prompt_alignment_check()
         preflight["execution_alignment"] = execution_alignment
@@ -324,7 +388,9 @@ def dispatch_chief_plan(
         allow_dirty=allow_dirty,
         ignored_prefixes=workspace_record_dirty_prefixes(repo_root=repo_root, workspace_root=workspace_path),
     )
-    dirty_context_text = _dirty_context_prompt(dirty_context)
+    dirty_context_text = "\n\n".join(
+        part for part in (_dirty_context_prompt(dirty_context), _roadmap_context_prompt(closed_loop)) if part
+    )
     report_prompt = None
     if diagnosis_mode:
         report_prompt = (
@@ -356,6 +422,7 @@ def dispatch_chief_plan(
         reasoning_effort=reasoning_effort,
         dispatch_mode=dispatch_mode,
         prompt_style=prompt_style,
+        codex_provider=codex_provider,
     )
     toolchain_policy = _toolchain_policy_for_command(effective_verification_command)
     toolchain_preflight = _toolchain_preflight_for_command(effective_verification_command, policy=toolchain_policy)
@@ -367,6 +434,7 @@ def dispatch_chief_plan(
         "plan_status": str(plan.get("status") or ""),
         "dry_run": bool(dry_run or not execute),
         "execute": bool(execute and not dry_run),
+        "project_memory_usage": dict(((plan.get("project_memory") or {}).get("usage") or {})),
         "worker": {
             "track_id": track_token,
             "agent": str(selected_track.get("agent") or ""),
@@ -376,6 +444,8 @@ def dispatch_chief_plan(
             "resolved_model": worker_command.get("resolved_model", ""),
             "resolved_reasoning_effort": worker_command.get("resolved_reasoning_effort", ""),
             "model_source": worker_command.get("model_source", ""),
+            "resolved_provider": worker_command.get("resolved_provider", ""),
+            "provider_source": worker_command.get("provider_source", ""),
             "reasoning_effort_source": worker_command.get("reasoning_effort_source", ""),
             "resolved_sandbox": worker_command.get("resolved_sandbox", ""),
             "sandbox_source": worker_command.get("sandbox_source", ""),
@@ -385,6 +455,8 @@ def dispatch_chief_plan(
             "prompt_style": prompt_style,
             "repair_strategy": repair_strategy,
             "timeout_seconds": worker_timeout_seconds,
+            "memory_mode": memory_mode,
+            "acceptance_policy": acceptance_policy,
         },
         "worktree": {
             "path": str(worktree),
@@ -645,6 +717,7 @@ def dispatch_chief_plan(
     repair_executable = executable
     repair_env: dict[str, str] | None = None
     repair_backend: dict[str, Any] | None = None
+    active_codex_provider = codex_provider
     quota_hit = (
         worker_backend is None
         and worker_record.get("status") != "completed"
@@ -654,10 +727,48 @@ def dispatch_chief_plan(
         # Record the quota failure so future dispatches can skip this agent
         from .agent_backends import record_quota_failure
         record_quota_failure(worker_agent_norm)
-    if quota_hit and not _allow_automatic_low_cost_failover(worker_agent_norm):
+    if (
+        quota_hit
+        and worker_agent_norm == "codex"
+        and codex_failover_provider
+        and codex_failover_provider != str(worker_command.get("resolved_provider") or codex_provider)
+    ):
+        failover_command = build_worker_command(
+            plan=plan,
+            track=selected_track,
+            worktree=worktree_project_root,
+            verification_command=effective_verification_command,
+            phase="implementation",
+            model_policy=model_policy,
+            repo_map_text=repo_map_text,
+            prompt_override=report_prompt,
+            prompt_suffix=dirty_context_text,
+            reasoning_effort=reasoning_effort,
+            dispatch_mode=dispatch_mode,
+            prompt_style=prompt_style,
+            codex_provider=codex_failover_provider,
+        )
+        failover_record = _run_worker_attempt(
+            workspace_root=workspace_path,
+            plan_id=plan_id,
+            mission_id=progress_mission_id,
+            attempt=f"quota_failover_codex_{codex_failover_provider}",
+            track=selected_track,
+            argv=list(failover_command["argv"]),
+            stdin_text=failover_command.get("stdin"),
+            cwd=worktree_project_root,
+            timeout_seconds=worker_timeout_seconds,
+            log_path=logs_dir / f"{track_token}-quota-failover-{codex_failover_provider}.log",
+            runner=runner,
+            env=_apply_toolchain_policy_env(None, toolchain_policy),
+            command_metadata=failover_command,
+            dispatch_mode=dispatch_mode,
+        )
+        if failover_record.get("status") == "completed":
+            active_codex_provider = codex_failover_provider
+    elif quota_hit and not _allow_automatic_low_cost_failover(worker_agent_norm):
         preview["worker"]["failover_disabled"] = (
-            "Codex was explicitly requested; automatic MiMo failover is disabled. "
-            "Retry explicitly with --agent mimo if you want MiMo."
+            "No alternate Codex provider is configured for automatic failover."
         )
     elif quota_hit:
         failover_backend = resolve_backend_by_name("bugteam") or resolve_backend_by_name("mimo")
@@ -798,6 +909,7 @@ def dispatch_chief_plan(
                 reasoning_effort=reasoning_effort,
                 dispatch_mode=dispatch_mode,
                 prompt_style=prompt_style,
+                codex_provider=active_codex_provider,
                 resume_session_id=current_session_id if use_resume else None,
             )
             repair_argv = list(repair_command["argv"])
@@ -846,6 +958,7 @@ def dispatch_chief_plan(
                     reasoning_effort=reasoning_effort,
                     dispatch_mode=dispatch_mode,
                     prompt_style=prompt_style,
+                    codex_provider=active_codex_provider,
                 )
                 fallback_argv = list(fallback_command["argv"])
                 if repair_executable:
@@ -1055,7 +1168,9 @@ def dispatch_chief_plan(
         "dispatch_mode": dispatch_mode,
         "prompt_style": prompt_style,
         "repair_strategy": repair_strategy,
-        "resolved_model": preview["worker"].get("resolved_model"),
+        "resolved_model": effective_worker_record.get("resolved_model") or preview["worker"].get("resolved_model"),
+        "resolved_provider": effective_worker_record.get("resolved_provider") or preview["worker"].get("resolved_provider"),
+        "provider_source": effective_worker_record.get("provider_source") or preview["worker"].get("provider_source"),
         "resolved_reasoning_effort": preview["worker"].get("resolved_reasoning_effort"),
         "resolved_sandbox": preview["worker"].get("resolved_sandbox"),
         "resolved_approval": preview["worker"].get("resolved_approval"),
@@ -1064,6 +1179,7 @@ def dispatch_chief_plan(
         "repair_rounds": repair_rounds_completed,
         "verification_attempts": len(verification_attempts),
         "usage": payload.get("usage_summary"),
+        "project_memory_usage": dict(((plan.get("project_memory") or {}).get("usage") or {})),
         "verdict": latest_verification.get("verdict"),
         "status": status,
         "elapsed_seconds": round(monotonic() - dispatch_started, 6),
@@ -1193,6 +1309,16 @@ def _dispatch_preflight_payload(
 
 
 def _dispatch_preflight_block(preflight: dict[str, Any]) -> dict[str, str] | None:
+    strict_acceptance = (
+        preflight.get("strict_acceptance")
+        if isinstance(preflight.get("strict_acceptance"), dict)
+        else {}
+    )
+    if str(strict_acceptance.get("status") or "") == "blocked":
+        return {
+            "reason": str(strict_acceptance.get("reason") or "weak_command_gate"),
+            "message": str(strict_acceptance.get("message") or "Strict acceptance blocked dispatch."),
+        }
     execution_alignment = (
         preflight.get("execution_alignment")
         if isinstance(preflight.get("execution_alignment"), dict)
@@ -1692,6 +1818,14 @@ def _task_kind_for_phase(phase: str, model_policy: dict[str, Any] | None) -> str
     return _POLICY_TIER_TASK_KIND.get(tier, "implementation")
 
 
+def _explicit_model_for_phase(phase: str, model_policy: dict[str, Any] | None) -> str:
+    policy = model_policy if isinstance(model_policy, dict) else {}
+    value = str(policy.get(phase) or "").strip()
+    if value.lower() in {*_POLICY_TIER_TASK_KIND, "", "inherit"}:
+        return ""
+    return value
+
+
 def build_worker_command(
     *,
     plan: dict[str, Any],
@@ -1707,11 +1841,13 @@ def build_worker_command(
     dispatch_mode: str = "tracked",
     prompt_style: str = "expanded",
     resume_session_id: str | None = None,
+    codex_provider: str = "inherit",
 ) -> dict[str, Any]:
     agent = canonical_agent_name(str(track.get("agent") or "codex"))
     profile = load_agent_profile(agent) or {}
     task_kind = _task_kind_for_phase(phase, model_policy)
     config = recommend_worker_config(profile, task_kind=task_kind) if profile else {}
+    explicit_model = _explicit_model_for_phase(phase, model_policy)
     prompt = prompt_override or build_worker_prompt(
         plan=plan,
         track=track,
@@ -1720,6 +1856,8 @@ def build_worker_command(
         dispatch_mode=dispatch_mode,
         prompt_style=prompt_style,
     )
+    if prompt_override:
+        prompt = _with_dispatch_project_memory(prompt, plan)
     if str(prompt_suffix or "").strip():
         prompt = prompt.rstrip() + "\n\n" + str(prompt_suffix).strip()
     if repo_map_text:
@@ -1759,10 +1897,19 @@ def build_worker_command(
     if resume_session_id:
         argv.append("resume")
     argv.append("--json")
+    provider = str(codex_provider or "inherit").strip()
+    if provider.lower() != "inherit":
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", provider):
+            raise ValueError("codex_provider must be a simple provider id")
+        # A TOML literal string survives the Windows npm .cmd shim unchanged;
+        # JSON's double quotes are escaped into literal backslashes by cmd.exe.
+        argv.extend(["-c", f"model_provider='{provider}'"])
     # The implementation phase honors any model already chosen for the track; other
     # phases (e.g. repair) follow the model_policy tier so a cheaper model can be
     # used when the policy asks for it.
-    if phase == "implementation":
+    if explicit_model:
+        model = explicit_model
+    elif phase == "implementation":
         model = str(track.get("model") or config.get("model") or "")
     else:
         model = str(config.get("model") or track.get("model") or "")
@@ -1791,6 +1938,9 @@ def build_worker_command(
     resolved_effort = effort if effort.lower() != "inherit" else str(
         user_defaults.get("reasoning_effort") or "inherited(config.toml)"
     )
+    resolved_provider = provider if provider.lower() != "inherit" else str(
+        user_defaults.get("provider") or "inherited(config.toml)"
+    )
     resolved_sandbox, sandbox_source = _resolved_codex_policy(
         track.get("sandbox"),
         option_names=("--sandbox", "-s"),
@@ -1808,6 +1958,8 @@ def build_worker_command(
         "resolved_model": resolved_model,
         "resolved_reasoning_effort": resolved_effort,
         "model_source": "command" if model else "config.toml",
+        "resolved_provider": resolved_provider,
+        "provider_source": "command" if provider.lower() != "inherit" else "config.toml",
         "reasoning_effort_source": effort_source if effort.lower() != "inherit" else "config.toml",
         "resolved_sandbox": resolved_sandbox,
         "sandbox_source": sandbox_source,
@@ -1919,6 +2071,9 @@ def build_worker_prompt(
         lines.append(
             "No complete target-file list is imposed. Determine the necessary implementation surface from the objective and repository."
         )
+    memory_lines = _dispatch_project_memory_lines(plan)
+    if memory_lines:
+        lines.extend(memory_lines)
     lines.extend(
         [
             "Safety boundary: do not edit archive, graveyard, checkpoint worktree, third-party sample,"
@@ -2004,6 +2159,8 @@ def _restricted_worker_changes(*, repo_root: Path, base_ref: str | None) -> tupl
             # worker starts. Its trusted inputs are guarded by a content
             # snapshot; tracked or staged workspace edits remain scope errors.
             if command_index == 2 and ".agent-workspace" in normalized.split("/"):
+                continue
+            if normalized == ".agent-workspace/workspace.json":
                 continue
             paths.add(normalized)
     return sorted(path for path in paths if _is_restricted_worker_path(path)), ""
@@ -2967,8 +3124,6 @@ def _extract_unified_diff(text: str) -> str:
         # Find the first newline after the opening code fence
         first_newline = raw.find("\n", 3)
         if first_newline > 0:
-            # Check if there's a language specifier (e.g., "diff")
-            lang = raw[3:first_newline].strip().lower()
             # Find the closing code fence - look for ``` at the start of a line
             # Skip the first ``` and look for the next one that's on its own line
             rest = raw[first_newline + 1:]
@@ -3189,6 +3344,8 @@ def _run_worker_attempt(
     metadata = command_metadata if isinstance(command_metadata, dict) else {}
     for key in (
         "resolved_model",
+        "resolved_provider",
+        "provider_source",
         "resolved_reasoning_effort",
         "model_source",
         "reasoning_effort_source",
@@ -3548,7 +3705,7 @@ def create_worktree(*, repo_root: Path, worktree: Path, branch: str, allow_dirty
                 text=True,
                 check=False,
             )
-            still_dirty = [l for l in recheck.stdout.splitlines() if l.strip()]
+            still_dirty = [line for line in recheck.stdout.splitlines() if line.strip()]
             if still_dirty:
                 if allow_dirty:
                     return {
@@ -3679,6 +3836,42 @@ def _dirty_context_prompt(summary: dict[str, Any]) -> str:
     if skipped:
         lines.append(f"Overlay skipped {skipped} dirty candidate(s), usually caches, dependencies, or secret-like files.")
     return "\n".join(lines)
+
+
+def _with_dispatch_project_memory(prompt: str, plan: dict[str, Any]) -> str:
+    lines = _dispatch_project_memory_lines(plan)
+    if not lines:
+        return prompt
+    return prompt.rstrip() + "\n\n" + "\n".join(lines)
+
+
+def _dispatch_project_memory_lines(plan: dict[str, Any]) -> list[str]:
+    memory = plan.get("project_memory") if isinstance(plan.get("project_memory"), dict) else {}
+    notes = project_memory_handoff_notes(memory)
+    usage = memory.get("usage") if isinstance(memory.get("usage"), dict) else {}
+    joined = " ".join(notes)
+    entries = memory.get("entries") if isinstance(memory.get("entries"), list) else []
+    memory_ids = [
+        str(item.get("memory_id"))
+        for item in entries
+        if isinstance(item, dict) and str(item.get("memory_id") or "") in joined
+    ]
+    usage.update(
+        {
+            "dispatch_injected": bool(notes),
+            "dispatch_note_count": len(notes),
+            "dispatch_chars": len(joined),
+            "dispatch_memory_ids": memory_ids,
+        }
+    )
+    if memory:
+        memory["usage"] = usage
+    if not notes:
+        return []
+    return [
+        "Project memory (advisory and non-exhaustive; inspect the repository wherever needed):",
+        *[f"- {item}" for item in notes],
+    ]
 
 
 _LOCAL_OVERLAY_SKIP_PARTS = {
@@ -3869,6 +4062,8 @@ def _overlay_nested_dirty_repo_root(*, repo_root: Path, worktree: Path, allow_di
         name = item.name
         if name in ignored_dirs or name.endswith(".checkpoint-worktrees"):
             continue
+        if item.is_file() and not _local_dirty_overlay_allowed(name, ignored=False):
+            continue
         dest = target / name
         try:
             if item.is_dir():
@@ -3882,6 +4077,14 @@ def _overlay_nested_dirty_repo_root(*, repo_root: Path, worktree: Path, allow_di
                         ".pytest_cache",
                         "__pycache__",
                         "node_modules",
+                        ".env*",
+                        "model_api_keys.txt",
+                        "api_keys.txt",
+                        "*.key",
+                        "*.pem",
+                        "*.pfx",
+                        "*.p12",
+                        "*.crt",
                         "*.pyc",
                         "*.pyo",
                     ),

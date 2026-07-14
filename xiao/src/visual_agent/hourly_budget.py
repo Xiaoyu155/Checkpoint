@@ -34,16 +34,19 @@ def build_hourly_plan(
     hours: float = 5.0,
     reserve_minutes: int = DEFAULT_RESERVE_MINUTES,
     pause_at_used_percentage: float = DEFAULT_PAUSE_AT_USED,
+    quota_mode: str = "conservative",
 ) -> dict[str, Any]:
     """Plan ready tasks inside the current quota window.
 
     This is deliberately conservative: if quota is hot, strong workers stop and
     the plan keeps only cheap/research/doc work moving.
     """
+    normalized_quota_mode = str(quota_mode or "conservative").strip().lower()
+    unrestricted = normalized_quota_mode == "unrestricted"
     window_minutes = max(30, int(float(hours) * 60))
     remaining = min(window_minutes, estimate_remaining_window_minutes(quota_snapshot, window_minutes=DEFAULT_WINDOW_MINUTES))
     used = quota_used_percentage(quota_snapshot)
-    requested_reserve = max(0, int(reserve_minutes))
+    requested_reserve = 0 if unrestricted else max(0, int(reserve_minutes))
     effective_reserve = effective_reserve_minutes(remaining, requested_reserve)
     usable_strong = max(0, remaining - effective_reserve)
     strong_allowed = used < float(pause_at_used_percentage) and usable_strong >= MIN_STRONG_WORKER_MINUTES
@@ -54,7 +57,6 @@ def build_hourly_plan(
     for task in tasks:
         if str(task.get("status") or "pending") not in {"pending", "ready"}:
             continue
-        task_id = str(task.get("task_id") or "")
         risk = str(task.get("risk") or "medium")
         tier = str(task.get("worker_tier") or "strong")
         estimate = max(5, int(task.get("estimated_strong_minutes") or task.get("estimated_minutes") or 30))
@@ -65,7 +67,11 @@ def build_hourly_plan(
             scheduled.append(_slot(task, mode="cheap_worker", minutes=max(5, int(task.get("estimated_minutes") or 20))))
             continue
         if tier in {"research", "doc"}:
-            scheduled.append(_slot(task, mode="research_or_doc", minutes=max(5, int(task.get("estimated_minutes") or 15))))
+            mode = "delegated_worker" if unrestricted else "research_or_doc"
+            scheduled.append(_slot(task, mode=mode, minutes=max(5, int(task.get("estimated_minutes") or 15))))
+            continue
+        if unrestricted:
+            scheduled.append(_slot(task, mode="delegated_worker", minutes=estimate))
             continue
         if strong_allowed and estimate <= usable_strong:
             scheduled.append(_slot(task, mode="strong_worker", minutes=estimate))
@@ -76,6 +82,7 @@ def build_hourly_plan(
 
     return {
         "schema_version": 1,
+        "quota_mode": normalized_quota_mode,
         "window_minutes": window_minutes,
         "remaining_window_minutes": remaining,
         "reserve_minutes": effective_reserve,
@@ -83,7 +90,9 @@ def build_hourly_plan(
         "usable_strong_minutes": usable_strong,
         "pause_at_used_percentage": float(pause_at_used_percentage),
         "quota_used_percentage": used,
-        "strong_workers_allowed": bool(strong_allowed or any(item.get("mode") == "strong_worker" for item in scheduled)),
+        "strong_workers_allowed": bool(
+            unrestricted or strong_allowed or any(item.get("mode") == "strong_worker" for item in scheduled)
+        ),
         "scheduled": scheduled,
         "deferred": deferred,
         "blocked": blocked,
@@ -145,7 +154,8 @@ def _summary(scheduled: list[dict[str, Any]], deferred: list[dict[str, Any]], bl
     strong = sum(1 for item in scheduled if item.get("mode") == "strong_worker")
     cheap = sum(1 for item in scheduled if item.get("mode") == "cheap_worker")
     research = sum(1 for item in scheduled if item.get("mode") == "research_or_doc")
-    return f"{len(scheduled)} scheduled ({strong} strong, {cheap} cheap, {research} research/doc), {len(deferred)} deferred, {len(blocked)} blocked"
+    delegated = sum(1 for item in scheduled if item.get("mode") == "delegated_worker")
+    return f"{len(scheduled)} scheduled ({strong} strong, {cheap} cheap, {research} research/doc, {delegated} delegated), {len(deferred)} deferred, {len(blocked)} blocked"
 
 
 def _window_used_percentage(snapshot: dict[str, Any], window_name: str) -> float | None:

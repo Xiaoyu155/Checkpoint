@@ -23,16 +23,23 @@ def test_dashboard_static_acceptance_passes_current_assets() -> None:
     assert "index_text:Supabase Auth" in ids
     assert "index_text:Google OAuth" in ids
     assert "index_text:Stripe Billing" in ids
+    assert "index_text:Pacer 可观测性" in ids
+    assert "index_text:Raw ledger" in ids
+    assert "index_text:Agent 父子树" in ids
     assert "app_contract:saveRelayConfig" in ids
     assert "app_contract:saveCommercialConfig" in ids
     assert "app_contract:renderCoreReadinessPanel" in ids
     assert "app_contract:/api/commercial-config" in ids
     assert "app_contract:renderSubscriptionQuotaPanel" in ids
+    assert "app_contract:loadObservabilityLaunches" in ids
+    assert "app_contract:_loadObservabilityTimeline" in ids
     assert "style_contract:.cockpit-layout" in ids
     assert "style_contract:.ops-rail" in ids
     assert "style_contract:.commercial-grid" in ids
     assert "style_contract:.core-readiness-card" in ids
     assert "style_contract:.detail-contract" in ids
+    assert "style_contract:.observability-workbench" in ids
+    assert "style_contract:.obs-token-stack" in ids
 
 
 def test_dashboard_static_acceptance_reports_missing_contract_text(tmp_path) -> None:

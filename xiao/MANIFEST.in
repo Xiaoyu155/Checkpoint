@@ -1,4 +1,7 @@
 include README.md LICENSE pyproject.toml
+include docker-compose.gateway.yml
+recursive-include cloud_api *.css *.example *.html *.js *.py Dockerfile
+recursive-include docs *.md
 recursive-include src/visual_agent/agent_profiles *.yaml
 recursive-include src/visual_agent/dashboard/static *.css *.html *.js
 recursive-include templates *.html *.json *.yaml

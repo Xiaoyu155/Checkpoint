@@ -110,6 +110,8 @@ def run_chief_mission(
     dispatch_mode: str | None = None,
     prompt_style: str | None = None,
     repair_strategy: str | None = None,
+    model_policy: dict[str, Any] | None = None,
+    execution_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     started = monotonic()
     run_started_at = datetime.now(timezone.utc).isoformat()
@@ -167,6 +169,15 @@ def run_chief_mission(
         max_worker_minutes=max_worker_minutes,
         max_repair_rounds=max_repair_rounds,
     )
+    if isinstance(model_policy, dict):
+        budget["model_policy"] = {
+            **budget["model_policy"],
+            **{str(key): str(value) for key, value in model_policy.items() if str(value).strip()},
+        }
+    if isinstance(execution_policy, dict):
+        budget["execution_policy"] = {
+            str(key): value for key, value in execution_policy.items() if value not in {None, ""}
+        }
     requested_verification_env = _merge_verification_env(
         normalize_verification_env((mission or {}).get("verification_env")),
         normalize_verification_env(verification_env),
@@ -557,6 +568,7 @@ def run_chief_mission(
         auto_repair_once=False,
         max_repair_rounds=0,
         model_policy=budget.get("model_policy") if isinstance(budget, dict) else None,
+        execution_policy=budget.get("execution_policy") if isinstance(budget, dict) else None,
         reasoning_effort=dispatch_reasoning_effort,
         dispatch_mode=effective_dispatch_mode,
         prompt_style=effective_prompt_style,
@@ -655,6 +667,7 @@ def run_chief_mission(
         auto_repair_once=auto_repair_once,
         max_repair_rounds=repair_rounds,
         model_policy=budget.get("model_policy") if isinstance(budget, dict) else None,
+        execution_policy=budget.get("execution_policy") if isinstance(budget, dict) else None,
         reasoning_effort=dispatch_reasoning_effort,
         dispatch_mode=effective_dispatch_mode,
         prompt_style=effective_prompt_style,

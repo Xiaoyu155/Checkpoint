@@ -13,7 +13,7 @@ checkpoint app
 目标不知道怎么写？点 **帮我理清目标**，会用便宜的小模型帮你把模糊目标改写清楚、列出该先说清楚的点
 （没配便宜模型时自动退回本地规则给建议，不联网也能用）。
 
-> 账号说明：agent 用的账号 = 你在终端登录的那个。默认用 `codex`，先 `codex login` 登录你的 Codex 订阅；也可以切到 Claude Code（先 `claude` 登录）。
+> 账号说明：默认且推荐的执行引擎是 `codex`。可以使用 `codex login` 的订阅认证，也可以在 Codex `config.toml` 中配置 OpenAI/Codex-compatible 中转 provider 和 token。
 
 ## 或者网页工作台
 
@@ -54,7 +54,7 @@ checkpoint mission start ^
 
 ## 省额度是怎么发生的
 
-- **便宜路由**：机械小活（改文案、重命名）自动派给便宜模型/便宜后端（如 MiMo），烧的不是你的 Claude 订阅；复杂活才上 Opus。
+- **模型路由**：机械小活可在同一个 Codex 执行引擎内选择低成本模型，复杂任务选择强模型；provider 可走 Codex 订阅或兼容中转 token，不自动换成其他 patch-worker。
 - **瘦上下文**：worker 每次是全新会话，只拿到这个任务需要的东西，不让它满项目乱翻、不重复读整个工程。
 - **确定性验收门**：测试不过就打回，AI 不能用"我觉得好了"糊弄你，也就不会在死循环里烧额度。
 
@@ -83,7 +83,7 @@ checkpoint mission import ^
 checkpoint mission worker --watch
 ```
 
-每个队列项会保存自己的 `agent`、验收命令、是否允许改测试、合并策略。你可以让一批任务用 Codex，另一批任务用 Claude Code；验收通过后默认等待确认合并，只有显式选择自动合并才会 merge。
+每个队列项会保存自己的 Codex 模型、provider 策略、验收命令、是否允许改测试和合并策略。验收通过后默认等待确认合并，只有显式选择自动合并才会 merge。
 
 ## 5 小时额度内的自动托管
 
@@ -111,7 +111,7 @@ worker 改动测试文件会被机械检测到并直接判验收失败（测试�
 
 ## 适配 Codex / Cursor 等
 
-DevPacer 把编码工具当"打工人"来调度——默认 Codex，`--agent claude-code` 可切到 Claude Code。验收门是通用的：无论谁改的代码，都跑同一条 `--test-command` 确认。Cursor 等工具改完的代码，也能用 `checkpoint mission start --test-command ...`（不派新 worker、只验收）来把关。
+DevPacer 使用 Codex 作为编码执行引擎，在外层负责本地记忆、provider/model 路由、托管、验收和路线约束。验收门独立于模型：代码必须通过强验收后才能进入待合并状态。
 
 ## 给 Claude Code 教用户的一句话
 

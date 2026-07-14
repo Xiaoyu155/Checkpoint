@@ -16,12 +16,19 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from ..missions import validate_mission_id
+from .observability import (
+    ObservabilityRequestError,
+    get_observability_launch,
+    get_observability_timeline,
+    list_observability_launches,
+)
 from .api import (
     build_diagnostic_bundle,
     build_dashboard_data_cached,
+    build_five_pillars_data,
     build_mission_detail,
     get_active_workspace,
     get_commercial_config,
@@ -139,11 +146,20 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         if path in {"/", "/index.html", "/工作台", "/workbench", "/dashboard"}:
             self._serve_static(_STATIC_DIR / "index.html", "text/html; charset=utf-8")
             return
+        if path in {"/five-pillars", "/five-pillars.html"}:
+            self._serve_static(_STATIC_DIR / "five-pillars.html", "text/html; charset=utf-8")
+            return
         if path == "/app.js":
             self._serve_static(_STATIC_DIR / "app.js", "application/javascript; charset=utf-8")
             return
         if path == "/style.css":
             self._serve_static(_STATIC_DIR / "style.css", "text/css; charset=utf-8")
+            return
+        if path == "/five-pillars.js":
+            self._serve_static(_STATIC_DIR / "five-pillars.js", "application/javascript; charset=utf-8")
+            return
+        if path == "/five-pillars.css":
+            self._serve_static(_STATIC_DIR / "five-pillars.css", "text/css; charset=utf-8")
             return
 
         # API endpoints
@@ -155,6 +171,32 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/data":
             self._send_json(build_dashboard_data_cached(root))
             return
+        if path == "/api/five-pillars":
+            self._send_json(build_five_pillars_data(root))
+            return
+        if path == "/api/observability/launches":
+            query = parse_qs(urlparse(self.path).query)
+            self._send_observability(
+                lambda: list_observability_launches(root, limit=(query.get("limit") or [20])[0])
+            )
+            return
+        if path.startswith("/api/observability/launches/"):
+            launch_id = path.removeprefix("/api/observability/launches/")
+            self._send_observability(lambda: get_observability_launch(root, launch_id))
+            return
+        if path.startswith("/api/observability/sessions/") and path.endswith("/timeline"):
+            session_id = path.removeprefix("/api/observability/sessions/").removesuffix("/timeline")
+            query = parse_qs(urlparse(self.path).query)
+            self._send_observability(
+                lambda: get_observability_timeline(
+                    root,
+                    launch_id=(query.get("launch_id") or [""])[0],
+                    session_id=session_id,
+                    cursor=(query.get("cursor") or [0])[0],
+                    limit=(query.get("limit") or [100])[0],
+                )
+            )
+            return
         if path == "/api/events":
             self._stream_events(root)
             return
@@ -162,7 +204,6 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(build_diagnostic_bundle(root))
             return
         if path == "/api/mission":
-            from urllib.parse import parse_qs, urlparse
             mission_id = self._validated_mission_id((parse_qs(urlparse(self.path).query).get("id") or [""])[0])
             if mission_id is None:
                 return
@@ -189,6 +230,14 @@ class _DashboardHandler(BaseHTTPRequestHandler):
 
         self.send_response(404)
         self.end_headers()
+
+    def _send_observability(self, builder: Any) -> None:
+        try:
+            payload = builder()
+        except ObservabilityRequestError as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=exc.status)
+            return
+        self._send_json(payload)
 
     def _stream_events(self, root: Path) -> None:
         self.send_response(200)

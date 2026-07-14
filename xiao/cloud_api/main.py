@@ -516,6 +516,14 @@ def create_app(*, workspace_root: str | Path = ".agent-workspace", audit_log: st
         )
         return response
 
+    from .gateway_routes import install_gateway_routes
+
+    install_gateway_routes(
+        app,
+        workspace_root=root,
+        require_admin=require_auth,
+        audit_event=audit_event,
+    )
     return app
 
 

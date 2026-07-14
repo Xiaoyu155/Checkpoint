@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pacer Gateway</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/gateway.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Pacer <span>Gateway</span></div>
+    <div class="connection"><i id="connectionDot"></i><span id="connectionText">未连接</span></div>
+    <div class="top-actions">
+      <span class="top-label">内部管理</span>
+      <button class="icon-button" id="refreshButton" type="button" title="刷新" aria-label="刷新">&#8635;</button>
+      <button class="button secondary" id="authButton" type="button">管理员凭证</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="metrics" aria-label="24 小时经营数据">
+      <div><span>请求</span><strong id="metricRequests">-</strong><small id="metricFailures">等待连接</small></div>
+      <div><span>计费额</span><strong id="metricRevenue">-</strong><small>24 小时</small></div>
+      <div><span>已确认收款</span><strong id="metricCash">-</strong><small>充值与套餐</small></div>
+      <div><span>上游成本</span><strong id="metricCost">-</strong><small>按价格快照</small></div>
+      <div><span>毛利</span><strong id="metricMargin">-</strong><small id="metricMarginRate">-</small></div>
+      <div><span>Tokens</span><strong id="metricTokens">-</strong><small id="metricActive">0 个在途请求</small></div>
+    </section>
+
+    <section class="readiness" aria-label="上线准备">
+      <div class="section-title"><h1>中转站控制台</h1><span id="readyState">等待读取配置</span></div>
+      <div class="checklist" id="setupChecks"></div>
+    </section>
+
+    <nav class="tabs" aria-label="管理视图">
+      <button class="active" type="button" data-tab="tenants">客户与套餐</button>
+      <button type="button" data-tab="upstreams">上游线路</button>
+      <button type="button" data-tab="prices">模型定价</button>
+      <button type="button" data-tab="requests">请求日志</button>
+      <button type="button" data-tab="ledger">资金账本</button>
+      <button type="button" data-tab="subscriptions">收款流水</button>
+    </nav>
+
+    <section class="view active" id="view-tenants">
+      <div class="split-band">
+        <form id="tenantForm" class="form-panel">
+          <div class="panel-head"><h2>新建客户</h2><button class="button primary" type="submit">开户</button></div>
+          <label>客户名称<input name="name" required maxlength="100" autocomplete="off"></label>
+          <label>套餐<select name="plan_id" id="tenantPlan"></select></label>
+          <label>初始余额（USD）<input name="initial_credit" type="number" min="0" step="0.01" value="0"></label>
+        </form>
+        <form id="planForm" class="form-panel">
+          <div class="panel-head"><h2>新建套餐</h2><button class="button secondary" type="submit">保存</button></div>
+          <label>套餐名称<input name="name" required maxlength="80" autocomplete="off"></label>
+          <div class="form-grid">
+            <label>月费（USD）<input name="monthly_fee" type="number" min="0" step="0.01" value="0"></label>
+            <label>包含额度（USD）<input name="included_credit" type="number" min="0" step="0.01" value="0"></label>
+            <label>RPM<input name="rpm" type="number" min="1" value="60"></label>
+            <label>并发<input name="concurrency" type="number" min="1" value="2"></label>
+          </div>
+        </form>
+      </div>
+      <div class="table-band">
+        <div class="panel-head"><h2>客户</h2><span id="tenantCount">0 个</span></div>
+        <div class="table-wrap"><table class="mobile-cards"><thead><tr><th>客户</th><th>套餐</th><th>余额</th><th>Key</th><th>状态</th><th>操作</th></tr></thead><tbody id="tenantRows"></tbody></table></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-upstreams">
+      <form id="upstreamForm" class="wide-form">
+        <div class="panel-head"><h2>新增上游线路</h2><button class="button primary" type="submit">接入</button></div>
+        <div class="form-grid six">
+          <label>线路名称<input name="name" required autocomplete="off"></label>
+          <label>Base URL<input name="base_url" required placeholder="https://api.openai.com/v1" autocomplete="off"></label>
+          <label>密钥环境变量<input name="secret_env" required placeholder="PACER_UPSTREAM_OPENAI_KEY" autocomplete="off"></label>
+          <label>模型（逗号分隔）<input name="models" required placeholder="gpt-5.5,gpt-5.4" autocomplete="off"></label>
+          <label>同质路由合同<input name="routing_contract" placeholder="openai-standard-2026q3" autocomplete="off"></label>
+          <label>优先级<input name="priority" type="number" value="100"></label>
+          <label>最大并发<input name="max_concurrency" type="number" min="1" value="20"></label>
+        </div>
+      </form>
+      <div class="table-band">
+        <div class="panel-head"><h2>线路池</h2><span id="upstreamCount">0 条</span></div>
+        <div class="table-wrap"><table class="mobile-cards"><thead><tr><th>线路</th><th>Provider</th><th>模型</th><th>路由合同</th><th>并发</th><th>延迟</th><th>熔断</th><th>密钥</th><th>状态</th></tr></thead><tbody id="upstreamRows"></tbody></table></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-prices">
+      <form id="priceForm" class="wide-form">
+        <div class="panel-head"><h2>模型价格</h2><button class="button primary" type="submit">保存价格</button></div>
+        <div class="form-grid six">
+          <label>公开模型<input name="model" required placeholder="gpt-5.5" autocomplete="off"></label>
+          <label>上游模型<input name="upstream_model" placeholder="gpt-5.5" autocomplete="off"></label>
+          <label>输入 $/1M<input name="input_price" type="number" min="0" step="0.0001" required></label>
+          <label>缓存输入 $/1M<input name="cached_price" type="number" min="0" step="0.0001" value="0"></label>
+          <label>输出 $/1M<input name="output_price" type="number" min="0" step="0.0001" required></label>
+          <label>最大输出 Tokens<input name="max_output_tokens" type="number" min="1" value="4096"></label>
+          <label>上游输入成本 $/1M<input name="upstream_input_cost" type="number" min="0" step="0.0001" value="0"></label>
+          <label>上游输出成本 $/1M<input name="upstream_output_cost" type="number" min="0" step="0.0001" value="0"></label>
+          <label>状态<select name="enabled"><option value="true">在售</option><option value="false">停用</option></select></label>
+        </div>
+      </form>
+      <div class="table-band">
+        <div class="panel-head"><h2>在售模型</h2><span id="priceCount">0 个</span></div>
+        <div class="table-wrap"><table class="mobile-cards"><thead><tr><th>公开模型</th><th>上游模型</th><th>输入</th><th>缓存输入</th><th>输出</th><th>上游成本</th><th>版本</th></tr></thead><tbody id="priceRows"></tbody></table></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-requests">
+      <div class="table-band full-height">
+        <div class="panel-head"><h2>请求日志</h2><span id="requestCount">0 条</span></div>
+        <div class="table-wrap"><table class="mobile-cards"><thead><tr><th>时间 / Request ID</th><th>客户</th><th>模型</th><th>上游</th><th>状态</th><th>Tokens</th><th>计费额</th><th>成本</th><th>延迟</th><th>Usage</th></tr></thead><tbody id="requestRows"></tbody></table></div>
+        <div class="table-footer"><div class="pagination"><button class="icon-button" id="requestPrev" type="button" title="上一页" aria-label="上一页" disabled>&#8592;</button><span id="requestPage">0 / 0</span><button class="icon-button" id="requestNext" type="button" title="下一页" aria-label="下一页" disabled>&#8594;</button></div></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-ledger">
+      <div class="table-band full-height">
+        <div class="panel-head"><h2>资金账本</h2><span id="ledgerCount">0 条</span></div>
+        <div class="table-wrap"><table class="mobile-cards"><thead><tr><th>时间</th><th>客户</th><th>类型</th><th>变动</th><th>余额</th><th>Request ID</th><th>备注</th></tr></thead><tbody id="ledgerRows"></tbody></table></div>
+        <div class="table-footer"><div class="pagination"><button class="icon-button" id="ledgerPrev" type="button" title="上一页" aria-label="上一页" disabled>&#8592;</button><span id="ledgerPage">0 / 0</span><button class="icon-button" id="ledgerNext" type="button" title="下一页" aria-label="下一页" disabled>&#8594;</button></div></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-subscriptions">
+      <div class="table-band full-height">
+        <div class="panel-head"><h2>订阅收款流水</h2><span id="subscriptionCount">0 条</span></div>
+        <div class="table-wrap"><table class="mobile-cards"><thead><tr><th>收款时间</th><th>客户</th><th>套餐</th><th>实收</th><th>发放额度</th><th>服务期间</th><th>外部交易号</th></tr></thead><tbody id="subscriptionRows"></tbody></table></div>
+      </div>
+    </section>
+  </main>
+
+  <div class="modal" id="authModal" hidden>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+      <div class="panel-head"><h2 id="authTitle">管理员凭证</h2><button class="icon-button" type="button" data-close="authModal" aria-label="关闭">&#215;</button></div>
+      <label>Cloud API Bearer Token<input id="adminToken" type="password" autocomplete="off" spellcheck="false"></label>
+      <div class="modal-actions"><button class="button secondary" type="button" id="clearTokenButton">清除</button><button class="button primary" type="button" id="connectButton">连接</button></div>
+    </div>
+  </div>
+
+  <div class="modal" id="secretModal" hidden>
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="secretTitle">
+      <div class="panel-head"><h2 id="secretTitle">客户 API Key</h2><button class="icon-button" type="button" data-close="secretModal" aria-label="关闭">&#215;</button></div>
+      <div class="secret-value" id="secretValue"></div>
+      <p class="modal-note">此 Key 仅显示一次。</p>
+      <div class="modal-actions"><button class="button primary" type="button" id="copySecretButton">复制 Key</button></div>
+    </div>
+  </div>
+
+  <div class="modal" id="keyModal" hidden>
+    <form class="modal-dialog" id="keyForm" role="dialog" aria-modal="true" aria-labelledby="keyTitle">
+      <div class="panel-head"><h2 id="keyTitle">签发客户 API Key</h2><button class="icon-button" type="button" data-close="keyModal" aria-label="关闭">&#215;</button></div>
+      <input name="tenant_id" type="hidden">
+      <p class="modal-context" id="keyTenant"></p>
+      <label>Key 名称<input name="name" required maxlength="80" value="Production key" autocomplete="off"></label>
+      <fieldset>
+        <legend>允许模型</legend>
+        <div class="option-grid" id="keyModelOptions"></div>
+      </fieldset>
+      <label>有效期
+        <select name="expiry_days">
+          <option value="30">30 天</option>
+          <option value="90" selected>90 天</option>
+          <option value="180">180 天</option>
+          <option value="365">365 天</option>
+          <option value="never">永不过期</option>
+        </select>
+      </label>
+      <div class="modal-actions"><button class="button secondary" type="button" data-close="keyModal">取消</button><button class="button primary" type="submit">签发 Key</button></div>
+    </form>
+  </div>
+
+  <div class="modal" id="billingModal" hidden>
+    <form class="modal-dialog" id="billingForm" role="dialog" aria-modal="true" aria-labelledby="billingTitle">
+      <div class="panel-head"><h2 id="billingTitle">客户入账</h2><button class="icon-button" type="button" data-close="billingModal" aria-label="关闭">&#215;</button></div>
+      <input name="tenant_id" type="hidden">
+      <input name="action" type="hidden">
+      <p class="modal-context" id="billingContext"></p>
+      <label id="billingAmountLabel">金额（USD）<input name="amount" type="number" min="0.01" step="0.01" required></label>
+      <label>外部交易号<input name="reference" required maxlength="200" autocomplete="off"></label>
+      <div class="modal-actions"><button class="button secondary" type="button" data-close="billingModal">取消</button><button class="button primary" type="submit" id="billingSubmit">确认入账</button></div>
+    </form>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="/gateway.js"></script>
+</body>
+</html>

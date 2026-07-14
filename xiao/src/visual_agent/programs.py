@@ -15,6 +15,12 @@ from .verification_profiles import choose_verification_command
 
 
 PROGRAMS_DIRNAME = "programs"
+DEFAULT_AUTONOMOUS_MODEL_ROUTING = {
+    "strong_worker": "inherit",
+    "cheap_worker": "gpt-5.6-luna",
+    "research_or_doc": "gpt-5.6-luna",
+    "delegated_worker": "gpt-5.6-terra",
+}
 
 
 def programs_dir(workspace_root: str | Path) -> Path:
@@ -41,11 +47,21 @@ def create_program_from_plan(
     agent: str = "codex",
     test_command: str | None = "auto",
     sequential: bool = True,
-    limit: int = 12,
+    limit: int | None = 12,
+    autonomous: bool = False,
+    allow_dirty: bool = False,
+    model: str | None = None,
+    strong_model: str | None = None,
+    cheap_model: str | None = None,
+    research_model: str | None = None,
+    codex_provider: str | None = None,
+    codex_failover_provider: str | None = None,
+    memory_mode: str = "enabled",
+    acceptance_policy: str | None = None,
 ) -> dict[str, Any]:
     source_path = Path(source_file).expanduser().resolve()
     text = source_path.read_text(encoding="utf-8")
-    parsed = parse_development_plan(text, source_name=str(source_path), limit=limit)
+    parsed = parse_development_plan(text, source_name=str(source_path), limit=None if autonomous else limit)
     title = str(objective or parsed.get("title") or source_path.stem)
     workspace_path = Path(workspace_root).expanduser().resolve()
     repo_path = Path(repo_root).expanduser().resolve()
@@ -60,6 +76,19 @@ def create_program_from_plan(
         for index, draft in enumerate(parsed.get("drafts") or [])
     ]
     now = datetime.now(timezone.utc).isoformat()
+    source_plan_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    model_routing = dict(DEFAULT_AUTONOMOUS_MODEL_ROUTING)
+    model_override = str(model or "").strip()
+    if model_override:
+        model_routing = {key: model_override for key in model_routing}
+    else:
+        for key, value in (
+            ("strong_worker", strong_model),
+            ("cheap_worker", cheap_model),
+            ("research_or_doc", research_model),
+        ):
+            if str(value or "").strip():
+                model_routing[key] = str(value).strip()
     program = {
         "schema_version": 1,
         "product": "DevPacer",
@@ -67,6 +96,7 @@ def create_program_from_plan(
         "program_id": make_program_id(title),
         "objective": title,
         "source_plan": str(source_path),
+        "source_plan_sha256": source_plan_sha256,
         "workspace_root": str(workspace_path),
         "repo_root": str(repo_path),
         "status": "planning",
@@ -78,6 +108,30 @@ def create_program_from_plan(
             "reserve_minutes": 45,
             "pause_at_used_percentage": 82,
             "resume_after_reset": True,
+            "quota_mode": "unrestricted" if autonomous else "conservative",
+        },
+        "autonomy_policy": {
+            "mode": "autonomous" if autonomous else "supervised",
+            "dispatch_mode": "delegated" if autonomous else "tracked",
+            "reasoning_effort": "inherit",
+            "max_rounds": 8 if autonomous else 3,
+            "max_repair_rounds": 7 if autonomous else 2,
+            "max_wall_minutes": 480 if autonomous else 60,
+            "max_worker_minutes": 240 if autonomous else 45,
+            "allow_coverage_gap": bool(autonomous),
+            "run_profile": "supervised" if autonomous else "dry-run",
+            "allow_dirty": bool(allow_dirty),
+            "model_routing": model_routing,
+            "closed_loop": {
+                "codex_provider": str(codex_provider or "inherit").strip() or "inherit",
+                "codex_failover_provider": str(codex_failover_provider or "").strip(),
+                "memory_mode": str(memory_mode or "enabled").strip().lower(),
+                "acceptance_policy": str(
+                    acceptance_policy or ("strict" if autonomous else "standard")
+                ).strip().lower(),
+                "roadmap_mode": "locked" if autonomous else "advisory",
+                "source_plan_sha256": source_plan_sha256,
+            },
         },
         "tasks": tasks,
         "current_focus": tasks[0]["objective"] if tasks else "",
@@ -172,6 +226,7 @@ def build_program_hourly_plan(*, workspace_root: str | Path, program_id: str, ho
         hours=hours,
         reserve_minutes=int(policy.get("reserve_minutes") or 45),
         pause_at_used_percentage=float(policy.get("pause_at_used_percentage") or 82),
+        quota_mode=str(policy.get("quota_mode") or "conservative"),
     )
 
 
@@ -202,6 +257,7 @@ def program_to_markdown(program: dict[str, Any]) -> str:
     lines.append(f"Status: `{program.get('status')}`")
     lines.append(f"Objective: {program.get('objective')}")
     lines.append(f"Tasks: `{len(tasks)}`")
+    lines.append(f"Autonomy: `{((program.get('autonomy_policy') or {}).get('mode') or 'supervised')}`")
     lines.append(f"Next action: {program.get('next_action') or ''}")
     if tasks:
         lines.extend(["", "### Tasks", ""])

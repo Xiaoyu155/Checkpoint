@@ -12,3 +12,5 @@ workflow_index.json
 .visual-agent-status.md
 强制测试记录.md
 model_api_keys.txt
+cloud_api/.env.gateway
+gui/actions.jsonl

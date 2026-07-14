@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any, Callable
@@ -10,7 +11,6 @@ from .milestone_checkpoint import generate_milestone_checkpoint
 from .models import to_jsonable
 from .programs import (
     append_program_event,
-    build_program_hourly_plan,
     load_program,
     ready_program_tasks,
     refresh_daily_plan,
@@ -156,6 +156,7 @@ def start_program(
     hours: float = 5.0,
     queue: bool = True,
     mission_runner: MissionRunner | None = None,
+    autonomous: bool | None = None,
 ) -> dict[str, Any]:
     workspace_path = Path(workspace_root).expanduser().resolve()
     if load_program(workspace_path, program_id) is None:
@@ -164,6 +165,63 @@ def start_program(
     # `program start` advances a sequential program past verified tasks.
     sync_program_tasks(workspace_root=workspace_path, program_id=program_id)
     program = load_program(workspace_path, program_id)
+    autonomy_policy = program.get("autonomy_policy") if isinstance(program.get("autonomy_policy"), dict) else {}
+    autonomous_mode = bool(autonomous) if autonomous is not None else str(autonomy_policy.get("mode") or "") == "autonomous"
+    if autonomous_mode:
+        model_routing = (
+            autonomy_policy.get("model_routing")
+            if isinstance(autonomy_policy.get("model_routing"), dict)
+            else {}
+        )
+        closed_loop = (
+            autonomy_policy.get("closed_loop")
+            if isinstance(autonomy_policy.get("closed_loop"), dict)
+            else {}
+        )
+        autonomy_policy = {
+            "mode": "autonomous",
+            "dispatch_mode": "delegated",
+            "reasoning_effort": str(autonomy_policy.get("reasoning_effort") or "inherit"),
+            "max_rounds": max(3, int(autonomy_policy.get("max_rounds") or 8)),
+            "max_repair_rounds": max(2, int(autonomy_policy.get("max_repair_rounds") or 7)),
+            "max_wall_minutes": max(60, int(autonomy_policy.get("max_wall_minutes") or 480)),
+            "max_worker_minutes": max(45, int(autonomy_policy.get("max_worker_minutes") or 240)),
+            "allow_coverage_gap": True,
+            "run_profile": "supervised",
+            "allow_dirty": bool(autonomy_policy.get("allow_dirty", False)),
+            "merge_policy": str(autonomy_policy.get("merge_policy") or "manual"),
+            "model_routing": dict(model_routing),
+            "closed_loop": dict(closed_loop),
+        }
+        program["autonomy_policy"] = autonomy_policy
+        roadmap_block = _roadmap_integrity_block(program, autonomy_policy)
+        if roadmap_block:
+            program["status"] = "blocked"
+            program["next_action"] = roadmap_block
+            save_program(workspace_path, program)
+            append_program_event(
+                workspace_path,
+                program_id,
+                {"event": "roadmap_integrity_blocked", "reason": roadmap_block},
+            )
+            return {
+                "schema_version": 1,
+                "product": "DevPacer",
+                "kind": "program_start",
+                "program_id": program_id,
+                "status": "blocked",
+                "hourly_plan": {},
+                "created_missions": [],
+                "queued_items": [],
+                "blocked_tasks": [{"task_id": "", "reason": roadmap_block}],
+                "program": program,
+            }
+        quota_policy = program.get("quota_policy") if isinstance(program.get("quota_policy"), dict) else {}
+        quota_policy["quota_mode"] = "unrestricted"
+        quota_policy["reserve_minutes"] = 0
+        quota_policy["pause_at_used_percentage"] = 101
+        program["quota_policy"] = quota_policy
+        save_program(workspace_path, program)
     if str(program.get("status") or "") in {"blocked", "completed"}:
         return {
             "schema_version": 1,
@@ -198,12 +256,63 @@ def start_program(
         pack = build_reference_pack(objective=str(task.get("objective") or ""), repo_root=program.get("repo_root") or ".", task_id=str(task.get("task_id") or ""))
         saved_pack = save_reference_pack(workspace_root=workspace_path, program_id=program_id, pack=pack)
         task["reference_pack_path"] = saved_pack["path"]
-        if mode == "research_or_doc":
+        if mode == "research_or_doc" and not autonomous_mode:
             task["status"] = "needs_review"
             task["block_reason"] = "research/doc only in current quota window"
             blocked.append({"task_id": task.get("task_id"), "reason": task["block_reason"], "reference_pack_path": saved_pack["path"]})
             continue
-        task_goal = _dispatch_goal_for_task(task)
+        upstream_mission_ids = [
+            str(by_id.get(str(dependency), {}).get("mission_id") or "")
+            for dependency in task.get("depends_on") or []
+            if str(by_id.get(str(dependency), {}).get("mission_id") or "")
+        ]
+        task_goal = _dispatch_goal_for_task(
+            task,
+            autonomous=autonomous_mode,
+            program_id=str(program.get("program_id") or ""),
+            upstream_mission_ids=upstream_mission_ids,
+        )
+        mission_options: dict[str, Any] = {}
+        if autonomous_mode:
+            route_mode = mode
+            if mode == "delegated_worker":
+                route_mode = {
+                    "strong": "strong_worker",
+                    "cheap": "cheap_worker",
+                    "research": "research_or_doc",
+                }.get(str(task.get("worker_tier") or ""), mode)
+            selected_model = str(
+                (autonomy_policy.get("model_routing") or {}).get(route_mode) or "inherit"
+            ).strip()
+            mission_options = {
+                "max_rounds": int(autonomy_policy["max_rounds"]),
+                "max_repair_rounds": int(autonomy_policy["max_repair_rounds"]),
+                "max_wall_minutes": max(
+                    int(autonomy_policy["max_wall_minutes"]),
+                    int(task.get("estimated_minutes") or 45) * 4,
+                ),
+                "max_worker_minutes": max(
+                    int(autonomy_policy["max_worker_minutes"]),
+                    int(task.get("estimated_minutes") or 45) * 2,
+                ),
+                "dispatch_mode": "delegated",
+                "prompt_style": "expanded",
+                "repair_strategy": "resume",
+                "reasoning_effort": str(autonomy_policy["reasoning_effort"]),
+                "model_policy": {
+                    "implementation": selected_model,
+                    "repair": selected_model,
+                    "classification": "fast",
+                    "visual_review": "multimodal",
+                },
+                "execution_policy": {
+                    **dict(autonomy_policy.get("closed_loop") or {}),
+                    "program_id": str(program_id),
+                    "task_id": str(task.get("task_id") or ""),
+                    "source_plan": str(program.get("source_plan") or ""),
+                    "source_plan_sha256": str(program.get("source_plan_sha256") or ""),
+                },
+            }
         result = runner(
             goal=task_goal,
             workspace_root=workspace_path,
@@ -211,9 +320,14 @@ def start_program(
             agents=((str(task.get("agent") or "codex"),) if task.get("agent") else ()),
             execute=False,
             dry_run=True,
+            # Imported Program tasks are already grounded by the locked source
+            # plan. Re-grounding on words such as "roadmap" can turn a concrete
+            # autonomous task back into an unnecessary clarification request.
+            ground_vague_goals=False,
             test_command=str(task.get("test_command") or "") or None,
-            max_wall_minutes=max(30, int(task.get("estimated_minutes") or 45)),
-            max_worker_minutes=max(15, int(task.get("estimated_minutes") or 45)),
+            max_wall_minutes=mission_options.pop("max_wall_minutes", max(30, int(task.get("estimated_minutes") or 45))),
+            max_worker_minutes=mission_options.pop("max_worker_minutes", max(15, int(task.get("estimated_minutes") or 45))),
+            **mission_options,
         )
         mission = result.get("mission") if isinstance(result.get("mission"), dict) else {}
         mission_id = str(mission.get("mission_id") or "")
@@ -226,8 +340,17 @@ def start_program(
                 mission_id=mission_id,
                 agent=str(task.get("agent") or "codex"),
                 test_command=str(task.get("test_command") or "") or None,
-                merge_policy="manual",
+                merge_policy=str(autonomy_policy.get("merge_policy") or "manual"),
                 priority=_priority_for_mode(mode),
+                run_profile=str(autonomy_policy.get("run_profile") or "dry-run") if autonomous_mode else "dry-run",
+                max_workflows=30 if autonomous_mode else 10,
+                timeout_seconds=float(autonomy_policy.get("max_worker_minutes") or 30) * 60 if autonomous_mode else 1800.0,
+                allow_dirty=bool(autonomy_policy.get("allow_dirty", False)) if autonomous_mode else False,
+                allow_coverage_gap=bool(autonomy_policy.get("allow_coverage_gap")) if autonomous_mode else False,
+                reasoning_effort=str(autonomy_policy.get("reasoning_effort") or "inherit") if autonomous_mode else None,
+                dispatch_mode="delegated" if autonomous_mode else None,
+                prompt_style="expanded" if autonomous_mode else None,
+                repair_strategy="resume" if autonomous_mode else None,
             )
             task["queue_id"] = item.queue_id
             task["status"] = "queued"
@@ -246,7 +369,14 @@ def start_program(
     append_program_event(
         workspace_path,
         program_id,
-        {"event": "started", "created": len(created), "queued": len(queued), "blocked": len(blocked), "hours": hours},
+        {
+            "event": "started",
+            "created": len(created),
+            "queued": len(queued),
+            "blocked": len(blocked),
+            "hours": hours,
+            "autonomy_mode": "autonomous" if autonomous_mode else "supervised",
+        },
     )
 
     # Layer 3: if any tasks are already verified (re-run of a program with
@@ -356,6 +486,8 @@ def payload_to_json(payload: dict[str, Any]) -> str:
 
 
 def _priority_for_mode(mode: str) -> int:
+    if mode == "delegated_worker":
+        return 15
     if mode == "strong_worker":
         return 10
     if mode == "cheap_worker":
@@ -363,11 +495,40 @@ def _priority_for_mode(mode: str) -> int:
     return 0
 
 
-def _dispatch_goal_for_task(task: dict[str, Any]) -> str:
+def _roadmap_integrity_block(program: dict[str, Any], autonomy_policy: dict[str, Any]) -> str:
+    closed_loop = autonomy_policy.get("closed_loop") if isinstance(autonomy_policy.get("closed_loop"), dict) else {}
+    if str(closed_loop.get("roadmap_mode") or "") != "locked":
+        return ""
+    source = Path(str(program.get("source_plan") or "")).expanduser()
+    expected = str(program.get("source_plan_sha256") or closed_loop.get("source_plan_sha256") or "")
+    if not source.is_file():
+        return f"Locked roadmap source is missing: {source}"
+    actual = hashlib.sha256(source.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    if expected and actual != expected:
+        return "Locked roadmap source changed after program creation; create a new program or restore the plan."
+    return ""
+
+
+def _dispatch_goal_for_task(
+    task: dict[str, Any],
+    *,
+    autonomous: bool = False,
+    program_id: str = "",
+    upstream_mission_ids: list[str] | None = None,
+) -> str:
     objective = str(task.get("objective") or "").strip()
     test_command = str(task.get("test_command") or "").strip()
     parts = [objective]
-    parts.append("Complete this imported program task as a concrete code change, keeping scope limited to the objective.")
+    context = [f"program_id={program_id}" if program_id else "", f"task_id={task.get('task_id') or ''}"]
+    if upstream_mission_ids:
+        context.append("upstream_mission_ids=" + ",".join(upstream_mission_ids))
+    parts.append("Closed-loop context: " + "; ".join(item for item in context if item))
+    if autonomous:
+        parts.append(
+            "Own this task end to end. Explore the repository, choose the implementation path, and delegate or reorganize work as needed."
+        )
+    else:
+        parts.append("Complete this imported program task as a concrete code change, keeping scope limited to the objective.")
     if test_command:
         parts.append(f"Done when `{test_command}` passes without weakening tests.")
     else:

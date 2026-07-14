@@ -185,7 +185,7 @@ def test_mission_import_facade_outputs_json(tmp_path, capsys, monkeypatch) -> No
             "--agent",
             "codex",
             "--test-command",
-            "auto",
+            "python -m pytest tests/test_security.py",
             "--merge-policy",
             "auto",
             "--format",

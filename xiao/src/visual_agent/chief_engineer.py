@@ -132,6 +132,7 @@ def build_chief_plan(
 
     project_memory = build_project_memory(workspace_root=workspace_path, repo_root=repo_path, goal=objective, limit=5)
     memory_notes = project_memory_handoff_notes(project_memory)
+    project_memory["usage"] = _project_memory_usage(project_memory, memory_notes)
 
     # Requirements gate: refuse to dispatch a goal with no verifiable definition
     # of done. Withholding dispatch here is the point — it saves a wasted agent
@@ -837,7 +838,12 @@ def _handoff_prompt(
     ]
     notes = [item for item in (memory_notes or []) if item]
     if notes:
-        lines.extend(["Project memory:", *[f"- {item}" for item in notes]])
+        lines.extend(
+            [
+                "Project memory (advisory and non-exhaustive; inspect any repository files needed):",
+                *[f"- {item}" for item in notes],
+            ]
+        )
     if permission_summary:
         decision = str(permission_summary.get("decision") or "unknown")
         risk = str(permission_summary.get("risk") or "unknown")
@@ -864,7 +870,36 @@ def _with_memory_notes(prompt: str, notes: list[str]) -> str:
     if not notes:
         return prompt
     memory = " ".join(f"Project memory: {item}" for item in notes[:3])
-    return f"{prompt} {memory}"
+    return (
+        f"{prompt} Memory is advisory and non-exhaustive; inspect any repository files needed. "
+        f"{memory}"
+    )
+
+
+def _project_memory_usage(payload: dict[str, Any], notes: list[str]) -> dict[str, Any]:
+    joined = " ".join(notes)
+    entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
+    instruction_memory = payload.get("instruction_memory") if isinstance(payload.get("instruction_memory"), dict) else {}
+    instruction_files = instruction_memory.get("files") if isinstance(instruction_memory.get("files"), list) else []
+    return {
+        "retrieval_invoked": True,
+        "selected_entries": len(entries),
+        "injected": bool(notes),
+        "injected_note_count": len(notes),
+        "injected_chars": len(joined),
+        "injected_memory_ids": [
+            str(item.get("memory_id"))
+            for item in entries
+            if isinstance(item, dict) and str(item.get("memory_id") or "") in joined
+        ],
+        "injected_instruction_paths": [
+            str(item.get("path"))
+            for item in instruction_files
+            if isinstance(item, dict) and str(item.get("path") or "") in joined
+        ],
+        "index_hits": int(((payload.get("index") or {}).get("hits") or 0)),
+        "index_misses": int(((payload.get("index") or {}).get("misses") or 0)),
+    }
 
 
 def _safe_token(value: str) -> str:

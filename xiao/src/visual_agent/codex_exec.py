@@ -27,6 +27,9 @@ def load_codex_user_defaults(config_path: str | Path | None = None) -> dict[str,
         "sandbox": _text(payload.get("sandbox_mode") or payload.get("sandbox")),
         "approval": _text(payload.get("approval_policy") or payload.get("approval")),
     }
+    provider = _text(payload.get("model_provider"))
+    if provider:
+        result["provider"] = provider
 
     profile_name = _text(payload.get("profile") or payload.get("active_profile"))
     if not profile_name:
@@ -185,6 +188,8 @@ def _load_toml(path: Path) -> dict[str, Any]:
 def _merge_defaults(result: dict[str, str], source: dict[str, Any]) -> None:
     if "model" in source:
         result["model"] = _text(source.get("model"))
+    if "model_provider" in source:
+        result["provider"] = _text(source.get("model_provider"))
     if "model_reasoning_effort" in source or "reasoning_effort" in source:
         result["reasoning_effort"] = _reasoning_effort(source)
     if "sandbox_mode" in source or "sandbox" in source:

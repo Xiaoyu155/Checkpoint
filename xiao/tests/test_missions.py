@@ -56,12 +56,12 @@ def test_mission_storage_roundtrip(tmp_path) -> None:
     assert summaries[0]["mission_id"] == "mission-1"
 
 
-def test_default_budget_policy_caps_first_repair_round() -> None:
+def test_default_budget_policy_caps_repair_rounds_at_two() -> None:
     budget = default_budget_policy(max_rounds=5, max_wall_minutes=60)
 
     assert budget["max_rounds"] == 5
-    # The first executable loop only supports one automatic repair round.
-    assert budget["max_repair_rounds"] == 1
+    # The execution loop supports at most two automatic repair rounds by default.
+    assert budget["max_repair_rounds"] == 2
     assert budget["model_policy"]["visual_review"] == "multimodal"
 
 

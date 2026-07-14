@@ -97,11 +97,19 @@ def test_workbench_page_loads_and_panels_open_without_js_errors(dashboard_url) -
         assert page.locator("#fTest").is_visible()
         assert page.locator("#traceStream").is_hidden()
         page.click(".side-group button:text('任务列表')")
+        page.wait_for_selector("#missionList", state="visible", timeout=5000)
         assert page.locator("#missionList").is_visible()
         assert page.locator("#fGoal").is_hidden()
         page.click(".side-group button:text('流式工作任务')")
         assert page.locator("#traceStream").is_visible()
         assert page.locator("#missionList").is_hidden()
+        page.click(".side-group button:text('Pacer 可观测性')")
+        assert page.locator("#obsLoadState").is_visible()
+        page.wait_for_function(
+            "() => !document.querySelector('#obsStatus')?.textContent.includes('加载')",
+            timeout=5000,
+        )
+        assert "暂无" in page.locator("#obsLoadState").inner_text()
         page.click(".side-group button:text('中转站')")
         assert page.locator("#relayBaseUrl").is_visible()
         assert page.locator("#traceStream").is_hidden()

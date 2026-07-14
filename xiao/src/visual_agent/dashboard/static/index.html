@@ -12,11 +12,12 @@
   <span class="hdr-sep">/</span>
   <button class="ghost" onclick="openProjModal()">切换项目</button>
   <div id="projPath" title="当前工作空间">未选择工作空间</div>
-  <select id="mobileViewNav" class="mobile-view-nav" aria-label="板块导航" onchange="switchWorkbenchView(this.value)">
+  <select id="mobileViewNav" class="mobile-view-nav" aria-label="板块导航" onchange="this.value==='five-pillars-link' ? (window.location.href='/five-pillars') : switchWorkbenchView(this.value)">
     <option value="mission-control">新建任务</option>
     <option value="core-readiness-panel">产品可用度</option>
     <option value="mission-desk">任务列表</option>
     <option value="trace-ledger">流式工作任务</option>
+    <option value="observability-panel">Pacer 可观测性</option>
     <option value="queue-panel">托管队列</option>
     <option value="programs-panel">项目托管</option>
     <option value="relay-panel">中转站</option>
@@ -24,6 +25,7 @@
     <option value="value-panel">低成本效率</option>
     <option value="autopilot-panel">托管闭环</option>
     <option value="readiness-panel">推广就绪</option>
+    <option value="five-pillars-link">五项闭环实证</option>
   </select>
   <div class="spc"></div>
   <div id="agentsRow"></div>
@@ -50,6 +52,7 @@
         <summary>任务管理</summary>
         <button data-nav-view="mission-desk" onclick="focusWorkbenchPanel('mission-desk')">任务列表</button>
         <button data-nav-view="trace-ledger" onclick="focusWorkbenchPanel('trace-ledger')">流式工作任务</button>
+        <button data-nav-view="observability-panel" onclick="focusWorkbenchPanel('observability-panel')">Pacer 可观测性</button>
         <button data-nav-view="queue-panel" onclick="focusWorkbenchPanel('queue-panel')">托管队列</button>
         <button data-nav-view="programs-panel" onclick="focusWorkbenchPanel('programs-panel')">项目托管</button>
       </details>
@@ -61,6 +64,7 @@
         <button data-nav-view="core-readiness-panel" onclick="focusWorkbenchPanel('core-readiness-panel')">产品可用度</button>
         <button data-nav-view="autopilot-panel" onclick="focusWorkbenchPanel('autopilot-panel')">托管闭环</button>
         <button data-nav-view="readiness-panel" onclick="focusWorkbenchPanel('readiness-panel')">推广就绪</button>
+        <button onclick="window.location.href='/five-pillars'">五项闭环实证</button>
         <button onclick="toggleWorker()">启动 / 停止 Worker</button>
         <button onclick="openProjModal()">切换项目</button>
         <button onclick="openSettings()">模型与通知设置</button>
@@ -166,6 +170,106 @@
         <div class="collapsible-body">
           <div id="traceStream" class="trace-stream">
             <div class="empty">暂无工作痕迹。创建 mission 后，这里会显示 launch、worker、日志、报告、验收和队列状态。</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="observability-workbench collapsible-panel workbench-view" data-workbench-view="observability-panel" data-collapse-key="observability-panel" aria-labelledby="obsTitle">
+        <div class="obs-toolbar">
+          <div>
+            <div class="eyebrow">Runtime Evidence</div>
+            <h2 id="obsTitle">Pacer 可观测性</h2>
+          </div>
+          <div class="obs-toolbar-actions">
+            <span id="obsStatus" class="obs-status is-idle" role="status" aria-live="polite">等待加载</span>
+            <button id="obsRefresh" onclick="refreshObservability()">刷新</button>
+            <button class="panel-toggle" onclick="togglePanel(event,'observability-panel')">收起</button>
+          </div>
+        </div>
+        <div class="collapsible-body">
+          <div class="obs-selectors" aria-label="可观测性范围">
+            <label for="obsLaunchSelect">Launch
+              <select id="obsLaunchSelect" onchange="selectObservabilityLaunch(this.value)" disabled>
+                <option value="">等待加载</option>
+              </select>
+            </label>
+            <label for="obsSessionSelect">Session
+              <select id="obsSessionSelect" onchange="selectObservabilitySession(this.value)" disabled>
+                <option value="">选择 launch 后加载</option>
+              </select>
+            </label>
+            <div id="obsRuntimeMeta" class="obs-runtime-meta">尚未选择运行记录</div>
+          </div>
+
+          <div id="obsLoadState" class="obs-state" data-level="idle">打开本板块后加载 Pacer launch 证据。</div>
+
+          <div id="obsContent" hidden>
+            <div class="obs-ledger-head">
+              <div>
+                <span class="obs-section-kicker">Launch 总账</span>
+                <b id="obsLedgerTitle">未命名 launch</b>
+              </div>
+              <div id="obsUsageMeta" class="obs-ledger-meta"></div>
+            </div>
+            <div class="obs-metric-grid" aria-label="Launch token 总账">
+              <div><span>Actual added</span><b id="obsActualAdded">0</b><small>去重后实际增加</small></div>
+              <div><span>Raw ledger</span><b id="obsRawLedger">0</b><small>原始累计账本</small></div>
+              <div><span>Cached input</span><b id="obsCached">0</b><small>实际缓存输入</small></div>
+              <div><span>Uncached input</span><b id="obsUncached">0</b><small>实际非缓存输入</small></div>
+              <div><span>Output</span><b id="obsOutput">0</b><small>输出 token</small></div>
+              <div class="reasoning"><span>Reasoning</span><b id="obsReasoning">0</b><small>已包含于 output，勿重复相加</small></div>
+            </div>
+
+            <section class="obs-band" aria-labelledby="obsTurnsTitle">
+              <div class="obs-band-head">
+                <div><span class="obs-section-kicker">Token ledger</span><h3 id="obsTurnsTitle">逐轮 token</h3></div>
+                <span id="obsTurnCount" class="obs-count">0 轮</span>
+              </div>
+              <div class="obs-token-legend" aria-label="Token 堆叠条图例">
+                <span><i class="cached"></i>Cached input</span>
+                <span><i class="uncached"></i>Uncached input</span>
+                <span><i class="output"></i>Output</span>
+                <span><i class="reasoning"></i>Reasoning（包含于 Output）</span>
+              </div>
+              <div class="obs-table-wrap">
+                <table class="obs-token-table">
+                  <thead><tr><th>轮次 / 事件</th><th>时间</th><th>Actual</th><th>Raw</th><th>Cached</th><th>Uncached</th><th>Output</th><th>Reasoning</th><th>构成</th></tr></thead>
+                  <tbody id="obsTurnsBody"></tbody>
+                </table>
+              </div>
+              <div id="obsTurnsState" class="obs-inline-state">选择 session 后显示逐轮 token。</div>
+            </section>
+
+            <div class="obs-split">
+              <section class="obs-band" aria-labelledby="obsAgentsTitle">
+                <div class="obs-band-head">
+                  <div><span class="obs-section-kicker">Delegation</span><h3 id="obsAgentsTitle">Agent 父子树</h3></div>
+                  <span id="obsAgentCount" class="obs-count">0 个</span>
+                </div>
+                <div id="obsAgentTree" class="obs-agent-tree"></div>
+              </section>
+
+              <section class="obs-band" aria-labelledby="obsToolsTitle">
+                <div class="obs-band-head">
+                  <div><span class="obs-section-kicker">Execution</span><h3 id="obsToolsTitle">Tool / MCP 时间线</h3></div>
+                  <span id="obsToolCount" class="obs-count">0 条</span>
+                </div>
+                <div id="obsToolTimeline" class="obs-timeline"></div>
+                <div class="obs-more-row"><button id="obsLoadMore" onclick="loadMoreObservabilityTimeline()" hidden>加载更多事件</button></div>
+              </section>
+            </div>
+
+            <section class="obs-band obs-evidence-band" aria-labelledby="obsEvidenceTitle">
+              <div class="obs-band-head">
+                <div><span class="obs-section-kicker">Operational evidence</span><h3 id="obsEvidenceTitle">闭环证据</h3></div>
+              </div>
+              <div class="obs-evidence-grid">
+                <section><h4>Compaction</h4><div id="obsEvidenceCompaction" class="obs-evidence-list"></div></section>
+                <section><h4>Memory</h4><div id="obsEvidenceMemory" class="obs-evidence-list"></div></section>
+                <section><h4>Verification</h4><div id="obsEvidenceVerification" class="obs-evidence-list"></div></section>
+                <section><h4>Outcome</h4><div id="obsEvidenceOutcome" class="obs-evidence-list"></div></section>
+              </div>
+            </section>
           </div>
         </div>
       </section>

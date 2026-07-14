@@ -23,6 +23,7 @@ from ..missions import list_missions
 from ..mimo_efficiency import compute_mimo_efficiency
 from ..notifications import load_notification_config
 from ..programs import list_programs
+from ..pacer_support import build_pacer_support_snapshot
 from ..subscription_quota import load_quota_snapshot, quota_status, quota_summary
 from ..user_profile import load_user_profile
 from ..workbench_board import attach_board_fields
@@ -177,6 +178,7 @@ def _build_dashboard_data_uncached(root: Path) -> dict[str, Any]:
     status = _read_status(root)
     worker = worker_status(root)
     value = _build_value(root, missions, plans)
+    pacer_support = build_pacer_support_snapshot(root)
 
     counts: dict[str, int] = {}
     for mission in missions:
@@ -200,9 +202,10 @@ def _build_dashboard_data_uncached(root: Path) -> dict[str, Any]:
         "mimo_available": mimo_available,
         "engine": "Checkpoint",
         "workspace_root": str(root),
-        "repo_root": str(root.parent),
+        "repo_root": str(pacer_support.get("repo_root") or root.parent),
         "status": status,
         "value": value,
+        "pacer_support": pacer_support,
         "subscription_quota": {
             "snapshot": subscription_snapshot,
             "status": quota_status(subscription_snapshot),
@@ -232,6 +235,7 @@ def _build_dashboard_data_uncached(root: Path) -> dict[str, Any]:
             subscription_summary=subscription_summary,
             value=value,
             worker=worker,
+            pacer_support=pacer_support,
         ),
         "promotion_readiness": _build_promotion_readiness(
             root,
@@ -260,6 +264,7 @@ def _build_core_readiness(
     subscription_summary: dict[str, Any],
     value: dict[str, Any],
     worker: dict[str, Any],
+    pacer_support: dict[str, Any],
 ) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
 
@@ -289,6 +294,15 @@ def _build_core_readiness(
             detail += "；已知配置：" + "、".join(known[:4])
         add("agents", "编码 Agent", "failed", detail, "安装并登录 Codex、Claude Code 或 Gemini。")
         add("intake", "需求收口", "warning", "只能使用本地规则追问，无法调用用户已订阅的编码 Agent", "先让至少一个编码 Agent 可用。")
+
+    codex_account = pacer_support.get("account") if isinstance(pacer_support.get("account"), dict) else {}
+    if codex_account.get("authenticated"):
+        method = str(codex_account.get("auth_method") or "codex_login")
+        add("codex_account", "Codex 运行身份", "success", f"已认证，方式：{method}")
+    elif codex_account.get("installed"):
+        add("codex_account", "Codex 运行身份", "warning", "已安装但未确认登录", "运行 pacer account login，然后用 pacer account status 复核。")
+    else:
+        add("codex_account", "Codex 运行身份", "failed", "未发现 Codex CLI", "安装 Codex CLI 并登录。")
 
     q_len = len(queue)
     if worker.get("running") and q_len:
@@ -492,7 +506,6 @@ def _build_promotion_readiness(
     if installed_agents:
         add("agents", "编码 Agent", "success", "已发现 " + "、".join(installed_agents[:4]))
     else:
-        known = [str(item.get("agent")) for item in agents if isinstance(item, dict) and item.get("agent")]
         add("agents", "编码 Agent", "failed", "没有发现可用编码 Agent", "至少安装并登录 Codex、Claude Code 或 Gemini 其中一个。")
 
     if worker.get("running"):

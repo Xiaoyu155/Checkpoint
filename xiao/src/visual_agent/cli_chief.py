@@ -9,10 +9,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    import argparse
+from typing import Any
 
 
 def _fmt_err(exc: Exception, *, command: str = "") -> str:
@@ -400,7 +397,17 @@ def _handle_program(args: Any) -> int:
             agent=args.agent,
             test_command=args.test_command,
             sequential=not bool(args.parallel),
-            limit=args.limit,
+            limit=None if args.autonomous else args.limit,
+            autonomous=bool(args.autonomous),
+            allow_dirty=bool(args.allow_dirty),
+            model=getattr(args, "model", None),
+            strong_model=getattr(args, "strong_model", None),
+            cheap_model=getattr(args, "cheap_model", None),
+            research_model=getattr(args, "research_model", None),
+            codex_provider=getattr(args, "codex_provider", None),
+            codex_failover_provider=getattr(args, "codex_failover_provider", None),
+            memory_mode=getattr(args, "memory_mode", "enabled"),
+            acceptance_policy=getattr(args, "acceptance_policy", None),
         )
         print(program_json(payload) if args.format == "json" else program_to_markdown(payload))
         return 0
@@ -416,7 +423,12 @@ def _handle_program(args: Any) -> int:
         print(hourly_json(payload) if args.format == "json" else hourly_plan_to_markdown(payload))
         return 0
     if args.action == "start":
-        payload = start_program(workspace_root=args.workspace_root, program_id=args.program, hours=args.hours)
+        payload = start_program(
+            workspace_root=args.workspace_root,
+            program_id=args.program,
+            hours=args.hours,
+            autonomous=True if args.autonomous else None,
+        )
         print(start_json(payload) if args.format == "json" else program_start_to_markdown(payload))
         return 0
     program = load_program(args.workspace_root, args.program)
@@ -444,9 +456,24 @@ def _handle_autopilot(args: Any) -> int:
         agent=args.agent,
         test_command=args.test_command,
         sequential=not bool(args.parallel),
-        limit=args.limit,
+        limit=None if args.autonomous else args.limit,
+        autonomous=bool(args.autonomous),
+        allow_dirty=bool(args.allow_dirty),
+        model=getattr(args, "model", None),
+        strong_model=getattr(args, "strong_model", None),
+        cheap_model=getattr(args, "cheap_model", None),
+        research_model=getattr(args, "research_model", None),
+        codex_provider=getattr(args, "codex_provider", None),
+        codex_failover_provider=getattr(args, "codex_failover_provider", None),
+        memory_mode=getattr(args, "memory_mode", "enabled"),
+        acceptance_policy=getattr(args, "acceptance_policy", None),
     )
-    payload = start_program(workspace_root=args.workspace_root, program_id=str(program["program_id"]), hours=args.hours)
+    payload = start_program(
+        workspace_root=args.workspace_root,
+        program_id=str(program["program_id"]),
+        hours=args.hours,
+        autonomous=True if args.autonomous else None,
+    )
     print(start_json(payload) if args.format == "json" else program_start_to_markdown(payload))
     return 0
 
@@ -473,7 +500,7 @@ def _handle_mission(args: Any) -> int:
 
 
 def _mission_start_or_resume(args: Any, action: str) -> int:
-    from .chief_run import chief_run_to_markdown, payload_to_json, run_chief_mission
+    from .chief_run import chief_run_to_markdown, payload_to_json
 
     resume_id = args.mission if action == "resume" else None
     if action == "resume" and not resume_id:

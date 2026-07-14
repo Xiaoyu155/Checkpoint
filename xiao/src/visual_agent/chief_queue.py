@@ -363,6 +363,13 @@ def _worker_lock_path(workspace_path: Path) -> Path:
     return workspace_path / "worker_lock.json"
 
 
+def _pid_is_running(pid: int) -> bool:
+    """Check a PID without sending a signal on Windows."""
+    from .chief_background import process_status
+
+    return bool(process_status(pid).get("alive"))
+
+
 def _acquire_worker_lock(workspace_path: Path) -> dict[str, Any] | None:
     """Write a worker lock file. Returns None if the lock was acquired, or a
     dict describing the existing lock if another worker is already running."""
@@ -371,12 +378,8 @@ def _acquire_worker_lock(workspace_path: Path) -> dict[str, Any] | None:
         try:
             existing = json.loads(lock_path.read_text(encoding="utf-8"))
             pid = int(existing.get("pid") or 0)
-            if pid:
-                try:
-                    os.kill(pid, 0)  # signal 0 = check if process exists
-                    return existing  # process is alive → lock is held
-                except (OSError, ProcessLookupError):
-                    pass  # process is dead → stale lock, overwrite
+            if pid and _pid_is_running(pid):
+                return existing
         except (ValueError, OSError):
             pass
     lock = {"pid": os.getpid(), "started_at": datetime.now(timezone.utc).isoformat()}

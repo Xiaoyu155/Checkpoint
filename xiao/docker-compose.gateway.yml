@@ -1,0 +1,21 @@
+services:
+  pacer-gateway:
+    build:
+      context: ..
+      dockerfile: xiao/cloud_api/Dockerfile
+    env_file:
+      - cloud_api/.env.gateway
+    ports:
+      - "8000:8000"
+    volumes:
+      - pacer_gateway_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:8000/v1/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  pacer_gateway_data:
