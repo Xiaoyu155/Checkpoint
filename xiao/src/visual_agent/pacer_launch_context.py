@@ -74,6 +74,9 @@ TASK_SOURCE_BASELINE_TRUST_POLICY_VERSION = 1
 MAX_TRUSTED_TASK_SOURCE_BASELINES = 256
 TASK_CONTRACT_TRUST_POLICY_VERSION = 1
 MAX_TRUSTED_TASK_CONTRACTS = 256
+PRELAUNCH_TASK_REQUIRED_ENV = "PACER_PRELAUNCH_TASK_REQUIRED"
+PRELAUNCH_TASK_CONTRACT_DIGEST_ENV = "PACER_PRELAUNCH_TASK_CONTRACT_DIGEST"
+PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV = "PACER_PRELAUNCH_SOURCE_BASELINE_DIGEST"
 LAUNCH_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _LAUNCH_STATE_THREAD_LOCKS_GUARD = threading.Lock()
 _LAUNCH_STATE_THREAD_LOCKS: dict[str, threading.RLock] = {}
@@ -1014,6 +1017,49 @@ def register_trusted_task_source_baseline(
     return receipt
 
 
+def adopt_prelaunched_task_source_baseline(
+    payload: dict[str, Any],
+    *,
+    workspace_root: str | Path,
+    launch_id: str,
+    repo_root: str | Path,
+    prelaunch_digest: str,
+    trusted_receipt: str = "",
+) -> str:
+    """Adopt launcher-pinned evidence into the current MCP process."""
+
+    workspace_identity, launch, repo_identity = _task_source_baseline_trust_key(
+        workspace_root=workspace_root,
+        launch_id=launch_id,
+        repo_root=repo_root,
+    )
+    _validate_task_source_baseline_repo(payload, repo_identity)
+    digest = task_source_baseline_digest(payload)
+    expected = _validated_sha256_digest(prelaunch_digest, "prelaunch source baseline")
+    if not hmac.compare_digest(digest, expected):
+        raise ValueError("prelaunch source baseline digest mismatch")
+    receipt = _validated_or_new_trust_receipt(
+        trusted_receipt,
+        secret=_TASK_SOURCE_BASELINE_TRUST_SECRET,
+        identity="\0".join(
+            (
+                "pacer-task-source-baseline-receipt-v1",
+                workspace_identity,
+                launch,
+                repo_identity,
+                digest,
+            )
+        ),
+    )
+    key = (workspace_identity, launch, repo_identity)
+    with _TASK_SOURCE_BASELINE_TRUST_LOCK:
+        _TRUSTED_TASK_SOURCE_BASELINES[key] = (digest, receipt)
+        _TRUSTED_TASK_SOURCE_BASELINES.move_to_end(key)
+        while len(_TRUSTED_TASK_SOURCE_BASELINES) > MAX_TRUSTED_TASK_SOURCE_BASELINES:
+            _TRUSTED_TASK_SOURCE_BASELINES.popitem(last=False)
+    return receipt
+
+
 def trusted_task_source_baseline_errors(
     payload: dict[str, Any],
     *,
@@ -1118,6 +1164,52 @@ def register_trusted_task_contract(
     return receipt
 
 
+def adopt_prelaunched_task_contract(
+    payload: dict[str, Any],
+    *,
+    goal: str,
+    workspace_root: str | Path,
+    launch_id: str,
+    repo_root: str | Path,
+    prelaunch_digest: str,
+    trusted_receipt: str = "",
+) -> str:
+    """Adopt a launcher-pinned contract into the current MCP process."""
+
+    workspace_identity, launch, repo_identity = _task_source_baseline_trust_key(
+        workspace_root=workspace_root,
+        launch_id=launch_id,
+        repo_root=repo_root,
+    )
+    goal_digest = _task_goal_digest(goal)
+    _validate_task_contract(payload, goal_digest)
+    digest = task_contract_digest(payload)
+    expected = _validated_sha256_digest(prelaunch_digest, "prelaunch task contract")
+    if not hmac.compare_digest(digest, expected):
+        raise ValueError("prelaunch task contract digest mismatch")
+    receipt = _validated_or_new_trust_receipt(
+        trusted_receipt,
+        secret=_TASK_CONTRACT_TRUST_SECRET,
+        identity="\0".join(
+            (
+                "pacer-task-contract-receipt-v1",
+                workspace_identity,
+                launch,
+                repo_identity,
+                goal_digest,
+                digest,
+            )
+        ),
+    )
+    key = (workspace_identity, launch, repo_identity)
+    with _TASK_CONTRACT_TRUST_LOCK:
+        _TRUSTED_TASK_CONTRACTS[key] = (goal_digest, digest, receipt)
+        _TRUSTED_TASK_CONTRACTS.move_to_end(key)
+        while len(_TRUSTED_TASK_CONTRACTS) > MAX_TRUSTED_TASK_CONTRACTS:
+            _TRUSTED_TASK_CONTRACTS.popitem(last=False)
+    return receipt
+
+
 def trusted_task_contract_errors(
     payload: dict[str, Any],
     *,
@@ -1171,6 +1263,22 @@ def trusted_task_contract_errors(
 def _task_goal_digest(goal: str) -> str:
     normalized = " ".join(unicodedata.normalize("NFKC", str(goal or "")).split()).casefold()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _validated_sha256_digest(value: str, label: str) -> str:
+    digest = str(value or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError(f"{label} digest is invalid")
+    return digest
+
+
+def _validated_or_new_trust_receipt(value: str, *, secret: bytes, identity: str) -> str:
+    receipt = str(value or "").strip().lower()
+    if receipt:
+        if not re.fullmatch(r"[0-9a-f]{64}", receipt):
+            raise ValueError("trusted receipt is invalid")
+        return receipt
+    return hmac.new(secret, identity.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _validate_task_contract(payload: dict[str, Any], goal_digest: str) -> None:

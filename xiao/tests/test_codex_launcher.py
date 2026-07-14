@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from visual_agent import codex_launcher
+from visual_agent import task_review
 from visual_agent.codex_rollout_telemetry import PACER_LAUNCH_OWNERSHIP_PREFIX
 from visual_agent.pacer_events import list_pacer_events
 from visual_agent.pacer_launch_context import (
@@ -19,6 +20,7 @@ from visual_agent.pacer_launch_context import (
 )
 
 REAL_PRELOAD_PACER_MEMORY = codex_launcher._preload_pacer_memory
+REAL_TASK_REVIEW_SUBPROCESS_RUN = task_review._SUBPROCESS_RUN
 
 
 @pytest.fixture(autouse=True)
@@ -757,6 +759,46 @@ def test_launch_preloads_memory_once_for_real_exec_task(tmp_path, monkeypatch) -
     persisted = json.loads(manifest.read_text(encoding="utf-8"))
     assert persisted["mode"] == "exec"
     assert persisted["liveness"]["stall_detection_enabled"] is True
+
+
+def test_launch_pre_registers_task_evidence_before_starting_codex(tmp_path, monkeypatch) -> None:
+    from visual_agent.pacer_launch_context import (
+        PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV,
+        PRELAUNCH_TASK_CONTRACT_DIGEST_ENV,
+        PRELAUNCH_TASK_REQUIRED_ENV,
+        load_task_source_baseline,
+        task_contract_digest,
+        task_source_baseline_digest,
+    )
+
+    (tmp_path / "app.py").write_text("value = 1\n", encoding="utf-8")
+    process_calls = []
+    observed = {}
+    monkeypatch.setattr(task_review, "_SUBPROCESS_RUN", REAL_TASK_REVIEW_SUBPROCESS_RUN)
+    _stub_native_codex(monkeypatch, process_calls)
+
+    def fake_run(command, **kwargs):
+        launch_id = kwargs["env"]["PACER_LAUNCH_ID"]
+        workspace = tmp_path / ".agent-workspace"
+        active = read_active_launch(workspace, launch_id=launch_id)
+        baseline = load_task_source_baseline(active, workspace_root=workspace)
+        observed.update({"active": active, "baseline": baseline, "env": kwargs["env"]})
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(codex_launcher.subprocess, "run", fake_run)
+
+    assert codex_launcher.launch_codex(["exec", "修复登录错误"], cwd=tmp_path) == 0
+
+    active = observed["active"]
+    baseline = observed["baseline"]
+    environment = observed["env"]
+    assert active["launch_goal"] == "修复登录错误"
+    assert active["task_contract"]["requirements"]
+    assert active["prelaunch_task_registration"]["status"] == "ready"
+    assert baseline["entries"]["app.py"]
+    assert environment[PRELAUNCH_TASK_REQUIRED_ENV] == "1"
+    assert environment[PRELAUNCH_TASK_CONTRACT_DIGEST_ENV] == task_contract_digest(active["task_contract"])
+    assert environment[PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV] == task_source_baseline_digest(baseline)
 
 
 def test_launch_memory_preload_failure_warns_and_preserves_native_prompt(tmp_path, monkeypatch, capsys) -> None:

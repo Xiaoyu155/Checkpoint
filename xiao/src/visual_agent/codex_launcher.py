@@ -24,12 +24,18 @@ from .codex_rollout_telemetry import (
     rollout_ownership_marker,
 )
 from .pacer_launch_context import (
+    PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV,
+    PRELAUNCH_TASK_CONTRACT_DIGEST_ENV,
+    PRELAUNCH_TASK_REQUIRED_ENV,
     initialize_active_launch,
     read_active_launch,
     read_launch_liveness,
     recover_orphaned_launches,
     resolve_python_runtime,
     save_rollout_baseline,
+    save_task_source_baseline,
+    task_contract_digest,
+    task_source_baseline_digest,
     update_active_launch,
     write_launch_liveness,
     write_context_recovery_capsule,
@@ -349,6 +355,17 @@ def launch_codex(argv: Sequence[str] = (), *, cwd: str | Path = ".") -> int:
     process_cwd = Path(cwd).expanduser().resolve()
     launch_id = _new_pacer_launch_id()
     effective_repo_root, binding_error = _effective_codex_repo_root(argv, process_cwd)
+    prepared_argv, read_prompt_from_stdin = _prepare_pacer_invocation(
+        argv,
+        launch_id=launch_id,
+    )
+    raw_stdin = sys.stdin.read() if read_prompt_from_stdin else None
+    stdin_prompt = (
+        _pacer_control_prompt(str(raw_stdin or ""), launch_id=launch_id)
+        if read_prompt_from_stdin
+        else None
+    )
+    task_text = _pacer_task_text(argv, stdin_text=raw_stdin)
     if binding_error:
         _warn_telemetry_degraded("effective repository binding", ValueError(binding_error))
         launch_path, launch = None, None
@@ -359,10 +376,29 @@ def launch_codex(argv: Sequence[str] = (), *, cwd: str | Path = ".") -> int:
             process_cwd=process_cwd,
             launch_id=launch_id,
         )
-    prepared_argv, read_prompt_from_stdin = _prepare_pacer_invocation(
-        argv,
-        launch_id=launch_id,
-    )
+    prelaunch_trust: dict[str, str] = {}
+    if launch_path is not None and launch is not None and task_text:
+        try:
+            prelaunch_trust = _pre_register_pacer_task(
+                workspace_root=launch_path.parents[2],
+                repo_root=effective_repo_root,
+                launch_id=str(launch["launch_id"]),
+                goal=task_text,
+            )
+        except Exception as exc:
+            try:
+                update_active_launch(
+                    launch_path.parents[2],
+                    expected_launch_id=str(launch["launch_id"]),
+                    prelaunch_task_registration={
+                        "schema_version": 1,
+                        "status": "failed",
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            except Exception:
+                pass
+            _warn_telemetry_degraded("prelaunch task registration", exc)
     rollout_snapshot: RolloutSnapshot | None = None
     watchdog: LaunchLivenessWatchdog | None = None
     if launch:
@@ -391,13 +427,12 @@ def launch_codex(argv: Sequence[str] = (), *, cwd: str | Path = ".") -> int:
     environment["PACER_LAUNCH_ID"] = launch_id
     if launch:
         _apply_managed_python_environment(environment, launch)
+    if launch and task_text:
+        environment[PRELAUNCH_TASK_REQUIRED_ENV] = "1"
+        if prelaunch_trust:
+            environment[PRELAUNCH_TASK_CONTRACT_DIGEST_ENV] = prelaunch_trust["task_contract_digest"]
+            environment[PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV] = prelaunch_trust["source_baseline_digest"]
     try:
-        stdin_prompt: str | None = None
-        raw_stdin: str | None = None
-        if read_prompt_from_stdin:
-            raw_stdin = sys.stdin.read()
-            stdin_prompt = _pacer_control_prompt(raw_stdin, launch_id=launch_id)
-        task_text = _pacer_task_text(argv, stdin_text=raw_stdin)
         if launch_path is not None and launch is not None and task_text:
             try:
                 memory = _preload_pacer_memory(
@@ -1041,6 +1076,67 @@ def _preload_pacer_memory(
     if not isinstance(safe_payload, dict) or not str(safe_payload.get("memory_receipt") or ""):
         raise ValueError("memory preload did not return a receipt")
     return safe_payload
+
+
+def _pre_register_pacer_task(
+    *,
+    workspace_root: Path,
+    repo_root: Path,
+    launch_id: str,
+    goal: str,
+) -> dict[str, str]:
+    from .task_review import build_task_contract, capture_task_source_baseline
+
+    contract = build_task_contract(goal)
+    baseline = capture_task_source_baseline(repo_root)
+    contract_digest = task_contract_digest(contract)
+    baseline_digest = task_source_baseline_digest(baseline)
+    active = update_active_launch(
+        workspace_root,
+        expected_launch_id=launch_id,
+        launch_goal=goal,
+        current_goal=goal[:2000],
+        query_goal=goal[:2000],
+        task_contract=contract,
+        task_contract_digest=contract_digest,
+        task_contract_trust_policy=2,
+    )
+    if str(active.get("launch_id") or "") != launch_id:
+        raise ValueError("prelaunch task registration lost the active launch")
+    save_task_source_baseline(
+        workspace_root=workspace_root,
+        launch_id=launch_id,
+        baseline=baseline,
+    )
+    active = update_active_launch(
+        workspace_root,
+        expected_launch_id=launch_id,
+        source_baseline_digest=baseline_digest,
+        source_baseline_trust_policy=2,
+        prelaunch_task_registration={
+            "schema_version": 1,
+            "status": "ready",
+            "contract_digest": contract_digest,
+            "source_baseline_digest": baseline_digest,
+        },
+    )
+    if str(active.get("source_baseline_digest") or "") != baseline_digest:
+        raise ValueError("prelaunch source baseline was not persisted")
+    try:
+        from .pacer_events import append_pacer_event
+
+        append_pacer_event(
+            workspace_root,
+            "task_pre_registered",
+            launch_id=launch_id,
+            data={"status": "ready", "destructive_action": False},
+        )
+    except Exception:
+        pass
+    return {
+        "task_contract_digest": contract_digest,
+        "source_baseline_digest": baseline_digest,
+    }
 
 
 def _get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:

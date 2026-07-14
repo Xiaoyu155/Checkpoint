@@ -318,6 +318,181 @@ def test_begin_pacer_task_does_not_retrust_existing_baseline_after_process_resta
         )
 
 
+def test_begin_pacer_task_adopts_launcher_pre_registered_evidence(tmp_path, monkeypatch) -> None:
+    from visual_agent import pacer_launch_context
+    from visual_agent.codex_launcher import _pre_register_pacer_task
+    from visual_agent.mcp_server import begin_pacer_task_payload
+    from visual_agent.pacer_launch_context import (
+        PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV,
+        PRELAUNCH_TASK_CONTRACT_DIGEST_ENV,
+        PRELAUNCH_TASK_REQUIRED_ENV,
+        initialize_active_launch,
+        load_task_source_baseline,
+        read_active_launch,
+        trusted_task_contract_errors,
+        trusted_task_source_baseline_errors,
+    )
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("value = 1\n", encoding="utf-8")
+    workspace = repo / ".agent-workspace"
+    launch_id = "launch-pre-registered"
+    manifest = workspace / "pacer_native" / "launches" / f"{launch_id}.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    initialize_active_launch(
+        workspace_root=workspace,
+        manifest_path=manifest,
+        launch={"launch_id": launch_id, "repo_root": str(repo)},
+    )
+    evidence = _pre_register_pacer_task(
+        workspace_root=workspace,
+        repo_root=repo,
+        launch_id=launch_id,
+        goal="修复登录错误",
+    )
+    monkeypatch.setattr(
+        pacer_launch_context,
+        "_TRUSTED_TASK_SOURCE_BASELINES",
+        type(pacer_launch_context._TRUSTED_TASK_SOURCE_BASELINES)(),
+    )
+    monkeypatch.setattr(
+        pacer_launch_context,
+        "_TRUSTED_TASK_CONTRACTS",
+        type(pacer_launch_context._TRUSTED_TASK_CONTRACTS)(),
+    )
+    monkeypatch.setenv("PACER_LAUNCH_ID", launch_id)
+    monkeypatch.setenv(PRELAUNCH_TASK_REQUIRED_ENV, "1")
+    monkeypatch.setenv(PRELAUNCH_TASK_CONTRACT_DIGEST_ENV, evidence["task_contract_digest"])
+    monkeypatch.setenv(PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV, evidence["source_baseline_digest"])
+
+    started = begin_pacer_task_payload(
+        {"workspace_root": str(workspace), "repo_root": str(repo), "goal": "修复登录错误"}
+    )
+    active = read_active_launch(workspace, launch_id=launch_id)
+    baseline = load_task_source_baseline(active, workspace_root=workspace)
+
+    assert started["status"] == "already_started"
+    assert started["source_baseline"]["status"] == "verified"
+    assert active["task_contract_receipt"]
+    assert active["source_baseline_receipt"]
+    assert trusted_task_contract_errors(
+        active["task_contract"],
+        goal="修复登录错误",
+        workspace_root=workspace,
+        launch_id=launch_id,
+        repo_root=repo,
+        trusted_digest=active["task_contract_digest"],
+        trusted_receipt=active["task_contract_receipt"],
+    ) == ()
+    assert trusted_task_source_baseline_errors(
+        baseline,
+        workspace_root=workspace,
+        launch_id=launch_id,
+        repo_root=repo,
+        trusted_digest=active["source_baseline_digest"],
+        trusted_receipt=active["source_baseline_receipt"],
+    ) == ()
+
+
+def test_begin_pacer_task_rejects_tampered_pre_registered_baseline(tmp_path, monkeypatch) -> None:
+    from visual_agent.codex_launcher import _pre_register_pacer_task
+    from visual_agent.mcp_server import begin_pacer_task_payload
+    from visual_agent.pacer_launch_context import (
+        PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV,
+        PRELAUNCH_TASK_CONTRACT_DIGEST_ENV,
+        PRELAUNCH_TASK_REQUIRED_ENV,
+        initialize_active_launch,
+        task_source_baseline_path,
+    )
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("value = 1\n", encoding="utf-8")
+    workspace = repo / ".agent-workspace"
+    launch_id = "launch-pre-tampered"
+    manifest = workspace / "pacer_native" / "launches" / f"{launch_id}.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    initialize_active_launch(
+        workspace_root=workspace,
+        manifest_path=manifest,
+        launch={"launch_id": launch_id, "repo_root": str(repo)},
+    )
+    evidence = _pre_register_pacer_task(
+        workspace_root=workspace,
+        repo_root=repo,
+        launch_id=launch_id,
+        goal="修复登录错误",
+    )
+    path = task_source_baseline_path(workspace, launch_id)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["entries"]["app.py"] = "tampered"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("PACER_LAUNCH_ID", launch_id)
+    monkeypatch.setenv(PRELAUNCH_TASK_REQUIRED_ENV, "1")
+    monkeypatch.setenv(PRELAUNCH_TASK_CONTRACT_DIGEST_ENV, evidence["task_contract_digest"])
+    monkeypatch.setenv(PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV, evidence["source_baseline_digest"])
+
+    with pytest.raises(ValueError, match="prelaunch source baseline digest mismatch"):
+        begin_pacer_task_payload(
+            {"workspace_root": str(workspace), "repo_root": str(repo), "goal": "修复登录错误"}
+        )
+
+
+def test_begin_pacer_task_rejects_replaced_pre_registered_goal_and_contract(tmp_path, monkeypatch) -> None:
+    from visual_agent.codex_launcher import _pre_register_pacer_task
+    from visual_agent.mcp_server import begin_pacer_task_payload
+    from visual_agent.pacer_launch_context import (
+        PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV,
+        PRELAUNCH_TASK_CONTRACT_DIGEST_ENV,
+        PRELAUNCH_TASK_REQUIRED_ENV,
+        initialize_active_launch,
+        launch_context_path,
+        task_contract_digest,
+    )
+    from visual_agent.task_review import build_task_contract
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("value = 1\n", encoding="utf-8")
+    workspace = repo / ".agent-workspace"
+    launch_id = "launch-pre-goal-tampered"
+    manifest = workspace / "pacer_native" / "launches" / f"{launch_id}.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    initialize_active_launch(
+        workspace_root=workspace,
+        manifest_path=manifest,
+        launch={"launch_id": launch_id, "repo_root": str(repo)},
+    )
+    evidence = _pre_register_pacer_task(
+        workspace_root=workspace,
+        repo_root=repo,
+        launch_id=launch_id,
+        goal="修复登录错误",
+    )
+    path = launch_context_path(workspace, launch_id)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    replacement_goal = "改做支付页面"
+    replacement_contract = build_task_contract(replacement_goal)
+    payload["launch_goal"] = replacement_goal
+    payload["current_goal"] = replacement_goal
+    payload["task_contract"] = replacement_contract
+    payload["task_contract_digest"] = task_contract_digest(replacement_contract)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("PACER_LAUNCH_ID", launch_id)
+    monkeypatch.setenv(PRELAUNCH_TASK_REQUIRED_ENV, "1")
+    monkeypatch.setenv(PRELAUNCH_TASK_CONTRACT_DIGEST_ENV, evidence["task_contract_digest"])
+    monkeypatch.setenv(PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV, evidence["source_baseline_digest"])
+
+    with pytest.raises(ValueError, match="prelaunch task contract digest mismatch"):
+        begin_pacer_task_payload(
+            {"workspace_root": str(workspace), "repo_root": str(repo), "goal": replacement_goal}
+        )
+
+
 def test_real_mcp_memory_call_registers_baseline_but_direct_preload_does_not(tmp_path) -> None:
     from visual_agent.mcp_server import get_pacer_memory_payload
     from visual_agent.pacer_launch_context import (

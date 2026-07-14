@@ -1280,6 +1280,19 @@ def begin_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _prelaunch_task_required() -> bool:
+    from .pacer_launch_context import PRELAUNCH_TASK_REQUIRED_ENV
+
+    return str(os.environ.get(PRELAUNCH_TASK_REQUIRED_ENV) or "").strip() == "1"
+
+
+def _required_prelaunch_digest(env_name: str, label: str) -> str:
+    digest = str(os.environ.get(env_name) or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError(f"{label} digest is unavailable")
+    return digest
+
+
 def _bind_pacer_task_contract(
     *,
     workspace_root: Path,
@@ -1288,6 +1301,8 @@ def _bind_pacer_task_contract(
     goal: str,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     from .pacer_launch_context import (
+        PRELAUNCH_TASK_CONTRACT_DIGEST_ENV,
+        adopt_prelaunched_task_contract,
         register_trusted_task_contract,
         task_contract_digest,
         trusted_task_contract_errors,
@@ -1302,6 +1317,26 @@ def _bind_pacer_task_contract(
     if existing and existing != task_contract:
         raise ValueError("active Pacer task contract does not match the immutable launch goal")
     if existing:
+        if _prelaunch_task_required():
+            receipt = adopt_prelaunched_task_contract(
+                existing,
+                goal=pinned_goal,
+                workspace_root=workspace_root,
+                launch_id=launch_id,
+                repo_root=repo_root,
+                prelaunch_digest=_required_prelaunch_digest(
+                    PRELAUNCH_TASK_CONTRACT_DIGEST_ENV,
+                    "prelaunch task contract",
+                ),
+                trusted_receipt=str(active.get("task_contract_receipt") or ""),
+            )
+            if not str(active.get("task_contract_receipt") or ""):
+                active = update_active_launch(
+                    workspace_root,
+                    expected_launch_id=launch_id,
+                    task_contract_receipt=receipt,
+                    task_contract_trust_policy=2,
+                )
         errors = trusted_task_contract_errors(
             existing,
             goal=pinned_goal,
@@ -1314,6 +1349,8 @@ def _bind_pacer_task_contract(
         if errors:
             raise ValueError("trusted task contract rejected: " + ", ".join(errors))
         return active, task_contract
+    if _prelaunch_task_required():
+        raise ValueError("prelaunch task contract is missing")
     receipt = register_trusted_task_contract(
         task_contract,
         goal=pinned_goal,
@@ -1364,6 +1401,8 @@ def _ensure_trusted_task_source_baseline(
     active: dict[str, Any],
 ) -> dict[str, Any]:
     from .pacer_launch_context import (
+        PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV,
+        adopt_prelaunched_task_source_baseline,
         load_task_source_baseline,
         read_active_launch,
         register_trusted_task_source_baseline,
@@ -1383,6 +1422,25 @@ def _ensure_trusted_task_source_baseline(
         payload = load_task_source_baseline(current, workspace_root=workspace_root)
         if not payload:
             raise ValueError("trusted task source baseline file is unreadable")
+        if _prelaunch_task_required():
+            receipt = adopt_prelaunched_task_source_baseline(
+                payload,
+                workspace_root=workspace_root,
+                launch_id=launch_id,
+                repo_root=repo_root,
+                prelaunch_digest=_required_prelaunch_digest(
+                    PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV,
+                    "prelaunch source baseline",
+                ),
+                trusted_receipt=str(current.get("source_baseline_receipt") or ""),
+            )
+            if not str(current.get("source_baseline_receipt") or ""):
+                current = update_active_launch(
+                    workspace_root,
+                    expected_launch_id=launch_id,
+                    source_baseline_receipt=receipt,
+                    source_baseline_trust_policy=2,
+                )
         errors = trusted_task_source_baseline_errors(
             payload,
             workspace_root=workspace_root,
@@ -1399,6 +1457,8 @@ def _ensure_trusted_task_source_baseline(
             receipt=str(current.get("source_baseline_receipt") or ""),
             status="verified",
         )
+    if _prelaunch_task_required():
+        raise ValueError("prelaunch task source baseline is missing")
     if any(
         str(current.get(key) or "").strip()
         for key in ("source_baseline_path", "source_baseline_digest", "source_baseline_receipt")
