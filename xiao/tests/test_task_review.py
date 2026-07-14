@@ -587,6 +587,94 @@ def test_task_contract_classifies_read_only_test_run_and_documentation() -> None
     assert documentation["requirements"][0]["required_artifact_role"] == "documentation"
 
 
+def test_task_contract_keeps_documentation_scope_with_compileall_acceptance() -> None:
+    goal = (
+        "更新 README.md，增加 Usage 小节，写明 python app.py 启动命令，只修改该文档"
+        "并使用 python -m compileall -q app.py 验证。"
+    )
+
+    contract = build_task_contract(goal)
+
+    assert [item["required_artifact_role"] for item in contract["requirements"]] == [
+        "documentation",
+        "documentation",
+    ]
+
+
+def test_task_contract_keeps_negated_implementation_constraint_read_only() -> None:
+    goal = (
+        "新增 tests/test_validator.py，为 validator.py 的 is_even 覆盖偶数和奇数，并使用 "
+        "python -m unittest discover -s tests -v 验证；不要修改 validator.py。"
+    )
+
+    contract = build_task_contract(goal)
+
+    assert [item["required_artifact_role"] for item in contract["requirements"]] == ["test", ""]
+    assert contract["requirements"][1]["intent"] == "read_only"
+    assert contract["requirements"][1]["requires_source_change"] is False
+
+
+def test_task_review_accepts_documentation_change_with_requested_compileall(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    readme = repo / "README.md"
+    readme.write_text("# Sample App\n", encoding="utf-8")
+    (repo / "app.py").write_text("print('sample')\n", encoding="utf-8")
+    baseline = capture_task_source_baseline(repo)
+    readme.write_text("# Sample App\n\n## Usage\n\n```bash\npython app.py\n```\n", encoding="utf-8")
+    goal = (
+        "更新 README.md，增加 Usage 小节，写明 python app.py 启动命令，只修改该文档"
+        "并使用 python -m compileall -q app.py 验证。"
+    )
+    contract = build_task_contract(goal)
+    step = {
+        "name": "compile-app",
+        "argv": [sys.executable, "-m", "compileall", "-q", "app.py"],
+    }
+    claims = [
+        {
+            "kind": "change",
+            "requirement_ids": [requirement["id"]],
+            "requirement": requirement["text"],
+            "result": "README Usage 文档已更新，并保留指定启动命令。",
+            "files": [{"path": "README.md", "state": "modified"}],
+            "verification_steps": ["compile-app"],
+        }
+        for requirement in contract["requirements"]
+    ]
+
+    review = audit_task_completion(
+        launch_goal=goal,
+        submitted_goal=goal,
+        summary="README 已增加 Usage 小节和 python app.py 启动命令。",
+        completion_evidence={
+            "result_kind": "change",
+            "claims": claims,
+            "unresolved_items": [],
+            "known_risks": [],
+        },
+        requested_steps=[step],
+        repo_root=repo,
+        task_contract=contract,
+        source_baseline=baseline,
+        verification={
+            "status": "passed",
+            "records": [
+                {
+                    "name": "compile-app",
+                    "status": "passed",
+                    "exit_code": 0,
+                    "elapsed_seconds": 0.1,
+                }
+            ],
+        },
+    )
+
+    assert review["valid"] is True
+    assert review["trust"] == "yes"
+    assert review["warnings"] == []
+
+
 @pytest.mark.parametrize(
     "goal",
     [

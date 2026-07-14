@@ -158,6 +158,73 @@ def test_support_snapshot_aggregates_native_outcomes_and_commands(tmp_path, monk
     assert "可信结论：可信" in markdown
 
 
+def test_support_keeps_trusted_documentation_compile_batch_verified(tmp_path, monkeypatch) -> None:
+    from visual_agent.task_review import build_task_contract
+
+    workspace = tmp_path / ".agent-workspace"
+    native = workspace / "pacer_native"
+    native.mkdir(parents=True)
+    run_id = "20260715-120000-doccompile"
+    launch_id = "launch-documentation"
+    goal = (
+        "更新 README.md，增加 Usage 小节，写明 python app.py 启动命令，只修改该文档"
+        "并使用 python -m compileall -q app.py 验证。"
+    )
+    (native / "history.jsonl").write_text(
+        json.dumps(
+            {
+                "repo_root": str(tmp_path.resolve()),
+                "recorded_at": "2026-07-15T12:00:00+00:00",
+                "goal": goal,
+                "summary": "README usage updated",
+                "verification": f"run_id={run_id}; status=passed",
+                "status": "completed",
+                "evidence_level": "verified_batch",
+                "batch_run_id": run_id,
+                "launch_id": launch_id,
+                "task_review": {
+                    "schema_version": 1,
+                    "kind": "pacer_task_review",
+                    "valid": True,
+                    "verdict": "approved",
+                    "trust": "yes",
+                    "task_contract": build_task_contract(goal),
+                    "errors": [],
+                    "warnings": [],
+                    "user_report": {"can_trust": "yes"},
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    run_dir = native / "commands" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "summary.json").write_text(
+        json.dumps(
+            _verification_summary(
+                run_id,
+                launch_id=launch_id,
+                commands=[["python", "-m", "compileall", "-q", "app.py"]],
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "visual_agent.pacer_support.inspect_codex_account",
+        lambda: {"installed": True, "authenticated": True, "auth_method": "api_key"},
+    )
+    monkeypatch.setattr("visual_agent.pacer_support.load_codex_user_defaults", lambda: {})
+
+    payload = build_pacer_support_snapshot(workspace)
+
+    assert payload["commands"]["verified_runs"] == 1
+    assert payload["commands"]["invalid_verification_runs"] == 0
+    assert payload["memory"]["latest"]["evidence_level"] == "verified_batch"
+    assert payload["memory"]["latest"]["verification_batch_valid"] is True
+    assert payload["memory"]["latest"]["verification_errors"] == []
+
+
 @pytest.mark.parametrize("summary_kind", ["legacy", "ordinary_command"])
 def test_support_does_not_upgrade_non_verification_passed_summary(
     tmp_path,

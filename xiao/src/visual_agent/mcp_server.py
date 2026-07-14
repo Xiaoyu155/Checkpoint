@@ -97,6 +97,7 @@ except ImportError:
 
 server = Server(APP_NAME) if Server is not None else None
 _PACER_VERIFICATION_SENTINEL = object()
+_PACER_DOCUMENTATION_COMPILE_SENTINEL = object()
 _PACER_PINNED_LAUNCH_SENTINEL = object()
 _PACER_COMPLETION_AUDIT_SENTINEL = object()
 _PACER_MCP_DISPATCH_SENTINEL = object()
@@ -2421,7 +2422,12 @@ def _verified_pacer_history_active(
         if str(entry.get("status") or "") != "completed" or str(entry.get("evidence_level") or "") != "verified_batch":
             continue
         summary = _read_pacer_batch_summary(Path(selected["native_root"]), run_id)
-        if summary is not None and _pacer_batch_passed(summary, expected_run_id=run_id):
+        task_review = entry.get("task_review") if isinstance(entry.get("task_review"), dict) else {}
+        if summary is not None and _pacer_batch_passed(
+            summary,
+            expected_run_id=run_id,
+            allow_compile_only=_task_review_allows_compile_only(task_review),
+        ):
             return True
     return False
 
@@ -2466,6 +2472,7 @@ def _pacer_batch_passed(
     *,
     expected_launch_id: str | None = None,
     expected_run_id: str = "",
+    allow_compile_only: bool = False,
 ) -> bool:
     from .pacer_verification import audit_pacer_verification_batch
 
@@ -2473,7 +2480,15 @@ def _pacer_batch_passed(
         payload,
         expected_launch_id=expected_launch_id,
         expected_run_id=expected_run_id,
+        allow_compile_only=allow_compile_only,
     ).valid
+
+
+def _task_review_allows_compile_only(task_review: Any) -> bool:
+    from .task_review import task_contract_allows_compile_only
+
+    review = task_review if isinstance(task_review, dict) else {}
+    return bool(review.get("valid")) and task_contract_allows_compile_only(review.get("task_contract"))
 
 
 def _pacer_batch_signature(payload: dict[str, Any]) -> tuple[Any, ...]:
@@ -2546,6 +2561,7 @@ def record_pacer_outcome_payload(args: dict[str, Any]) -> dict[str, Any]:
         outcome_status=status,
         expected_launch_id=str(active.get("launch_id") or ""),
         trusted_receipt=str(args.get("verification_receipt") or ""),
+        allow_compile_only=_task_review_allows_compile_only(completion_audit),
     )
     directory = workspace_root / "pacer_native"
     directory.mkdir(parents=True, exist_ok=True)
@@ -2652,6 +2668,7 @@ def _pacer_outcome_evidence(
     outcome_status: str,
     expected_launch_id: str = "",
     trusted_receipt: str = "",
+    allow_compile_only: bool = False,
 ) -> tuple[str, str, str]:
     match = re.search(r"(?:run_id\s*=\s*|batch\s+)([0-9]{8}-[0-9]{6}-[A-Za-z0-9_-]+)", verification)
     if not match:
@@ -2681,6 +2698,7 @@ def _pacer_outcome_evidence(
             payload,
             expected_launch_id=expected_launch_id,
             expected_run_id=run_id,
+            allow_compile_only=allow_compile_only,
         )
         if not audit.valid:
             raise ValueError(
@@ -2707,6 +2725,7 @@ def _pacer_outcome_evidence(
             trusted_receipt=trusted_receipt,
             expected_launch_id=expected_launch_id,
             expected_run_id=run_id,
+            allow_compile_only=allow_compile_only,
         )
         if validation.valid:
             return "verified_batch", run_id, summary_digest
@@ -2798,6 +2817,10 @@ def run_pacer_verification_payload(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw_steps, list) or not raw_steps:
         raise ValueError("steps must be a non-empty list")
     workspace_root, repo_root, resolved_launch_id = _resolve_pacer_roots(args)
+    allow_compile_only = (
+        args.get("_pacer_documentation_compile_sentinel")
+        is _PACER_DOCUMENTATION_COMPILE_SENTINEL
+    )
     python_runtime = _managed_python_runtime(
         workspace_root,
         repo_root,
@@ -2849,7 +2872,8 @@ def run_pacer_verification_payload(args: dict[str, Any]) -> dict[str, Any]:
         }
         resolved_steps.append(resolved_item)
         step_classes.append(step_class)
-    if not any(step_class in ACCEPTANCE_STEP_CLASSES for step_class in step_classes):
+    acceptance_classes = ACCEPTANCE_STEP_CLASSES | ({"compile"} if allow_compile_only else set())
+    if not any(step_class in acceptance_classes for step_class in step_classes):
         raise ValueError(
             "verification batch requires at least one substantive test, build, or analyze step; "
             "compile alone is insufficient"
@@ -2874,7 +2898,11 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
         PACER_VERIFICATION_POLICY_VERSION,
         PACER_VERIFICATION_SOURCE_TOOL,
     )
-    from .task_review import audit_task_completion, task_review_error
+    from .task_review import (
+        audit_task_completion,
+        task_contract_allows_compile_only,
+        task_review_error,
+    )
 
     goal = str(args.get("goal") or "").strip()
     summary = str(args.get("summary") or "").strip()
@@ -2897,6 +2925,7 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
         repo_root=repo_root,
         active=active,
     )
+    allow_compile_only = task_contract_allows_compile_only(task_contract)
     source_baseline, source_baseline_digest = _load_trusted_task_source_baseline(
         workspace_root=workspace_root,
         repo_root=repo_root,
@@ -2925,6 +2954,9 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
         "steps": args.get("steps"),
         "stop_on_failure": bool(args.get("stop_on_failure", False)),
         "tail_chars": int(args.get("tail_chars") or 1200),
+        "_pacer_documentation_compile_sentinel": (
+            _PACER_DOCUMENTATION_COMPILE_SENTINEL if allow_compile_only else None
+        ),
     })
     if (
         str(verification.get("kind") or "") != PACER_VERIFICATION_BATCH_KIND
@@ -4094,7 +4126,7 @@ def _ok_json(payload: dict[str, Any]) -> list[TextContent]:
 def main() -> None:
     _apply_startup_args()
     if server is None or stdio_server is None:
-        raise RuntimeError("MCP support is not installed. Run: pip install -e .[mcp]")
+        raise RuntimeError("MCP support is not installed. Reinstall with: python -m pip install -e .")
     asyncio.run(_run())
 
 
@@ -4109,7 +4141,7 @@ def _apply_startup_args(argv: list[str] | None = None) -> None:
 
 async def _run() -> None:
     if server is None or stdio_server is None:
-        raise RuntimeError("MCP support is not installed. Run: pip install -e .[mcp]")
+        raise RuntimeError("MCP support is not installed. Reinstall with: python -m pip install -e .")
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 

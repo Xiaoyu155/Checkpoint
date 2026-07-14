@@ -100,11 +100,13 @@ def validate_pacer_verification_batch(
     trusted_receipt: str = "",
     expected_launch_id: str | None = None,
     expected_run_id: str = "",
+    allow_compile_only: bool = False,
 ) -> VerificationBatchValidation:
     validation = audit_pacer_verification_batch(
         payload,
         expected_launch_id=expected_launch_id,
         expected_run_id=expected_run_id,
+        allow_compile_only=allow_compile_only,
     )
     if not isinstance(payload, dict):
         return validation
@@ -130,6 +132,7 @@ def audit_pacer_verification_batch(
     *,
     expected_launch_id: str | None = None,
     expected_run_id: str = "",
+    allow_compile_only: bool = False,
 ) -> VerificationBatchValidation:
     """Validate on-disk evidence structurally without granting process trust."""
     errors: list[str] = []
@@ -211,7 +214,8 @@ def audit_pacer_verification_batch(
             errors.append("not_applicable_count_mismatch")
     if not passed_substantive:
         errors.append("substantive_verification_required")
-    if not any(step_class in ACCEPTANCE_STEP_CLASSES for step_class in passed_substantive):
+    acceptance_classes = ACCEPTANCE_STEP_CLASSES | ({"compile"} if allow_compile_only else set())
+    if not any(step_class in acceptance_classes for step_class in passed_substantive):
         errors.append("behavioral_verification_required")
 
     unique_errors = tuple(dict.fromkeys(errors))

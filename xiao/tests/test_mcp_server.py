@@ -113,6 +113,7 @@ def active_completion_context(
     *,
     launch_id: str = "launch-complete",
     goal: str = "test the project",
+    initial_files: dict[str, str] | None = None,
 ):
     from visual_agent import codex_rollout_telemetry
     from visual_agent.codex_rollout_telemetry import RolloutSnapshot
@@ -125,6 +126,10 @@ def active_completion_context(
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "pyproject.toml").write_text("[project]\nname='completion-test'\n", encoding="utf-8")
+    for relative_path, content in (initial_files or {}).items():
+        path = repo / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
     workspace = repo / ".agent-workspace"
     manifest = workspace / "pacer_native" / "launches" / f"{launch_id}.json"
     manifest.parent.mkdir(parents=True)
@@ -1673,6 +1678,69 @@ def test_compile_only_summary_cannot_satisfy_acceptance() -> None:
     assert validation.valid is False
     assert validation.step_classes == ("compile",)
     assert "behavioral_verification_required" in validation.errors
+
+
+def test_complete_documentation_task_accepts_requested_compileall(tmp_path, monkeypatch) -> None:
+    from visual_agent.mcp_server import complete_pacer_task_payload
+    from visual_agent.task_review import build_task_contract
+
+    goal = (
+        "更新 README.md，增加 Usage 小节，写明 python app.py 启动命令，只修改该文档"
+        "并使用 python -m compileall -q app.py 验证。"
+    )
+    workspace, repo = active_completion_context(
+        tmp_path,
+        monkeypatch,
+        launch_id="launch-documentation-compile",
+        goal=goal,
+        initial_files={
+            "README.md": "# Sample App\n\nA minimal command-line sample.\n",
+            "app.py": "def main():\n    return 0\n",
+        },
+    )
+    (repo / "README.md").write_text(
+        "# Sample App\n\nA minimal command-line sample.\n\n"
+        "## Usage\n\n```bash\npython app.py\n```\n",
+        encoding="utf-8",
+    )
+    contract = build_task_contract(goal)
+    claims = [
+        {
+            "kind": "change",
+            "requirement_ids": [requirement["id"]],
+            "requirement": requirement["text"],
+            "result": "README Usage 文档已更新，并写明 python app.py 启动命令。",
+            "files": [{"path": "README.md", "state": "modified"}],
+            "verification_steps": ["compile-app"],
+        }
+        for requirement in contract["requirements"]
+    ]
+
+    payload = complete_pacer_task_payload(
+        {
+            "workspace_root": str(workspace),
+            "repo_root": str(repo),
+            "goal": goal,
+            "summary": "README 已增加 Usage 小节和 python app.py 启动命令。",
+            "completion_evidence": {
+                "result_kind": "change",
+                "claims": claims,
+                "unresolved_items": [],
+                "known_risks": [],
+            },
+            "steps": [
+                {
+                    "name": "compile-app",
+                    "argv": [sys.executable, "-m", "compileall", "-q", "app.py"],
+                }
+            ],
+        }
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["verification"]["records"][0]["step_class"] == "compile"
+    assert payload["task_review"]["trust"] == "yes"
+    assert payload["five_pillars_active"] is True
 
 
 def test_complete_pacer_task_success_activates_all_five_pillars(tmp_path, monkeypatch) -> None:

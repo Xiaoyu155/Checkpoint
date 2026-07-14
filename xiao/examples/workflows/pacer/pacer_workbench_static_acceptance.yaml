@@ -1,16 +1,28 @@
 schema_version: 1
 min_runtime_version: "0.1.0"
 name: pacer_workbench_static_acceptance
-version: 1
-description: Validate the Pacer workbench static shell exposes mission intake, value metrics, and requirement-contract evidence.
+version: 2
+description: Validate the Pacer workbench shell and install metadata expose a usable, dependency-complete release.
 tags: [verification, fast, pacer, dashboard, workbench]
 affects:
   - .gitignore
+  - README.md
+  - docs/mcp.md
+  - docs/release_0.1.2.md
+  - docs/源码总览.md
+  - docs/验收进度_2026-07-10.md
   - examples/workflows/
+  - pyproject.toml
   - src/visual_agent/
   - tests/
   - xiao/.gitignore
+  - xiao/README.md
+  - xiao/docs/mcp.md
+  - xiao/docs/release_0.1.2.md
+  - xiao/docs/源码总览.md
+  - xiao/docs/验收进度_2026-07-10.md
   - xiao/examples/workflows/
+  - xiao/pyproject.toml
   - xiao/src/visual_agent/
   - xiao/tests/
 visibility: private
@@ -24,3 +36,10 @@ steps:
     expect_text: '"status": "success"'
     timeout_seconds: 30
     description: Verify Pacer dashboard static workbench acceptance signals.
+  - id: packaging_contract
+    action: run_command
+    command: python -m pytest tests/test_packaging_contract.py -q
+    dry_run: false
+    expect_text: '1 passed'
+    timeout_seconds: 30
+    description: Verify the release version and core MCP dependency contract.

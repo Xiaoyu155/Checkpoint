@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 import json
 import math
@@ -355,6 +356,12 @@ def launch_codex(argv: Sequence[str] = (), *, cwd: str | Path = ".") -> int:
     if not executable:
         print("Pacer requires Codex CLI on PATH. Install Codex and run `codex login` first.")
         return 127
+    if not _mcp_runtime_available():
+        print(
+            "Pacer requires the MCP runtime in this Python environment. "
+            "Reinstall with `python -m pip install --upgrade visual-agent`."
+        )
+        return 78
     process_cwd = Path(cwd).expanduser().resolve()
     launch_id = _new_pacer_launch_id()
     effective_repo_root, binding_error = _effective_codex_repo_root(argv, process_cwd)
@@ -509,6 +516,13 @@ def launch_codex(argv: Sequence[str] = (), *, cwd: str | Path = ".") -> int:
         watchdog=watchdog,
     )
     return int(completed.returncode)
+
+
+def _mcp_runtime_available() -> bool:
+    try:
+        return importlib.util.find_spec("mcp") is not None
+    except (ImportError, AttributeError, ValueError):
+        return False
 
 
 def _new_pacer_launch_id() -> str:

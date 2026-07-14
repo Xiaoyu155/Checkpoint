@@ -93,6 +93,17 @@ def build_pacer_support_snapshot(
     profile = load_user_profile().to_public_dict()
     outcomes, outcome_conflicted_run_ids = _read_native_outcomes(root, repo)
     command_runs, command_conflicted_run_ids = _read_command_runs(root, repo)
+    documentation_compile_run_ids = {
+        _outcome_run_id(item)
+        for item in outcomes
+        if _task_review_allows_compile_only(item.get("task_review"))
+    }
+    command_runs = [
+        _reaudit_command_run(item, allow_compile_only=True)
+        if str(item.get("run_id") or "") in documentation_compile_run_ids
+        else item
+        for item in command_runs
+    ]
     conflicted_run_ids = sorted(set(outcome_conflicted_run_ids) | set(command_conflicted_run_ids))
     # Older or partially migrated workspaces may only have the durable active
     # pointer, without a per-launch context file. Keep its negative mechanical
@@ -691,6 +702,7 @@ def _annotate_outcome_evidence(
             command_run,
             expected_launch_id=str(annotated.get("launch_id") or "") or None,
             expected_run_id=run_id,
+            allow_compile_only=_task_review_allows_compile_only(annotated.get("task_review")),
         )
         if command_run is not None
         else None
@@ -713,6 +725,36 @@ def _annotate_outcome_evidence(
         return annotated
     annotated["evidence_level"] = "self_reported"
     return annotated
+
+
+def _task_review_allows_compile_only(task_review: Any) -> bool:
+    from .task_review import task_contract_allows_compile_only
+
+    review = task_review if isinstance(task_review, dict) else {}
+    return bool(review.get("valid")) and task_contract_allows_compile_only(review.get("task_contract"))
+
+
+def _reaudit_command_run(
+    item: dict[str, Any],
+    *,
+    allow_compile_only: bool,
+) -> dict[str, Any]:
+    run_id = str(item.get("run_id") or "")
+    validation = audit_pacer_verification_batch(
+        item,
+        expected_launch_id=str(item.get("launch_id") or "") or None,
+        expected_run_id=run_id,
+        allow_compile_only=allow_compile_only,
+    )
+    return {
+        **item,
+        "_verification_valid": validation.valid,
+        "_verification_errors": list(validation.errors),
+        "_verification_step_classes": list(validation.step_classes),
+        "_verification_substantive_step_classes": list(
+            validation.substantive_step_classes
+        ),
+    }
 
 
 def _compact_command_run(item: dict[str, Any]) -> dict[str, Any]:

@@ -1158,6 +1158,16 @@ def test_launch_codex_reports_missing_cli(tmp_path, monkeypatch, capsys) -> None
     assert not (tmp_path / ".agent-workspace").exists()
 
 
+def test_launch_codex_requires_mcp_runtime_before_creating_launch(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(codex_launcher.shutil, "which", lambda _name: r"C:\Tools\codex.exe")
+    monkeypatch.setattr(codex_launcher, "_mcp_runtime_available", lambda: False)
+
+    assert codex_launcher.launch_codex(["exec", "修复错误"], cwd=tmp_path) == 78
+
+    assert "requires the MCP runtime" in capsys.readouterr().out
+    assert not (tmp_path / ".agent-workspace").exists()
+
+
 def test_launch_codex_writes_redacted_launch_manifest(tmp_path, monkeypatch) -> None:
     (tmp_path / ".agent-workspace").mkdir()
     calls = []

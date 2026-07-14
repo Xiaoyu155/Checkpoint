@@ -10,11 +10,12 @@ audit-oriented execution paths.
 python -m pip install visual-agent
 ```
 
+The core install includes the MCP runtime required by `pacer`.
+
 Install optional capabilities only where they are needed:
 
 ```console
 python -m pip install "visual-agent[web]"
-python -m pip install "visual-agent[mcp]"
 python -m pip install "visual-agent[cloud]"
 python -m pip install "visual-agent[desktop]"
 ```

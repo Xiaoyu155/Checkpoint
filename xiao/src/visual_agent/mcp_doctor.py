@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
@@ -182,7 +181,7 @@ def _next_steps(status: str, checks: list[dict[str, Any]]) -> list[str]:
     if "pythonpath_src" in failed:
         steps.append("Run the command from the visual-agent checkout or pass --repo-root to the checkout containing src/visual_agent.")
     if "mcp_import" in failed:
-        steps.append("Install MCP support in the selected Python: python -m pip install -e .[mcp]")
+        steps.append("Install the Pacer runtime in the selected Python: python -m pip install -e .")
     if "workspace_root" in warnings:
         steps.append("Initialize the workspace before using tools that require it: python -m visual_agent.cli init --root <workspace_root>")
     if status == "success":

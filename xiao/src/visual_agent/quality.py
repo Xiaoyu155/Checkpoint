@@ -1175,7 +1175,7 @@ def build_install_check_plan() -> dict[str, Any]:
     checks = [
         {"id": "python", "command": f"{python} --version", "required": True, "purpose": "Confirm the selected Python is callable."},
         {"id": "editable_install_web", "command": f"{python} -m pip install -e .[web]", "required": True, "purpose": "Install browser automation dependencies."},
-        {"id": "editable_install_mcp", "command": f"{python} -m pip install -e .[mcp]", "required": True, "purpose": "Install MCP server dependencies."},
+        {"id": "editable_install_mcp", "command": f"{python} -m pip install -e .", "required": True, "purpose": "Install the runtime including required MCP server dependencies."},
         {"id": "playwright_browser", "command": f"{python} -m playwright install chromium", "required": False, "purpose": "Install browser binaries for live browser runs."},
         {"id": "doctor", "command": f"{python} -m visual_agent.cli doctor", "required": True, "purpose": "Check local capability availability without leaking secrets."},
         {"id": "mcp_doctor", "command": f"{python} -m visual_agent.cli mcp-doctor --format markdown", "required": True, "purpose": "Check MCP startup paths, PYTHONPATH, and import readiness."},

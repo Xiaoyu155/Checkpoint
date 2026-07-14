@@ -180,7 +180,7 @@ def test_version_flag_prints_runtime_info(capsys) -> None:
     output = capsys.readouterr().out
 
     assert code == 0
-    assert "visual-agent 0.1.1" in output
+    assert "visual-agent 0.1.2" in output
     assert "Product: Checkpoint" in output
     assert "Python:" in output
     assert "Playwright:" in output
@@ -194,7 +194,7 @@ def test_checkpoint_entrypoint_prints_brand_aligned_version(capsys, monkeypatch)
     output = capsys.readouterr().out
 
     assert code == 0
-    assert "checkpoint 0.1.1" in output
+    assert "checkpoint 0.1.2" in output
     assert "Product: Checkpoint" in output
     assert "Package: visual-agent" in output
 

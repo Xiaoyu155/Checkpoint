@@ -229,6 +229,19 @@ def build_task_contract(goal: str) -> dict[str, Any]:
     }
 
 
+def task_contract_allows_compile_only(task_contract: Any) -> bool:
+    """Allow compile-only acceptance only for a source-changing documentation task."""
+
+    contract = task_contract if isinstance(task_contract, dict) else {}
+    requirements = contract.get("requirements") if isinstance(contract.get("requirements"), list) else []
+    changed_roles = {
+        str(item.get("required_artifact_role") or "")
+        for item in requirements
+        if isinstance(item, dict) and bool(item.get("requires_source_change"))
+    }
+    return bool(contract.get("requires_source_change")) and changed_roles == {"documentation"}
+
+
 def _goal_requirement_clauses(goal: str) -> list[str]:
     clauses: list[str] = []
     for sentence in _CLAUSE_SPLIT.split(str(goal or "")):
@@ -244,17 +257,26 @@ def _goal_intent(goal: str) -> tuple[str, bool, str]:
     if not normalized:
         return "implementation", True, "implementation"
 
+    mutation_text = normalized
+    for negated_mutation in (
+        "不要修改", "不得修改", "不能修改", "无需修改", "无须修改", "禁止修改", "切勿修改",
+        "do not modify", "don't modify", "must not modify", "without modifying",
+    ):
+        mutation_text = mutation_text.replace(negated_mutation, "")
+
     chinese_mutation_markers = (
         "修复", "实现", "新增", "添加", "编写", "重构", "优化", "删除", "接入",
-        "配置", "创建", "制作", "完善", "升级", "调整", "开发", "更新", "改造", "支持", "补充",
+        "配置", "创建", "制作", "完善", "升级", "调整", "开发", "更新", "修改", "增加",
+        "改造", "支持", "补充",
     )
     english_words = set(re.findall(r"[a-z][a-z0-9_-]*", normalized))
+    mutation_english_words = set(re.findall(r"[a-z][a-z0-9_-]*", mutation_text))
     english_mutation_words = {
         "add", "build", "change", "configure", "create", "delete", "develop", "fix",
         "implement", "integrate", "modify", "optimize", "refactor", "support", "update", "write",
     }
-    has_mutation = any(marker in normalized for marker in chinese_mutation_markers) or bool(
-        english_words & english_mutation_words
+    has_mutation = any(marker in mutation_text for marker in chinese_mutation_markers) or bool(
+        mutation_english_words & english_mutation_words
     )
     has_test = any(marker in normalized for marker in ("测试", "用例", "回归", "覆盖率")) or bool(
         english_words & {"test", "tests", "spec", "coverage", "regression"}
@@ -397,6 +419,11 @@ def audit_task_completion(
         for item in contract_requirements
         if isinstance(item, dict) and str(item.get("id") or "")
     }
+    allowed_acceptance_step_classes = (
+        ACCEPTANCE_STEP_CLASSES | {"compile"}
+        if task_contract_allows_compile_only(contract)
+        else ACCEPTANCE_STEP_CLASSES
+    )
     if not requirement_index:
         _issue(errors, "task_contract_empty", "任务契约没有可验收的需求项。")
 
@@ -693,7 +720,7 @@ def audit_task_completion(
                     step=raw_name,
                 )
                 continue
-            if step["step_class"] in ACCEPTANCE_STEP_CLASSES:
+            if step["step_class"] in allowed_acceptance_step_classes:
                 acceptance_step_seen = True
                 locked_requirement = (
                     str(requirement_index[valid_requirement_ids[0]].get("text") or "")
@@ -706,10 +733,8 @@ def audit_task_completion(
                     else ""
                 )
                 relevance_files = claim_paths_by_role.get(required_role, []) if required_role else []
-                if _verification_step_covers_claim(
-                    step,
-                    locked_requirement=locked_requirement,
-                    files=relevance_files,
+                if required_role == "documentation" or _verification_step_covers_claim(
+                    step, locked_requirement=locked_requirement, files=relevance_files
                 ):
                     relevant_acceptance_bound = True
             claim_requires_test = kind == "test" or any(
@@ -787,7 +812,11 @@ def audit_task_completion(
             "source_change_not_proven",
             "原目标要求修改项目，但没有任何文件被证明是在本轮启动后发生变化。",
         )
-    if source_change_required and not test_only_goal and attributed_implementation_file_count <= 0:
+    if (
+        source_change_required
+        and "implementation" in required_roles
+        and attributed_implementation_file_count <= 0
+    ):
         _issue(
             errors,
             "implementation_change_not_proven",

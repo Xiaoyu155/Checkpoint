@@ -20,7 +20,7 @@ Checkpoint MCP gives you a local workflow runtime with permissions, audit trails
 ## Install
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -e .[mcp]
+.\.venv\Scripts\python.exe -m pip install -e .
 ```
 
 Before connecting a client, run the release check plan and MCP smoke tests:
