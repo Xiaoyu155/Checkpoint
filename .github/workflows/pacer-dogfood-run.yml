@@ -127,8 +127,13 @@ jobs:
             separate completion-evidence claim for each locked requirement: bind a test-run or test
             requirement only to targeted-tests, bind an analysis requirement only to
             targeted-analysis, and bind every other requirement to the relevant one of those two
-            steps. Do not add or run any other verification step. If that one completion call is
-            rejected, stop without retrying it.
+            steps. Begin every claim result by repeating that claim's exact locked requirement text,
+            then append the concrete completed or passed result so the semantic binding is exact.
+            If the patch is exact and both steps pass, submit unresolved_items [] and known_risks
+            []; the absent ignored .visual-agent-status.md file and product pillars outside this
+            bounded task are not unfinished work or risks of this task.
+            Do not add or run any other verification step. If that one completion call is rejected,
+            stop without retrying it.
         run: |
           set -euo pipefail
           export PATH="$RUNNER_TEMP/venv-a/bin:$PATH"
