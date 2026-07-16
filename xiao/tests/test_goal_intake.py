@@ -58,7 +58,12 @@ def test_model_path_parses_json(monkeypatch):
 
 def test_auto_intake_backend_reads_credentials(tmp_path, monkeypatch):
     cred = tmp_path / "model_api_keys.txt"
-    cred.write_text("deepseek sk-abcdefghijklmnopqrstuvwxyz012345\nmimo tp-zzzzzzzzzzzzzzzzzz\n", encoding="utf-8")
+    fake_deepseek_key = "sk-" + "x" * 32
+    fake_mimo_key = "tp-" + "z" * 32
+    cred.write_text(
+        f"deepseek {fake_deepseek_key}\nmimo {fake_mimo_key}\n",
+        encoding="utf-8",
+    )
     monkeypatch.setenv("CHECKPOINT_MODEL_CREDENTIALS", str(cred))
     from visual_agent.goal_intake import auto_intake_backend
 
