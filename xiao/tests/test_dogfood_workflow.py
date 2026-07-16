@@ -47,6 +47,9 @@ def test_dogfood_producer_keeps_provider_secrets_out_of_reusable_verifier() -> N
     assert "PACER_DOGFOOD_PROVIDER_API_KEY" in workflow
     assert "PACER_DOGFOOD_PROVIDER_BASE_URL" in workflow
     assert "scripts/pacer_dogfood_candidate.patch" in workflow
+    assert "Configure ephemeral Codex MCP layer" in workflow
+    assert "[mcp_servers.pacer]" in workflow
+    assert "required = true" in workflow
     assert "uses: ./.github/workflows/pacer-dogfood.yml" in workflow
     assert "secrets: inherit" not in workflow
     assert "pull_request_target:" not in workflow

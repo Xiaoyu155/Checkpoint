@@ -81,6 +81,24 @@ jobs:
           echo "PACER_INPUT_WHEEL=${wheels[0]}" >> "$GITHUB_ENV"
           test -z "$(git status --porcelain)"
 
+      - name: Configure ephemeral Codex MCP layer
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CODEX_HOME="$RUNNER_TEMP/codex-home"
+          mkdir -p "$CODEX_HOME"
+          {
+            printf '[mcp_servers.pacer]\n'
+            printf 'command = "%s"\n' "$RUNNER_TEMP/venv-a/bin/python"
+            printf 'args = ["-m", "visual_agent.mcp_server"]\n'
+            printf 'env_vars = ["PACER_LAUNCH_ID", "PACER_PRELAUNCH_TASK_REQUIRED", "PACER_PRELAUNCH_TASK_CONTRACT_DIGEST", "PACER_PRELAUNCH_SOURCE_BASELINE_DIGEST"]\n'
+            printf 'required = true\n'
+            printf 'startup_timeout_sec = 30\n'
+          } > "$CODEX_HOME/config.toml"
+          echo "CODEX_HOME=$CODEX_HOME" >> "$GITHUB_ENV"
+          codex mcp list | tee "$RUNNER_TEMP/codex-mcp-list.txt"
+          grep -E '^pacer[[:space:]].*[[:space:]]enabled[[:space:]]' "$RUNNER_TEMP/codex-mcp-list.txt"
+
       - name: Verify the configured provider without exposing credentials
         shell: bash
         run: |
