@@ -108,7 +108,6 @@ jobs:
             --ask-for-approval never \
             --sandbox workspace-write \
             exec \
-            --ignore-user-config \
             --skip-git-repo-check \
             --model "$PACER_PROVIDER_MODEL" \
             -c "model_provider='$PACER_PROVIDER_ID'" \
