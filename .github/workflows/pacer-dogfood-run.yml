@@ -1,0 +1,195 @@
+name: Pacer Dogfood Producer
+run-name: Pacer Dogfood ${{ inputs.provider_model }} / ${{ github.run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider_model:
+        description: Responses API model used by the isolated Pacer worker.
+        required: true
+        default: gpt-5.6-sol
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: pacer-dogfood-producer-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  produce:
+    name: Produce one deterministic Pacer A-to-B candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: xiao
+    env:
+      PACER_PROVIDER_API_KEY: ${{ secrets.PACER_DOGFOOD_PROVIDER_API_KEY }}
+      PACER_PROVIDER_BASE_URL: ${{ secrets.PACER_DOGFOOD_PROVIDER_BASE_URL }}
+      PACER_PROVIDER_ID: sub2api_dogfood
+      PACER_PROVIDER_MODEL: ${{ inputs.provider_model }}
+      PACER_AUTO_COMPACT_TOKEN_LIMIT: "96000"
+    steps:
+      - name: Check out main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: xiao/pyproject.toml
+
+      - name: Install pinned Codex and wheel tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global @openai/codex@0.144.4
+          python -m pip install --disable-pip-version-check build
+          codex --version
+
+      - name: Create isolated Pacer source baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init
+          git config user.name "pacer-dogfood"
+          git config user.email "pacer-dogfood@users.noreply.github.com"
+          git add --all
+          git commit -m "Immutable Pacer Dogfood source baseline"
+          echo "PACER_NESTED_BASELINE=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          git apply --cached scripts/pacer_dogfood_candidate.patch
+          git diff --cached --binary HEAD -- > "$RUNNER_TEMP/expected-candidate.diff"
+          git restore --staged src/visual_agent/dogfood_provider_check.py tests/test_dogfood_provider_check.py
+          test -z "$(git status --porcelain)"
+
+      - name: Build and install parent wheel A
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          mkdir -p "$RUNNER_TEMP/input-wheel"
+          python -m build --wheel --outdir "$RUNNER_TEMP/input-wheel"
+          rm -rf build visual_agent.egg-info
+          mapfile -t wheels < <(find "$RUNNER_TEMP/input-wheel" -maxdepth 1 -type f -name '*.whl' -print)
+          test "${#wheels[@]}" -eq 1
+          python -m venv "$RUNNER_TEMP/venv-a"
+          "$RUNNER_TEMP/venv-a/bin/python" -m pip install --disable-pip-version-check "${wheels[0]}"
+          echo "PACER_INPUT_WHEEL=${wheels[0]}" >> "$GITHUB_ENV"
+          test -z "$(git status --porcelain)"
+
+      - name: Verify the configured provider without exposing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/venv-a/bin/pacer" pacer-dogfood-provider-check \
+            --provider-id "$PACER_PROVIDER_ID" \
+            --base-url "$PACER_PROVIDER_BASE_URL" \
+            --model "$PACER_PROVIDER_MODEL" \
+            --key-env PACER_PROVIDER_API_KEY \
+            --timeout-seconds 120 \
+            --format json > "$RUNNER_TEMP/provider-receipt.json"
+
+      - name: Run installed Pacer A on its own exact candidate change
+        shell: bash
+        env:
+          PACER_DOGFOOD_TASK: >-
+            Apply the exact checked-in patch scripts/pacer_dogfood_candidate.patch and make no
+            other source changes. Run python -m pytest tests/test_dogfood_provider_check.py
+            tests/test_pacer_quality_cli.py -q. Complete this Pacer task once with server-derived
+            evidence for the exact implementation and test; do not commit.
+        run: |
+          set -euo pipefail
+          export PATH="$RUNNER_TEMP/venv-a/bin:$PATH"
+          pacer \
+            --ask-for-approval never \
+            --sandbox workspace-write \
+            exec \
+            --ignore-user-config \
+            --skip-git-repo-check \
+            --model "$PACER_PROVIDER_MODEL" \
+            -c "model_provider='$PACER_PROVIDER_ID'" \
+            -c "model_providers.$PACER_PROVIDER_ID.name='Pacer Dogfood Provider'" \
+            -c "model_providers.$PACER_PROVIDER_ID.base_url='$PACER_PROVIDER_BASE_URL'" \
+            -c "model_providers.$PACER_PROVIDER_ID.env_key='PACER_PROVIDER_API_KEY'" \
+            -c "model_providers.$PACER_PROVIDER_ID.wire_api='responses'" \
+            "$PACER_DOGFOOD_TASK"
+
+      - name: Prove the Pacer change is exactly the immutable candidate patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --binary HEAD -- > "$RUNNER_TEMP/actual-candidate.diff"
+          cmp "$RUNNER_TEMP/expected-candidate.diff" "$RUNNER_TEMP/actual-candidate.diff"
+          git diff --check
+          git apply --reverse --check scripts/pacer_dogfood_candidate.patch
+
+      - name: Build and independently install candidate wheel B
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          mkdir -p "$RUNNER_TEMP/candidate-wheel"
+          python -m build --wheel --outdir "$RUNNER_TEMP/candidate-wheel"
+          rm -rf build visual_agent.egg-info
+          mapfile -t wheels < <(find "$RUNNER_TEMP/candidate-wheel" -maxdepth 1 -type f -name '*.whl' -print)
+          test "${#wheels[@]}" -eq 1
+          python -m venv "$RUNNER_TEMP/venv-b"
+          "$RUNNER_TEMP/venv-b/bin/python" -m pip install --disable-pip-version-check "${wheels[0]}"
+          "$RUNNER_TEMP/venv-b/bin/python" -m pip check
+          (
+            cd "$RUNNER_TEMP"
+            "$RUNNER_TEMP/venv-b/bin/pacer" pacer-dogfood-policy-check \
+              --repo-root "$GITHUB_WORKSPACE/xiao" --format json
+            "$RUNNER_TEMP/venv-b/bin/python" -c \
+              "from visual_agent.dogfood_provider_check import PROVIDER_CHECK_RECEIPT_SCHEMA_VERSION as version; assert version == 1"
+          )
+          echo "PACER_CANDIDATE_WHEEL=${wheels[0]}" >> "$GITHUB_ENV"
+
+      - name: Build canonical fail-closed evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/venv-a/bin/python" -m visual_agent.dogfood_ci \
+            --repo-root . \
+            --workspace-root .agent-workspace \
+            --input-wheel "$PACER_INPUT_WHEEL" \
+            --candidate-wheel "$PACER_CANDIDATE_WHEEL" \
+            --expected-change-set "$RUNNER_TEMP/expected-candidate.diff" \
+            --provider-receipt "$RUNNER_TEMP/provider-receipt.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --baseline-commit "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            | tee .dogfood/producer-summary.json
+
+      - name: Upload immutable candidate wheel
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: pacer-candidate
+          path: xiao/.dogfood/candidate/*.whl
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload canonical evidence and bound receipts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: pacer-dogfood-evidence
+          path: xiao/.dogfood/evidence/**
+          if-no-files-found: error
+          retention-days: 30
+
+  prove:
+    name: Independently attest and verify candidate B
+    needs: produce
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    uses: ./.github/workflows/pacer-dogfood.yml
+    with:
+      candidate_artifact_name: pacer-candidate
+      evidence_artifact_name: pacer-dogfood-evidence

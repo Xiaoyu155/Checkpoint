@@ -62,6 +62,8 @@ def test_default_budget_policy_caps_repair_rounds_at_two() -> None:
     assert budget["max_rounds"] == 5
     # The execution loop supports at most two automatic repair rounds by default.
     assert budget["max_repair_rounds"] == 2
+    assert budget["max_total_tokens"] == 120_000
+    assert budget["max_same_failure_count"] == 2
     assert budget["model_policy"]["visual_review"] == "multimodal"
 
 

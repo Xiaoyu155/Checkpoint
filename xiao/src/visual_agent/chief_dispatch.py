@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 import hashlib
+import inspect
 import os
 import re
 import shlex
 import shutil
 import subprocess
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Any, Callable
@@ -34,10 +35,19 @@ from .command_verification import (
     tamper_repair_brief,
 )
 from .chief_plans_store import append_dispatch_record, append_worker_record, load_plan, plan_dir, save_verification
+from .change_set import collect_repository_change_set
 from .codex_check import codex_check_to_markdown, is_runtime_changed_file, run_codex_check
 from .diff_summary import build_diff_summary
+from .dynamic_model_selector import routing_request_evidence
 from .execution_alignment import build_worker_prompt_alignment_check
 from .mission_progress import record_worker_output, save_mission_progress
+from .managed_state import (
+    ManagedBudgetPolicy,
+    ManagedBudgetUsage,
+    assess_managed_budget,
+    evaluate_retry,
+    managed_idempotency_key,
+)
 from .preflight import dependency_preflight
 from .subprocess_window import (
     hidden_subprocess_kwargs,
@@ -265,6 +275,13 @@ def dispatch_chief_plan(
     if plan is None:
         return _blocked(plan_id=plan_id, reason=f"No saved plan found: {plan_id}")
     closed_loop = dict(execution_policy) if isinstance(execution_policy, dict) else {}
+    managed_budget_policy: ManagedBudgetPolicy | None = None
+    managed_budget_error = ""
+    if "managed_budget" in closed_loop:
+        try:
+            managed_budget_policy = _managed_budget_policy(closed_loop.get("managed_budget"))
+        except (TypeError, ValueError) as exc:
+            managed_budget_error = str(exc)
     memory_mode = str(closed_loop.get("memory_mode") or "enabled").strip().lower()
     acceptance_policy = str(closed_loop.get("acceptance_policy") or "standard").strip().lower()
     codex_provider = str(closed_loop.get("codex_provider") or "inherit").strip()
@@ -296,6 +313,15 @@ def dispatch_chief_plan(
         return _blocked(plan_id=plan_id, reason="No matching worker track found in the saved plan.", plan=plan)
 
     repo_root = Path(str(plan.get("repo_root") or ".")).expanduser().resolve()
+    managed_key = str(closed_loop.get("idempotency_key") or "").strip() or managed_idempotency_key(
+        {
+            "objective": str(plan.get("objective") or ""),
+            "repo_root": str(repo_root),
+            "requirement_contract": plan.get("requirement_contract")
+            if isinstance(plan.get("requirement_contract"), dict)
+            else {},
+        }
+    )
     raw_test_command = str(test_command or "").strip()
     resolved_test_command, verification_profile = resolve_test_command(test_command, repo_root=repo_root)
     test_command_unresolved = bool(raw_test_command) and not str(resolved_test_command or "").strip()
@@ -341,6 +367,24 @@ def dispatch_chief_plan(
         timeout_info=timeout_info,
         command_safety=command_safety,
     )
+    if managed_budget_error:
+        preflight["status"] = "blocked"
+        preflight["managed_budget"] = {
+            "status": "blocked",
+            "reason": "managed_budget_invalid",
+            "message": managed_budget_error,
+        }
+    elif managed_budget_policy is not None:
+        preflight["managed_budget"] = {
+            "status": "ok",
+            "policy": {
+                "max_wall_seconds": managed_budget_policy.max_wall_seconds,
+                "max_total_tokens": managed_budget_policy.max_total_tokens,
+                "max_attempts": managed_budget_policy.max_attempts,
+                "max_repair_rounds": managed_budget_policy.max_repair_rounds,
+                "max_same_failure_count": managed_budget_policy.max_same_failure_count,
+            },
+        }
     if acceptance_policy == "strict" and command_mode and _is_weak_command_gate(effective_verification_command):
         preflight["status"] = "blocked"
         preflight["strict_acceptance"] = {
@@ -426,6 +470,14 @@ def dispatch_chief_plan(
     )
     toolchain_policy = _toolchain_policy_for_command(effective_verification_command)
     toolchain_preflight = _toolchain_preflight_for_command(effective_verification_command, policy=toolchain_policy)
+    initial_budget = _dispatch_budget_assessment(
+        managed_budget_policy,
+        dispatch_started=dispatch_started,
+        records=[],
+        repair_rounds=0,
+        same_failure_count=0,
+        operation="worker_attempt",
+    )
     preview = {
         "schema_version": 1,
         "status": "preview",
@@ -478,6 +530,15 @@ def dispatch_chief_plan(
             "timeout_reason": timeout_info["reason"],
         },
         "preflight": preflight,
+        "managed_runtime": {
+            "schema_version": 1,
+            "idempotency_key": managed_key,
+            "transition_valid": True,
+            "budget_status": str(initial_budget.get("status") or "not_configured"),
+            "budget": initial_budget,
+            "routing_evidence": dict(worker_command.get("routing_evidence") or {}),
+            "retry": {},
+        },
         "repo_map": repo_map_stats,
         "toolchain_policy": toolchain_policy,
         "subscription_quota": _quota_preview(),
@@ -853,6 +914,7 @@ def dispatch_chief_plan(
     repair_worker_records: list[dict[str, Any]] = []
     repair_worker_record: dict[str, Any] | None = None
     repair_rounds_completed = 0
+    budget_blocked: dict[str, Any] | None = None
     repair_limit = _repair_round_limit(
         auto_repair_once=auto_repair_once,
         max_repair_rounds=max_repair_rounds,
@@ -866,6 +928,17 @@ def dispatch_chief_plan(
     repair_agent = canonical_agent_name(str(repair_track.get("agent") or ""))
     for repair_round in range(1, repair_limit + 1):
         if verification.get("verdict") != "fail" or not _verification_is_repairable(verification):
+            break
+        repair_budget = _dispatch_budget_assessment(
+            managed_budget_policy,
+            dispatch_started=dispatch_started,
+            records=[worker_record, failover_record, *repair_worker_records],
+            repair_rounds=repair_rounds_completed,
+            same_failure_count=_same_verification_failure_count(verification_attempts),
+            operation="repair",
+        )
+        if not bool(repair_budget.get("allowed", True)):
+            budget_blocked = repair_budget
             break
         use_resume = bool(
             repair_strategy == "resume"
@@ -1026,6 +1099,20 @@ def dispatch_chief_plan(
         and looks_like_quota_exhaustion(failover_record.get("stdout_tail"), failover_record.get("stderr_tail"))
     )
     quota_exhausted = not worker_completed and (primary_quota or failover_quota)
+    runtime_worker_records = [
+        record
+        for record in [worker_record, failover_record, *repair_worker_records]
+        if isinstance(record, dict)
+    ]
+    usage_summary = summarize_worker_usage(runtime_worker_records)
+    final_budget = budget_blocked or _dispatch_budget_assessment(
+        managed_budget_policy,
+        dispatch_started=dispatch_started,
+        records=runtime_worker_records,
+        repair_rounds=repair_rounds_completed,
+        same_failure_count=_same_verification_failure_count(verification_attempts),
+        operation="continue",
+    )
     has_product_changes = _worktree_has_product_changes(worktree_project_root)
     has_prior_verified = bool(
         allow_prior_verified_evidence and _mission_has_prior_verified_evidence(workspace_path, plan_id)
@@ -1041,7 +1128,11 @@ def dispatch_chief_plan(
         diff = latest_verification.get("diff_summary") if isinstance(latest_verification.get("diff_summary"), dict) else {}
         verification_changed = diff.get("changed_files") if isinstance(diff.get("changed_files"), list) else []
     has_change_evidence = has_product_changes or bool(verification_changed) or has_prior_verified
-    report_deliverable_verified = bool(diagnosis_mode or review_plan_mode) and latest_verdict == "pass"
+    report_deliverable_verified = (
+        bool(diagnosis_mode or review_plan_mode)
+        and worker_completed
+        and latest_verdict == "pass"
+    )
     if toolchain_violation and latest_verdict == "pass":
         status = "verified_blocked"
     elif toolchain_violation:
@@ -1067,6 +1158,13 @@ def dispatch_chief_plan(
         # It must never surface as verified (principle: dry-run cannot pose as
         # real acceptance).
         status = "inspection_only"
+    if budget_blocked is not None and latest_verdict == "fail":
+        status = "managed_budget_exhausted"
+    if str(final_budget.get("status") or "") == "exhausted" and status in {
+        "verified",
+        "no_product_changes",
+    }:
+        status = "managed_budget_exhausted"
 
     # Clear quota failure record if the task succeeded (verified or merged)
     if status in {"verified", "merged"}:
@@ -1132,9 +1230,25 @@ def dispatch_chief_plan(
         "toolchain_violation": toolchain_violation,
         "verification_attempts": verification_attempts,
         "latest_verification": latest_verification,
-        "usage_summary": summarize_worker_usage(
-            [worker_record, failover_record, *repair_worker_records]
-        ),
+        "usage_summary": usage_summary,
+        "managed_runtime": {
+            "schema_version": 1,
+            "idempotency_key": managed_key,
+            "transition_valid": True,
+            "budget_status": str(final_budget.get("status") or "not_configured"),
+            "budget": final_budget,
+            "routing_evidence": _managed_routing_evidence(
+                effective_worker_record,
+                fallback=worker_command.get("routing_evidence"),
+            ),
+            "retry": _managed_retry_decision(
+                effective_worker_record,
+                verification=latest_verification,
+                idempotency_key=managed_key,
+                attempts_completed=max(1, len(runtime_worker_records)),
+                max_attempts=(managed_budget_policy.max_attempts if managed_budget_policy else 1),
+            ),
+        },
     }
     if diagnosis_mode and latest_verification.get("diagnosis_report"):
         payload["diagnosis_report"] = latest_verification["diagnosis_report"]
@@ -1152,11 +1266,7 @@ def dispatch_chief_plan(
             "Worker did not complete normally, but the current worktree changes passed the "
             "test command. Inspect the worktree manually before merging."
         )
-    all_worker_records = [
-        record
-        for record in [worker_record, failover_record, *repair_worker_records]
-        if isinstance(record, dict)
-    ]
+    all_worker_records = runtime_worker_records
     session_ids = list(
         dict.fromkeys(session for session in (_worker_session_id(record) for record in all_worker_records) if session)
     )
@@ -1309,6 +1419,16 @@ def _dispatch_preflight_payload(
 
 
 def _dispatch_preflight_block(preflight: dict[str, Any]) -> dict[str, str] | None:
+    managed_budget = (
+        preflight.get("managed_budget")
+        if isinstance(preflight.get("managed_budget"), dict)
+        else {}
+    )
+    if str(managed_budget.get("status") or "") == "blocked":
+        return {
+            "reason": str(managed_budget.get("reason") or "managed_budget_invalid"),
+            "message": str(managed_budget.get("message") or "Managed budget is invalid."),
+        }
     strict_acceptance = (
         preflight.get("strict_acceptance")
         if isinstance(preflight.get("strict_acceptance"), dict)
@@ -1370,6 +1490,179 @@ def _missing_declared_verification_env(verification_env: list[dict[str, Any]]) -
         if name and not os.environ.get(name):
             missing.append(name)
     return missing
+
+
+def _managed_budget_policy(value: Any) -> ManagedBudgetPolicy:
+    if not isinstance(value, dict):
+        raise ValueError("managed_budget must be an object")
+    return ManagedBudgetPolicy(
+        max_wall_seconds=float(value.get("max_wall_seconds") or 0),
+        max_total_tokens=int(value.get("max_total_tokens") or 0),
+        max_attempts=int(value.get("max_attempts") or 0),
+        max_repair_rounds=int(value.get("max_repair_rounds") or 0),
+        max_same_failure_count=int(
+            value["max_same_failure_count"] if "max_same_failure_count" in value else 2
+        ),
+    )
+
+
+def _dispatch_budget_assessment(
+    policy: ManagedBudgetPolicy | None,
+    *,
+    dispatch_started: float,
+    records: list[dict[str, Any] | None],
+    repair_rounds: int,
+    same_failure_count: int,
+    operation: str,
+) -> dict[str, Any]:
+    if policy is None:
+        return {
+            "allowed": True,
+            "status": "not_configured",
+            "operation": operation,
+            "reason_codes": [],
+        }
+    worker_records = [item for item in records if isinstance(item, dict)]
+    usage_complete = all(isinstance(item.get("usage"), dict) for item in worker_records)
+    usage_summary = summarize_worker_usage(worker_records)
+    usage = ManagedBudgetUsage(
+        elapsed_seconds=max(0.0, monotonic() - dispatch_started),
+        total_tokens=(int(usage_summary.get("total_tokens") or 0) if usage_complete else None),
+        attempts=len(worker_records),
+        repair_rounds=max(0, int(repair_rounds)),
+        same_failure_count=max(0, int(same_failure_count)),
+    )
+    assessment = assess_managed_budget(policy, usage, operation=operation).to_dict()
+    assessment["usage_complete"] = usage_complete
+    assessment["usage"] = {
+        "elapsed_seconds": round(usage.elapsed_seconds, 6),
+        "total_tokens": usage.total_tokens,
+        "attempts": usage.attempts,
+        "repair_rounds": usage.repair_rounds,
+        "same_failure_count": usage.same_failure_count,
+    }
+    return assessment
+
+
+def _same_verification_failure_count(attempts: list[dict[str, Any]]) -> int:
+    signatures = [_verification_failure_signature(item) for item in attempts]
+    if not signatures or not signatures[-1]:
+        return 0
+    latest = signatures[-1]
+    count = 0
+    for signature in reversed(signatures):
+        if signature != latest:
+            break
+        count += 1
+    return count
+
+
+def _verification_failure_signature(verification: dict[str, Any]) -> str:
+    if str(verification.get("verdict") or "") != "fail":
+        return ""
+    command = (
+        verification.get("command_verification")
+        if isinstance(verification.get("command_verification"), dict)
+        else {}
+    )
+    repair = (
+        verification.get("repair_brief")
+        if isinstance(verification.get("repair_brief"), dict)
+        else {}
+    )
+    failed_step = repair.get("failed_step") if isinstance(repair.get("failed_step"), dict) else {}
+    material = "|".join(
+        [
+            str(command.get("failure_kind") or repair.get("failure_kind") or ""),
+            str(repair.get("workflow") or ""),
+            str(failed_step.get("id") or ""),
+            str(repair.get("message") or command.get("output_tail") or "")[:1000],
+        ]
+    )
+    return hashlib.sha256(material.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _managed_routing_evidence(record: dict[str, Any], *, fallback: Any) -> dict[str, Any]:
+    value = record.get("routing_evidence")
+    if isinstance(value, dict):
+        return dict(value)
+    return dict(fallback) if isinstance(fallback, dict) else {}
+
+
+def _managed_retry_decision(
+    worker: dict[str, Any],
+    *,
+    verification: dict[str, Any],
+    idempotency_key: str,
+    attempts_completed: int,
+    max_attempts: int,
+) -> dict[str, Any]:
+    failure_kind = _managed_retry_failure_kind(worker, verification=verification)
+    fraction_material = f"{idempotency_key}:{attempts_completed}".encode("utf-8")
+    fraction_bits = int(hashlib.sha256(fraction_material).hexdigest()[:13], 16)
+    random_fraction = fraction_bits / float((16**13) - 1)
+    decision = evaluate_retry(
+        failure_kind,
+        attempts_completed=max(1, int(attempts_completed)),
+        max_attempts=max(1, int(max_attempts)),
+        factor_seconds=1.0,
+        maximum_seconds=600.0,
+        random_fraction=random_fraction,
+    ).to_dict()
+    if decision.get("retry"):
+        decision["scheduled_at"] = (
+            datetime.now(timezone.utc)
+            + timedelta(seconds=float(decision.get("delay_seconds") or 0.0))
+        ).isoformat()
+    decision["current_attempt_status"] = str(worker.get("status") or "unknown")
+    decision["current_attempt_remains_failed"] = str(worker.get("status") or "") != "completed"
+    return decision
+
+
+def _managed_retry_failure_kind(
+    worker: dict[str, Any],
+    *,
+    verification: dict[str, Any],
+) -> str:
+    repair = (
+        verification.get("repair_brief")
+        if isinstance(verification.get("repair_brief"), dict)
+        else {}
+    )
+    if str(repair.get("source") or "") in {
+        "test_tampering",
+        "acceptance_chain_tampering",
+        "scope_violation",
+        "workspace_tamper",
+    }:
+        return "evidence_rejected"
+    status = str(worker.get("status") or "")
+    stdout = str(worker.get("stdout_tail") or "")
+    stderr = str(worker.get("stderr_tail") or "")
+    text = "\n".join([stdout, stderr]).lower()
+    if looks_like_quota_exhaustion(stdout, stderr):
+        return "provider_rate_limit"
+    if any(
+        marker in text
+        for marker in (
+            "internal server error",
+            "bad gateway",
+            "service unavailable",
+            "gateway timeout",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+        )
+    ):
+        return "provider_5xx"
+    if "timed out after" in text or "network timeout" in text or "connection timed out" in text:
+        return "network_timeout"
+    if status == "crashed":
+        return "process_crash"
+    if status == "completed":
+        return "verification_failed" if str(verification.get("verdict") or "") == "fail" else "none"
+    return "worker_failed"
 
 
 def _verification_is_repairable(verification: dict[str, Any]) -> bool:
@@ -1472,20 +1765,11 @@ def _resume_session_failed(record: dict[str, Any] | None) -> bool:
 
 
 def _worktree_has_product_changes(worktree: Path) -> bool:
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(worktree), "-c", "core.quotePath=false", "status", "--porcelain"],
-            capture_output=True,
-            text=True,
-            timeout=10.0,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+    change_set = collect_repository_change_set(repo_root=worktree, base_ref="HEAD")
+    if not change_set.complete:
         return False
-    if completed.returncode != 0:
-        return False
-    for raw in completed.stdout.splitlines():
-        path = raw[3:].replace("\\", "/").strip()
+    for fact in change_set.changes:
+        path = fact.path
         if not path:
             continue
         if path.startswith(".agent-workspace/") or path == ".visual-agent-status.md":
@@ -1897,7 +2181,12 @@ def build_worker_command(
     if resume_session_id:
         argv.append("resume")
     argv.append("--json")
+    selection = track.get("model_selection") if isinstance(track.get("model_selection"), dict) else {}
+    selected = selection.get("selected") if isinstance(selection.get("selected"), dict) else {}
+    selected_provider = str(selected.get("provider") or "").strip()
     provider = str(codex_provider or "inherit").strip()
+    if provider.lower() == "inherit" and selected_provider:
+        provider = selected_provider
     if provider.lower() != "inherit":
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", provider):
             raise ValueError("codex_provider must be a simple provider id")
@@ -1941,6 +2230,11 @@ def build_worker_command(
     resolved_provider = provider if provider.lower() != "inherit" else str(
         user_defaults.get("provider") or "inherited(config.toml)"
     )
+    routing_evidence = routing_request_evidence(
+        selection,
+        requested_provider=resolved_provider,
+        requested_model=resolved_model,
+    )
     resolved_sandbox, sandbox_source = _resolved_codex_policy(
         track.get("sandbox"),
         option_names=("--sandbox", "-s"),
@@ -1967,6 +2261,7 @@ def build_worker_command(
         "approval_source": approval_source,
         "session_mode": "resume" if resume_session_id else "new",
         "json_output": True,
+        "routing_evidence": routing_evidence,
     }
 
 
@@ -2127,43 +2422,91 @@ def build_verification_command(
 
 def _restricted_worker_changes(*, repo_root: Path, base_ref: str | None) -> tuple[list[str], str]:
     base = str(base_ref or "HEAD").strip() or "HEAD"
-    commands = (
-        ["git", "-c", "core.quotePath=false", "diff", "--name-only", base],
-        ["git", "-c", "core.quotePath=false", "diff", "--name-only", "--cached"],
-        ["git", "-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard"],
-    )
+    change_set = collect_repository_change_set(repo_root=repo_root, base_ref=base)
+    if not change_set.complete:
+        return [], ", ".join(change_set.errors) or "change_set_incomplete"
     paths: set[str] = set()
-    for command_index, command in enumerate(commands):
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=str(repo_root),
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30.0,
-                encoding="utf-8",
-                errors="replace",
-                **hidden_subprocess_kwargs(),
-            )
-        except (OSError, subprocess.SubprocessError) as exc:
-            return [], f"{type(exc).__name__}: {exc}"
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "git diff failed").strip()
-            return [], detail[-1000:]
-        for line in completed.stdout.splitlines():
-            normalized = line.strip().replace("\\", "/")
-            if not normalized:
-                continue
-            # Pacer prepares an untracked verification workspace before the
-            # worker starts. Its trusted inputs are guarded by a content
-            # snapshot; tracked or staged workspace edits remain scope errors.
-            if command_index == 2 and ".agent-workspace" in normalized.split("/"):
-                continue
-            if normalized == ".agent-workspace/workspace.json":
-                continue
-            paths.add(normalized)
+    for fact in change_set.changes:
+        normalized = fact.path
+        # Pacer prepares an untracked verification workspace before the worker
+        # starts. Tracked workspace edits remain scope errors.
+        if ".agent-workspace" in normalized.split("/") and not _git_path_is_tracked(
+            repo_root,
+            normalized,
+        ):
+            continue
+        if normalized == ".agent-workspace/workspace.json":
+            continue
+        paths.add(normalized)
+    tracked_restricted, tracked_error = _tracked_restricted_worker_changes(
+        repo_root=repo_root,
+        base_ref=base,
+    )
+    if tracked_error:
+        return [], tracked_error
+    paths.update(tracked_restricted)
     return sorted(path for path in paths if _is_restricted_worker_path(path)), ""
+
+
+def _tracked_restricted_worker_changes(
+    *,
+    repo_root: Path,
+    base_ref: str,
+) -> tuple[list[str], str]:
+    """Recover tracked runtime changes intentionally omitted from source facts."""
+
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo_root),
+                "diff",
+                "--name-only",
+                "-z",
+                "--relative",
+                "--no-renames",
+                base_ref,
+                "--",
+                ".",
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=False,
+            timeout=10.0,
+            **hidden_subprocess_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return [], "tracked_scope_diff_unavailable"
+    if completed.returncode != 0:
+        return [], "tracked_scope_diff_failed"
+    try:
+        output = completed.stdout.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return [], "tracked_scope_diff_invalid_utf8"
+    paths = {
+        item.replace("\\", "/").strip().lstrip("/")
+        for item in output.split("\0")
+        if item.strip()
+    }
+    paths.discard(".agent-workspace/workspace.json")
+    return sorted(path for path in paths if _is_restricted_worker_path(path)), ""
+
+
+def _git_path_is_tracked(repo_root: Path, path: str) -> bool:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo_root), "ls-files", "--error-unmatch", "--", path],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10.0,
+            **hidden_subprocess_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return completed.returncode == 0
 
 
 def _scope_violation_verification(
@@ -3290,32 +3633,24 @@ def _run_worker_attempt(
             log_path=log_path,
         )
 
-    if stdin_text is not None:
-        try:
-            result = runner(argv, cwd, timeout_seconds, log_path, env=env, stdin_text=stdin_text, progress_callback=progress_callback)
-        except TypeError:
-            try:
-                result = runner(argv, cwd, timeout_seconds, log_path, env=env, stdin_text=stdin_text)
-            except TypeError:
-                try:
-                    result = runner(argv, cwd, timeout_seconds, log_path, stdin_text=stdin_text)
-                except TypeError:
-                    try:
-                        result = runner(argv, cwd, timeout_seconds, log_path, env=env)
-                    except TypeError:
-                        result = runner(argv, cwd, timeout_seconds, log_path)
-    else:
-        try:
-            result = runner(argv, cwd, timeout_seconds, log_path, env=env, progress_callback=progress_callback)
-        except TypeError:
-            try:
-                result = runner(argv, cwd, timeout_seconds, log_path, env=env)
-            except TypeError:
-                result = runner(argv, cwd, timeout_seconds, log_path)
-    exit_code = int(result.get("exit_code") or 0)
+    result = _invoke_worker_runner_once(
+        runner,
+        argv=argv,
+        cwd=cwd,
+        timeout_seconds=timeout_seconds,
+        log_path=log_path,
+        env=env,
+        stdin_text=stdin_text,
+        progress_callback=progress_callback,
+    )
+    raw_exit_code = result.get("exit_code")
+    try:
+        exit_code = int(raw_exit_code) if raw_exit_code is not None else 125
+    except (TypeError, ValueError, OverflowError):
+        exit_code = 125
     stdout_tail = str(result.get("stdout_tail") or "")
     stderr_tail = str(result.get("stderr_tail") or "")
-    status = "completed" if exit_code == 0 else "failed"
+    status = "completed" if exit_code == 0 else "crashed" if raw_exit_code is None else "failed"
     blocked_reason = _worker_blocked_reason(stdout_tail=stdout_tail, stderr_tail=stderr_tail, log_path=log_path)
     if blocked_reason:
         status = "blocked"
@@ -3358,6 +3693,8 @@ def _run_worker_attempt(
         value = metadata.get(key)
         if value not in {None, ""}:
             record[key] = value
+    if isinstance(metadata.get("routing_evidence"), dict):
+        record["routing_evidence"] = dict(metadata["routing_evidence"])
     if blocked_reason:
         record["blocked_reason"] = blocked_reason
     usage = _extract_worker_usage(
@@ -3392,6 +3729,42 @@ def _run_worker_attempt(
         activity_started_at="",
     )
     return record
+
+
+def _invoke_worker_runner_once(
+    runner: Callable[..., dict[str, Any]],
+    *,
+    argv: list[str],
+    cwd: Path,
+    timeout_seconds: float,
+    log_path: Path,
+    env: dict[str, str] | None,
+    stdin_text: str | None,
+    progress_callback: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    optional = {
+        "env": env,
+        "progress_callback": progress_callback,
+        **({"stdin_text": stdin_text} if stdin_text is not None else {}),
+    }
+    try:
+        signature = inspect.signature(runner)
+    except (TypeError, ValueError):
+        accepted: dict[str, Any] = {}
+    else:
+        accepts_kwargs = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        accepted = (
+            optional
+            if accepts_kwargs
+            else {key: value for key, value in optional.items() if key in signature.parameters}
+        )
+    result = runner(argv, cwd, timeout_seconds, log_path, **accepted)
+    if not isinstance(result, dict):
+        raise TypeError("worker runner must return a result object")
+    return result
 
 
 def _worker_blocked_reason(*, stdout_tail: str, stderr_tail: str, log_path: Path) -> str:

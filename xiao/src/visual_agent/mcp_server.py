@@ -45,6 +45,7 @@ from .mcp_common import (  # noqa: F401
     safe_workspace_child,
 )
 from .models import to_jsonable as to_jsonable
+from .pacer_pillars import assess_five_pillars
 from .preflight import run_preflight as run_preflight
 from .reports import compact_run_report
 from .run_profile import RUN_PROFILE_CHOICES as RUN_PROFILE_CHOICES
@@ -70,14 +71,22 @@ from .mcp_repair import (
     rollback_repair_payload,
 )
 from .mcp_response import budget_mcp_payload, mcp_error_payload
+from .mcp_pacer_contracts import (
+    PACER_TYPED_TOOL_NAMES,
+    pacer_tool_input_schema,
+    pacer_tool_output_schema,
+    validate_pacer_tool_input,
+    validate_pacer_tool_output,
+)
 
 
 APP_NAME = "visual-agent"
 APP_VERSION = "0.1.0"
+MAX_PACER_COMPLETION_ATTEMPTS = 3
 try:
     from mcp.server import Server
     from mcp.server.stdio import stdio_server
-    from mcp.types import TextContent, Tool
+    from mcp.types import CallToolResult, TextContent, Tool
 except ImportError:
     Server = None  # type: ignore[assignment]
     stdio_server = None  # type: ignore[assignment]
@@ -92,7 +101,14 @@ except ImportError:
         name: str
         description: str
         inputSchema: dict[str, Any]
+        outputSchema: dict[str, Any] | None = None
         annotations: dict[str, Any] | None = None
+
+    @dataclass(frozen=True)
+    class CallToolResult:  # type: ignore[no-redef]
+        content: list[Any]
+        structuredContent: dict[str, Any] | None = None
+        isError: bool = False
 
 
 server = Server(APP_NAME) if Server is not None else None
@@ -104,7 +120,7 @@ _PACER_MCP_DISPATCH_SENTINEL = object()
 
 
 def mcp_tools() -> list[Tool]:
-    return [
+    tools = [
         Tool(
             name="begin_pacer_task",
             description=(
@@ -127,6 +143,18 @@ def mcp_tools() -> list[Tool]:
                     "goal": {"type": "string", "minLength": 1},
                 },
                 "required": ["workspace_root", "repo_root", "goal"],
+            },
+            outputSchema={
+                "type": "object",
+                "properties": {
+                    "schema_version": {"type": "integer"},
+                    "status": {"type": "string"},
+                    "launch_id": {"type": "string"},
+                    "task_contract": {"type": "object"},
+                    "error": {"type": "string"},
+                },
+                "required": ["schema_version"],
+                "additionalProperties": True,
             },
         ),
         Tool(
@@ -154,8 +182,29 @@ def mcp_tools() -> list[Tool]:
                         "type": "string",
                         "description": "Receipt returned by the first full memory response in this Pacer launch.",
                     },
+                    "memory_ids_used": {
+                        "type": "array",
+                        "maxItems": 20,
+                        "items": {"type": "string", "minLength": 1, "maxLength": 200},
+                        "description": (
+                            "Optional IDs actually used from a prior response. Requires a matching "
+                            "known_memory_receipt; every ID must have been delivered as trusted memory."
+                        ),
+                    },
                 },
                 "required": ["workspace_root", "repo_root"],
+            },
+            outputSchema={
+                "type": "object",
+                "properties": {
+                    "schema_version": {"type": "integer"},
+                    "status": {"type": "string"},
+                    "effective_memory": {"type": "object"},
+                    "memory_receipt": {"type": "string"},
+                    "error": {"type": "string"},
+                },
+                "required": ["schema_version"],
+                "additionalProperties": True,
             },
         ),
         Tool(
@@ -325,8 +374,9 @@ def mcp_tools() -> list[Tool]:
                 "Atomically verify and finish one task in the current Pacer launch. Pass verification steps as argv "
                 "arrays, for example steps=[{name: 'tests', argv: ['python', '-m', 'pytest', '-q']}]. The tool "
                 "runs the allowlisted verification path, captures compact runtime telemetry, and automatically binds "
-                "the verified run_id to the completed/failed outcome. completion_evidence binds each delivery claim "
-                "to source files and named verification steps so unrelated green checks cannot complete the task. "
+                "the verified run_id to the completed/failed outcome. Each claim only needs one immutable requirement "
+                "ID, a concrete result, and named verification steps. Pacer derives file paths and created/modified/"
+                "deleted states from the trusted launch baseline so model-authored file status is never trusted. "
                 "It never accepts a run_pacer_commands batch."
             ),
             annotations={
@@ -350,6 +400,7 @@ def mcp_tools() -> list[Tool]:
                             "result_kind": {
                                 "type": "string",
                                 "enum": ["change", "configuration", "review", "research", "test"],
+                                "description": "Legacy compatibility field. Pacer derives the canonical value.",
                             },
                             "claims": {
                                 "type": "array",
@@ -362,6 +413,7 @@ def mcp_tools() -> list[Tool]:
                                         "kind": {
                                             "type": "string",
                                             "enum": ["change", "configuration", "review", "research", "test"],
+                                            "description": "Legacy compatibility field. Pacer derives the canonical value.",
                                         },
                                         "requirement_ids": {
                                             "type": "array",
@@ -376,12 +428,13 @@ def mcp_tools() -> list[Tool]:
                                             "type": "string",
                                             "minLength": 1,
                                             "maxLength": 500,
-                                            "description": "Quote or closely map the part of the original goal this claim satisfies.",
+                                            "description": "Legacy compatibility field. Pacer loads immutable text by requirement ID.",
                                         },
                                         "result": {"type": "string", "minLength": 1, "maxLength": 1000},
                                         "files": {
                                             "type": "array",
-                                            "maxItems": 20,
+                                            "maxItems": 200,
+                                            "description": "Legacy compatibility field. Pacer ignores it and derives file facts.",
                                             "items": {
                                                 "type": "object",
                                                 "additionalProperties": False,
@@ -400,15 +453,16 @@ def mcp_tools() -> list[Tool]:
                                             "minItems": 1,
                                             "maxItems": 20,
                                             "items": {"type": "string", "minLength": 1, "maxLength": 120},
-                                            "description": "Names must exactly match steps[].name and must pass.",
+                                            "description": (
+                                                "Names must exactly match steps[].name and must pass. Reuse the task's "
+                                                "substantive test/build/analyze step for read-only or protected-path "
+                                                "claims; Pacer derives file facts, so do not add Git inspection steps."
+                                            ),
                                         },
                                     },
                                     "required": [
-                                        "kind",
                                         "requirement_ids",
-                                        "requirement",
                                         "result",
-                                        "files",
                                         "verification_steps",
                                     ],
                                 },
@@ -425,7 +479,7 @@ def mcp_tools() -> list[Tool]:
                                 "items": {"type": "string", "maxLength": 400},
                             },
                         },
-                        "required": ["result_kind", "claims", "unresolved_items", "known_risks"],
+                        "required": ["claims", "unresolved_items", "known_risks"],
                     },
                     "steps": {
                         "type": "array",
@@ -464,6 +518,20 @@ def mcp_tools() -> list[Tool]:
                     "completion_evidence",
                     "steps",
                 ],
+            },
+            outputSchema={
+                "type": "object",
+                "properties": {
+                    "schema_version": {"type": "integer"},
+                    "status": {"type": "string"},
+                    "launch_id": {"type": "string"},
+                    "task_review": {"type": "object"},
+                    "five_pillars_active": {"type": "boolean"},
+                    "five_pillars_assessment": {"type": "object"},
+                    "error": {"type": "string"},
+                },
+                "required": ["schema_version"],
+                "additionalProperties": True,
             },
         ),
         Tool(
@@ -1152,6 +1220,24 @@ def mcp_tools() -> list[Tool]:
             },
         ),
     ]
+    for index, tool in enumerate(tools):
+        if tool.name not in PACER_TYPED_TOOL_NAMES:
+            continue
+        updates = {
+            "inputSchema": pacer_tool_input_schema(tool.name),
+            "outputSchema": pacer_tool_output_schema(tool.name),
+        }
+        if hasattr(tool, "model_copy"):
+            tools[index] = tool.model_copy(update=updates)
+        else:
+            tools[index] = Tool(
+                name=tool.name,
+                description=tool.description,
+                inputSchema=updates["inputSchema"],
+                outputSchema=updates["outputSchema"],
+                annotations=tool.annotations,
+            )
+    return tools
 
 
 if server is not None:
@@ -1161,15 +1247,22 @@ if server is not None:
         return mcp_tools()
 
     @server.call_tool()
-    async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-        return await call_tool(name, arguments)
+    async def handle_call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
+        payload = await call_tool_payload(name, arguments)
+        return _tool_result(payload, tool_name=name)
 
 
 async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> list[TextContent]:
+    return _ok_json(await call_tool_payload(name, arguments))
+
+
+async def call_tool_payload(name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     args = arguments or {}
     workspace = workspace_for_audit(args)
     audit_mcp_call(workspace, name, args, {"status": "started", "phase": "entry"})
     try:
+        if name in PACER_TYPED_TOOL_NAMES:
+            args = validate_pacer_tool_input(name, args)
         handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "begin_pacer_task": begin_pacer_task_payload,
             "get_pacer_memory": get_pacer_memory_payload,
@@ -1223,12 +1316,16 @@ async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> list[
             payload = await asyncio.to_thread(handlers[name], handler_args)
         else:
             payload = handlers[name](handler_args)
+        if name in PACER_TYPED_TOOL_NAMES:
+            payload = validate_pacer_tool_output(name, payload)
         audit_mcp_call(workspace, name, args, payload)
-        return _ok_json(payload)
+        return payload
     except Exception as exc:
         payload = mcp_error_payload(f"{type(exc).__name__}: {exc}")
+        if name in PACER_TYPED_TOOL_NAMES:
+            payload = validate_pacer_tool_output(name, payload)
         audit_mcp_call(workspace, name, args, payload)
-        return _ok_json(payload)
+        return payload
 
 
 def begin_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
@@ -1313,7 +1410,7 @@ def _bind_pacer_task_contract(
 
     launch_id = str(active.get("launch_id") or "")
     pinned_goal = str(active.get("launch_goal") or goal).strip()
-    task_contract = build_task_contract(pinned_goal)
+    task_contract = build_task_contract(pinned_goal, repo_root=repo_root)
     existing = active.get("task_contract") if isinstance(active.get("task_contract"), dict) else {}
     if existing and existing != task_contract:
         raise ValueError("active Pacer task contract does not match the immutable launch goal")
@@ -1560,6 +1657,23 @@ def _load_trusted_task_source_baseline(
     return payload, task_source_baseline_digest(payload)
 
 
+def _normalized_memory_ids_used(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("memory_ids_used must be an array of memory IDs")
+    if len(value) > 20:
+        raise ValueError("memory_ids_used cannot contain more than 20 IDs")
+    normalized: list[str] = []
+    for raw in value:
+        memory_id = str(raw).strip() if isinstance(raw, str) else ""
+        if not memory_id or len(memory_id) > 200:
+            raise ValueError("memory_ids_used entries must be non-empty strings up to 200 characters")
+        if memory_id not in normalized:
+            normalized.append(memory_id)
+    return normalized
+
+
 def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
     started = monotonic()
     workspace_root, repo_root, resolved_launch_id = _resolve_pacer_roots(args)
@@ -1606,6 +1720,7 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
     detail = str(args.get("detail") or "compact")
     memory_budget = max(1000, min(20000, int(args.get("memory_budget_chars") or 6000)))
     known_receipt = str(args.get("known_memory_receipt") or "").strip()
+    requested_used_ids = _normalized_memory_ids_used(args.get("memory_ids_used"))
     launch_id = str(active.get("launch_id") or launch_id)
     memory_goal_digest = _pacer_goal_digest(memory_goal)
     query_goal_digest = _pacer_goal_digest(query_goal)
@@ -1632,44 +1747,132 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
         and str(cached.get("view_digest") or "") == view_digest
         and os.path.normcase(str(cached.get("repo_root") or "")) == os.path.normcase(str(repo_root))
     )
+    if requested_used_ids and not can_reuse:
+        raise ValueError("memory_ids_used requires a matching known_memory_receipt from this launch")
     if can_reuse:
         from .pacer_events import append_pacer_event
-        from .pacer_launch_context import update_pillar
+        from .pacer_launch_context import update_active_launch, update_pillar
 
         effective_memory = cached.get("effective_memory") if isinstance(cached.get("effective_memory"), dict) else {}
+        lookup = cached.get("lookup") if isinstance(cached.get("lookup"), dict) else {}
+        relevance = cached.get("relevance") if isinstance(cached.get("relevance"), dict) else {}
+        cached_injection = cached.get("injection") if isinstance(cached.get("injection"), dict) else {}
+        retrieved_ids = _normalized_memory_ids_used(relevance.get("retrieved_memory_ids"))
+        injected_ids = _normalized_memory_ids_used(cached_injection.get("memory_ids"))
+        if any(memory_id not in retrieved_ids for memory_id in injected_ids):
+            raise ValueError("cached memory injection is not a subset of retrieved memory IDs")
+        unknown_used_ids = [memory_id for memory_id in requested_used_ids if memory_id not in injected_ids]
+        if unknown_used_ids:
+            raise ValueError(
+                "memory_ids_used contains IDs not delivered as trusted memory: " + ", ".join(unknown_used_ids)
+            )
+        prior_used_ids = _normalized_memory_ids_used(cached.get("used_memory_ids"))
+        used_ids = list(dict.fromkeys([*prior_used_ids, *requested_used_ids]))
+        injection = {
+            **cached_injection,
+            "status": "reused_prior_delivery" if injected_ids else "no_trusted_relevant_memory",
+            "injected_hit": bool(injected_ids),
+            "delivered_now": False,
+            "memory_ids": injected_ids,
+            "receipt": receipt,
+        }
+        effective_response = {
+            **effective_memory,
+            "hit": bool(injected_ids),
+            "lookup_hit": bool(lookup.get("lookup_hit")),
+            "relevant_hit": bool(relevance.get("relevant_hit")),
+            "injected_hit": bool(injected_ids),
+            "used_hit": bool(used_ids),
+            "retrieved_memory_ids": retrieved_ids,
+            "injected_memory_ids": injected_ids,
+            "memory_ids_used": used_ids,
+        }
+        active = update_active_launch(
+            workspace_root,
+            expected_launch_id=launch_id,
+            memory_cache={
+                **cached,
+                "injection": injection,
+                "used_memory_ids": used_ids,
+                "effective_memory": effective_response,
+            },
+        )
         active = update_pillar(
             workspace_root,
             "memory",
             {
                 "active": True,
-                "state": "reused_with_evidence" if effective_memory.get("hit") else "reused_empty",
+                "state": (
+                    "reused_with_bound_use"
+                    if used_ids
+                    else "reused_with_injection"
+                    if injected_ids
+                    else "reused_without_relevant_memory"
+                    if lookup.get("lookup_hit")
+                    else "reused_empty"
+                ),
                 "retrieval_succeeded": True,
-                "effective_hit": bool(effective_memory.get("hit")),
-                "returned_entries": int(effective_memory.get("total_returned") or 0),
+                "lookup_hit": bool(lookup.get("lookup_hit")),
+                "relevant_hit": bool(relevance.get("relevant_hit")),
+                "injected_hit": bool(injected_ids),
+                "used_hit": bool(used_ids),
+                "effective_hit": bool(injected_ids),
+                "retrieved_memory_ids": retrieved_ids,
+                "injected_memory_ids": injected_ids,
+                "memory_ids_used": used_ids,
+                "returned_entries": int(effective_response.get("total_returned") or 0),
                 "duplicates_removed": int(cached.get("duplicates_removed") or 0),
                 "budget_chars": cached.get("budget_chars"),
                 "cache_status": "hit",
+                "response_cache_status": "hit",
                 "receipt": receipt,
             },
             launch_id=launch_id,
         )
+        compact_memory_pillar = _compact_pacer_pillars(active.get("pillars")).get("memory", {})
+        compact_assessment = (
+            compact_memory_pillar.get("assessment")
+            if isinstance(compact_memory_pillar.get("assessment"), dict)
+            else {}
+        )
+        five_pillars_assessment = assess_five_pillars(active)
         response = {
             "schema_version": 2,
             "status": "memory_reused",
             "memory_status": "not_modified",
             "cache_status": "hit",
             "memory_reused": True,
+            "response_cache": {"status": "hit", "reused": True},
             "memory_receipt": receipt,
             "launch_id": launch_id,
             "memory_goal_digest": memory_goal_digest,
             "query_goal_digest": query_goal_digest,
+            "memory_use": {
+                "used_hit": bool(used_ids),
+                "memory_ids_used": used_ids,
+            },
             "effective_memory": {
-                "hit": bool(effective_memory.get("hit")),
-                "total_returned": int(effective_memory.get("total_returned") or 0),
-                "formal_entries": int(effective_memory.get("formal_entries") or 0),
-                "native_history_entries": int(effective_memory.get("native_history_entries") or 0),
+                "hit": bool(injected_ids),
+                "lookup_hit": bool(lookup.get("lookup_hit")),
+                "relevant_hit": bool(relevance.get("relevant_hit")),
+                "injected_hit": bool(injected_ids),
+                "used_hit": bool(used_ids),
+                "retrieved_memory_ids": retrieved_ids,
+                "injected_memory_ids": injected_ids,
+                "memory_ids_used": used_ids,
+            },
+            "memory_assessment": {
+                "status": str(compact_assessment.get("status") or "indeterminate"),
+                "passed": bool(compact_assessment.get("passed")),
+                "reason_codes": [
+                    str(item) for item in (compact_assessment.get("reason_codes") or [])[:6]
+                ],
             },
             "five_pillars_active": _all_pillars_active(active),
+            "five_pillars_assessment": {
+                "status": str(five_pillars_assessment.get("status") or "indeterminate"),
+                "passed": bool(five_pillars_assessment.get("passed")),
+            },
         }
         payload_chars = _pacer_payload_chars(response)
         append_pacer_event(
@@ -1680,6 +1883,10 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
                 "payload_chars": payload_chars,
                 "receipt": receipt,
                 "cache_status": "hit",
+                "lookup_hit": bool(lookup.get("lookup_hit")),
+                "relevant_hit": bool(relevance.get("relevant_hit")),
+                "injected_hit": bool(injected_ids),
+                "used_hit": bool(used_ids),
                 "memory_goal_digest": memory_goal_digest,
                 "query_goal_digest": query_goal_digest,
                 "duration_ms": round((monotonic() - started) * 1000, 3),
@@ -1687,7 +1894,7 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
         )
         return response
 
-    from .project_memory import build_project_memory
+    from .project_memory import build_project_memory, score_memory_entry
 
     payload = build_project_memory(
         workspace_root=workspace_root,
@@ -1732,15 +1939,30 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
                 seen_entries.add(fingerprint)
     native_history.sort(key=_pacer_history_sort_key)
     total_native = len(native_history)
-    native_history = native_history[-limit:]
-    native_active = _verified_pacer_history_active(
-        native_records,
-        visible_entries=native_history,
-        standard_workspace=is_standard_workspace,
+    unique_native_all = _dedupe_native_memory(native_history)
+    scored_native: list[dict[str, Any]] = []
+    for entry in unique_native_all:
+        candidate = dict(entry)
+        relevance_score = score_memory_entry(memory_goal, candidate)
+        candidate["relevance_score"] = int(relevance_score.get("score") or 0)
+        candidate["match_reasons"] = [str(item) for item in relevance_score.get("match_reasons") or []]
+        candidate["relevance"] = relevance_score
+        candidate["memory_id"] = _native_memory_id(candidate)
+        scored_native.append(candidate)
+    scored_native.sort(
+        key=lambda item: (int(item.get("relevance_score") or 0), _pacer_history_sort_key(item)),
+        reverse=True,
     )
+    if memory_goal:
+        relevant_native = [item for item in scored_native if (item.get("relevance") or {}).get("relevant") is True]
+    else:
+        relevant_native = list(scored_native)
+    native_relevant_count = (
+        len(relevant_native) if memory_goal else 0
+    )
+    unique_native = sorted(relevant_native[:limit], key=_pacer_history_sort_key)
     raw_formal = payload.get("entries") if isinstance(payload.get("entries"), list) else []
     unique_formal = _dedupe_formal_memory([item for item in raw_formal if isinstance(item, dict)])
-    unique_native = _dedupe_native_memory(native_history)
     formal_identities = {
         _memory_identity(str(item.get("objective") or ""))
         for item in unique_formal
@@ -1752,6 +1974,80 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
     unique_native = [
         item for item in unique_native if _memory_identity(str(item.get("goal") or "")) not in formal_identities
     ]
+    trusted_native_run_ids = _trusted_pacer_history_run_ids(
+        native_records,
+        visible_entries=unique_native,
+        standard_workspace=is_standard_workspace,
+    )
+    for item in unique_native:
+        run_id = str(item.get("batch_run_id") or "")
+        trusted = bool(run_id and run_id in trusted_native_run_ids)
+        item["trust"] = {
+            "trusted": trusted,
+            "basis": "verified_batch_summary" if trusted else "unverified_or_self_reported",
+        }
+    native_active = bool(trusted_native_run_ids)
+    formal_lookup = payload.get("lookup") if isinstance(payload.get("lookup"), dict) else {}
+    formal_relevance = payload.get("relevance") if isinstance(payload.get("relevance"), dict) else {}
+    formal_relevant = formal_relevance.get("relevant_hit") is True
+    formal_relevant_ids = [
+        str(item.get("memory_id") or "")
+        for item in unique_formal
+        if formal_relevant and str(item.get("memory_id") or "")
+    ]
+    trusted_native_relevant_ids = [
+        str(item.get("memory_id") or "")
+        for item in unique_native
+        if (item.get("relevance") or {}).get("relevant") is True
+        and (item.get("trust") or {}).get("trusted") is True
+        and str(item.get("memory_id") or "")
+    ]
+    trusted_relevant_ids = list(dict.fromkeys([*formal_relevant_ids, *trusted_native_relevant_ids]))
+    lookup_hit = bool(formal_lookup.get("lookup_hit")) or total_native > 0
+    relevant_candidate_hit = bool(formal_relevant_ids) or native_relevant_count > 0
+    relevant_hit: bool | None = bool(trusted_relevant_ids) if memory_goal else None
+    formal_ranking = formal_relevance.get("ranking") if isinstance(formal_relevance.get("ranking"), list) else []
+    ranking_rows = [
+        {**item, "source": "formal", "trusted": True}
+        for item in formal_ranking
+        if isinstance(item, dict)
+    ]
+    ranking_rows.extend(
+        {
+            "source": "native_history",
+            "memory_id": str(item.get("memory_id") or ""),
+            "score": int(item.get("relevance_score") or 0),
+            "match_reasons": [str(reason) for reason in item.get("match_reasons") or []],
+            "judgment": str((item.get("relevance") or {}).get("judgment") or "unjudged"),
+            "relevant": (item.get("relevance") or {}).get("relevant"),
+            "trusted": (item.get("trust") or {}).get("trusted") is True,
+        }
+        for item in unique_native
+    )
+    ranking_rows.sort(key=lambda item: int(item.get("score") or 0), reverse=True)
+    ranking = [{**item, "rank": index} for index, item in enumerate(ranking_rows[:limit], start=1)]
+    lookup = {
+        "status": "succeeded",
+        "hit": lookup_hit,
+        "lookup_hit": lookup_hit,
+        "candidate_count": int(formal_lookup.get("candidate_count") or 0) + total_native,
+        "formal_candidate_count": int(formal_lookup.get("candidate_count") or 0),
+        "native_candidate_count": total_native,
+    }
+    relevance = {
+        "status": "estimated" if memory_goal else "unjudged",
+        "hit": relevant_hit,
+        "relevant_hit": relevant_hit,
+        "candidate_hit": relevant_candidate_hit if memory_goal else None,
+        "threshold": formal_relevance.get("threshold"),
+        "eligible_count": (
+            int(formal_relevance.get("eligible_count") or 0) + native_relevant_count
+            if memory_goal
+            else None
+        ),
+        "trusted_eligible_count": len(trusted_relevant_ids) if memory_goal else None,
+        "ranking": ranking,
+    }
     if detail != "full":
         compact_formal = [_compact_formal_memory_entry(item) for item in unique_formal]
         compact_native = [_compact_native_memory_entry(item) for item in unique_native]
@@ -1772,12 +2068,67 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
             "enforced": False,
         }
     formal_entries = len(payload["entries"])
+    returned_formal_ids = {
+        str(item.get("memory_id") or "")
+        for item in payload["entries"]
+        if isinstance(item, dict) and str(item.get("memory_id") or "")
+    }
+    returned_trusted_native_ids = {
+        str(item.get("memory_id") or "")
+        for item in native_history
+        if isinstance(item, dict)
+        and (item.get("trust") or {}).get("trusted") is True
+        and str(item.get("memory_id") or "")
+    }
+    injected_ids = [
+        memory_id
+        for memory_id in trusted_relevant_ids
+        if memory_id in returned_formal_ids or memory_id in returned_trusted_native_ids
+    ]
+    relevance["returned_count"] = formal_entries + len(native_history)
+    relevance["trusted_returned_count"] = len(injected_ids)
+    relevance["retrieved_memory_ids"] = trusted_relevant_ids
+    injection = {
+        "status": "delivered" if injected_ids else "no_trusted_relevant_memory",
+        "injected_hit": bool(injected_ids),
+        "delivered_now": True,
+        "memory_ids": injected_ids,
+        "formal_memory_ids": [memory_id for memory_id in injected_ids if memory_id in returned_formal_ids],
+        "native_memory_ids": [memory_id for memory_id in injected_ids if memory_id in returned_trusted_native_ids],
+        "receipt": receipt,
+    }
+    memory_use = {
+        "status": "not_reported",
+        "used_hit": False,
+        "retrieved_memory_ids": trusted_relevant_ids,
+        "injected_memory_ids": injected_ids,
+        "memory_ids_used": [],
+        "binding": "receipt_required",
+        "evidence_level": "unobserved",
+    }
     effective_memory = {
-        "hit": formal_entries > 0 or len(native_history) > 0,
+        "hit": bool(injected_ids),
+        "lookup_hit": lookup_hit,
+        "relevant_hit": relevant_hit,
+        "injected_hit": bool(injected_ids),
+        "used_hit": False,
+        "retrieved_memory_ids": trusted_relevant_ids,
+        "injected_memory_ids": injected_ids,
+        "memory_ids_used": [],
         "total_returned": formal_entries + len(native_history),
+        "trusted_returned_entries": len(injected_ids),
         "formal_entries": formal_entries,
         "native_history_entries": len(native_history),
+        "trusted_native_history_entries": len(returned_trusted_native_ids),
         "sources": [
+            source
+            for source, count in (
+                ("formal", len(injection["formal_memory_ids"])),
+                ("native_history", len(injection["native_memory_ids"])),
+            )
+            if count > 0
+        ],
+        "returned_sources": [
             source
             for source, count in (("formal", formal_entries), ("native_history", len(native_history)))
             if count > 0
@@ -1785,9 +2136,11 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
         "formal_raw_entries": len(raw_formal),
         "formal_unique_entries": len(unique_formal),
         "native_raw_entries": total_native,
-        "native_unique_entries": len(unique_native),
+        "native_unique_entries": len(unique_native_all),
+        "native_relevant_entries": native_relevant_count,
+        "native_untrusted_relevant_entries": max(0, native_relevant_count - len(trusted_native_relevant_ids)),
         "native_verified_evidence": native_active,
-        "duplicates_removed": (len(raw_formal) - len(unique_formal)) + (total_native - len(unique_native)),
+        "duplicates_removed": (len(raw_formal) - len(unique_formal)) + (total_native - len(unique_native_all)),
         "cross_source_duplicates_removed": cross_source_removed,
     }
     from .pacer_launch_context import latest_pending_recovery_capsule
@@ -1807,13 +2160,29 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
         "memory",
         {
             "active": True,
-            "state": "loaded_with_evidence" if effective_memory["hit"] else "loaded_empty",
+            "state": (
+                "loaded_with_injection"
+                if injected_ids
+                else "loaded_with_relevant_memory"
+                if relevant_hit
+                else "loaded_without_relevant_memory"
+                if lookup_hit
+                else "loaded_empty"
+            ),
             "retrieval_succeeded": True,
+            "lookup_hit": lookup_hit,
+            "relevant_hit": relevant_hit,
+            "injected_hit": bool(injected_ids),
+            "used_hit": False,
             "effective_hit": bool(effective_memory["hit"]),
+            "retrieved_memory_ids": trusted_relevant_ids,
+            "injected_memory_ids": injected_ids,
+            "memory_ids_used": [],
             "returned_entries": int(effective_memory["total_returned"]),
             "duplicates_removed": int(effective_memory["duplicates_removed"]),
             "budget_chars": memory_budget_usage.get("limit_chars"),
             "cache_status": cache_status,
+            "response_cache_status": cache_status,
             "receipt": receipt,
         },
         launch_id=launch_id,
@@ -1827,12 +2196,11 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
                 "source_digest": source_digest,
                 "view_digest": view_digest,
                 "repo_root": str(repo_root),
-                "effective_memory": {
-                    "hit": bool(effective_memory["hit"]),
-                    "total_returned": int(effective_memory["total_returned"]),
-                    "formal_entries": formal_entries,
-                    "native_history_entries": len(native_history),
-                },
+                "lookup": lookup,
+                "relevance": relevance,
+                "injection": injection,
+                "used_memory_ids": [],
+                "effective_memory": effective_memory,
                 "duplicates_removed": int(effective_memory["duplicates_removed"]),
                 "budget_chars": memory_budget_usage.get("limit_chars"),
             },
@@ -1843,9 +2211,14 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
         "memory_status": "modified",
         "cache_status": cache_status,
         "memory_reused": False,
+        "response_cache": {"status": cache_status, "reused": False},
         "memory_receipt": receipt,
         "memory_goal_digest": memory_goal_digest,
         "query_goal_digest": query_goal_digest,
+        "lookup": lookup,
+        "relevance": relevance,
+        "memory_injection": injection,
+        "memory_use": memory_use,
         "effective_memory": effective_memory,
         "memory_budget": memory_budget_usage,
         "recovery_capsule": recovery,
@@ -1854,6 +2227,7 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
         "native_history_returned": len(native_history),
         "native_history_omitted": max(0, total_native - len(native_history)),
         "five_pillars_active": _all_pillars_active(active),
+        "five_pillars_assessment": assess_five_pillars(active),
         "pillars": active.get("pillars", {}),
         "launch_id": launch_id,
         "runtime": {"python": python_runtime},
@@ -1872,6 +2246,10 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
             "payload_chars": payload_chars,
             "receipt": receipt,
             "cache_status": cache_status,
+            "lookup_hit": lookup_hit,
+            "relevant_hit": relevant_hit,
+            "injected_hit": bool(injected_ids),
+            "used_hit": False,
             "memory_goal_digest": memory_goal_digest,
             "query_goal_digest": query_goal_digest,
             "duration_ms": round((monotonic() - started) * 1000, 3),
@@ -1883,6 +2261,11 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
 def _compact_pacer_memory_payload(payload: dict[str, Any]) -> dict[str, Any]:
     effective = payload.get("effective_memory") if isinstance(payload.get("effective_memory"), dict) else {}
     budget = payload.get("memory_budget") if isinstance(payload.get("memory_budget"), dict) else {}
+    lookup = payload.get("lookup") if isinstance(payload.get("lookup"), dict) else {}
+    relevance = payload.get("relevance") if isinstance(payload.get("relevance"), dict) else {}
+    injection = payload.get("memory_injection") if isinstance(payload.get("memory_injection"), dict) else {}
+    memory_use = payload.get("memory_use") if isinstance(payload.get("memory_use"), dict) else {}
+    response_cache = payload.get("response_cache") if isinstance(payload.get("response_cache"), dict) else {}
     response: dict[str, Any] = {
         "schema_version": payload.get("schema_version", 2),
         "response_detail": "compact",
@@ -1890,11 +2273,36 @@ def _compact_pacer_memory_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "memory_status": str(payload.get("memory_status") or ""),
         "cache_status": str(payload.get("cache_status") or ""),
         "memory_reused": bool(payload.get("memory_reused")),
+        "response_cache": {
+            "status": str(response_cache.get("status") or payload.get("cache_status") or ""),
+            "reused": bool(response_cache.get("reused")),
+        },
         "memory_receipt": str(payload.get("memory_receipt") or ""),
         "launch_id": str(payload.get("launch_id") or ""),
         "goal": str(payload.get("goal") or ""),
+        "lookup": {
+            "lookup_hit": bool(lookup.get("lookup_hit")),
+            "candidate_count": int(lookup.get("candidate_count") or 0),
+        },
+        "relevance": {
+            "relevant_hit": relevance.get("relevant_hit"),
+            "candidate_hit": relevance.get("candidate_hit"),
+            "retrieved_memory_ids": [str(item) for item in (relevance.get("retrieved_memory_ids") or [])[:20]],
+        },
+        "memory_injection": {
+            "injected_hit": bool(injection.get("injected_hit")),
+            "memory_ids": [str(item) for item in (injection.get("memory_ids") or [])[:20]],
+        },
+        "memory_use": {
+            "used_hit": bool(memory_use.get("used_hit")),
+            "memory_ids_used": [str(item) for item in (memory_use.get("memory_ids_used") or [])[:20]],
+        },
         "effective_memory": {
             "hit": bool(effective.get("hit")),
+            "lookup_hit": bool(effective.get("lookup_hit")),
+            "relevant_hit": effective.get("relevant_hit"),
+            "injected_hit": bool(effective.get("injected_hit")),
+            "used_hit": bool(effective.get("used_hit")),
             "total_returned": int(effective.get("total_returned") or 0),
             "formal_entries": int(effective.get("formal_entries") or 0),
             "native_history_entries": int(effective.get("native_history_entries") or 0),
@@ -1911,6 +2319,9 @@ def _compact_pacer_memory_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "native_omitted": int(budget.get("native_omitted") or 0),
         },
         "five_pillars_active": bool(payload.get("five_pillars_active")),
+        "five_pillars_assessment": _compact_five_pillars_assessment(
+            payload.get("five_pillars_assessment")
+        ),
         "pillars": _compact_pacer_pillars(payload.get("pillars")),
     }
     recovery = _compact_pacer_recovery_capsule(payload.get("recovery_capsule"))
@@ -1945,11 +2356,71 @@ def _compact_pacer_pillars(value: Any) -> dict[str, dict[str, Any]]:
             "state": str(pillar.get("state") or "inactive"),
         }
         if name == "memory":
-            summary["effective_hit"] = bool(pillar.get("effective_hit"))
+            for key in ("effective_hit", "lookup_hit", "relevant_hit", "injected_hit", "used_hit"):
+                if key in pillar:
+                    summary[key] = pillar[key]
+            for key in ("retrieved_memory_ids", "injected_memory_ids", "memory_ids_used"):
+                values = pillar.get(key) if isinstance(pillar.get(key), list) else []
+                if values:
+                    summary[key] = [str(item) for item in values[:20]]
         elif name == "routing":
             summary["mimo_used"] = bool(pillar.get("mimo_used"))
+            for key in ("decision_id", "policy_match"):
+                if key in pillar:
+                    summary[key] = pillar[key]
+        elif name == "managed":
+            for key in ("transition_valid", "idempotency_key", "budget_status"):
+                if key in pillar:
+                    summary[key] = pillar[key]
+        elif name == "acceptance":
+            for key in (
+                "evidence_integrity",
+                "acceptance_adequacy",
+                "product_verdict",
+                "digest_verified",
+                "standard_source",
+            ):
+                if key in pillar:
+                    summary[key] = pillar[key]
+        elif name == "dogfood":
+            for key in (
+                "dogfood_status",
+                "pacer_on_pacer",
+                "artifact_files_verified",
+                "attestation_status",
+                "evidence_digest",
+            ):
+                if key in pillar:
+                    summary[key] = pillar[key]
+        assessment = pillar.get("assessment") if isinstance(pillar.get("assessment"), dict) else {}
+        if assessment:
+            summary["assessment"] = {
+                "status": str(assessment.get("status") or "indeterminate"),
+                "passed": bool(assessment.get("passed")),
+                "adequacy": str(assessment.get("adequacy") or "unknown"),
+                "reason_codes": [str(item) for item in (assessment.get("reason_codes") or [])[:12]],
+            }
         response[name] = summary
     return response
+
+
+def _compact_five_pillars_assessment(value: Any) -> dict[str, Any]:
+    assessment = value if isinstance(value, dict) else {}
+    pillars = assessment.get("pillars") if isinstance(assessment.get("pillars"), dict) else {}
+    return {
+        "status": str(assessment.get("status") or "indeterminate"),
+        "passed": bool(assessment.get("passed")),
+        "counts": dict(assessment.get("counts"))
+        if isinstance(assessment.get("counts"), dict)
+        else {},
+        "pillars": {
+            name: {
+                "status": str((pillars.get(name) or {}).get("status") or "indeterminate"),
+                "passed": bool((pillars.get(name) or {}).get("passed")),
+            }
+            for name in ("routing", "memory", "managed", "acceptance", "dogfood")
+        },
+    }
 
 
 def get_pacer_runtime_telemetry_payload(args: dict[str, Any]) -> dict[str, Any]:
@@ -1973,6 +2444,7 @@ def get_pacer_runtime_telemetry_payload(args: dict[str, Any]) -> dict[str, Any]:
             "lifecycle_status": str(active.get("status") or ""),
             "liveness": active.get("liveness") if isinstance(active.get("liveness"), dict) else {},
             "five_pillars_active": False,
+            "five_pillars_assessment": assess_five_pillars(active),
         }
         return _compact_pacer_runtime_telemetry_payload(response) if detail == "compact" else response
     rollout_ownership = (
@@ -2019,6 +2491,27 @@ def get_pacer_runtime_telemetry_payload(args: dict[str, Any]) -> dict[str, Any]:
         and bool(model)
         and not uses_mimo
     )
+    routing_decision = (
+        active.get("routing_decision")
+        if isinstance(active.get("routing_decision"), dict)
+        else {}
+    )
+    selected = (
+        routing_decision.get("selected")
+        if isinstance(routing_decision.get("selected"), dict)
+        else {}
+    )
+    request_evidence = (
+        routing_decision.get("request_evidence")
+        if isinstance(routing_decision.get("request_evidence"), dict)
+        else {}
+    )
+    policy_match: bool | None = None
+    if selected:
+        policy_match = (
+            str(selected.get("provider") or "").casefold() == provider.casefold()
+            and str(selected.get("model") or "").casefold() == model.casefold()
+        )
     update_pillar(
         workspace_root,
         "routing",
@@ -2031,6 +2524,13 @@ def get_pacer_runtime_telemetry_payload(args: dict[str, Any]) -> dict[str, Any]:
             "ownership_required": ownership_required,
             "ownership_matched": bool(telemetry_ownership.get("matched")),
             "attribution_confidence": str(telemetry.get("attribution_confidence") or "none"),
+            "decision_id": str(routing_decision.get("decision_id") or ""),
+            "policy_version": int(routing_decision.get("policy_version") or 0),
+            "policy_match": policy_match,
+            "request_evidence": request_evidence,
+            "policy_verdict": (
+                "matched" if policy_match is True else "mismatched" if policy_match is False else "passthrough"
+            ),
             "continuity_scope": "current_launch_only",
         },
         launch_id=launch_id,
@@ -2047,6 +2547,7 @@ def get_pacer_runtime_telemetry_payload(args: dict[str, Any]) -> dict[str, Any]:
         "liveness": active.get("liveness") if isinstance(active.get("liveness"), dict) else {},
         "pillars": active.get("pillars", {}),
         "five_pillars_active": _all_pillars_active(active),
+        "five_pillars_assessment": assess_five_pillars(active),
     }
     return _compact_pacer_runtime_telemetry_payload(response) if detail == "compact" else response
 
@@ -2096,6 +2597,9 @@ def _compact_pacer_runtime_telemetry_payload(payload: dict[str, Any]) -> dict[st
         },
         "pillars": _compact_pacer_pillars(payload.get("pillars")),
         "five_pillars_active": bool(payload.get("five_pillars_active")),
+        "five_pillars_assessment": _compact_five_pillars_assessment(
+            payload.get("five_pillars_assessment")
+        ),
     }
     warnings = payload.get("warnings") if isinstance(payload.get("warnings"), list) else []
     if warnings:
@@ -2296,6 +2800,11 @@ def _dedupe_native_memory(entries: list[dict[str, Any]]) -> list[dict[str, Any]]
     return sorted(selected.values(), key=_pacer_history_sort_key)
 
 
+def _native_memory_id(entry: dict[str, Any]) -> str:
+    run_id = str(entry.get("batch_run_id") or "")
+    return f"pacer-native:{run_id}" if _valid_pacer_run_id(run_id) else ""
+
+
 def _compact_formal_memory_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return {
         "source": "formal",
@@ -2312,6 +2821,7 @@ def _compact_formal_memory_entry(entry: dict[str, Any]) -> dict[str, Any]:
 def _compact_native_memory_entry(entry: dict[str, Any]) -> dict[str, Any]:
     result = {
         "source": "native_history",
+        "memory_id": str(entry.get("memory_id") or ""),
         "recorded_at": str(entry.get("recorded_at") or ""),
         "goal": str(entry.get("goal") or "")[:500],
         "summary": str(entry.get("summary") or "")[:1000],
@@ -2319,6 +2829,10 @@ def _compact_native_memory_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "status": str(entry.get("status") or ""),
         "evidence_level": str(entry.get("evidence_level") or "self_reported"),
         "batch_run_id": str(entry.get("batch_run_id") or ""),
+        "relevance_score": int(entry.get("relevance_score") or 0),
+        "match_reasons": [str(item) for item in (entry.get("match_reasons") or [])[:10]],
+        "relevance": dict(entry.get("relevance") or {}) if isinstance(entry.get("relevance"), dict) else {},
+        "trust": dict(entry.get("trust") or {}) if isinstance(entry.get("trust"), dict) else {},
     }
     task_review = entry.get("task_review") if isinstance(entry.get("task_review"), dict) else {}
     user_report = task_review.get("user_report") if isinstance(task_review.get("user_report"), dict) else {}
@@ -2403,11 +2917,27 @@ def _verified_pacer_history_active(
     visible_entries: list[dict[str, Any]],
     standard_workspace: bool,
 ) -> bool:
+    return bool(
+        _trusted_pacer_history_run_ids(
+            records,
+            visible_entries=visible_entries,
+            standard_workspace=standard_workspace,
+        )
+    )
+
+
+def _trusted_pacer_history_run_ids(
+    records: list[dict[str, Any]],
+    *,
+    visible_entries: list[dict[str, Any]],
+    standard_workspace: bool,
+) -> set[str]:
     visible_run_ids = {
         str(entry.get("batch_run_id") or "")
         for entry in visible_entries
         if _valid_pacer_run_id(str(entry.get("batch_run_id") or ""))
     }
+    trusted: set[str] = set()
     for run_id in visible_run_ids:
         group = [record for record in records if str(record["entry"].get("batch_run_id") or "") == run_id]
         canonical = [record for record in group if record["source"] == "canonical"]
@@ -2428,8 +2958,8 @@ def _verified_pacer_history_active(
             expected_run_id=run_id,
             allow_compile_only=_task_review_allows_compile_only(task_review),
         ):
-            return True
-    return False
+            trusted.add(run_id)
+    return trusted
 
 
 def _pacer_sources_conflict(
@@ -2584,20 +3114,42 @@ def record_pacer_outcome_payload(args: dict[str, Any]) -> dict[str, Any]:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
     from .pacer_launch_context import update_pillar
-    acceptance_active = status == "completed" and evidence_level == "verified_batch"
+    verified_acceptance = status == "completed" and evidence_level == "verified_batch"
+    evidence_integrity = str(completion_audit.get("evidence_integrity") or "")
+    acceptance_adequacy = str(completion_audit.get("acceptance_adequacy") or "unknown")
+    product_verdict = str(completion_audit.get("product_verdict") or "indeterminate")
+    acceptance_assessment = (
+        completion_audit.get("acceptance_assessment")
+        if isinstance(completion_audit.get("acceptance_assessment"), dict)
+        else {}
+    )
+    digest_verified = acceptance_assessment.get("digest_verified") is True
+    acceptance_active = bool(
+        verified_acceptance
+        and evidence_integrity == "verified"
+        and acceptance_adequacy == "sufficient"
+        and product_verdict == "pass"
+        and digest_verified
+    )
     active = update_pillar(
         workspace_root,
         "acceptance",
         {
             "active": acceptance_active,
-            "state": "verified" if acceptance_active else "not_verified",
+            "state": "verified" if acceptance_active else "evidence_verified_result_indeterminate" if verified_acceptance else "not_verified",
             "run_id": batch_run_id,
             "outcome_status": status,
+            "evidence_integrity": evidence_integrity,
+            "acceptance_adequacy": acceptance_adequacy,
+            "product_verdict": product_verdict,
+            "digest_verified": digest_verified,
+            "standard_source": str(acceptance_assessment.get("standard_source") or "unknown"),
+            "standard_digest": str(acceptance_assessment.get("standard_digest") or ""),
         },
         launch_id=launch_id,
     )
     responsibility = active.get("source_responsibility") if isinstance(active.get("source_responsibility"), dict) else {}
-    managed_active = acceptance_active and bool(active.get("launch_id"))
+    managed_active = verified_acceptance and bool(active.get("launch_id"))
     active = update_pillar(
         workspace_root,
         "managed",
@@ -2612,21 +3164,83 @@ def record_pacer_outcome_payload(args: dict[str, Any]) -> dict[str, Any]:
         launch_id=launch_id,
     )
     audit_valid = not completion_audit or bool(completion_audit.get("valid"))
-    dogfood_active = managed_active and bool(goal) and bool(summary) and audit_valid
+    dogfood_assessment: dict[str, Any] = {
+        "status": "indeterminate",
+        "passed": False,
+        "reason_codes": ["dogfood_evidence_missing"],
+    }
+    dogfood_path = repo_root / ".pacer" / "dogfood-evidence.json"
+    if dogfood_path.is_file():
+        from .dogfood_evidence import load_dogfood_evidence
+
+        key_id = str(os.environ.get("PACER_DOGFOOD_ATTESTATION_KEY_ID") or "").strip()
+        key = os.environ.get("PACER_DOGFOOD_ATTESTATION_KEY", "")
+        attestation_keys = {key_id: key} if key_id and key else {}
+        runs_root = repo_root.parent / ".runs"
+        artifact_roots = (runs_root,) if runs_root.is_dir() and not runs_root.is_symlink() else ()
+        try:
+            dogfood_assessment = load_dogfood_evidence(
+                repo_root,
+                artifact_roots=artifact_roots,
+                attestation_keys=attestation_keys,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            dogfood_assessment = {
+                "status": "failed",
+                "passed": False,
+                "reason_codes": ["dogfood_evidence_load_failed"],
+                "error_type": type(exc).__name__,
+            }
+    dogfood_active = bool(
+        dogfood_assessment.get("passed") is True and verified_acceptance and audit_valid
+    )
+    attestation = (
+        dogfood_assessment.get("attestation")
+        if isinstance(dogfood_assessment.get("attestation"), dict)
+        else {}
+    )
+    dogfood_quality = (
+        dogfood_assessment.get("quality")
+        if isinstance(dogfood_assessment.get("quality"), dict)
+        else {}
+    )
     active = update_pillar(
         workspace_root,
         "dogfood",
         {
             "active": dogfood_active,
-            "state": "verified_source_discipline" if dogfood_active else "discipline_unverified",
+            "state": (
+                "pacer_on_pacer_verified"
+                if dogfood_active
+                else "verified_source_discipline"
+                if managed_active and bool(goal) and bool(summary) and audit_valid
+                else "discipline_unverified"
+            ),
             "source_mode": str(responsibility.get("mode") or ""),
             "project_existed_at_launch": bool(responsibility.get("project_existed_at_launch")),
             "alternate_directory_authorized": bool(responsibility.get("alternate_directory_authorized")),
             "project_root": str(active.get("project_root") or ""),
             "goal_recorded": bool(goal),
             "summary_recorded": bool(summary),
-            "verified_batch": acceptance_active,
+            "verified_batch": verified_acceptance,
             "task_review_valid": bool(completion_audit.get("valid")) if completion_audit else None,
+            "pacer_on_pacer": bool(dogfood_assessment.get("pacer_on_pacer")),
+            "self_change_attributed": bool(dogfood_assessment.get("self_change_attributed")),
+            "installed_artifact_verified": bool(
+                dogfood_assessment.get("installed_artifact_verified")
+            ),
+            "artifact_files_verified": bool(dogfood_assessment.get("artifact_files_verified")),
+            "evidence_digest": str(dogfood_assessment.get("evidence_digest") or ""),
+            "dogfood_status": str(dogfood_assessment.get("status") or "indeterminate"),
+            "dogfood_reason_codes": [
+                str(item) for item in (dogfood_assessment.get("reason_codes") or [])[:20]
+            ],
+            "attestation_status": str(attestation.get("status") or "missing"),
+            "attestation_key_id": str(attestation.get("key_id") or ""),
+            "quality_score": int(dogfood_quality.get("score") or 0),
+            "quality_target_score": int(dogfood_quality.get("target_score") or 95),
+            "quality_target_met": dogfood_quality.get("meets_target") is True,
+            "quality_level": str(dogfood_quality.get("level") or "insufficient"),
         },
         launch_id=launch_id,
     )
@@ -2658,6 +3272,7 @@ def record_pacer_outcome_payload(args: dict[str, Any]) -> dict[str, Any]:
         "launch_id": launch_id,
         "pillars": active.get("pillars", {}),
         "five_pillars_active": _all_pillars_active(active),
+        "five_pillars_assessment": assess_five_pillars(active),
     }
 
 
@@ -2900,8 +3515,13 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
     )
     from .task_review import (
         audit_task_completion,
+        derive_task_completion_evidence,
         task_contract_allows_compile_only,
         task_review_error,
+    )
+    from .pacer_launch_context import (
+        record_completion_rejection,
+        register_completion_attempt,
     )
 
     goal = str(args.get("goal") or "").strip()
@@ -2920,6 +3540,19 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
     launch_id = str(active.get("launch_id") or resolved_launch_id)
     if not launch_id:
         raise ValueError("complete_pacer_task requires an active Pacer launch")
+    completion_control = register_completion_attempt(
+        workspace_root,
+        launch_id=launch_id,
+        max_attempts=MAX_PACER_COMPLETION_ATTEMPTS,
+    )
+    completion_attempt = int(completion_control.get("attempts") or 0)
+    if completion_attempt > MAX_PACER_COMPLETION_ATTEMPTS:
+        raise ValueError(
+            _completion_attempts_exhausted_error(
+                attempt=completion_attempt,
+                max_attempts=MAX_PACER_COMPLETION_ATTEMPTS,
+            )
+        )
     task_contract = _load_trusted_pacer_task_contract(
         workspace_root=workspace_root,
         repo_root=repo_root,
@@ -2931,18 +3564,38 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
         repo_root=repo_root,
         active=active,
     )
+    canonical_evidence = derive_task_completion_evidence(
+        completion_evidence=args.get("completion_evidence"),
+        repo_root=repo_root,
+        task_contract=task_contract,
+        source_baseline=source_baseline,
+    )
     preflight_review = audit_task_completion(
         launch_goal=str(active.get("launch_goal") or ""),
         submitted_goal=goal,
         summary=summary,
-        completion_evidence=args.get("completion_evidence"),
+        completion_evidence=canonical_evidence,
         requested_steps=args.get("steps"),
         repo_root=repo_root,
         task_contract=task_contract,
         source_baseline=source_baseline,
     )
     if not bool(preflight_review.get("valid")):
-        raise ValueError(task_review_error(preflight_review))
+        retryable = completion_attempt < MAX_PACER_COMPLETION_ATTEMPTS
+        record_completion_rejection(
+            workspace_root,
+            launch_id=launch_id,
+            reason_codes=_task_review_reason_codes(preflight_review),
+            retryable=retryable,
+        )
+        raise ValueError(
+            task_review_error(
+                preflight_review,
+                retryable=retryable,
+                attempt=completion_attempt,
+                max_attempts=MAX_PACER_COMPLETION_ATTEMPTS,
+            )
+        )
     pinned_args = {
         "workspace_root": str(workspace_root),
         "repo_root": str(repo_root),
@@ -2989,11 +3642,17 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
         repo_root=repo_root,
         active=active_after_verification,
     )
+    canonical_evidence = derive_task_completion_evidence(
+        completion_evidence=args.get("completion_evidence"),
+        repo_root=repo_root,
+        task_contract=task_contract,
+        source_baseline=source_baseline,
+    )
     task_review = audit_task_completion(
         launch_goal=str(active_after_verification.get("launch_goal") or ""),
         submitted_goal=goal,
         summary=summary,
-        completion_evidence=args.get("completion_evidence"),
+        completion_evidence=canonical_evidence,
         requested_steps=args.get("steps"),
         repo_root=repo_root,
         task_contract=task_contract,
@@ -3001,7 +3660,21 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
         verification=verification,
     )
     if verification_status == "passed" and not bool(task_review.get("valid")):
-        raise ValueError(task_review_error(task_review))
+        retryable = completion_attempt < MAX_PACER_COMPLETION_ATTEMPTS
+        record_completion_rejection(
+            workspace_root,
+            launch_id=launch_id,
+            reason_codes=_task_review_reason_codes(task_review),
+            retryable=retryable,
+        )
+        raise ValueError(
+            task_review_error(
+                task_review,
+                retryable=retryable,
+                attempt=completion_attempt,
+                max_attempts=MAX_PACER_COMPLETION_ATTEMPTS,
+            )
+        )
     task_review["source_baseline_trust"] = {
         "policy_version": 1,
         "digest": source_baseline_digest,
@@ -3045,6 +3718,7 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
     runtime_summary = dict(runtime)
     runtime_summary.pop("pillars", None)
     runtime_summary.pop("five_pillars_active", None)
+    runtime_summary.pop("five_pillars_assessment", None)
     compact_outcome = {
         "status": str(outcome.get("status") or ""),
         "outcome_status": str(outcome.get("outcome_status") or outcome_status),
@@ -3065,7 +3739,43 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
         "outcome": compact_outcome,
         "pillars": pillars,
         "five_pillars_active": bool(outcome.get("five_pillars_active")),
+        "five_pillars_assessment": outcome.get("five_pillars_assessment")
+        if isinstance(outcome.get("five_pillars_assessment"), dict)
+        else assess_five_pillars(outcome.get("pillars")),
     }
+
+
+def _task_review_reason_codes(review: dict[str, Any]) -> list[str]:
+    errors = review.get("errors") if isinstance(review.get("errors"), list) else []
+    return [
+        str(item.get("code") or "completion_rejected")
+        for item in errors
+        if isinstance(item, dict)
+    ]
+
+
+def _completion_attempts_exhausted_error(*, attempt: int, max_attempts: int) -> str:
+    payload = {
+        "schema_version": 1,
+        "kind": "pacer_completion_correction",
+        "retryable": False,
+        "errors": [
+            {
+                "code": "completion_attempts_exhausted",
+                "message": "Pacer completion correction attempts are exhausted.",
+                "correction": "Stop retrying this launch and start a new task after fixing the evidence contract.",
+            }
+        ],
+        "completion_control": {
+            "attempt": max(1, int(attempt)),
+            "max_attempts": max(1, int(max_attempts)),
+        },
+    }
+    return "completion audit rejected: " + json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def _compact_completed_verification(payload: dict[str, Any]) -> dict[str, Any]:
@@ -3217,6 +3927,16 @@ def _safe_verification_argv(argv: list[str]) -> bool:
             return True
         if len(args) >= 3 and args[:3] == ["-m", "ruff", "check"]:
             return True
+        if args == [
+            "-m",
+            "visual_agent.cli",
+            "codex-check",
+            "--workspace-root",
+            ".agent-workspace",
+            "--repo-root",
+            ".",
+        ]:
+            return True
         return _safe_unittest_discover_argv(argv[1:])
     if executable in {"pytest", "pytest.exe", "mypy", "mypy.exe"}:
         return True
@@ -3355,8 +4075,7 @@ def _activate_pacer_project(
 
 
 def _all_pillars_active(active: dict[str, Any]) -> bool:
-    pillars = active.get("pillars") if isinstance(active.get("pillars"), dict) else {}
-    return all(bool((pillars.get(name) or {}).get("active")) for name in ("routing", "memory", "managed", "acceptance", "dogfood"))
+    return bool(assess_five_pillars(active)["passed"])
 
 
 def run_workflow_payload(args: dict[str, Any]) -> dict[str, Any]:
@@ -4118,9 +4837,32 @@ def generate_workflow_payload(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _ok_json(payload: dict[str, Any]) -> list[TextContent]:
-    safe_payload = budget_mcp_payload(scrub_secrets(payload))
+    safe_payload = _safe_mcp_payload(payload)
     text = json.dumps(safe_payload, ensure_ascii=False, indent=2, default=str)
     return [TextContent(type="text", text=text)]
+
+
+def _tool_result(payload: dict[str, Any], *, tool_name: str = "") -> CallToolResult:
+    safe_payload = _safe_mcp_payload(payload)
+    if tool_name in PACER_TYPED_TOOL_NAMES:
+        try:
+            safe_payload = validate_pacer_tool_output(tool_name, safe_payload)
+        except Exception:
+            safe_payload = validate_pacer_tool_output(
+                tool_name,
+                mcp_error_payload("MCP structured output validation failed"),
+            )
+    text = json.dumps(safe_payload, ensure_ascii=False, indent=2, default=str)
+    return CallToolResult(
+        content=[TextContent(type="text", text=text)],
+        structuredContent=safe_payload,
+        isError=bool(safe_payload.get("error")),
+    )
+
+
+def _safe_mcp_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    safe = budget_mcp_payload(scrub_secrets(payload))
+    return safe if isinstance(safe, dict) else {"schema_version": 1, "error": "invalid MCP payload"}
 
 
 def main() -> None:

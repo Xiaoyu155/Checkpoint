@@ -112,16 +112,11 @@ def observe_browser(params: dict[str, Any], context: ProviderContext) -> Observa
         # same thread fails with "Sync API inside the asyncio loop".
         existing_page.goto(url, wait_until=str(params.get("wait_until") or "domcontentloaded"), timeout=int(params.get("timeout_ms", 10_000)))
         try:
-            # SPA hash navigation returns before the framework re-renders; wait for
-            # visible content, then give the router a short settle window.
-            existing_page.wait_for_function(
-                "() => !!document.body && document.body.innerText.trim().length > 0",
-                timeout=int(params.get("timeout_ms", 10_000)),
-            )
+            wait_for_browser_page_ready(existing_page, timeout_ms=int(params.get("timeout_ms", 10_000)))
         except Exception:
             pass
-        settle_seconds = float(params.get("wait_after_seconds", 0.3) or 0)
-        if settle_seconds > 0:
+        settle_seconds = float(params.get("wait_after_seconds", 0.0) or 0)
+        if "wait_after_seconds" in params and settle_seconds > 0:
             existing_page.wait_for_timeout(int(settle_seconds * 1000))
         return browser_page_observation(
             existing_page,
@@ -196,6 +191,11 @@ def observe_browser(params: dict[str, Any], context: ProviderContext) -> Observa
             browser.close()
         playwright.stop()
         raise
+
+
+def wait_for_browser_page_ready(page: Any, *, timeout_ms: int) -> None:
+    """Use Playwright actionability instead of a DOM polling script."""
+    page.locator("body").wait_for(state="visible", timeout=max(1, int(timeout_ms)))
 
 
 def browser_page_observation(

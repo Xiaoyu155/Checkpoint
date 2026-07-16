@@ -25,6 +25,8 @@ from visual_agent.pacer_launch_context import (
     read_active_launch,
     read_launch_liveness,
     read_reconciled_active_launch,
+    record_completion_rejection,
+    register_completion_attempt,
     register_trusted_task_source_baseline,
     recover_orphaned_launches,
     resolve_python_runtime,
@@ -55,6 +57,40 @@ def test_launch_state_lock_timeout_is_bounded_for_native_startup() -> None:
     assert 0 < LAUNCH_STATE_LOCK_TIMEOUT_SECONDS <= 1.0
 
 
+def test_completion_attempts_are_persisted_and_bounded(tmp_path: Path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    launch_id = "launch-completion-limit"
+    manifest = workspace / "pacer_native" / "launches" / f"{launch_id}.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    initialize_active_launch(
+        workspace_root=workspace,
+        manifest_path=manifest,
+        launch={"launch_id": launch_id, "repo_root": str(tmp_path)},
+    )
+
+    first = register_completion_attempt(workspace, launch_id=launch_id, max_attempts=3)
+    second = register_completion_attempt(workspace, launch_id=launch_id, max_attempts=3)
+    rejected = record_completion_rejection(
+        workspace,
+        launch_id=launch_id,
+        reason_codes=["claim_without_relevant_acceptance"],
+        retryable=True,
+    )
+    third = register_completion_attempt(workspace, launch_id=launch_id, max_attempts=3)
+    exhausted = register_completion_attempt(workspace, launch_id=launch_id, max_attempts=3)
+
+    assert first["attempts"] == 1
+    assert second["attempts"] == 2
+    assert rejected["status"] == "correction_required"
+    assert rejected["last_rejection_codes"] == ["claim_without_relevant_acceptance"]
+    assert third["attempts"] == 3
+    assert third["retryable"] is False
+    assert exhausted["attempts"] == 4
+    assert exhausted["status"] == "attempts_exhausted"
+    assert read_active_launch(workspace, launch_id=launch_id)["completion_control"] == exhausted
+
+
 def test_python_runtime_prefers_project_venv_without_recursive_search(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     interpreter = repo / ".venv" / "Scripts" / "python.exe"
@@ -76,6 +112,34 @@ def test_python_runtime_prefers_project_venv_without_recursive_search(tmp_path: 
     assert runtime["trusted_venv"] is True
     assert runtime["bound_repo_root"] == str(repo.resolve())
     assert probes == [interpreter]
+
+
+def test_python_runtime_uses_pacer_launcher_before_untrusted_path(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    launcher = tmp_path / "pacer-venv" / "Scripts" / "python.exe"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("fixture", encoding="utf-8")
+    path_python = tmp_path / "system" / "python.exe"
+    path_python.parent.mkdir()
+    path_python.write_text("fixture", encoding="utf-8")
+    probes: list[Path] = []
+
+    runtime = resolve_python_runtime(
+        repo,
+        pacer_executable=launcher,
+        environment={},
+        path_lookup=lambda name: str(path_python) if name == "python" else None,
+        capability_probe=lambda path: probes.append(path) or _python_capability(),
+        include_pacer_runtime_roots=False,
+    )
+
+    assert runtime["executable"] == str(launcher)
+    assert runtime["source"] == "pacer_launcher"
+    assert runtime["trusted_venv"] is True
+    assert runtime["root"] == str(launcher.parent.parent)
+    assert runtime["bound_repo_root"] == str(repo.resolve())
+    assert probes == [launcher]
 
 
 def test_python_runtime_does_not_borrow_unrelated_parent_venv(tmp_path: Path) -> None:
@@ -326,7 +390,13 @@ def test_concurrent_launch_updates_merge_without_losing_fields(tmp_path: Path) -
     assert all(not thread.is_alive() for thread in threads)
     active = read_active_launch(workspace)
     assert active["memory_cache"] == {"receipt": "receipt-1"}
-    assert active["pillars"]["acceptance"] == {"active": True, "state": "verified"}
+    acceptance = active["pillars"]["acceptance"]
+    assert acceptance["active"] is True
+    assert acceptance["state"] == "verified"
+    assert acceptance["assessment"]["status"] == "partial"
+    assert acceptance["assessment"]["reason_codes"] == [
+        "acceptance_standard_insufficient"
+    ]
     assert not list((workspace / "pacer_native").rglob("*.tmp"))
 
 

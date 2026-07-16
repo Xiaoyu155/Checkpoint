@@ -5,7 +5,13 @@ from visual_agent.chief_dispatch import build_worker_command
 from visual_agent.chief_plans_store import append_worker_record, load_plan, save_plan, save_verification
 from visual_agent.cli import main
 from visual_agent.missions import append_round, create_mission, default_budget_policy, load_mission, write_final_report
-from visual_agent.project_memory import build_project_memory, load_instruction_memory, project_memory_handoff_notes, project_memory_to_markdown
+from visual_agent.project_memory import (
+    build_project_memory,
+    load_instruction_memory,
+    project_memory_handoff_notes,
+    project_memory_to_markdown,
+    score_memory_entry,
+)
 from visual_agent.program_scheduler import start_program
 from visual_agent.programs import create_program_from_plan
 from visual_agent.workspace import init_workspace
@@ -262,6 +268,128 @@ def test_memory_v2_ranks_exact_paths_and_symbols_above_generic_preview(tmp_path)
     assert "exact_path" in payload["entries"][0]["match_reasons"]
     assert "exact_symbol" in payload["entries"][0]["match_reasons"]
     assert all(item["mission_id"] != "preview-workbench" for item in payload["entries"])
+    assert payload["lookup"] == {
+        "status": "succeeded",
+        "hit": True,
+        "lookup_hit": True,
+        "candidate_count": 2,
+    }
+    assert payload["relevance"]["status"] == "estimated"
+    assert payload["relevance"]["hit"] is True
+    assert payload["relevance"]["relevant_hit"] is True
+    assert payload["relevance"]["ranking"][0]["memory_id"] == "mission:verified-worker-lock"
+    assert payload["relevance"]["ranking"][0]["selected"] is True
+
+
+def test_memory_v2_separates_entry_cache_reuse_from_relevant_hit(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    seed_evidence_mission(
+        tmp_path,
+        workspace,
+        mission_id="verified-worker-lock",
+        objective="Make Windows worker lock acquisition safe",
+        changed_files=["src/visual_agent/chief_queue.py"],
+        functions_touched=["_acquire_worker_lock"],
+    )
+
+    first = build_project_memory(
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        goal="Translate the lunar astronomy almanac into French",
+    )
+    second = build_project_memory(
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        goal="Translate the lunar astronomy almanac into French",
+    )
+
+    assert first["entry_cache"]["status"] == "cold"
+    assert first["entry_cache"]["reused_entries"] == 0
+    assert first["entry_cache"]["rebuilt_entries"] == 1
+    assert first["lookup"]["hit"] is True
+    assert first["lookup"]["lookup_hit"] is True
+    assert first["lookup"]["candidate_count"] == 1
+    assert first["relevance"]["hit"] is False
+    assert first["relevance"]["relevant_hit"] is False
+    assert first["relevance"]["eligible_count"] == 0
+    assert first["relevance"]["returned_count"] == 0
+    assert first["relevance"]["ranking"][0]["relevant"] is False
+    assert first["entry_count"] == 0
+
+    assert second["entry_cache"]["status"] == "warm"
+    assert second["entry_cache"]["reused_entries"] == 1
+    assert second["entry_cache"]["rebuilt_entries"] == 0
+    assert second["index"]["hits"] == 1
+    assert second["relevance"]["hit"] is False
+
+
+def test_memory_v2_without_query_keeps_relevance_unjudged(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    seed_evidence_mission(
+        tmp_path,
+        workspace,
+        mission_id="verified-worker-lock",
+        objective="Make Windows worker lock acquisition safe",
+    )
+
+    payload = build_project_memory(workspace_root=workspace.root, repo_root=tmp_path)
+
+    assert payload["lookup"]["lookup_hit"] is True
+    assert payload["relevance"]["status"] == "unjudged"
+    assert payload["relevance"]["hit"] is None
+    assert payload["relevance"]["relevant_hit"] is None
+    assert payload["relevance"]["ranking"][0]["judgment"] == "unjudged"
+    assert payload["relevance"]["ranking"][0]["relevant"] is None
+
+
+def test_memory_v2_public_scorer_returns_rank_evidence_without_cache_semantics() -> None:
+    entry = {
+        "memory_id": "mission:verified-worker-lock",
+        "mission_id": "verified-worker-lock",
+        "objective": "Make Windows worker lock acquisition safe",
+        "changed_files": ["src/visual_agent/chief_queue.py"],
+        "symbols": ["_acquire_worker_lock"],
+        "status": "verified",
+        "acceptance_criteria": [],
+        "evidence": {},
+    }
+
+    matched = score_memory_entry(
+        "Fix _acquire_worker_lock in src/visual_agent/chief_queue.py",
+        entry,
+    )
+    unrelated = score_memory_entry("Translate a lunar astronomy almanac", entry)
+    unjudged = score_memory_entry("", entry)
+
+    assert matched["relevant"] is True
+    assert matched["score"] >= matched["threshold"]
+    assert {"exact_path", "exact_symbol"} <= set(matched["match_reasons"])
+    assert unrelated["relevant"] is False
+    assert unrelated["score"] == 0
+    assert unjudged["judgment"] == "unjudged"
+    assert unjudged["relevant"] is None
+
+    native = score_memory_entry(
+        "Make Windows worker lock acquisition safe",
+        {"batch_run_id": "native-1", "goal": "Make Windows worker lock acquisition safe"},
+    )
+    assert native["relevant"] is True
+    assert "objective_phrase" in native["match_reasons"]
+
+
+def test_memory_v2_recalls_a_short_chinese_domain_term() -> None:
+    entry = {
+        "memory_id": "memory-login",
+        "objective": "继续登录开发并补充边界处理",
+        "status": "completed",
+    }
+
+    matched = score_memory_entry("修复登录", entry)
+    unrelated = score_memory_entry("更新支付结算", entry)
+
+    assert matched["relevant"] is True
+    assert matched["score"] >= matched["threshold"]
+    assert unrelated["relevant"] is False
 
 
 def test_memory_v2_prioritizes_an_explicit_mission_id(tmp_path) -> None:
@@ -347,6 +475,9 @@ def test_memory_v2_reuses_and_invalidates_incremental_index(tmp_path) -> None:
     assert first["index"]["misses"] == 1
     assert second["index"]["hits"] == 1
     assert third["index"]["misses"] == 1
+    assert first["entry_cache"]["status"] == "cold"
+    assert second["entry_cache"]["status"] == "warm"
+    assert third["entry_cache"]["status"] == "cold"
 
 
 def test_autonomous_pacer_program_injects_retrieved_memory_into_delegated_worker(tmp_path) -> None:

@@ -13,6 +13,7 @@ from typing import Any, Callable
 from .codex_exec import load_codex_user_defaults
 from .codex_launcher import DEFAULT_AUTO_COMPACT_TOKEN_LIMIT, _native_codex_command
 from .pacer_launch_context import read_active_launch, read_reconciled_active_launch
+from .pacer_pillars import assess_five_pillars
 from .pacer_verification import audit_pacer_verification_batch
 from .security import scrub_secrets
 from .user_profile import load_user_profile
@@ -109,6 +110,7 @@ def build_pacer_support_snapshot(
     # pointer, without a per-launch context file. Keep its negative mechanical
     # evidence visible instead of falling back to a falsely green legacy run.
     active_launch = read_reconciled_active_launch(root) or read_active_launch(root)
+    active_pillar_assessment = assess_five_pillars(active_launch)
     launches = _read_launches(root, repo)
     storage = _pacer_storage_status(
         root,
@@ -228,6 +230,7 @@ def build_pacer_support_snapshot(
                     "pillars": active_launch.get("pillars")
                     if isinstance(active_launch.get("pillars"), dict)
                     else {},
+                    "assessment": active_pillar_assessment,
                 },
                 "root": str(root / "pacer_native" / "launches"),
                 "source_roots": launch_sources,
@@ -668,6 +671,12 @@ def _compact_outcome(item: dict[str, Any]) -> dict[str, Any]:
             "valid": bool(task_review.get("valid")),
             "verdict": str(task_review.get("verdict") or ""),
             "trust": str(task_review.get("trust") or ""),
+            "evidence_integrity": str(task_review.get("evidence_integrity") or "unknown"),
+            "acceptance_adequacy": str(task_review.get("acceptance_adequacy") or "unknown"),
+            "product_verdict": str(task_review.get("product_verdict") or "indeterminate"),
+            "acceptance_assessment": _compact_acceptance_assessment(
+                task_review.get("acceptance_assessment")
+            ),
             "errors": list(task_review.get("errors") or [])[:8],
             "warnings": list(task_review.get("warnings") or [])[:8],
             "user_report": {
@@ -683,10 +692,52 @@ def _compact_outcome(item: dict[str, Any]) -> dict[str, Any]:
                 ],
                 "risks": [str(value)[:300] for value in (user_report.get("risks") or [])[:8]],
                 "can_trust": str(user_report.get("can_trust") or task_review.get("trust") or "no"),
+                "evidence_integrity": str(
+                    user_report.get("evidence_integrity")
+                    or task_review.get("evidence_integrity")
+                    or "unknown"
+                ),
+                "acceptance_adequacy": str(
+                    user_report.get("acceptance_adequacy")
+                    or task_review.get("acceptance_adequacy")
+                    or "unknown"
+                ),
+                "product_verdict": str(
+                    user_report.get("product_verdict")
+                    or task_review.get("product_verdict")
+                    or "indeterminate"
+                ),
                 "next_action": str(user_report.get("next_action") or "")[:500],
             },
         }
     return result
+
+
+def _compact_acceptance_assessment(value: Any) -> dict[str, Any]:
+    assessment = value if isinstance(value, dict) else {}
+    if not assessment:
+        return {}
+    return {
+        "schema_version": assessment.get("schema_version"),
+        "standard_source": str(assessment.get("standard_source") or "unknown"),
+        "standard_digest": str(assessment.get("standard_digest") or "")[:128],
+        "digest_verified": bool(assessment.get("digest_verified")),
+        "adequacy": str(assessment.get("adequacy") or "insufficient"),
+        "final_phase": bool(assessment.get("final_phase")),
+        "required_step_classes": [
+            str(item)[:80] for item in (assessment.get("required_step_classes") or [])[:10]
+        ],
+        "observed_step_classes": [
+            str(item)[:80] for item in (assessment.get("observed_step_classes") or [])[:10]
+        ],
+        "missing_step_classes": [
+            str(item)[:80] for item in (assessment.get("missing_step_classes") or [])[:10]
+        ],
+        "missing_commands": [
+            str(item)[:300] for item in (assessment.get("missing_commands") or [])[:10]
+        ],
+        "reason_codes": [str(item)[:120] for item in (assessment.get("reason_codes") or [])[:12]],
+    }
 
 
 def _annotate_outcome_evidence(

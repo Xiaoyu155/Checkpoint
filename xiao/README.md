@@ -18,6 +18,8 @@ Install optional capabilities only where they are needed:
 python -m pip install "visual-agent[web]"
 python -m pip install "visual-agent[cloud]"
 python -m pip install "visual-agent[desktop]"
+python -m pip install "visual-agent[eval]"
+python -m pip install "visual-agent[otel]"
 ```
 
 The Cloud extra includes the FastAPI service, Celery worker, and Redis
@@ -54,6 +56,28 @@ relay provider already configured in Codex. Pacer does not store relay keys or
 silently fall back to another model backend.
 Use `checkpoint dashboard --workspace-root .agent-workspace` when you want the
 full evidence and queue view.
+
+Pacer repositories can check in `.pacer/acceptance.json` as the versioned
+product standard. Release automation should lock `.pacer/release.json` to an
+externally supplied digest before running any matrix case:
+
+```console
+pacer pacer-release-manifest-check --manifest .pacer/release.json --expected-digest <sha256>
+pacer pacer-dogfood-policy-check --repo-root .
+pacer pacer-dogfood-check --repo-root .
+```
+
+The Dogfood check only passes when the canonical evidence file references real,
+digest-matching A/B wheels, contracts, verification receipts, and a fresh-install
+self-check receipt. The default 95-point gate also requires GitHub Artifact
+Attestations for the candidate wheel and canonical evidence; HMAC-only local
+evidence is capped at 85. A normal successful repository task remains partial
+Dogfood. See `docs/Pacer_Dogfood_专项重构_2026-07-15.md`.
+
+OpenTelemetry projection is optional and disabled by default. Configure a standard
+OpenTelemetry SDK/provider, then set `PACER_OTEL_ENABLED=1` to project durable Pacer
+events as bounded spans. SDK and exporter failures never change local evidence or
+task results; prompts, secrets, and absolute paths are not exported.
 
 The project is in alpha. Use `dry-run` for inspection, and explicitly select a
 supervised or approved run profile before allowing workflows to mutate external

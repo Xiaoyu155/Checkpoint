@@ -1,4 +1,11 @@
 const state = { data: null, filter: 'all', selected: '' };
+const PILLAR_STATUSES = new Set(['passed', 'failed', 'partial', 'indeterminate']);
+const STATUS_LABELS = {
+  passed: '已通过',
+  failed: '未通过',
+  partial: '部分满足',
+  indeterminate: '无法判定',
+};
 
 const byId = id => document.getElementById(id);
 const escapeHtml = value => String(value ?? '').replace(/[&<>"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[char]));
@@ -46,15 +53,44 @@ function render() {
   setText('programTitle', program.objective || '已完成 Program');
   setText('evidenceMode', data.mode === 'native' ? 'Pacer native evidence' : 'Legacy Program evidence');
   const programStatus = program.status || '-';
-  setText('programStatus', programStatus);
-  document.querySelector('.program-state')?.classList.toggle('attention', !['completed', 'passed', 'verified'].includes(programStatus));
+  const latestReview = data.support?.memory?.latest?.task_review || {};
+  const productVerdict = latestReview.product_verdict || 'indeterminate';
+  const programTone = productVerdict === 'pass' ? 'passed' : productVerdict === 'fail' ? 'failed' : 'indeterminate';
+  setText('programStatus', data.mode === 'native' ? `${programStatus} / ${STATUS_LABELS[programTone]}` : programStatus);
+  const programState = document.querySelector('.program-state');
+  programState?.classList.remove('passed', 'failed', 'partial', 'indeterminate');
+  programState?.classList.add(data.mode === 'native' ? programTone : 'partial');
   setText('programId', program.program_id || '-');
   setText('missionIds', (data.missions || []).map(item => item.mission_id).filter(Boolean).join(', ') || '-');
   setText('providerModel', [program.provider, program.model].filter(Boolean).join(' / ') || '-');
   setText('workerRepair', `${program.worker_count || 0} / ${program.repair_count || 0}`);
-  setText('acceptanceLine', `${program.verification_verdict || '无结论'} · ${brief(program.verification_command || '无验收命令', 150)}`);
-  renderPillars(data.pillars || []);
-  renderDetail((data.pillars || []).find(item => item.id === state.selected) || (data.pillars || [])[0]);
+  setText(
+    'acceptanceLine',
+    latestReview.evidence_integrity
+      ? `证据 ${latestReview.evidence_integrity} · 标准 ${latestReview.acceptance_adequacy || 'unknown'} · 产品 ${productVerdict}`
+      : `${program.verification_verdict || '无结论'} · ${brief(program.verification_command || '无验收命令', 150)}`,
+  );
+  const pillars = normalizePillars(data.pillars || [], data);
+  renderPillars(pillars);
+  renderDetail(pillars.find(item => item.id === state.selected) || pillars[0]);
+}
+
+function normalizePillars(pillars, data) {
+  const supportLaunch = data.support?.launches?.active || {};
+  const aggregate = data.mode === 'native' ? supportLaunch.assessment?.pillars || {} : {};
+  const rawPillars = data.mode === 'native' ? supportLaunch.pillars || {} : {};
+  return pillars.map(item => {
+    const embedded = item.assessment && typeof item.assessment === 'object' ? item.assessment : null;
+    const aggregateAssessment = aggregate[item.id] && typeof aggregate[item.id] === 'object' ? aggregate[item.id] : null;
+    const rawAssessment = rawPillars[item.id]?.assessment && typeof rawPillars[item.id].assessment === 'object'
+      ? rawPillars[item.id].assessment
+      : null;
+    const assessment = embedded || aggregateAssessment || rawAssessment || {};
+    let status = PILLAR_STATUSES.has(assessment.status) ? assessment.status : '';
+    if (!status && PILLAR_STATUSES.has(item.status)) status = item.status;
+    if (!status) status = item.status === 'passed' ? 'partial' : 'indeterminate';
+    return { ...item, status, assessment };
+  });
 }
 
 function renderSupport(support) {
@@ -95,7 +131,7 @@ function renderPillars(pillars) {
       <span class="row-index">${String(pillars.indexOf(item) + 1).padStart(2, '0')}</span>
       <span class="row-copy"><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.evidence)}</small></span>
       <span class="metric">${escapeHtml(item.metric)}</span>
-      <span class="row-status">${item.status === 'passed' ? '通过' : '关注'}</span>
+      <span class="row-status">${STATUS_LABELS[item.status] || STATUS_LABELS.indeterminate}</span>
     </button>`).join('') : '<div class="empty">当前筛选没有项目。</div>';
   document.querySelectorAll('.pillar-row').forEach(row => row.addEventListener('click', () => {
     state.selected = row.dataset.id || '';
@@ -115,9 +151,20 @@ function renderDetail(pillar) {
   const usage = telemetry.usage || {};
   const compactions = telemetry.compactions || {};
   const agents = telemetry.agents || {};
+  const assessment = pillar.assessment || {};
+  const latestReview = support.memory?.latest?.task_review || {};
+  const acceptanceAssessment = latestReview.acceptance_assessment || {};
+  const reasons = (assessment.reason_codes || []).join(', ') || '-';
   byId('evidencePanel').innerHTML = `
-    <div class="detail-head"><span class="detail-state ${escapeHtml(pillar.status)}">${pillar.status === 'passed' ? '已通过' : '需关注'}</span><h2>${escapeHtml(pillar.title)}</h2></div>
+    <div class="detail-head"><span class="detail-state ${escapeHtml(pillar.status)}">${escapeHtml(STATUS_LABELS[pillar.status] || STATUS_LABELS.indeterminate)}</span><h2>${escapeHtml(pillar.title)}</h2></div>
     <dl class="detail-list">
+      <div><dt>核心状态</dt><dd><code>${escapeHtml(pillar.status)}</code></dd></div>
+      <div><dt>证据充分性</dt><dd><code>${escapeHtml(assessment.adequacy || 'unknown')}</code></dd></div>
+      <div><dt>原因代码</dt><dd><code>${escapeHtml(reasons)}</code></dd></div>
+      <div><dt>证据完整性</dt><dd><code>${escapeHtml(latestReview.evidence_integrity || 'unknown')}</code></dd></div>
+      <div><dt>验收标准</dt><dd><code>${escapeHtml(latestReview.acceptance_adequacy || 'unknown')}</code></dd></div>
+      <div><dt>产品结论</dt><dd><code>${escapeHtml(latestReview.product_verdict || 'indeterminate')}</code></dd></div>
+      <div><dt>标准来源</dt><dd><code>${escapeHtml(acceptanceAssessment.standard_source || 'unknown')}</code></dd></div>
       <div><dt>Program ID</dt><dd><code>${escapeHtml(program.program_id || '-')}</code></dd></div>
       <div><dt>Provider / Model</dt><dd><code>${escapeHtml([program.provider, program.model].filter(Boolean).join(' / ') || '-')}</code></dd></div>
       <div><dt>上游 Memory ID</dt><dd><code>${escapeHtml(program.upstream_memory_id || '-')}</code></dd></div>

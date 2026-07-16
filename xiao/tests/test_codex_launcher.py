@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -28,7 +32,7 @@ def _stable_python_runtime(monkeypatch):
     monkeypatch.setattr(
         codex_launcher,
         "resolve_python_runtime",
-        lambda _root: {
+        lambda _root, **_kwargs: {
             "executable": "",
             "source": "unavailable",
             "available": False,
@@ -82,10 +86,14 @@ def _assert_native_control(prompt: str, *, task: str | None = None) -> None:
     assert '"argv":["python","-m","pytest","-q"]' in prompt
     assert '"completion_evidence"' in prompt
     assert '"requirement_ids"' in prompt
+    assert '"result_kind"' not in prompt
+    assert '"files"' not in prompt
+    assert "derives created/modified/deleted file facts" in prompt
+    assert "Do not add git status/diff inspection steps" in prompt
     assert '"unresolved_items":[]' in prompt
     assert "Copy the original task text exactly into goal." in prompt
     assert "every locked task_contract requirement ID" in prompt
-    assert "never label a requested implementation or fix as review/research/test" in prompt
+    assert "Do not send result_kind, kind, requirement, or files" in prompt
     assert "Treat the returned task_review as authoritative." in prompt
     assert "Use its user_report_markdown as the leading report block" in prompt
     assert "never upgrade or omit its limitations" in prompt
@@ -102,6 +110,69 @@ def _ownership_lines(prompt: str) -> list[str]:
         for line in prompt.splitlines()
         if line.startswith(PACER_LAUNCH_OWNERSHIP_PREFIX)
     ]
+
+
+def test_native_routing_injects_selected_model_and_provider(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    workspace.mkdir()
+    (workspace / "model_pool.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "id": "routed",
+                        "provider": "custom",
+                        "model": "gpt-routed",
+                        "capability": 0.8,
+                        "cost": 0.4,
+                        "agent_backend": "codex",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    arguments, decision = codex_launcher._apply_native_routing(
+        ["exec", "Add checkout field"],
+        repo_root=tmp_path,
+        task="Add checkout field",
+    )
+
+    assert arguments[:4] == ["-c", "model_provider='custom'", "--model", "gpt-routed"]
+    assert decision["request_evidence"]["policy_match"] is True
+    assert decision["decision_id"]
+
+
+def test_native_routing_preserves_explicit_user_model(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    workspace.mkdir()
+    (workspace / "model_pool.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "id": "routed",
+                        "provider": "custom",
+                        "model": "gpt-routed",
+                        "capability": 0.8,
+                        "cost": 0.4,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    arguments, decision = codex_launcher._apply_native_routing(
+        ["--model", "user-model", "exec", "task"],
+        repo_root=tmp_path,
+        task="task",
+    )
+
+    assert arguments == ["--model", "user-model", "exec", "task"]
+    assert decision["verdict"] == "passthrough"
+    assert decision["reason_codes"] == ["routing_user_override"]
 
 
 def test_launch_codex_forwards_terminal_and_arguments(tmp_path, monkeypatch) -> None:
@@ -193,7 +264,7 @@ def test_launch_binds_relative_sibling_without_changing_process_cwd(
     monkeypatch.setattr(
         codex_launcher,
         "resolve_python_runtime",
-        lambda root: runtime_roots.append(root)
+            lambda root, **_kwargs: runtime_roots.append(root)
         or {
             "available": False,
             "pytest_available": False,
@@ -325,7 +396,7 @@ def test_launch_codex_exports_managed_python_and_records_runtime(tmp_path, monke
     }
     calls = []
     monkeypatch.delenv("PACER_PYTHON", raising=False)
-    monkeypatch.setattr(codex_launcher, "resolve_python_runtime", lambda _root: runtime)
+    monkeypatch.setattr(codex_launcher, "resolve_python_runtime", lambda _root, **_kwargs: runtime)
     monkeypatch.setattr(codex_launcher.shutil, "which", lambda _name: r"C:\Tools\codex.exe")
     monkeypatch.setattr(
         codex_launcher.subprocess,
@@ -342,10 +413,97 @@ def test_launch_codex_exports_managed_python_and_records_runtime(tmp_path, monke
     assert codex_launcher.launch_codex(cwd=tmp_path) == 0
 
     environment = calls[0][1]["env"]
-    assert "PACER_PYTHON" not in environment
+    assert environment["PACER_PYTHON"] == str(interpreter)
     assert environment["PATH"].split(codex_launcher.os.pathsep)[0] == str(interpreter.parent)
     manifest = next((tmp_path / ".agent-workspace" / "pacer_native" / "launches").glob("*.json"))
     assert json.loads(manifest.read_text(encoding="utf-8"))["runtime"]["python"] == runtime
+
+
+def test_launch_codex_exports_its_installed_wheel_python(tmp_path, monkeypatch) -> None:
+    interpreter = tmp_path / "wheel-a" / "Scripts" / "python.exe"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("fixture", encoding="utf-8")
+    calls = []
+    observed = {}
+    monkeypatch.delenv("PACER_PYTHON", raising=False)
+    monkeypatch.setattr(codex_launcher.sys, "executable", str(interpreter))
+    monkeypatch.setattr(codex_launcher.shutil, "which", lambda name: r"C:\Tools\codex.exe")
+
+    def resolve(root, **kwargs):
+        observed.update({"root": root, **kwargs})
+        return {
+            "executable": str(interpreter),
+            "source": "pacer_launcher",
+            "available": True,
+            "pytest_available": True,
+            "probe_status": "ok",
+            "trusted_venv": True,
+            "root": str(interpreter.parent.parent),
+            "bound_repo_root": str(tmp_path),
+        }
+
+    monkeypatch.setattr(codex_launcher, "resolve_python_runtime", resolve)
+    monkeypatch.setattr(
+        codex_launcher.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs))
+        or subprocess.CompletedProcess(command, 0),
+    )
+    monkeypatch.setattr(codex_launcher, "capture_rollout_snapshot", lambda: "snapshot")
+    monkeypatch.setattr(
+        codex_launcher,
+        "aggregate_rollout_telemetry",
+        lambda _snapshot, **_kwargs: {"status": "no_rollout", "attribution_confidence": "none"},
+    )
+
+    assert codex_launcher.launch_codex(cwd=tmp_path) == 0
+
+    assert observed["pacer_executable"] == str(interpreter)
+    environment = calls[0][1]["env"]
+    assert environment["PACER_PYTHON"] == str(interpreter)
+    assert environment["PATH"].split(codex_launcher.os.pathsep)[0] == str(interpreter.parent)
+
+
+def test_managed_pacer_launcher_python_runs_pytest_from_worker_path() -> None:
+    if os.name != "nt":
+        pytest.skip("Codex worker command resolution is exercised through PowerShell on Windows")
+    interpreter = Path(sys.executable).resolve()
+    environment = os.environ.copy()
+    launch = {
+        "runtime": {
+            "python": {
+                "executable": str(interpreter),
+                "source": "pacer_launcher",
+                "available": True,
+                "pytest_available": True,
+                "trusted_venv": True,
+            }
+        }
+    }
+
+    codex_launcher._apply_managed_python_environment(environment, launch)
+
+    resolved = shutil.which("python", path=environment["PATH"])
+    assert resolved is not None
+    assert os.path.samefile(resolved, interpreter)
+    powershell = shutil.which("powershell.exe")
+    assert powershell is not None
+    completed = subprocess.run(
+        [
+            powershell,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "python -m pytest --version",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.startswith("pytest ")
 
 
 def test_launcher_does_not_freeze_known_root_fallback_in_environment(tmp_path) -> None:
@@ -700,7 +858,7 @@ def test_pacer_mcp_config_overrides_user_transport_and_forwards_launch_trust() -
     assert configured[-2:] == ["exec", "修复错误"]
 
 
-def test_failed_prelaunch_registration_does_not_forward_stale_parent_digests(
+def test_failed_prelaunch_registration_blocks_codex_and_returns_nonzero(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -714,12 +872,17 @@ def test_failed_prelaunch_registration_does_not_forward_stale_parent_digests(
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("registration failed")),
     )
 
-    assert codex_launcher.launch_codex(["exec", "修复登录错误"], cwd=tmp_path) == 0
+    assert codex_launcher.launch_codex(["exec", "修复登录错误"], cwd=tmp_path) == 78
 
-    environment = calls[0][1]["env"]
-    assert environment["PACER_PRELAUNCH_TASK_REQUIRED"] == "1"
-    assert "PACER_PRELAUNCH_TASK_CONTRACT_DIGEST" not in environment
-    assert "PACER_PRELAUNCH_SOURCE_BASELINE_DIGEST" not in environment
+    assert calls == []
+    active = read_active_launch(tmp_path / ".agent-workspace")
+    assert active["status"] == "launch_failed"
+    assert active["exit_code"] == 78
+    assert active["prelaunch_task_registration"] == {
+        "schema_version": 1,
+        "status": "failed",
+        "error_type": "RuntimeError",
+    }
 
 
 def test_effective_auto_compact_limit_reads_inline_long_config() -> None:
@@ -865,6 +1028,122 @@ def test_launch_pre_registers_task_evidence_before_starting_codex(tmp_path, monk
     assert environment[PRELAUNCH_TASK_REQUIRED_ENV] == "1"
     assert environment[PRELAUNCH_TASK_CONTRACT_DIGEST_ENV] == task_contract_digest(active["task_contract"])
     assert environment[PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV] == task_source_baseline_digest(baseline)
+
+
+def test_resume_reuses_pending_recovery_contract_and_source_baseline(tmp_path, monkeypatch) -> None:
+    from visual_agent.pacer_launch_context import (
+        PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV,
+        PRELAUNCH_TASK_CONTRACT_DIGEST_ENV,
+        load_task_source_baseline,
+    )
+
+    source = tmp_path / "app.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    expected_source_digest = "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest()
+    calls = []
+    observed = {}
+    monkeypatch.setattr(task_review, "_SUBPROCESS_RUN", REAL_TASK_REVIEW_SUBPROCESS_RUN)
+    monkeypatch.setattr(codex_launcher.shutil, "which", lambda _name: r"C:\Tools\codex.exe")
+    snapshot = codex_launcher.RolloutSnapshot(tmp_path / "sessions", "2026-07-16T00:00:00+00:00", {})
+    monkeypatch.setattr(codex_launcher, "capture_rollout_snapshot", lambda: snapshot)
+    monkeypatch.setattr(codex_launcher, "save_rollout_baseline", lambda **_kwargs: None)
+    monkeypatch.setattr(codex_launcher, "_start_launch_watchdog", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        codex_launcher,
+        "aggregate_rollout_telemetry",
+        lambda *_args, **_kwargs: {
+            "status": "captured",
+            "current_context_usage": {"input_tokens": 96000},
+        },
+    )
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if len(calls) == 1:
+            source.write_text("value = 2\n", encoding="utf-8")
+            return subprocess.CompletedProcess(command, 1)
+        workspace = tmp_path / ".agent-workspace"
+        active = read_active_launch(workspace, launch_id=kwargs["env"]["PACER_LAUNCH_ID"])
+        observed.update(
+            {
+                "active": active,
+                "baseline": load_task_source_baseline(active, workspace_root=workspace),
+                "command": command,
+                "environment": kwargs["env"],
+            }
+        )
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(codex_launcher.subprocess, "run", fake_run)
+
+    assert codex_launcher.launch_codex(["exec", "repair recovery"], cwd=tmp_path) == 1
+    assert codex_launcher.launch_codex(
+        ["exec", "resume", "session-1", "continue previous work"],
+        cwd=tmp_path,
+    ) == 0
+
+    active = observed["active"]
+    assert active["launch_goal"] == "repair recovery"
+    assert active["prelaunch_task_registration"]["status"] == "recovered"
+    assert active["recovery_source_launch_id"]
+    assert observed["baseline"]["entries"]["app.py"] == expected_source_digest
+    prompt = observed["command"][-1]
+    _assert_native_control(prompt, task="repair recovery")
+    assert "continue previous work" not in prompt
+    assert observed["environment"][PRELAUNCH_TASK_CONTRACT_DIGEST_ENV] == active["task_contract_digest"]
+    assert observed["environment"][PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV] == active[
+        "source_baseline_digest"
+    ]
+
+
+@pytest.mark.parametrize("tamper", ["contract", "baseline"])
+def test_resume_blocks_tampered_recovery_evidence(tmp_path, monkeypatch, tamper) -> None:
+    from visual_agent.pacer_launch_context import (
+        read_active_launch,
+        task_source_baseline_path,
+        write_active_launch,
+    )
+
+    (tmp_path / "app.py").write_text("value = 1\n", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(task_review, "_SUBPROCESS_RUN", REAL_TASK_REVIEW_SUBPROCESS_RUN)
+    monkeypatch.setattr(codex_launcher.shutil, "which", lambda _name: r"C:\Tools\codex.exe")
+    snapshot = codex_launcher.RolloutSnapshot(tmp_path / "sessions", "2026-07-16T00:00:00+00:00", {})
+    monkeypatch.setattr(codex_launcher, "capture_rollout_snapshot", lambda: snapshot)
+    monkeypatch.setattr(codex_launcher, "save_rollout_baseline", lambda **_kwargs: None)
+    monkeypatch.setattr(codex_launcher, "_start_launch_watchdog", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        codex_launcher,
+        "aggregate_rollout_telemetry",
+        lambda *_args, **_kwargs: {
+            "status": "captured",
+            "current_context_usage": {"input_tokens": 96000},
+        },
+    )
+    monkeypatch.setattr(
+        codex_launcher.subprocess,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs))
+        or subprocess.CompletedProcess(command, 1),
+    )
+
+    assert codex_launcher.launch_codex(["exec", "repair recovery"], cwd=tmp_path) == 1
+    workspace = tmp_path / ".agent-workspace"
+    source_launch = read_active_launch(workspace)
+    if tamper == "contract":
+        source_launch["task_contract"]["requirements"][0]["text"] = "tampered"
+        write_active_launch(workspace, source_launch)
+    else:
+        baseline_path = task_source_baseline_path(workspace, source_launch["launch_id"])
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        baseline["captured_at"] = "tampered"
+        baseline_path.write_text(json.dumps(baseline), encoding="utf-8")
+
+    assert codex_launcher.launch_codex(
+        ["exec", "resume", "session-1", "continue previous work"],
+        cwd=tmp_path,
+    ) == 78
+    assert len(calls) == 1
 
 
 def test_launch_memory_preload_failure_warns_and_preserves_native_prompt(tmp_path, monkeypatch, capsys) -> None:

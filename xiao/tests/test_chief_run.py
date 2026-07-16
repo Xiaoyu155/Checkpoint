@@ -1047,6 +1047,13 @@ def test_chief_run_forwards_explicit_reasoning_override(tmp_path, monkeypatch) -
     )
 
     assert calls[0]["reasoning_effort"] == "high"
+    assert calls[0]["execution_policy"]["managed_budget"] == {
+        "max_wall_seconds": 3600.0,
+        "max_total_tokens": 120_000,
+        "max_attempts": 3,
+        "max_repair_rounds": 2,
+        "max_same_failure_count": 2,
+    }
 
 
 def test_chief_run_resume_uses_remaining_round_budget(tmp_path, monkeypatch) -> None:

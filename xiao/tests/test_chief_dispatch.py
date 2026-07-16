@@ -5,11 +5,17 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from time import monotonic
+
+import pytest
 
 from visual_agent.chief_dispatch import (
     _dirty_context_prompt,
     _dirty_context_summary,
     _dirty_path_ignored,
+    _dispatch_budget_assessment,
+    _managed_budget_policy,
+    _managed_retry_decision,
     _run_worker_attempt,
     _verification_is_repairable,
     _write_worktree_gitignore,
@@ -25,6 +31,7 @@ from visual_agent.chief_dispatch import (
 from visual_agent.chief_engineer import build_chief_plan, chief_plan_to_dict
 from visual_agent.chief_plans_store import load_verification, load_worker_records, save_plan
 from visual_agent.codex_check import CodexCheckResult, CodexWorkflowCheck
+from visual_agent.managed_state import ManagedBudgetPolicy
 from visual_agent.workspace import init_workspace
 
 
@@ -416,6 +423,143 @@ def test_worker_attempt_persists_progress_heartbeat(tmp_path) -> None:
     assert progress["stage"] == "worker_completed"
     assert progress["worker_status"] == "completed"
     assert "editing src/app.js" in progress["last_output_tail"]
+
+
+def test_worker_attempt_does_not_retry_internal_type_error(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    workspace.mkdir()
+    calls = []
+
+    def broken_runner(argv, cwd, timeout_seconds, log_path, **kwargs):
+        calls.append((argv, kwargs))
+        raise TypeError("internal worker bug")
+
+    with pytest.raises(TypeError, match="internal worker bug"):
+        _run_worker_attempt(
+            workspace_root=workspace,
+            plan_id="p-type-error",
+            attempt="initial",
+            track={"id": "track_1_codex", "agent": "codex"},
+            argv=["codex", "exec"],
+            cwd=tmp_path,
+            timeout_seconds=10,
+            log_path=workspace / "worker.log",
+            runner=broken_runner,
+        )
+
+    assert len(calls) == 1
+
+
+def test_worker_attempt_missing_exit_code_is_crashed(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    workspace.mkdir()
+
+    def incomplete_runner(argv, cwd, timeout_seconds, log_path):
+        return {"stdout_tail": "incomplete", "stderr_tail": ""}
+
+    record = _run_worker_attempt(
+        workspace_root=workspace,
+        plan_id="p-missing-exit",
+        attempt="initial",
+        track={"id": "track_1_codex", "agent": "codex"},
+        argv=["codex", "exec"],
+        cwd=tmp_path,
+        timeout_seconds=10,
+        log_path=workspace / "worker.log",
+        runner=incomplete_runner,
+    )
+
+    assert record["status"] == "crashed"
+    assert record["exit_code"] == 125
+
+
+def test_managed_budget_blocks_repair_when_usage_is_unknown_or_repeated() -> None:
+    policy = ManagedBudgetPolicy(
+        max_wall_seconds=600,
+        max_total_tokens=1000,
+        max_attempts=3,
+        max_repair_rounds=2,
+        max_same_failure_count=2,
+    )
+    unknown = _dispatch_budget_assessment(
+        policy,
+        dispatch_started=monotonic(),
+        records=[{"status": "failed"}],
+        repair_rounds=0,
+        same_failure_count=1,
+        operation="repair",
+    )
+    repeated = _dispatch_budget_assessment(
+        policy,
+        dispatch_started=monotonic(),
+        records=[{"status": "failed", "usage": {"total_tokens": 100}}],
+        repair_rounds=1,
+        same_failure_count=2,
+        operation="repair",
+    )
+
+    assert unknown["allowed"] is False
+    assert unknown["status"] == "usage_unknown"
+    assert unknown["reason_codes"] == ["token_usage_unknown"]
+    assert repeated["allowed"] is False
+    assert "same_failure_repeated" in repeated["reason_codes"]
+
+
+def test_managed_budget_policy_defaults_same_failure_limit_to_two() -> None:
+    policy = _managed_budget_policy(
+        {
+            "max_wall_seconds": 600,
+            "max_total_tokens": 1000,
+            "max_attempts": 3,
+            "max_repair_rounds": 1,
+        }
+    )
+
+    assert policy.max_same_failure_count == 2
+
+
+@pytest.mark.parametrize(
+    ("worker", "expected_kind"),
+    [
+        ({"status": "failed", "stderr_tail": "HTTP 503 Service Unavailable"}, "provider_5xx"),
+        ({"status": "failed", "stderr_tail": "Timed out after 30s"}, "network_timeout"),
+        ({"status": "crashed", "stderr_tail": ""}, "process_crash"),
+    ],
+)
+def test_managed_retry_whitelist_keeps_current_attempt_failed(
+    worker: dict,
+    expected_kind: str,
+) -> None:
+    decision = _managed_retry_decision(
+        worker,
+        verification={"verdict": "fail"},
+        idempotency_key="managed:key",
+        attempts_completed=1,
+        max_attempts=3,
+    )
+
+    assert decision["failure_kind"] == expected_kind
+    assert decision["retry"] is True
+    assert decision["status"] == "scheduled"
+    assert decision["delay_seconds"] >= 0
+    assert decision["current_attempt_remains_failed"] is True
+
+
+def test_evidence_rejection_is_never_retried() -> None:
+    decision = _managed_retry_decision(
+        {"status": "completed"},
+        verification={
+            "verdict": "fail",
+            "repair_brief": {"source": "test_tampering"},
+        },
+        idempotency_key="managed:key",
+        attempts_completed=1,
+        max_attempts=3,
+    )
+
+    assert decision["failure_kind"] == "evidence_rejected"
+    assert decision["retry"] is False
+    assert decision["status"] == "not_retryable"
 
 
 def test_worker_attempt_persists_sidecars_and_prefers_codex_stdout_usage(tmp_path) -> None:
@@ -1162,6 +1306,22 @@ def test_worktree_product_changes_ignore_devpacer_gitignore_block(tmp_path) -> N
     assert chief_dispatch._worktree_has_product_changes(tmp_path) is False
 
 
+def test_worktree_product_changes_incomplete_scan_is_not_change_evidence(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from visual_agent import chief_dispatch
+
+    incomplete = type("IncompleteChangeSet", (), {"complete": False})()
+    monkeypatch.setattr(
+        chief_dispatch,
+        "collect_repository_change_set",
+        lambda **_kwargs: incomplete,
+    )
+
+    assert chief_dispatch._worktree_has_product_changes(tmp_path) is False
+
+
 def test_worktree_product_changes_ignore_dart_runtime_caches(tmp_path) -> None:
     from visual_agent import chief_dispatch
 
@@ -1335,6 +1495,40 @@ def test_build_worker_command_honors_explicit_codex_model(tmp_path) -> None:
     )
     assert "--model" in cmd["argv"]
     assert "custom-codex-model" in cmd["argv"]
+
+
+def test_build_worker_command_executes_dynamic_routing_decision(tmp_path) -> None:
+    plan = {"objective": "fix", "acceptance_criteria": [], "selected_workflows": []}
+    track = {
+        "id": "track_1_codex",
+        "agent": "codex",
+        "model": "gpt-routed",
+        "model_selection": {
+            "schema_version": 2,
+            "policy_version": 2,
+            "decision_id": "decision-1",
+            "status": "selected",
+            "required_tier": "standard",
+            "selected": {
+                "id": "routed",
+                "provider": "custom",
+                "model": "gpt-routed",
+                "agent_backend": "codex",
+            },
+        },
+    }
+
+    command = build_worker_command(
+        plan=plan,
+        track=track,
+        worktree=tmp_path,
+        verification_command="python -m pytest -q",
+    )
+
+    assert command["argv"][command["argv"].index("--model") + 1] == "gpt-routed"
+    assert "model_provider='custom'" in command["argv"]
+    assert command["routing_evidence"]["policy_match"] is True
+    assert command["routing_evidence"]["decision_id"] == "decision-1"
 
 
 def test_worker_reasoning_uses_track_for_implementation_and_profile_for_repair(tmp_path, monkeypatch) -> None:
@@ -1679,7 +1873,7 @@ def test_chief_dispatch_review_plan_uses_report_as_acceptance(tmp_path, monkeypa
     assert "建议开发计划" in payload["review_plan_report"]
 
 
-def test_chief_dispatch_review_plan_report_pass_beats_worker_timeout(tmp_path, monkeypatch) -> None:
+def test_chief_dispatch_review_plan_report_cannot_hide_worker_timeout(tmp_path, monkeypatch) -> None:
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     plan_id = "review-timeout"
     save_plan(
@@ -1732,7 +1926,7 @@ def test_chief_dispatch_review_plan_report_pass_beats_worker_timeout(tmp_path, m
     assert payload["worker_record"]["status"] == "failed"
     assert payload["latest_verification"]["run_profile"] == "review_plan"
     assert payload["latest_verification"]["verdict"] == "pass"
-    assert payload["status"] == "verified"
+    assert payload["status"] == "worker_failed"
 
 
 def test_chief_dispatch_blocks_inspection_lane(tmp_path, monkeypatch) -> None:
@@ -2741,7 +2935,7 @@ def test_dispatch_repair_resumes_codex_session_and_writes_ledger(tmp_path, monke
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", fake_create_worktree)
     verification_results = [
         {"verdict": "fail", "exit_code": 1, "failure_kind": "command_failed", "command": "python -c pass", "raw_output_tail": "assertion failed"},
-        {"verdict": "fail", "exit_code": 1, "failure_kind": "command_failed", "command": "python -c pass", "raw_output_tail": "assertion still failing"},
+        {"verdict": "fail", "exit_code": 1, "failure_kind": "changed_failure", "command": "python -c pass", "raw_output_tail": "a different assertion is now failing"},
         {"verdict": "pass", "exit_code": 0, "failure_kind": "", "command": "python -c pass"},
     ]
     monkeypatch.setattr(
@@ -2774,6 +2968,16 @@ def test_dispatch_repair_resumes_codex_session_and_writes_ledger(tmp_path, monke
         command_runner=fake_runner,
         test_command="python -c pass",
         repair_strategy="resume",
+        execution_policy={
+            "idempotency_key": "managed:repair-test",
+            "managed_budget": {
+                "max_wall_seconds": 600,
+                "max_total_tokens": 1000,
+                "max_attempts": 3,
+                "max_repair_rounds": 2,
+                "max_same_failure_count": 2,
+            },
+        },
     )
 
     assert payload["status"] == "verified"
@@ -2787,7 +2991,7 @@ def test_dispatch_repair_resumes_codex_session_and_writes_ledger(tmp_path, monke
         assert call["argv"][exec_index : exec_index + 3] == ["exec", "resume", "--json"]
         assert call["argv"][-2:] == ["thread-123", "-"]
     assert "assertion failed" in calls[1]["stdin"]
-    assert "assertion still failing" in calls[2]["stdin"]
+    assert "a different assertion is now failing" in calls[2]["stdin"]
     assert all("Objective:" not in call["stdin"] for call in calls[1:])
     assert payload["usage_summary"]["input_tokens"] == 350
     assert payload["usage_summary"]["cache_read_tokens"] == 300
@@ -2800,6 +3004,9 @@ def test_dispatch_repair_resumes_codex_session_and_writes_ledger(tmp_path, monke
     assert payload["dispatch_record"]["resolved_sandbox"] == "workspace-write"
     assert payload["dispatch_record"]["repair_rounds"] == 2
     assert payload["dispatch_record"]["verification_attempts"] == 3
+    assert payload["managed_runtime"]["idempotency_key"] == "managed:repair-test"
+    assert payload["managed_runtime"]["budget_status"] == "within_budget"
+    assert payload["managed_runtime"]["budget"]["usage"]["total_tokens"] == 390
 
 
 def test_dispatch_resume_unavailable_falls_back_to_fresh_with_full_evidence(tmp_path, monkeypatch) -> None:

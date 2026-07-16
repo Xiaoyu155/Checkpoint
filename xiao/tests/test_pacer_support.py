@@ -89,7 +89,23 @@ def test_support_snapshot_aggregates_native_outcomes_and_commands(tmp_path, monk
                     "kind": "pacer_task_review",
                     "valid": True,
                     "verdict": "approved",
-                    "trust": "yes",
+                    "trust": "with_limits",
+                    "evidence_integrity": "verified",
+                    "acceptance_adequacy": "insufficient",
+                    "product_verdict": "indeterminate",
+                    "acceptance_assessment": {
+                        "schema_version": 1,
+                        "standard_source": "template",
+                        "standard_digest": "digest-1",
+                        "digest_verified": True,
+                        "adequacy": "insufficient",
+                        "final_phase": True,
+                        "required_step_classes": ["test"],
+                        "observed_step_classes": ["test", "compile"],
+                        "missing_step_classes": [],
+                        "missing_commands": [],
+                        "reason_codes": ["acceptance_standard_template_only"],
+                    },
                     "errors": [],
                     "warnings": [],
                     "user_report": {
@@ -100,8 +116,11 @@ def test_support_snapshot_aggregates_native_outcomes_and_commands(tmp_path, monk
                         "evidence": ["验收 tests：通过"],
                         "blocking_issues": [],
                         "risks": [],
-                        "can_trust": "yes",
-                        "next_action": "可以交付。",
+                        "can_trust": "with_limits",
+                        "evidence_integrity": "verified",
+                        "acceptance_adequacy": "insufficient",
+                        "product_verdict": "indeterminate",
+                        "next_action": "补充验收标准。",
                     },
                 },
             }
@@ -149,13 +168,29 @@ def test_support_snapshot_aggregates_native_outcomes_and_commands(tmp_path, monk
 
     assert payload["memory"]["total_outcomes"] == 1
     assert payload["memory"]["latest"]["evidence_level"] == "verified_batch"
-    assert payload["memory"]["latest"]["task_review"]["trust"] == "yes"
+    latest_review = payload["memory"]["latest"]["task_review"]
+    assert latest_review["trust"] == "with_limits"
+    assert latest_review["evidence_integrity"] == "verified"
+    assert latest_review["acceptance_adequacy"] == "insufficient"
+    assert latest_review["product_verdict"] == "indeterminate"
+    assert latest_review["acceptance_assessment"]["standard_source"] == "template"
+    assert latest_review["acceptance_assessment"]["digest_verified"] is True
+    assert latest_review["user_report"]["product_verdict"] == "indeterminate"
     assert payload["commands"]["passed_runs"] == 1
     assert payload["commands"]["passed_steps"] == 2
     assert payload["launches"]["active"]["liveness"]["state"] == "stalled"
+    active_assessment = payload["launches"]["active"]["assessment"]
+    assert active_assessment["passed"] is False
+    assert set(active_assessment["pillars"]) == {
+        "routing",
+        "memory",
+        "managed",
+        "acceptance",
+        "dogfood",
+    }
     assert "lifecycle=running, liveness=stalled" in markdown
     assert "Pacer 任务审查：审查通过，可以交付。" in markdown
-    assert "可信结论：可信" in markdown
+    assert "产品结论：无法判定" in markdown
 
 
 def test_support_keeps_trusted_documentation_compile_batch_verified(tmp_path, monkeypatch) -> None:
@@ -831,6 +866,22 @@ def test_pacer_status_accepts_explicit_external_workspace_and_repo(tmp_path, mon
     assert result == 0
     assert payload["repo_root"] == str(repo.resolve())
     assert payload["memory"]["latest"]["goal"] == "explicit status workspace"
+
+
+def test_pacer_management_routes_quality_commands_to_pacer_cli(monkeypatch) -> None:
+    from visual_agent import cli
+
+    calls: list[list[str]] = []
+    monkeypatch.setattr(cli, "main", lambda argv: calls.append(argv) or 23)
+
+    result = handle_pacer_management(
+        ["pacer-release-manifest-check", "--manifest", ".pacer/release.json"]
+    )
+
+    assert result == 23
+    assert calls == [
+        ["pacer-release-manifest-check", "--manifest", ".pacer/release.json"]
+    ]
 
 
 def test_pacer_account_bind_saves_only_local_profile(tmp_path, monkeypatch, capsys) -> None:

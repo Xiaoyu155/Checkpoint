@@ -41,6 +41,7 @@ dependencies = [
     "mss>=9.0.1",
     "Pillow>=10.0.0",
     "portalocker>=2.7",
+    "pydantic>=2.11.0,<3",
     "pyautogui>=0.9.54",
     "PyYAML>=6.0.0",
 ]
@@ -55,6 +56,13 @@ desktop = [
 ]
 test = [
     "pytest>=8.0.0",
+]
+eval = [
+    "ir-measures>=0.4.3,<1",
+]
+otel = [
+    "opentelemetry-api>=1.25.0,<2",
+    "opentelemetry-sdk>=1.25.0,<2",
 ]
 # Compatibility alias: MCP is required by the core Pacer runtime as of 0.1.2.
 mcp = []

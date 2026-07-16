@@ -117,10 +117,8 @@ def test_action_dispatcher_uses_playwright_page_for_click_and_fill(tmp_path) -> 
     assert page.calls == [
         ("locator", "#username"),
         ("fill", "demo"),
-        ("wait_for_timeout", 200),
         ("locator", "#username"),
         ("click", None),
-        ("wait_for_timeout", 200),
     ]
 
 
@@ -145,8 +143,32 @@ def test_action_dispatcher_refreshes_playwright_page(tmp_path) -> None:
     assert result.metadata["execution"] == "playwright"
     assert page.calls == [
         ("reload", {"wait_until": "load", "timeout": 1234}),
-        ("wait_for_timeout", 200),
     ]
+
+
+def test_action_dispatcher_keeps_explicit_browser_settle_wait(tmp_path) -> None:
+    dispatcher = ActionDispatcher()
+    context = WorkflowContext(run_id="run", run_dir=tmp_path)
+    page = FakePage()
+    context.resources["playwright_page"] = page
+    resolved = ResolvedTarget(
+        target=Target(label="submit", role="button"),
+        evidence=LocationEvidence(
+            provider=ProviderKind.DOM,
+            confidence=1,
+            reason="dom",
+            handle="#submit",
+        ),
+    )
+
+    dispatcher.execute(
+        "click",
+        resolved,
+        {"dry_run": False, "wait_after_seconds": 0.25},
+        ActionDispatchContext(workflow_context=context, dry_run=True),
+    )
+
+    assert page.calls[-1] == ("wait_for_timeout", 250)
 
 
 def test_action_dispatcher_blocks_real_desktop_text_input_without_opt_in(tmp_path) -> None:

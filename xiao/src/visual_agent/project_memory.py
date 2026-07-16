@@ -45,6 +45,14 @@ _STOPWORDS = {
     "修复",
     "任务",
     "当前",
+    "继续",
+    "开发",
+    "功能",
+    "更新",
+    "新增",
+    "增加",
+    "支持",
+    "实现",
     "测试",
     "项目",
     "验证",
@@ -64,8 +72,8 @@ def build_project_memory(
     cached_entries = cached.get("entries") if isinstance(cached.get("entries"), dict) else {}
     next_cached_entries: dict[str, Any] = {}
     entries: list[dict[str, Any]] = []
-    hits = 0
-    misses = 0
+    reused_entries = 0
+    rebuilt_entries = 0
 
     for summary in list_missions(workspace_path):
         mission_id = str(summary.get("mission_id") or "")
@@ -79,7 +87,7 @@ def build_project_memory(
             and isinstance(cached_item.get("entry"), dict)
         ):
             base_entry = dict(cached_item["entry"])
-            hits += 1
+            reused_entries += 1
         else:
             mission = load_mission(workspace_path, mission_id)
             if mission is None:
@@ -97,22 +105,42 @@ def build_project_memory(
                 verification,
                 source_paths=source_paths,
             )
-            misses += 1
+            rebuilt_entries += 1
         next_cached_entries[mission_id] = {"signature": signature, "entry": base_entry}
         scored = dict(base_entry)
-        score, reasons = _relevance(goal or "", scored)
-        scored["relevance_score"] = score
-        scored["match_reasons"] = reasons
+        relevance = score_memory_entry(goal or "", scored)
+        scored["relevance_score"] = relevance["score"]
+        scored["match_reasons"] = relevance["match_reasons"]
+        scored["relevance"] = relevance
         entries.append(scored)
 
     _save_index(workspace_path, next_cached_entries)
     entries.sort(key=lambda item: (int(item.get("relevance_score") or 0), item.get("updated_at", "")), reverse=True)
-    if str(goal or "").strip():
+    query_present = bool(str(goal or "").strip())
+    if query_present:
         pool = [item for item in entries if int(item.get("relevance_score") or 0) >= MIN_RELEVANCE_SCORE]
     else:
         durable = [item for item in entries if _is_durable(item)]
         pool = durable or entries
     selected = pool[: max(0, int(limit))]
+    selected_ids = {str(item.get("memory_id") or "") for item in selected}
+    ranking = [
+        {
+            "rank": rank,
+            "memory_id": str(item.get("memory_id") or ""),
+            "score": int(item.get("relevance_score") or 0),
+            "match_reasons": [str(reason) for reason in item.get("match_reasons") or []],
+            "judgment": str((item.get("relevance") or {}).get("judgment") or "unjudged"),
+            "relevant": (item.get("relevance") or {}).get("relevant"),
+            "selected": str(item.get("memory_id") or "") in selected_ids,
+        }
+        for rank, item in enumerate(entries[: max(0, int(limit))], start=1)
+    ]
+    cache_status = _entry_cache_status(
+        reused_entries=reused_entries,
+        rebuilt_entries=rebuilt_entries,
+        stored_entries=len(next_cached_entries),
+    )
     return {
         "schema_version": MEMORY_SCHEMA_VERSION,
         "product": "DevPacer",
@@ -130,10 +158,34 @@ def build_project_memory(
             "default_handoff_chars": DEFAULT_HANDOFF_CHARS,
             "message": "Memory is advisory and non-exhaustive; inspect any repository files needed for the task.",
         },
+        "entry_cache": {
+            "status": cache_status,
+            "path": str(_index_path(workspace_path)),
+            "reused_entries": reused_entries,
+            "rebuilt_entries": rebuilt_entries,
+            "stored_entries": len(next_cached_entries),
+        },
+        "lookup": {
+            "status": "succeeded",
+            "hit": bool(entries),
+            "lookup_hit": bool(entries),
+            "candidate_count": len(entries),
+        },
+        "relevance": {
+            "status": "estimated" if query_present else "unjudged",
+            "hit": bool(pool) if query_present else None,
+            "relevant_hit": bool(pool) if query_present else None,
+            "threshold": MIN_RELEVANCE_SCORE,
+            "eligible_count": len(pool) if query_present else None,
+            "returned_count": len(selected),
+            "ranking": ranking,
+        },
         "index": {
             "path": str(_index_path(workspace_path)),
-            "hits": hits,
-            "misses": misses,
+            # Compatibility aliases. These are entry-cache counters, not
+            # evidence that the returned memories are relevant to the task.
+            "hits": reused_entries,
+            "misses": rebuilt_entries,
             "entry_count": len(next_cached_entries),
         },
     }
@@ -462,14 +514,27 @@ def _memory_recommendations(entries: list[dict[str, Any]]) -> list[str]:
     return recommendations[:6]
 
 
-def _relevance(goal: str, entry: dict[str, Any]) -> tuple[int, list[str]]:
-    if not goal.strip():
-        return 0, []
-    query = goal.lower()
+def score_memory_entry(
+    goal: str,
+    entry: dict[str, Any],
+    *,
+    threshold: int = MIN_RELEVANCE_SCORE,
+) -> dict[str, Any]:
+    """Score one memory candidate without interpreting cache reuse as relevance."""
+    query_text = str(goal or "").strip()
+    if not query_text:
+        return {
+            "judgment": "unjudged",
+            "score": 0,
+            "threshold": max(0, int(threshold)),
+            "relevant": None,
+            "match_reasons": [],
+        }
+    query = query_text.lower()
     score = 0
     reasons: list[str] = []
-    mission_id = str(entry.get("mission_id") or "").lower()
-    memory_id = str(entry.get("memory_id") or "").lower()
+    mission_id = str(entry.get("mission_id") or entry.get("batch_run_id") or "").lower()
+    memory_id = str(entry.get("memory_id") or entry.get("batch_run_id") or "").lower()
     if (mission_id and mission_id in query) or (memory_id and memory_id in query):
         score += 120
         reasons.append("explicit_memory_id")
@@ -483,13 +548,13 @@ def _relevance(goal: str, entry: dict[str, Any]) -> tuple[int, list[str]]:
     if set(query_symbols) & set(symbols):
         score += 50
         reasons.append("exact_symbol")
-    objective = str(entry.get("objective") or "").lower()
+    objective = str(entry.get("objective") or entry.get("goal") or "").lower()
     if query in objective or (len(objective) >= 12 and objective in query):
         score += 100
         reasons.append("objective_phrase")
     objective_overlap = _tokens(query) & _tokens(objective)
     if objective_overlap:
-        score += min(40, 8 * len(objective_overlap))
+        score += _token_overlap_score(objective_overlap)
         reasons.append("objective_terms")
     failure_text = " ".join(str(item) for item in ((entry.get("evidence") or {}).get("failed_signatures") or [])).lower()
     failure_overlap = _tokens(query) & _tokens(failure_text)
@@ -507,7 +572,25 @@ def _relevance(goal: str, entry: dict[str, Any]) -> tuple[int, list[str]]:
     if str(entry.get("status") or "") in _PREVIEW_STATUSES or str(entry.get("stop_reason") or "") in _PREVIEW_STOP_REASONS:
         score = max(0, score - 20)
         reasons.append("preview_penalty")
-    return score, reasons if score > 0 else []
+    reasons = reasons if score > 0 else []
+    relevance_threshold = max(0, int(threshold))
+    return {
+        "judgment": "estimated",
+        "score": score,
+        "threshold": relevance_threshold,
+        "relevant": score >= relevance_threshold,
+        "match_reasons": reasons,
+    }
+
+
+def _entry_cache_status(*, reused_entries: int, rebuilt_entries: int, stored_entries: int) -> str:
+    if stored_entries <= 0:
+        return "empty"
+    if reused_entries > 0 and rebuilt_entries > 0:
+        return "partial"
+    if reused_entries > 0:
+        return "warm"
+    return "cold"
 
 
 def _tokens(value: str) -> set[str]:
@@ -526,6 +609,19 @@ def _tokens(value: str) -> set[str]:
                 if run[index : index + size] not in _STOPWORDS
             )
     return tokens
+
+
+def _token_overlap_score(tokens: set[str]) -> int:
+    score = 0
+    for token in tokens:
+        if re.fullmatch(r"[\u3400-\u9fff]+", token):
+            # A shared two-character Chinese domain term often carries the same
+            # signal as a complete English identifier; generic verbs are removed
+            # by _STOPWORDS before this point.
+            score += 24 if len(token) == 2 else 18
+        else:
+            score += 8
+    return min(40, score)
 
 
 def _path_terms(value: str) -> set[str]:

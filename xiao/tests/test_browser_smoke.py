@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from visual_agent.browser_smoke import build_browser_smoke_workflow, browser_smoke_run_dir, browser_smoke_to_markdown, run_browser_smoke
+from visual_agent.browser_smoke import (
+    build_browser_smoke_workflow,
+    browser_smoke_run_dir,
+    browser_smoke_to_markdown,
+    run_browser_smoke,
+    wait_for_browser_smoke_text,
+    wait_for_browser_smoke_url,
+)
 from visual_agent.cli import main
 from visual_agent.models import Observation, ProviderKind
 from visual_agent.validation import validate_workflow
@@ -24,6 +31,17 @@ class FakeLocator:
         self.page.fills.append((self.selector, value))
 
 
+class FakeTextLocator:
+    def __init__(self, page, text):
+        self.page = page
+        self.text = text
+
+    def wait_for(self, *, state, timeout):
+        self.page.web_first_calls.append(("text", self.text, state, timeout))
+        if self.text.lower() not in self.page.text.lower():
+            raise TimeoutError("text missing")
+
+
 class FakePage:
     viewport_size = {"width": 1280, "height": 720}
 
@@ -32,6 +50,7 @@ class FakePage:
         self.clicked = False
         self.text = "Login"
         self.fills = []
+        self.web_first_calls = []
 
     def locator(self, selector):
         self.selector = selector
@@ -40,10 +59,14 @@ class FakePage:
     def wait_for_timeout(self, _value):
         return None
 
-    def wait_for_function(self, _script, *, arg, timeout):
-        value = str(arg).lower()
-        if value not in self.text.lower() and value not in self.url.lower():
-            raise TimeoutError("text missing")
+    def get_by_text(self, text, *, exact):
+        assert exact is False
+        return FakeTextLocator(self, text)
+
+    def wait_for_url(self, pattern, *, timeout):
+        self.web_first_calls.append(("url", pattern.pattern, timeout))
+        if pattern.search(self.url) is None:
+            raise TimeoutError("URL missing")
 
     def evaluate(self, _script, arg=None):
         if arg is not None:
@@ -349,6 +372,30 @@ def test_browser_smoke_waits_for_text_after_click(tmp_path, monkeypatch) -> None
     assert payload["status"] == "success"
     assert payload["waits"] == [
         {"status": "found", "type": "wait_for_text_after", "text": "Dashboard Ready", "timeout_seconds": 5.0}
+    ]
+
+
+def test_browser_smoke_wait_helpers_use_playwright_web_first_apis() -> None:
+    page = FakePage()
+    page.text = "Dashboard Ready"
+    page.url = "https://example.test/dashboard"
+
+    text_results = wait_for_browser_smoke_text(
+        {"playwright_page": page},
+        texts=["Dashboard Ready"],
+        timeout_seconds=1.25,
+    )
+    url_results = wait_for_browser_smoke_url(
+        {"playwright_page": page},
+        contains=["/dashboard"],
+        timeout_seconds=1.25,
+    )
+
+    assert text_results[0]["status"] == "found"
+    assert url_results[0]["status"] == "found"
+    assert page.web_first_calls == [
+        ("text", "Dashboard Ready", "visible", 1250),
+        ("url", "/dashboard", 1250),
     ]
 
 

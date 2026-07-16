@@ -6,7 +6,14 @@ from visual_agent.uia import UIAWindowMatch
 import pytest
 
 from visual_agent.capture import capture_window_params, crop_image
-from visual_agent.providers import ProviderContext, ProviderRegistry, default_provider_registry, normalize_url, route_handler
+from visual_agent.providers import (
+    ProviderContext,
+    ProviderRegistry,
+    default_provider_registry,
+    normalize_url,
+    route_handler,
+    wait_for_browser_page_ready,
+)
 
 
 def test_default_provider_registry_contains_current_observe_actions(tmp_path) -> None:
@@ -31,6 +38,23 @@ def test_provider_registry_can_register_custom_provider(tmp_path) -> None:
 
     assert observation.provider == ProviderKind.MOCK
     assert observation.source == "custom"
+
+
+def test_browser_page_readiness_uses_body_locator_wait() -> None:
+    calls = []
+
+    class BodyLocator:
+        def wait_for(self, *, state, timeout):
+            calls.append(("wait_for", state, timeout))
+
+    class Page:
+        def locator(self, selector):
+            calls.append(("locator", selector))
+            return BodyLocator()
+
+    wait_for_browser_page_ready(Page(), timeout_ms=4321)
+
+    assert calls == [("locator", "body"), ("wait_for", "visible", 4321)]
 
 
 def test_ocr_provider_supports_deterministic_mock_text(tmp_path) -> None:

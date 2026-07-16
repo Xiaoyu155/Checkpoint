@@ -250,6 +250,10 @@ def test_autonomous_program_delegates_all_internal_tasks_with_wide_budget(tmp_pa
     assert "task_id=task-001" in calls[0]["goal"]
     assert calls[0]["model_policy"]["implementation"] == "inherit"
     assert calls[1]["model_policy"]["implementation"] == "gpt-5.6-luna"
+    assert calls[0]["model_policy"]["repair"] == "inherit"
+    assert calls[1]["model_policy"]["repair"] == "inherit"
+    assert calls[0]["max_total_tokens"] == 120_000
+    assert calls[0]["max_same_failure_count"] == 2
     assert calls[0]["execution_policy"]["program_id"] == program["program_id"]
     assert calls[0]["execution_policy"]["task_id"] == "task-001"
     assert calls[0]["execution_policy"]["roadmap_mode"] == "locked"

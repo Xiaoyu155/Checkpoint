@@ -4,30 +4,20 @@ import subprocess
 from pathlib import Path
 from typing import Any, Iterable
 
+from .change_set import collect_repository_change_set
 from .context_ingestion import CodeChange
 
 
 def changed_files(*, base: str = "HEAD", cwd: Path | None = None, include_untracked: bool = True) -> list[str]:
     root = cwd or Path.cwd()
-    files: set[str] = set()
-    for command in (
-        ["git", "-c", "core.quotePath=false", "diff", "--name-only", base],
-        ["git", "-c", "core.quotePath=false", "diff", "--name-only", "--cached"],
-    ):
-        try:
-            result = subprocess.run(
-                command,
-                cwd=str(root),
-                text=True,
-                capture_output=True,
-                check=True,
-            )
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            return []
-        files.update(normalize_changed_file(line) for line in result.stdout.splitlines() if line.strip())
+    change_set = collect_repository_change_set(repo_root=root, base_ref=base)
+    if not change_set.complete:
+        return []
+    paths = [item.path for item in change_set.changes]
     if include_untracked:
-        files.update(git_untracked_files(cwd=root))
-    return sorted(item for item in files if item)
+        return sorted(dict.fromkeys(paths))
+    untracked = set(git_untracked_files(cwd=root))
+    return sorted(dict.fromkeys(path for path in paths if path not in untracked))
 
 
 def collect_code_changes(
@@ -38,14 +28,16 @@ def collect_code_changes(
     max_file_bytes: int = 200_000,
 ) -> tuple[CodeChange, ...]:
     root = cwd or Path.cwd()
-    status_by_path = git_diff_name_status(base=base, cwd=root)
-    if include_untracked:
-        for path in git_untracked_files(cwd=root):
-            status_by_path.setdefault(path, "A")
+    change_set = collect_repository_change_set(repo_root=root, base_ref=base)
+    if not change_set.complete:
+        return ()
+    untracked = set(git_untracked_files(cwd=root)) if not include_untracked else set()
     changes: list[CodeChange] = []
-    for relative_path in sorted(status_by_path):
+    for fact in change_set.changes:
+        relative_path = fact.path
+        if relative_path in untracked:
+            continue
         path = root / relative_path
-        status = status_by_path[relative_path]
         exists = path.exists()
         if exists and path.is_dir():
             continue
@@ -59,9 +51,9 @@ def collect_code_changes(
                 continue
         else:
             after = ""
-        if status.startswith("D") or (before is not None and not exists):
+        if fact.state == "deleted" or (before is not None and not exists):
             change_type = "deleted"
-        elif status.startswith("A") or before is None:
+        elif fact.state == "created" or before is None:
             change_type = "added"
         else:
             change_type = "modified"
@@ -78,27 +70,15 @@ def collect_code_changes(
 
 def git_diff_name_status(*, base: str = "HEAD", cwd: Path | None = None) -> dict[str, str]:
     root = cwd or Path.cwd()
-    try:
-        result = subprocess.run(
-        ["git", "-c", "core.quotePath=false", "diff", "--name-status", base],
-            cwd=str(root),
-            text=True,
-            capture_output=True,
-            check=True,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError):
+    change_set = collect_repository_change_set(repo_root=root, base_ref=base)
+    if not change_set.complete:
         return {}
-    status_by_path: dict[str, str] = {}
-    for line in result.stdout.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 2:
-            continue
-        status = parts[0].strip()
-        # Rename/copy entries include old and new path; use the new path as the current file.
-        path = normalize_changed_file(parts[-1])
-        if path:
-            status_by_path[path] = status
-    return status_by_path
+    status_codes = {"created": "A", "modified": "M", "deleted": "D"}
+    return {
+        item.path: status_codes[item.state]
+        for item in change_set.changes
+        if item.state in status_codes
+    }
 
 
 def git_untracked_files(*, cwd: Path | None = None) -> list[str]:

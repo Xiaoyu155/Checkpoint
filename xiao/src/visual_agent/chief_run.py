@@ -38,6 +38,7 @@ from .models import to_jsonable
 from .mission_pipeline import mission_result_to_pipeline_state, write_mission_state
 from .mission_contract import normalize_requirement_contract, requirement_contract_planning_answers
 from .mission_progress import build_mission_progress, save_mission_progress
+from .managed_state import managed_task_idempotency_key
 from .notifications import build_event_notification, load_notification_config, send_email_notification
 from .verification_profiles import resolve_test_command
 from .workspace import init_workspace
@@ -73,6 +74,29 @@ def _merge_verification_env(*groups: list[dict[str, Any]]) -> list[dict[str, str
     return merged
 
 
+def _managed_execution_policy(
+    budget: dict[str, Any],
+    *,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    existing = (
+        budget.get("execution_policy")
+        if isinstance(budget.get("execution_policy"), dict)
+        else {}
+    )
+    return {
+        **existing,
+        "idempotency_key": str(idempotency_key),
+        "managed_budget": {
+            "max_wall_seconds": float(budget.get("max_wall_minutes") or 1) * 60.0,
+            "max_total_tokens": int(budget.get("max_total_tokens") or 120_000),
+            "max_attempts": int(budget.get("max_rounds") or 1),
+            "max_repair_rounds": int(budget.get("max_repair_rounds") or 0),
+            "max_same_failure_count": int(budget.get("max_same_failure_count") or 2),
+        },
+    }
+
+
 def run_chief_mission(
     *,
     goal: str | None = None,
@@ -89,6 +113,8 @@ def run_chief_mission(
     max_repair_rounds: int | None = 2,
     max_wall_minutes: int = 60,
     max_worker_minutes: int = 45,
+    max_total_tokens: int = 120_000,
+    max_same_failure_count: int = 2,
     execute: bool = False,
     dry_run: bool = True,
     run_profile: str = "dry-run",
@@ -168,6 +194,8 @@ def run_chief_mission(
         max_wall_minutes=max_wall_minutes,
         max_worker_minutes=max_worker_minutes,
         max_repair_rounds=max_repair_rounds,
+        max_total_tokens=max_total_tokens,
+        max_same_failure_count=max_same_failure_count,
     )
     if isinstance(model_policy, dict):
         budget["model_policy"] = {
@@ -328,6 +356,15 @@ def run_chief_mission(
         if plan_id:
             save_plan(plan_payload, workspace_root=workspace_path, plan_id=str(plan_id))
 
+    task_idempotency_key = str((mission or {}).get("idempotency_key") or "").strip()
+    if not task_idempotency_key:
+        task_idempotency_key = managed_task_idempotency_key(
+            goal=str(goal or plan_payload.get("objective") or ""),
+            repo_root=str(repo_path),
+            test_command=str(test_command or ""),
+            requirement_contract=contract_payload,
+        )
+
     if mission is None:
         mission = create_mission(
             workspace_root=workspace_path,
@@ -347,6 +384,8 @@ def run_chief_mission(
             prompt_style=effective_prompt_style,
             repair_strategy=effective_repair_strategy,
         )
+        mission["idempotency_key"] = task_idempotency_key
+        mission = save_mission(workspace_path, mission)["mission"]
         if execute and not dry_run:
             mission["budget_started_at"] = run_started_at
             mission["status"] = "running"
@@ -358,6 +397,7 @@ def run_chief_mission(
             event="chief_run_mission_created",
             goal=str(goal or plan_payload.get("objective") or ""),
             plan_id=str(plan_id),
+            idempotency_key=task_idempotency_key,
         )
         if grounding_payload:
             append_round(
@@ -421,6 +461,7 @@ def run_chief_mission(
             current_state="EXECUTING",
             event="chief_run_resume_executing",
             plan_id=str(plan_id or ""),
+            idempotency_key=task_idempotency_key,
         )
     if _mission_budget_elapsed_minutes(mission, started) > float(budget["max_wall_minutes"]):
         return _finish(
@@ -552,6 +593,10 @@ def run_chief_mission(
             started=started,
         )
 
+    managed_execution_policy = _managed_execution_policy(
+        budget,
+        idempotency_key=task_idempotency_key,
+    )
     preview = runner(
         workspace_root=workspace_path,
         plan_id=str(plan_id),
@@ -568,7 +613,7 @@ def run_chief_mission(
         auto_repair_once=False,
         max_repair_rounds=0,
         model_policy=budget.get("model_policy") if isinstance(budget, dict) else None,
-        execution_policy=budget.get("execution_policy") if isinstance(budget, dict) else None,
+        execution_policy=managed_execution_policy,
         reasoning_effort=dispatch_reasoning_effort,
         dispatch_mode=effective_dispatch_mode,
         prompt_style=effective_prompt_style,
@@ -667,7 +712,7 @@ def run_chief_mission(
         auto_repair_once=auto_repair_once,
         max_repair_rounds=repair_rounds,
         model_policy=budget.get("model_policy") if isinstance(budget, dict) else None,
-        execution_policy=budget.get("execution_policy") if isinstance(budget, dict) else None,
+        execution_policy=managed_execution_policy,
         reasoning_effort=dispatch_reasoning_effort,
         dispatch_mode=effective_dispatch_mode,
         prompt_style=effective_prompt_style,
@@ -925,6 +970,8 @@ def _stop_reason_from_dispatch(dispatch: dict[str, Any], budget: dict[str, Any])
         return "worker_error"
     if status == "merged_verification_failed":
         return "merged_verification_failed"
+    if status == "managed_budget_exhausted":
+        return "budget_exhausted"
     if verdict == "coverage_gap":
         return "coverage_gap"
     if verdict == "inspection_only":
@@ -1146,6 +1193,13 @@ def _finish(
             event="chief_run_finished",
             status=status,
             stop_reason=stop_reason,
+            idempotency_key=str(mission.get("idempotency_key") or ""),
+            managed_runtime=(
+                dispatch_payload.get("managed_runtime")
+                if isinstance(dispatch_payload, dict)
+                and isinstance(dispatch_payload.get("managed_runtime"), dict)
+                else {}
+            ),
         )
 
     # Add failover information to the message if applicable

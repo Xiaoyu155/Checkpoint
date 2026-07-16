@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hmac
 import os
 import json
 import math
@@ -24,11 +25,14 @@ from .codex_rollout_telemetry import (
     capture_rollout_snapshot,
     rollout_ownership_marker,
 )
+from .dynamic_model_selector import model_pool_path, routing_request_evidence, select_model_for_task, selection_to_dict
 from .pacer_launch_context import (
     PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV,
     PRELAUNCH_TASK_CONTRACT_DIGEST_ENV,
     PRELAUNCH_TASK_REQUIRED_ENV,
     initialize_active_launch,
+    latest_pending_recovery_capsule,
+    load_task_source_baseline,
     read_active_launch,
     read_launch_liveness,
     recover_orphaned_launches,
@@ -58,10 +62,9 @@ PACER_BEGIN_TASK_TEMPLATE = (
 )
 PACER_COMPLETE_TASK_TEMPLATE = (
     '{"workspace_root":".agent-workspace","repo_root":".","goal":"<task>",'
-    '"summary":"<result>","completion_evidence":{"result_kind":"change","claims":['
-    '{"kind":"change","requirement_ids":["<locked requirement ID>"],'
-    '"requirement":"<exact locked goal item>","result":"<actual result>",'
-    '"files":[{"path":"<relative path>","state":"modified"}],"verification_steps":["tests"]}],'
+    '"summary":"<result>","completion_evidence":{"claims":['
+    '{"requirement_ids":["<locked requirement ID>"],"result":"<actual result>",'
+    '"verification_steps":["tests"]}],'
     '"unresolved_items":[],"known_risks":[]},'
     '"steps":[{"name":"tests","argv":["python","-m","pytest","-q"]}]}'
 )
@@ -387,29 +390,110 @@ def launch_codex(argv: Sequence[str] = (), *, cwd: str | Path = ".") -> int:
             process_cwd=process_cwd,
             launch_id=launch_id,
         )
+    recovery: dict[str, Any] = {}
+    if launch_path is not None and launch is not None:
+        try:
+            recovery = _validated_pending_recovery(
+                workspace_root=launch_path.parents[2],
+                repo_root=effective_repo_root,
+                argv=argv,
+            )
+            if recovery:
+                task_text = str(recovery["goal"])
+                prepared_argv, read_prompt_from_stdin = _replace_pacer_task(
+                    prepared_argv,
+                    task_text,
+                    launch_id=launch_id,
+                )
+                stdin_prompt = (
+                    _pacer_control_prompt(task_text, launch_id=launch_id)
+                    if read_prompt_from_stdin
+                    else None
+                )
+        except Exception as exc:
+            failure = {
+                "schema_version": 1,
+                "status": "failed",
+                "error_type": type(exc).__name__,
+                "recovery": True,
+            }
+            launch["prelaunch_task_registration"] = failure
+            try:
+                update_active_launch(
+                    launch_path.parents[2],
+                    expected_launch_id=str(launch["launch_id"]),
+                    prelaunch_task_registration=failure,
+                )
+            except Exception:
+                pass
+            _finish_launch_record(
+                launch_path,
+                launch,
+                exit_code=78,
+                status="launch_failed",
+            )
+            print(
+                f"Pacer blocked this recovery because its trusted state could not be validated "
+                f"({type(exc).__name__}).",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 78
+    routing_decision: dict[str, Any] = {}
+    if task_text and not binding_error:
+        try:
+            prepared_argv, routing_decision = _apply_native_routing(
+                prepared_argv,
+                repo_root=effective_repo_root,
+                task=task_text,
+            )
+        except ValueError as exc:
+            print(f"Pacer routing blocked this launch: {exc}")
+            return 78
     prelaunch_trust: dict[str, str] = {}
     if launch_path is not None and launch is not None and task_text:
         try:
+            if routing_decision:
+                update_active_launch(
+                    launch_path.parents[2],
+                    expected_launch_id=str(launch["launch_id"]),
+                    routing_decision=routing_decision,
+                )
             prelaunch_trust = _pre_register_pacer_task(
                 workspace_root=launch_path.parents[2],
                 repo_root=effective_repo_root,
                 launch_id=str(launch["launch_id"]),
                 goal=task_text,
+                recovery=recovery,
             )
         except Exception as exc:
+            failure = {
+                "schema_version": 1,
+                "status": "failed",
+                "error_type": type(exc).__name__,
+            }
+            launch["prelaunch_task_registration"] = failure
             try:
                 update_active_launch(
                     launch_path.parents[2],
                     expected_launch_id=str(launch["launch_id"]),
-                    prelaunch_task_registration={
-                        "schema_version": 1,
-                        "status": "failed",
-                        "error_type": type(exc).__name__,
-                    },
+                    prelaunch_task_registration=failure,
                 )
             except Exception:
                 pass
-            _warn_telemetry_degraded("prelaunch task registration", exc)
+            _finish_launch_record(
+                launch_path,
+                launch,
+                exit_code=78,
+                status="launch_failed",
+            )
+            print(
+                f"Pacer blocked this launch because the task contract could not be created "
+                f"({type(exc).__name__}).",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 78
     rollout_snapshot: RolloutSnapshot | None = None
     watchdog: LaunchLivenessWatchdog | None = None
     if launch:
@@ -518,6 +602,61 @@ def launch_codex(argv: Sequence[str] = (), *, cwd: str | Path = ".") -> int:
     return int(completed.returncode)
 
 
+def _apply_native_routing(
+    argv: Sequence[str],
+    *,
+    repo_root: Path,
+    task: str,
+) -> tuple[list[str], dict[str, Any]]:
+    arguments = [str(item) for item in argv]
+    workspace = repo_root / ".agent-workspace"
+    config_path = model_pool_path(workspace)
+    if not config_path.is_file():
+        return arguments, {
+            "schema_version": 1,
+            "verdict": "passthrough",
+            "policy_match": None,
+            "reason_codes": ["routing_catalog_unavailable"],
+        }
+    if _codex_flag_present(arguments, {"-m", "--model"}):
+        return arguments, {
+            "schema_version": 1,
+            "verdict": "passthrough",
+            "policy_match": None,
+            "reason_codes": ["routing_user_override"],
+        }
+    selection = selection_to_dict(
+        select_model_for_task(
+            objective=task,
+            workspace_root=workspace,
+            config_path=config_path,
+        )
+    )
+    selected = selection.get("selected") if isinstance(selection.get("selected"), dict) else {}
+    if str(selection.get("status") or "") != "selected" or not selected:
+        raise ValueError(str(selection.get("reason") or "no compatible model candidate"))
+    provider = str(selected.get("provider") or "").strip()
+    model = str(selected.get("model") or "").strip()
+    if str(selected.get("agent_backend") or "") != "codex" or not provider or not model:
+        raise ValueError("selected candidate is not executable by the Codex backend")
+    positionals = _codex_positional_indices(arguments)
+    insert_at = positionals[0] if positionals else len(arguments)
+    routed = [
+        *arguments[:insert_at],
+        "-c",
+        f"model_provider='{provider}'",
+        "--model",
+        model,
+        *arguments[insert_at:],
+    ]
+    request = routing_request_evidence(
+        selection,
+        requested_provider=provider,
+        requested_model=model,
+    )
+    return routed, {**selection, "request_evidence": request}
+
+
 def _mcp_runtime_available() -> bool:
     try:
         return importlib.util.find_spec("mcp") is not None
@@ -622,7 +761,10 @@ def _start_launch_record(
     )
     liveness["stall_detection_enabled"] = first in {"exec", "review"}
     try:
-        python_runtime = resolve_python_runtime(effective_repo_root)
+        python_runtime = resolve_python_runtime(
+            effective_repo_root,
+            pacer_executable=sys.executable,
+        )
     except Exception as exc:
         _warn_telemetry_degraded("python runtime discovery", exc)
         python_runtime = {
@@ -1033,6 +1175,88 @@ def _pacer_task_text(argv: Sequence[str], *, stdin_text: str | None = None) -> s
     return "" if task == "-" else task
 
 
+def _is_resume_invocation(argv: Sequence[str]) -> bool:
+    arguments = [str(item) for item in argv]
+    positionals = _codex_positional_indices(arguments)
+    if not positionals:
+        return False
+    command_index = positionals[0]
+    command = arguments[command_index]
+    if command == "resume":
+        return True
+    if command not in {"exec", "e"}:
+        return False
+    nested = _codex_positional_indices(arguments, start=command_index + 1)
+    return bool(nested and arguments[nested[0]] == "resume")
+
+
+def _replace_pacer_task(
+    argv: Sequence[str],
+    task: str,
+    *,
+    launch_id: str,
+) -> tuple[list[str], bool]:
+    arguments = [str(item) for item in argv]
+    prompt_index, reads_stdin = _pacer_task_prompt_location(arguments)
+    if reads_stdin:
+        return arguments, True
+    if prompt_index is None:
+        raise ValueError("Pacer recovery requires a resumable Codex prompt")
+    arguments[prompt_index] = _pacer_control_prompt(task, launch_id=launch_id)
+    return arguments, False
+
+
+def _validated_pending_recovery(
+    *,
+    workspace_root: Path,
+    repo_root: Path,
+    argv: Sequence[str],
+) -> dict[str, Any]:
+    if not _is_resume_invocation(argv):
+        return {}
+    capsule = latest_pending_recovery_capsule(workspace_root, repo_root=repo_root)
+    if not capsule:
+        return {}
+    source_launch_id = str(capsule.get("source_launch_id") or "").strip()
+    source = read_active_launch(workspace_root, launch_id=source_launch_id)
+    if not source or str(source.get("launch_id") or "") != source_launch_id:
+        raise ValueError("Pacer recovery source launch is unavailable")
+    expected_repo = os.path.normcase(str(repo_root.expanduser().resolve()))
+    capsule_repo = os.path.normcase(
+        str(Path(str(capsule.get("project_root") or ".")).expanduser().resolve())
+    )
+    source_repo = os.path.normcase(
+        str(Path(str(source.get("project_root") or source.get("repo_root") or ".")).expanduser().resolve())
+    )
+    if capsule_repo != expected_repo or source_repo != expected_repo:
+        raise ValueError("Pacer recovery repository binding does not match")
+    goal = str(source.get("launch_goal") or source.get("current_goal") or "").strip()
+    if not goal or str(capsule.get("goal") or "").strip() != goal:
+        raise ValueError("Pacer recovery goal does not match the source launch")
+    contract = source.get("task_contract") if isinstance(source.get("task_contract"), dict) else {}
+    contract_digest = task_contract_digest(contract)
+    if not hmac.compare_digest(contract_digest, str(source.get("task_contract_digest") or "")):
+        raise ValueError("Pacer recovery task contract digest does not match")
+    from .task_review import build_task_contract
+
+    if contract != build_task_contract(goal, repo_root=repo_root):
+        raise ValueError("Pacer recovery task contract does not match the immutable goal")
+    baseline = load_task_source_baseline(source, workspace_root=workspace_root)
+    if not baseline or baseline.get("complete") is not True:
+        raise ValueError("Pacer recovery source baseline is unavailable")
+    baseline_digest = task_source_baseline_digest(baseline)
+    if not hmac.compare_digest(baseline_digest, str(source.get("source_baseline_digest") or "")):
+        raise ValueError("Pacer recovery source baseline digest does not match")
+    return {
+        "source_launch_id": source_launch_id,
+        "goal": goal,
+        "task_contract": contract,
+        "source_baseline": baseline,
+        "task_contract_digest": contract_digest,
+        "source_baseline_digest": baseline_digest,
+    }
+
+
 def _pacer_task_prompt_location(arguments: Sequence[str]) -> tuple[int | None, bool]:
     values = [str(item) for item in arguments]
     if _codex_flag_present(values, CODEX_HELP_FLAGS):
@@ -1130,13 +1354,34 @@ def _pre_register_pacer_task(
     repo_root: Path,
     launch_id: str,
     goal: str,
+    recovery: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     from .task_review import build_task_contract, capture_task_source_baseline
 
-    contract = build_task_contract(goal)
-    baseline = capture_task_source_baseline(repo_root)
+    recovered = recovery if isinstance(recovery, dict) else {}
+    contract = (
+        dict(recovered["task_contract"])
+        if isinstance(recovered.get("task_contract"), dict)
+        else build_task_contract(goal, repo_root=repo_root)
+    )
+    baseline = (
+        dict(recovered["source_baseline"])
+        if isinstance(recovered.get("source_baseline"), dict)
+        else capture_task_source_baseline(repo_root)
+    )
     contract_digest = task_contract_digest(contract)
     baseline_digest = task_source_baseline_digest(baseline)
+    if recovered:
+        if not hmac.compare_digest(
+            contract_digest,
+            str(recovered.get("task_contract_digest") or ""),
+        ):
+            raise ValueError("Pacer recovered task contract changed before registration")
+        if not hmac.compare_digest(
+            baseline_digest,
+            str(recovered.get("source_baseline_digest") or ""),
+        ):
+            raise ValueError("Pacer recovered source baseline changed before registration")
     active = update_active_launch(
         workspace_root,
         expected_launch_id=launch_id,
@@ -1146,6 +1391,7 @@ def _pre_register_pacer_task(
         task_contract=contract,
         task_contract_digest=contract_digest,
         task_contract_trust_policy=2,
+        recovery_source_launch_id=str(recovered.get("source_launch_id") or ""),
     )
     if str(active.get("launch_id") or "") != launch_id:
         raise ValueError("prelaunch task registration lost the active launch")
@@ -1161,9 +1407,14 @@ def _pre_register_pacer_task(
         source_baseline_trust_policy=2,
         prelaunch_task_registration={
             "schema_version": 1,
-            "status": "ready",
+            "status": "recovered" if recovered else "ready",
             "contract_digest": contract_digest,
             "source_baseline_digest": baseline_digest,
+            **(
+                {"source_launch_id": str(recovered.get("source_launch_id") or "")}
+                if recovered
+                else {}
+            ),
         },
     )
     if str(active.get("source_baseline_digest") or "") != baseline_digest:
@@ -1361,10 +1612,13 @@ def _pacer_control_prompt(
             "At the end call only `mcp__pacer__complete_pacer_task` for Pacer completion, using argv string arrays:",
         PACER_COMPLETE_TASK_TEMPLATE,
         "Copy the original task text exactly into goal. Map every locked task_contract requirement ID to at least "
-        "one completion_evidence claim using requirement_ids, name real project-relative files, bind each claim "
-        "to a named verification step, and list unfinished work in unresolved_items; never hide it in prose.",
-        "For an explicitly read-only audit use result_kind=review, kind=review and files=[]; never label a requested "
-        "implementation or fix as review/research/test to avoid source-file evidence.",
+        "one completion_evidence claim using requirement_ids, state the concrete result, bind each claim to a named "
+        "verification step, and list unfinished work in unresolved_items; never hide it in prose.",
+        "Do not send result_kind, kind, requirement, or files in completion_evidence. Pacer loads immutable requirement "
+        "text and derives created/modified/deleted file facts from the trusted launch baseline, including read-only "
+        "and protected-path checks.",
+        "For a read-only or protected-path requirement, bind its claim to the same substantive test/build/analyze step "
+        "that validates the task. Do not add git status/diff inspection steps; Pacer checks the protected paths itself.",
         "Treat the returned task_review as authoritative. In the final answer report its goal, completed items, "
         "not-completed items, evidence, risks, and can_trust verdict. Use its user_report_markdown as the leading "
         "report block; never upgrade or omit its limitations.",
@@ -1425,11 +1679,11 @@ def _codex_flag_present(arguments: Sequence[str], flags: set[str], *, start: int
             while index < len(arguments) and not _looks_like_option(str(arguments[index])):
                 index += 1
             continue
+        if argument in flags:
+            return True
         if argument in CODEX_OPTIONS_WITH_VALUE:
             index += 2
             continue
-        if argument in flags:
-            return True
         index += 1
     return False
 
@@ -1478,8 +1732,11 @@ def _apply_managed_python_environment(
     executable = str(python.get("executable") or "").strip()
     if not executable or not bool(python.get("available")):
         return
-    if str(python.get("source") or "") != "project_venv" or not bool(python.get("trusted_venv")):
+    if str(python.get("source") or "") not in {"project_venv", "pacer_launcher"} or not bool(
+        python.get("trusted_venv")
+    ):
         return
+    environment["PACER_PYTHON"] = executable
     scripts = str(Path(executable).parent)
     existing = [item for item in environment.get("PATH", "").split(os.pathsep) if item]
     scripts_key = os.path.normcase(os.path.abspath(scripts))

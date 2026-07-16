@@ -50,7 +50,15 @@ def append_pacer_event(
         temporary = path.with_suffix(".tmp")
         temporary.write_text(json.dumps(event, ensure_ascii=False), encoding="utf-8")
         temporary.replace(path)
-        return {**event, "path": str(path)}
+        result = {**event, "path": str(path)}
+        try:
+            from .pacer_otel import export_pacer_event
+
+            export_pacer_event(result)
+        except Exception:
+            # OTel is optional and runs only after the local evidence is durable.
+            pass
+        return result
     except (OSError, portalocker.exceptions.LockException) as exc:
         try:
             if temporary is not None:

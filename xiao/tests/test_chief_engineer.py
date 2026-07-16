@@ -243,9 +243,12 @@ def test_chief_plan_worker_tracks_use_capability_profiles(tmp_path, monkeypatch)
     )
 
     codex_track = plan.worker_tracks[0]
-    assert codex_track["model"] == ""  # Codex uses the logged-in CLI default model.
+    assert codex_track["model"] == "economy"
     assert codex_track["model_selection"]["status"] == "selected"
     assert codex_track["model_selection"]["selected"]["id"] == "local-economy"
+    assert codex_track["routing_decision_id"]
+    assert codex_track["selected_provider"] == "local"
+    assert "--model economy" in codex_track["command"]
     assert "codex exec" in codex_track["command"]
     assert "--sandbox" in codex_track["command"]
     claude_track = plan.worker_tracks[1]

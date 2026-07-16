@@ -618,7 +618,20 @@ def _worker_tracks(
         reasoning_effort = "inherit"
         parallelism_hint = ""
         if profile:
-            config = recommend_worker_config(profile, task_kind=task_kind)
+            config = dict(recommend_worker_config(profile, task_kind=task_kind))
+            selected = (
+                model_selection.get("selected")
+                if isinstance(model_selection, dict) and isinstance(model_selection.get("selected"), dict)
+                else {}
+            )
+            if (
+                agent == "codex"
+                and str(model_selection.get("status") or "") == "selected"
+                and str(selected.get("agent_backend") or "") == "codex"
+                and str(selected.get("model") or "")
+            ):
+                config["model"] = str(selected["model"])
+                config["model_flag"] = f"--model {selected['model']}"
             model = str(config.get("model") or "")
             sandbox = config.get("sandbox") or {}
             approval = config.get("approval") or {}
@@ -640,6 +653,8 @@ def _worker_tracks(
                 "tier": route.tier if route else "",
                 "route_reason": route.reason if route else "",
                 "model_selection": model_selection if route else None,
+                "routing_decision_id": str((model_selection or {}).get("decision_id") or ""),
+                "selected_provider": str(((model_selection or {}).get("selected") or {}).get("provider") or ""),
                 "sandbox": sandbox,
                 "approval": approval,
                 "reasoning_effort": reasoning_effort,

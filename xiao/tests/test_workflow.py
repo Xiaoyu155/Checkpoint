@@ -2217,9 +2217,13 @@ def test_new_assertion_helpers_cover_element_url_count_attribute_and_overlap() -
     runtime = WorkflowRuntime(output_dir=Path("runs"))
 
     class DummyLocator:
-        def __init__(self, count: int, attrs: dict[str, Any]) -> None:
+        def __init__(self, count: int, attrs: dict[str, Any], calls: list[tuple[Any, ...]]) -> None:
             self._count = count
             self._attrs = attrs
+            self._calls = calls
+
+        def wait_for(self, *, state: str, timeout: int) -> None:
+            self._calls.append(("locator_wait", state, timeout))
 
         def count(self) -> int:
             return self._count
@@ -2234,11 +2238,17 @@ def test_new_assertion_helpers_cover_element_url_count_attribute_and_overlap() -
     class DummyPage:
         def __init__(self) -> None:
             self.url = "https://example.test/dashboard"
+            self.calls: list[tuple[Any, ...]] = []
 
         def locator(self, selector: str) -> DummyLocator:
             counts = {"#submit": 2, ".item": 3}
             attrs = {"id": "submit", "disabled": "false"}
-            return DummyLocator(counts.get(selector, 0), attrs)
+            return DummyLocator(counts.get(selector, 0), attrs, self.calls)
+
+        def wait_for_url(self, pattern, *, timeout: int) -> None:
+            self.calls.append(("url_wait", pattern.pattern, timeout))
+            if pattern.search(self.url) is None:
+                raise TimeoutError("URL missing")
 
         def evaluate(self, _script: str):
             return []
@@ -2265,3 +2275,5 @@ def test_new_assertion_helpers_cover_element_url_count_attribute_and_overlap() -
     assert runtime._assert_count(WorkflowStep("count", "assert_count", {"selector": ".item", "min": 1, "max": 5}), context).status == ActionStatus.SUCCESS
     assert runtime._assert_attribute(WorkflowStep("attr", "assert_attribute", {"selector": "#submit", "attr": "disabled", "value": "false"}), context).status == ActionStatus.SUCCESS
     assert runtime._assert_no_layout_overlap(WorkflowStep("overlap", "assert_no_layout_overlap", {}), context).status == ActionStatus.SUCCESS
+    assert ("locator_wait", "attached", 5000) in page.calls
+    assert ("url_wait", "/dashboard", 5000) in page.calls

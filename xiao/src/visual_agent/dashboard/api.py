@@ -31,6 +31,7 @@ from ..mission_progress import build_mission_progress
 from ..missions import list_missions, load_mission, save_mission
 from ..programs import list_programs, load_program
 from ..pacer_support import build_pacer_support_snapshot
+from ..pacer_pillars import assess_pillar
 from ..subprocess_window import hidden_subprocess_kwargs
 from ..user_profile import load_user_profile, profile_from_payload, save_user_profile
 from ..workbench_board import attach_board_fields, mission_review_payload
@@ -1043,7 +1044,7 @@ def _native_five_pillars_data(root: Path, support: dict[str, Any]) -> dict[str, 
     use_mechanical = all(isinstance(mechanical.get(name), dict) for name in ("routing", "memory", "managed", "acceptance", "dogfood"))
 
     def mechanical_active(name: str, fallback: bool) -> bool:
-        active = bool(mechanical[name].get("active")) if use_mechanical else fallback
+        active = bool(assess_pillar(name, mechanical[name]).get("passed")) if use_mechanical else fallback
         if name in {"managed", "acceptance", "dogfood"}:
             return active and verified_outcome and (fallback if name == "dogfood" else True)
         return active
@@ -1053,12 +1054,19 @@ def _native_five_pillars_data(root: Path, support: dict[str, Any]) -> dict[str, 
             return "legacy evidence: " + fallback
         item = mechanical[name]
         state = str(item.get("state") or "unknown")
+        assessment = assess_pillar(name, item)
+        assessment_status = str(assessment.get("status") or "indeterminate")
+        reason_codes = ",".join(str(code) for code in assessment.get("reason_codes") or [])
         if name in {"managed", "acceptance", "dogfood"} and not verified_outcome:
             return (
                 f"launch={active_launch.get('launch_id') or 'unknown'}; state={state}; "
                 f"{verification_evidence}"
             )
-        return f"launch={active_launch.get('launch_id') or 'unknown'}; state={state}"
+        suffix = f"; reasons={reason_codes}" if reason_codes else ""
+        return (
+            f"launch={active_launch.get('launch_id') or 'unknown'}; state={state}; "
+            f"assessment={assessment_status}{suffix}"
+        )
 
     pillars = [
         _pillar(

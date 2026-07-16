@@ -194,11 +194,7 @@ def wait_for_browser_smoke_text(
     timeout_ms = max(1, int(timeout_seconds * 1000))
     for text in texts:
         try:
-            page.wait_for_function(
-                "(expected) => document.body && (document.body.innerText || document.body.textContent || '').toLowerCase().includes(String(expected).toLowerCase())",
-                arg=text,
-                timeout=timeout_ms,
-            )
+            page.get_by_text(text, exact=False).wait_for(state="visible", timeout=timeout_ms)
             results.append({"status": "found", "type": "wait_for_text_after", "text": text, "timeout_seconds": timeout_seconds})
         except Exception as exc:
             results.append(
@@ -226,11 +222,7 @@ def wait_for_browser_smoke_url(
     timeout_ms = max(1, int(timeout_seconds * 1000))
     for fragment in contains:
         try:
-            page.wait_for_function(
-                "(expected) => String(window.location.href).includes(String(expected))",
-                arg=fragment,
-                timeout=timeout_ms,
-            )
+            page.wait_for_url(re.compile(re.escape(fragment)), timeout=timeout_ms)
             results.append({"status": "found", "type": "wait_for_url_contains_after", "text": fragment, "timeout_seconds": timeout_seconds})
         except Exception as exc:
             results.append(

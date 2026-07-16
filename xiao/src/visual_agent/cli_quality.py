@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
+from .dogfood_evidence import load_dogfood_evidence
+from .dogfood_policy import load_dogfood_policy
+from .dogfood_provider_check import (
+    dogfood_provider_receipt_to_markdown,
+    run_dogfood_provider_check,
+)
+from .dogfood_quality import DOGFOOD_TARGET_SCORE
 from .models import to_jsonable
 from .mcp_doctor import build_mcp_startup_doctor, mcp_startup_doctor_to_markdown
 from .quality import (
@@ -34,6 +42,8 @@ from .quality import (
     write_quality_gate_step_summary,
 )
 from .run_profile import SAFE_RUN_PROFILE_CHOICES
+from .release_gate import assess_release_manifest_file
+from .release_evidence import run_release_evidence_bundle
 
 
 QUALITY_COMMANDS = {
@@ -43,6 +53,11 @@ QUALITY_COMMANDS = {
     "release-check",
     "release-smoke",
     "release-trial",
+    "pacer-dogfood-check",
+    "pacer-dogfood-provider-check",
+    "pacer-dogfood-policy-check",
+    "pacer-release-manifest-check",
+    "pacer-release-check",
     "install-check",
     "mcp-doctor",
     "mcp-client-config",
@@ -116,6 +131,102 @@ def add_quality_parsers(subparsers: argparse._SubParsersAction[Any]) -> None:
     release_trial.add_argument("--cloud-user", default="release-trial", help="User header used for local cloud execution.")
     release_trial.add_argument("--cloud-api-key", default="release-trial-key", help="Bearer token used for local cloud execution.")
     release_trial.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    dogfood_check = subparsers.add_parser(
+        "pacer-dogfood-check",
+        help="Verify canonical Pacer-on-Pacer evidence and every referenced artifact.",
+    )
+    dogfood_check.add_argument("--repo-root", default=".", help="Pacer repository root. Default: current directory.")
+    dogfood_check.add_argument(
+        "--artifact-root",
+        action="append",
+        default=[],
+        help="Explicit trusted artifact root outside the repository. Repeat for multiple roots.",
+    )
+    dogfood_check.add_argument(
+        "--attestation-key-id",
+        default=None,
+        help="Attestation key id. The secret is read only from PACER_DOGFOOD_ATTESTATION_KEY.",
+    )
+    dogfood_check.add_argument(
+        "--github-repository",
+        default=os.environ.get("GITHUB_REPOSITORY", ""),
+        help="GitHub owner/repository whose artifact attestations must verify.",
+    )
+    dogfood_check.add_argument(
+        "--signer-workflow",
+        default=os.environ.get("PACER_DOGFOOD_SIGNER_WORKFLOW", ""),
+        help="Expected GitHub workflow identity passed to gh attestation verify.",
+    )
+    dogfood_check.add_argument(
+        "--require-github-provenance",
+        action="store_true",
+        help="Fail unless both the evidence file and candidate wheel have verified GitHub attestations.",
+    )
+    dogfood_check.add_argument(
+        "--minimum-score",
+        type=int,
+        default=DOGFOOD_TARGET_SCORE,
+        help="Required mechanical Dogfood quality score. Default: 95.",
+    )
+    dogfood_check.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    dogfood_policy = subparsers.add_parser(
+        "pacer-dogfood-policy-check",
+        help="Validate the canonical three-lane Dogfood policy and pinned GitHub references.",
+    )
+    dogfood_policy.add_argument("--repo-root", default=".", help="Pacer repository root.")
+    dogfood_policy.add_argument("--format", choices=["json", "markdown"], default="json")
+
+    dogfood_provider = subparsers.add_parser(
+        "pacer-dogfood-provider-check",
+        help="Verify a custom Codex Responses provider without exposing its endpoint or credential.",
+    )
+    dogfood_provider.add_argument("--provider-id", required=True, help="Codex custom provider id.")
+    dogfood_provider.add_argument("--base-url", required=True, help="Provider endpoint; never emitted in the receipt.")
+    dogfood_provider.add_argument("--model", required=True, help="Model id to probe.")
+    dogfood_provider.add_argument(
+        "--key-env",
+        required=True,
+        help="Environment variable containing the provider credential; raw keys are not accepted.",
+    )
+    dogfood_provider.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=60.0,
+        help="Probe timeout, greater than zero and at most 300 seconds. Default: 60.",
+    )
+    dogfood_provider.add_argument("--format", choices=["json", "markdown"], default="json")
+
+    release_manifest_check = subparsers.add_parser(
+        "pacer-release-manifest-check",
+        help="Validate a digest-locked Pacer release matrix manifest.",
+    )
+    release_manifest_check.add_argument("--manifest", default=".pacer/release.json", help="Release manifest path.")
+    release_manifest_check.add_argument("--expected-digest", required=True, help="Expected canonical SHA-256 digest.")
+    release_manifest_check.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
+
+    release_bundle_check = subparsers.add_parser(
+        "pacer-release-check",
+        help="Evaluate an externally attested, digest-locked Pacer release evidence bundle.",
+    )
+    release_bundle_check.add_argument("--repo-root", default=".", help="Pacer repository root.")
+    release_bundle_check.add_argument("--manifest", default=".pacer/release.json", help="Canonical release manifest.")
+    release_bundle_check.add_argument("--expected-digest", required=True, help="Pre-locked release manifest SHA-256.")
+    release_bundle_check.add_argument("--evidence-root", default=".", help="Trusted root containing the bundle and case results.")
+    release_bundle_check.add_argument("--bundle", default=".pacer/release-evidence.json", help="Bundle path relative to evidence-root.")
+    release_bundle_check.add_argument(
+        "--artifact-root",
+        action="append",
+        default=[],
+        help="Additional trusted Dogfood artifact root. Repeat for multiple roots.",
+    )
+    release_bundle_check.add_argument(
+        "--attestation-key-id",
+        default=None,
+        help="Release bundle key id. The secret is read from PACER_RELEASE_ATTESTATION_KEY.",
+    )
+    release_bundle_check.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
     install_check = subparsers.add_parser("install-check", help="Print the local install/dependency check plan.")
     install_check.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
@@ -244,6 +355,139 @@ def handle_quality_command(args: Any, *, release_trial_runner: Any = None) -> in
         else:
             print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
         return 0 if result.get("status") == "success" else 1
+    if args.command == "pacer-dogfood-check":
+        key_id = str(
+            args.attestation_key_id
+            or os.environ.get("PACER_DOGFOOD_ATTESTATION_KEY_ID")
+            or ""
+        ).strip()
+        secret = os.environ.get("PACER_DOGFOOD_ATTESTATION_KEY", "")
+        attestation_keys = {key_id: secret} if key_id and secret else {}
+        try:
+            result = load_dogfood_evidence(
+                args.repo_root,
+                artifact_roots=tuple(args.artifact_root or ()),
+                attestation_keys=attestation_keys,
+                github_repository=args.github_repository,
+                github_signer_workflow=args.signer_workflow,
+                github_run_id=os.environ.get("GITHUB_RUN_ID", ""),
+                github_run_attempt=os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+                require_github_provenance=args.require_github_provenance,
+                target_score=args.minimum_score,
+            )
+        except Exception as exc:  # noqa: BLE001 - CLI gates must fail closed
+            result = {
+                "schema_version": 1,
+                "status": "failed",
+                "passed": False,
+                "reason_codes": ["dogfood_evidence_load_failed"],
+                "error_type": type(exc).__name__,
+            }
+        quality = result.get("quality") if isinstance(result.get("quality"), dict) else {}
+        if result.get("passed") is True and quality.get("meets_target") is not True:
+            result["status"] = "failed"
+            result["passed"] = False
+            result["pacer_on_pacer"] = False
+            result["reason_codes"] = list(
+                dict.fromkeys(
+                    [*result.get("reason_codes", []), "dogfood_quality_target_not_met"]
+                )
+            )
+        if args.format == "markdown":
+            print(_pacer_gate_to_markdown("Pacer Dogfood", result))
+        else:
+            print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
+        return 0 if result.get("passed") is True else 1
+    if args.command == "pacer-dogfood-policy-check":
+        try:
+            result = load_dogfood_policy(args.repo_root)
+        except Exception as exc:  # noqa: BLE001 - policy gates fail closed
+            result = {
+                "schema_version": 1,
+                "status": "failed",
+                "passed": False,
+                "reason_codes": ["dogfood_policy_load_failed"],
+                "error_type": type(exc).__name__,
+            }
+        if args.format == "markdown":
+            print(_pacer_gate_to_markdown("Pacer Dogfood Policy", result))
+        else:
+            print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
+        return 0 if result.get("passed") is True else 1
+    if args.command == "pacer-dogfood-provider-check":
+        result = run_dogfood_provider_check(
+            provider_id=args.provider_id,
+            base_url=args.base_url,
+            model=args.model,
+            key_env=args.key_env,
+            timeout_seconds=args.timeout_seconds,
+        )
+        if args.format == "markdown":
+            print(dogfood_provider_receipt_to_markdown(result))
+        else:
+            print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
+        return 0 if result.get("passed") is True else 1
+    if args.command == "pacer-release-manifest-check":
+        result = assess_release_manifest_file(
+            args.manifest,
+            expected_manifest_digest=args.expected_digest,
+        )
+        if args.format == "markdown":
+            print(_pacer_gate_to_markdown("Pacer Release Manifest", result))
+        else:
+            print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
+        return 0 if result.get("passed") is True else 1
+    if args.command == "pacer-release-check":
+        try:
+            manifest_path = _canonical_release_manifest_path(args.repo_root, args.manifest)
+            manifest_assessment = assess_release_manifest_file(
+                manifest_path,
+                expected_manifest_digest=args.expected_digest,
+            )
+            if not manifest_assessment.get("passed"):
+                result = manifest_assessment
+            else:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+                key_id = str(
+                    args.attestation_key_id
+                    or os.environ.get("PACER_RELEASE_ATTESTATION_KEY_ID")
+                    or manifest.get("release_attestation_key_id")
+                    or ""
+                ).strip()
+                release_secret = os.environ.get("PACER_RELEASE_ATTESTATION_KEY", "")
+                dogfood_key_id = str(
+                    os.environ.get("PACER_DOGFOOD_ATTESTATION_KEY_ID") or key_id
+                ).strip()
+                dogfood_secret = os.environ.get("PACER_DOGFOOD_ATTESTATION_KEY", "")
+                release_keys = {key_id: release_secret} if key_id and release_secret else {}
+                dogfood_keys = (
+                    {dogfood_key_id: dogfood_secret}
+                    if dogfood_key_id and dogfood_secret
+                    else release_keys
+                )
+                result = run_release_evidence_bundle(
+                    manifest=manifest,
+                    expected_manifest_digest=args.expected_digest,
+                    repo_root=args.repo_root,
+                    evidence_root=args.evidence_root,
+                    bundle_path=args.bundle,
+                    release_attestation_keys=release_keys,
+                    dogfood_attestation_keys=dogfood_keys,
+                    dogfood_artifact_roots=tuple(args.artifact_root or ()),
+                )
+        except Exception as exc:  # noqa: BLE001 - release gates must fail closed
+            result = {
+                "schema_version": 1,
+                "status": "failed",
+                "passed": False,
+                "reason_codes": ["release_evidence_load_failed"],
+                "error_type": type(exc).__name__,
+            }
+        if args.format == "markdown":
+            print(_pacer_gate_to_markdown("Pacer Release", result))
+        else:
+            print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
+        return 0 if result.get("passed") is True else 1
     if args.command == "install-check":
         plan = build_install_check_plan()
         if args.format == "markdown":
@@ -308,6 +552,20 @@ def handle_quality_command(args: Any, *, release_trial_runner: Any = None) -> in
     raise ValueError(f"Unsupported quality command: {args.command}")
 
 
+def _pacer_gate_to_markdown(title: str, result: dict[str, Any]) -> str:
+    reasons = [str(item) for item in result.get("reason_codes") or [] if str(item)]
+    lines = [f"## {title}", "", f"Status: `{result.get('status', 'failed')}`"]
+    digest = str(result.get("manifest_digest") or result.get("evidence_digest") or "")
+    if digest:
+        lines.append(f"Digest: `{digest}`")
+    if reasons:
+        lines.extend(["", "Reasons:", *[f"- `{reason}`" for reason in reasons]])
+    error = str(result.get("error") or "")
+    if error:
+        lines.extend(["", f"Error: {error}"])
+    return "\n".join(lines)
+
+
 def parse_optional_bool(value: str | None) -> bool | None:
     if value is None or str(value).strip() == "":
         return None
@@ -317,3 +575,19 @@ def parse_optional_bool(value: str | None) -> bool | None:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"Expected boolean value, got: {value}")
+
+
+def _canonical_release_manifest_path(repo_root: str | Path, value: str | Path) -> Path:
+    root = Path(repo_root).expanduser().resolve()
+    expected = root / ".pacer" / "release.json"
+    current = root
+    for part in (".pacer", "release.json"):
+        current /= part
+        if current.is_symlink():
+            raise ValueError("release manifest path cannot use symbolic links")
+    supplied = Path(value).expanduser()
+    if not supplied.is_absolute():
+        supplied = root / supplied
+    if supplied.resolve(strict=False) != expected.resolve(strict=False):
+        raise ValueError("release manifest must be .pacer/release.json")
+    return expected

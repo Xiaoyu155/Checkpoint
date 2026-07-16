@@ -186,6 +186,14 @@ def start_program(
             "max_repair_rounds": max(2, int(autonomy_policy.get("max_repair_rounds") or 7)),
             "max_wall_minutes": max(60, int(autonomy_policy.get("max_wall_minutes") or 480)),
             "max_worker_minutes": max(45, int(autonomy_policy.get("max_worker_minutes") or 240)),
+            "max_total_tokens": max(
+                1,
+                int(autonomy_policy.get("max_total_tokens") or 120_000),
+            ),
+            "max_same_failure_count": max(
+                1,
+                int(autonomy_policy.get("max_same_failure_count") or 2),
+            ),
             "allow_coverage_gap": True,
             "run_profile": "supervised",
             "allow_dirty": bool(autonomy_policy.get("allow_dirty", False)),
@@ -284,9 +292,16 @@ def start_program(
             selected_model = str(
                 (autonomy_policy.get("model_routing") or {}).get(route_mode) or "inherit"
             ).strip()
+            repair_model = str(
+                (autonomy_policy.get("model_routing") or {}).get("strong_worker")
+                or (autonomy_policy.get("model_routing") or {}).get("delegated_worker")
+                or "strong"
+            ).strip()
             mission_options = {
                 "max_rounds": int(autonomy_policy["max_rounds"]),
                 "max_repair_rounds": int(autonomy_policy["max_repair_rounds"]),
+                "max_total_tokens": int(autonomy_policy["max_total_tokens"]),
+                "max_same_failure_count": int(autonomy_policy["max_same_failure_count"]),
                 "max_wall_minutes": max(
                     int(autonomy_policy["max_wall_minutes"]),
                     int(task.get("estimated_minutes") or 45) * 4,
@@ -301,7 +316,7 @@ def start_program(
                 "reasoning_effort": str(autonomy_policy["reasoning_effort"]),
                 "model_policy": {
                     "implementation": selected_model,
-                    "repair": selected_model,
+                    "repair": repair_model,
                     "classification": "fast",
                     "visual_review": "multimodal",
                 },

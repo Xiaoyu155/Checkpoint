@@ -55,6 +55,8 @@ def default_budget_policy(
     max_wall_minutes: int = 60,
     max_worker_minutes: int = 45,
     max_repair_rounds: int | None = None,
+    max_total_tokens: int = 120_000,
+    max_same_failure_count: int = 2,
 ) -> dict[str, Any]:
     repair_rounds = max(0, min(max_rounds - 1, 2)) if max_repair_rounds is None else max(0, max_repair_rounds)
     return {
@@ -62,6 +64,8 @@ def default_budget_policy(
         "max_wall_minutes": max(1, int(max_wall_minutes)),
         "max_worker_minutes": max(1, int(max_worker_minutes)),
         "max_repair_rounds": repair_rounds,
+        "max_total_tokens": max(1, int(max_total_tokens)),
+        "max_same_failure_count": max(1, int(max_same_failure_count)),
         "model_policy": {
             "implementation": "strong",
             "repair": "strong",

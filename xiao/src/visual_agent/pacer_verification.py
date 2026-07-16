@@ -38,6 +38,8 @@ def classify_verification_step(argv: list[str]) -> str:
     executable = Path(argv[0]).name.lower()
     args = [value.lower() for value in argv[1:]]
     if len(args) >= 2 and args[0] == "-m":
+        if args[:3] == ["-m", "visual_agent.cli", "codex-check"]:
+            return "analyze"
         return {
             "pytest": "test",
             "unittest": "test",

@@ -41,8 +41,46 @@ def _write_launch(workspace: Path, launch_id: str = "20260713-123242-test") -> N
             "compactions": {"count": 0},
         },
         "pillars": {
-            name: {"active": True, "state": "verified"}
-            for name in ("routing", "memory", "managed", "acceptance", "dogfood")
+            "routing": {
+                "active": True,
+                "state": "observed",
+                "runtime": {"provider": "custom", "model": "gpt-test"},
+                "ownership_matched": True,
+                "attribution_confidence": "high",
+                "mimo_used": False,
+                "decision_id": "decision-test",
+                "policy_match": True,
+                "request_evidence": {
+                    "decision_id": "decision-test",
+                    "policy_match": True,
+                    "decision": {"provider": "custom", "model": "gpt-test"},
+                    "request": {"provider": "custom", "model": "gpt-test"},
+                },
+            },
+            "memory": {
+                "active": True,
+                "state": "loaded_empty",
+                "retrieval_succeeded": True,
+                "effective_hit": False,
+            },
+            "managed": {
+                "active": False,
+                "state": "not_completed",
+                "outcome_recorded": True,
+            },
+            "acceptance": {"active": False, "state": "not_verified"},
+            "dogfood": {
+                "active": True,
+                "state": "verified_source_discipline",
+                "verified_batch": True,
+                "task_review_valid": True,
+                "pacer_on_pacer": True,
+                "self_change_attributed": True,
+                "installed_artifact_verified": True,
+                "artifact_files_verified": True,
+                "evidence_digest": "a" * 64,
+                "quality_target_met": True,
+            },
         },
     }
     (launch_dir / f"{launch_id}.json").write_text(
@@ -107,7 +145,34 @@ def test_observability_launch_detail_exposes_five_pillar_evidence(tmp_path) -> N
         "acceptance",
         "dogfood",
     }
-    assert all(item["status"] == "active" for item in payload["evidence"])
+    statuses = {item["kind"]: item["status"] for item in payload["evidence"]}
+    assert statuses == {
+        "routing": "passed",
+        "memory": "partial",
+        "managed": "failed",
+        "acceptance": "indeterminate",
+        "dogfood": "passed",
+    }
+    assert payload["launch"]["five_pillars_assessment"]["passed"] is False
+    memory = next(item for item in payload["evidence"] if item["kind"] == "memory")
+    assert memory["assessment"]["status"] == "partial"
+    assert memory["adequacy"] == "insufficient"
+    assert memory["reason_codes"] == ["memory_lookup_miss"]
+
+
+def test_five_pillars_assets_expose_all_strict_statuses() -> None:
+    static = Path(__file__).resolve().parents[1] / "src" / "visual_agent" / "dashboard" / "static"
+    html = (static / "five-pillars.html").read_text(encoding="utf-8")
+    script = (static / "five-pillars.js").read_text(encoding="utf-8")
+    stylesheet = (static / "five-pillars.css").read_text(encoding="utf-8")
+
+    for status in ("passed", "failed", "partial", "indeterminate"):
+        assert f'data-filter="{status}"' in html
+        assert status in script
+        assert f".{status}" in stylesheet
+    assert "STATUS_LABELS" in script
+    assert "acceptance_adequacy" in script
+    assert "product_verdict" in script
 
 
 def test_observability_api_rejects_invalid_ids_and_pagination(tmp_path) -> None:

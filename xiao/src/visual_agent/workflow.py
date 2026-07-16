@@ -1525,7 +1525,18 @@ class WorkflowRuntime:
         selector = str(step.params.get("selector") or "").strip()
         if not selector:
             raise ValueError("assert_element_exists requires selector.")
-        count = self._count_selector(selector, page=page, observation=context.latest_observation)
+        count = 0
+        if page is not None:
+            locator = page.locator(selector)
+            try:
+                if hasattr(locator, "wait_for"):
+                    timeout_ms = max(1, int(float(step.params.get("timeout_seconds", 5.0)) * 1000))
+                    locator.wait_for(state="attached", timeout=timeout_ms)
+                count = int(locator.count())
+            except Exception:
+                count = 0
+        else:
+            count = self._count_selector(selector, page=None, observation=context.latest_observation)
         if count <= 0:
             return self._assertion_failed(
                 step,
@@ -1540,6 +1551,13 @@ class WorkflowRuntime:
         fragment = str(step.params.get("fragment") or "").strip()
         if not fragment:
             raise ValueError("assert_url_contains requires fragment.")
+        page = context.resources.get("playwright_page")
+        if page is not None and hasattr(page, "wait_for_url"):
+            try:
+                timeout_ms = max(1, int(float(step.params.get("timeout_seconds", 5.0)) * 1000))
+                page.wait_for_url(re.compile(re.escape(fragment)), timeout=timeout_ms)
+            except Exception:
+                pass
         current_url = self._current_url(context)
         if fragment not in current_url:
             return self._assertion_failed(

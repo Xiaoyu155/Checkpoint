@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..pacer_pillars import assess_five_pillars, assess_pillar
+
 
 _LAUNCH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -228,6 +230,7 @@ def _launch_summary(payload: dict[str, Any], *, rollout: dict[str, Any] | None =
             detail.get("attribution_confidence") or telemetry.get("attribution_confidence") or "none"
         ),
         "detail_status": str(detail_status or telemetry.get("status") or "unavailable"),
+        "five_pillars_assessment": assess_five_pillars(payload),
     }
 
 
@@ -351,12 +354,18 @@ def _pillar_evidence(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
     for kind, label in labels.items():
         item = pillars.get(kind) if isinstance(pillars.get(kind), dict) else {}
+        assessment = assess_pillar(kind, item)
         evidence.append(
             {
                 "kind": kind,
-                "status": "active" if bool(item.get("active")) else "inactive",
+                "status": str(assessment.get("status") or "indeterminate"),
                 "label": label,
                 "detail": str(item.get("state") or "no_evidence"),
+                "passed": bool(assessment.get("passed")),
+                "available": bool(assessment.get("available")),
+                "adequacy": str(assessment.get("adequacy") or "unknown"),
+                "reason_codes": [str(code) for code in assessment.get("reason_codes") or []],
+                "assessment": assessment,
                 "timestamp": str(manifest.get("completed_at") or manifest.get("started_at") or ""),
             }
         )

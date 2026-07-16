@@ -130,6 +130,16 @@ def active_completion_context(
         path = repo / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+    default_test = repo / "tests" / "test_smoke.py"
+    if not default_test.exists():
+        default_test.parent.mkdir(parents=True, exist_ok=True)
+        default_test.write_text(
+            "import unittest\n\n"
+            "class SmokeTest(unittest.TestCase):\n"
+            "    def test_passes(self):\n"
+            "        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
     workspace = repo / ".agent-workspace"
     manifest = workspace / "pacer_native" / "launches" / f"{launch_id}.json"
     manifest.parent.mkdir(parents=True)
@@ -565,17 +575,15 @@ def test_pacer_completion_tool_schema_teaches_atomic_argv_contract() -> None:
 
     assert "argv" in completion.description
     assert "automatically binds" in completion.description
-    assert "unrelated green checks" in completion.description
+    assert "derives file paths" in completion.description
     assert "never accepts a run_pacer_commands batch" in completion.description
     assert "completion_evidence" in completion.inputSchema["required"]
-    assert completion_evidence_schema["required"] == [
-        "result_kind",
-        "claims",
-        "unresolved_items",
-        "known_risks",
-    ]
+    assert completion_evidence_schema["required"] == ["claims", "unresolved_items", "known_risks"]
     assert "requirement_ids" in claim_schema["properties"]
     assert "requirement_ids" in claim_schema["required"]
+    assert claim_schema["required"] == ["requirement_ids", "result", "verification_steps"]
+    assert "Pacer ignores it" in claim_schema["properties"]["files"]["description"]
+    assert "do not add Git inspection steps" in claim_schema["properties"]["verification_steps"]["description"]
     assert "begin_pacer_task" in claim_schema["properties"]["requirement_ids"]["description"]
     assert completion_argv["type"] == "array"
     assert completion_argv["items"] == {"type": "string"}
@@ -609,6 +617,104 @@ def test_pacer_verification_allows_python_test_batch(tmp_path, monkeypatch) -> N
     })
     assert payload["status"] == "passed"
     assert captured["steps"][0]["name"] == "tests"
+
+
+def test_pacer_verification_allows_exact_repository_checkpoint(tmp_path, monkeypatch) -> None:
+    from visual_agent import mcp_server
+
+    captured = {}
+    monkeypatch.setattr(
+        mcp_server,
+        "run_pacer_commands_payload",
+        lambda args: captured.update(args) or {"status": "passed"},
+    )
+    payload = mcp_server.run_pacer_verification_payload(
+        {
+            "workspace_root": str(tmp_path / ".agent-workspace"),
+            "repo_root": str(tmp_path),
+            "steps": [
+                {
+                    "name": "checkpoint",
+                    "argv": [
+                        "python",
+                        "-m",
+                        "visual_agent.cli",
+                        "codex-check",
+                        "--workspace-root",
+                        ".agent-workspace",
+                        "--repo-root",
+                        ".",
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert payload["status"] == "passed"
+    assert captured["steps"][0]["argv"][1:] == [
+        "-m",
+        "visual_agent.cli",
+        "codex-check",
+        "--workspace-root",
+        ".agent-workspace",
+        "--repo-root",
+        ".",
+    ]
+    assert captured["_pacer_verification_step_classes"] == ["analyze"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["python", "-m", "visual_agent.cli", "codex-check"],
+        [
+            "python",
+            "-m",
+            "visual_agent.cli",
+            "codex-check",
+            "--workspace-root",
+            "other-workspace",
+            "--repo-root",
+            ".",
+        ],
+        [
+            "python",
+            "-m",
+            "visual_agent.cli",
+            "codex-check",
+            "--workspace-root",
+            ".agent-workspace",
+            "--repo-root",
+            ".",
+            "--from-step",
+            "shell-step",
+        ],
+        [
+            "python",
+            "-m",
+            "visual_agent.cli",
+            "verify-now",
+            "--workspace-root",
+            ".agent-workspace",
+            "--repo-root",
+            ".",
+        ],
+    ],
+)
+def test_pacer_verification_rejects_other_checkpoint_cli_forms(
+    tmp_path,
+    argv,
+) -> None:
+    from visual_agent.mcp_server import run_pacer_verification_payload
+
+    with pytest.raises(ValueError, match="not allowlisted"):
+        run_pacer_verification_payload(
+            {
+                "workspace_root": str(tmp_path / ".agent-workspace"),
+                "repo_root": str(tmp_path),
+                "steps": [{"name": "checkpoint", "argv": argv}],
+            }
+        )
 
 
 def test_pacer_verification_allows_strict_unittest_discovery(tmp_path, monkeypatch) -> None:
@@ -894,7 +1000,7 @@ def test_pacer_native_memory_round_trip(tmp_path) -> None:
         asyncio.run(
             call_tool(
                 "get_pacer_memory",
-                {"workspace_root": str(workspace), "repo_root": str(repo), "goal": "继续登录开发"},
+                {"workspace_root": str(workspace), "repo_root": str(repo), "goal": "修复登录"},
             )
         )
     )
@@ -903,6 +1009,8 @@ def test_pacer_native_memory_round_trip(tmp_path) -> None:
     assert recorded["evidence_level"] == "self_reported"
     assert memory["five_pillars_active"] is False
     assert memory["native_codex_history"][-1]["verification"] == "pytest: 12 passed"
+    assert memory["native_codex_history"][-1]["trust"]["trusted"] is False
+    assert memory["effective_memory"]["hit"] is False
 
 
 @pytest.mark.parametrize("environment_launch_id", ["", "../invalid-launch"])
@@ -1148,7 +1256,7 @@ def test_pacer_memory_receipt_reuses_once_per_launch_and_preserves_root_goal(tmp
     assert all(item["memory_goal_digest"] == first["memory_goal_digest"] for item in reused)
     assert len({item["query_goal_digest"] for item in reused}) == 2
     assert all("native_codex_history" not in item and "entries" not in item for item in reused)
-    assert all(chars < 800 for chars in reused_response_chars)
+    assert all(chars < 1600 for chars in reused_response_chars)
     active = read_active_launch(workspace)
     assert active["launch_goal"] == "root development goal"
     assert active["current_goal"] == "tests child query"
@@ -1288,6 +1396,174 @@ def test_pacer_memory_receipt_invalidates_for_history_and_project_instruction_ch
     assert after_instruction["cache_status"] == "invalidated"
     assert after_instruction["goal"] == root_goal
     assert after_instruction["memory_receipt"] != after_missing_receipt["memory_receipt"]
+
+
+def test_pacer_memory_filters_unrelated_native_history_and_withholds_untrusted_hits(tmp_path) -> None:
+    from visual_agent.mcp_server import get_pacer_memory_payload
+    from visual_agent.pacer_launch_context import initialize_active_launch
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workspace = repo / ".agent-workspace"
+    manifest = workspace / "pacer_native" / "launches" / "launch-native-filter.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    initialize_active_launch(
+        workspace_root=workspace,
+        manifest_path=manifest,
+        launch={"launch_id": "launch-native-filter", "repo_root": str(repo)},
+    )
+    history = workspace / "pacer_native" / "history.jsonl"
+    history.write_text(
+        "\n".join(
+            json.dumps(item)
+            for item in (
+                {
+                    "recorded_at": "2026-07-13T00:00:00+00:00",
+                    "repo_root": str(repo.resolve()),
+                    "goal": "fix checkout total rounding",
+                    "summary": "model claimed this was useful",
+                    "status": "completed",
+                    "evidence_level": "self_reported",
+                },
+                {
+                    "recorded_at": "2026-07-13T01:00:00+00:00",
+                    "repo_root": str(repo.resolve()),
+                    "goal": "translate a lunar astronomy almanac",
+                    "summary": "unrelated model claim",
+                    "status": "completed",
+                    "evidence_level": "self_reported",
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    memory = get_pacer_memory_payload(
+        {
+            "workspace_root": str(workspace),
+            "repo_root": str(repo),
+            "goal": "fix checkout total rounding",
+            "detail": "full",
+        }
+    )
+
+    assert memory["native_history_total"] == 2
+    assert [item["goal"] for item in memory["native_codex_history"]] == ["fix checkout total rounding"]
+    assert memory["native_codex_history"][0]["trust"]["trusted"] is False
+    assert memory["lookup"]["lookup_hit"] is True
+    assert memory["relevance"]["candidate_hit"] is True
+    assert memory["relevance"]["relevant_hit"] is False
+    assert memory["memory_injection"]["injected_hit"] is False
+    assert memory["effective_memory"]["hit"] is False
+    assert memory["pillars"]["memory"]["assessment"]["reason_codes"] == [
+        "memory_relevance_unverified"
+    ]
+
+
+def test_pacer_memory_binds_trusted_used_ids_to_prior_injection_receipt(tmp_path) -> None:
+    from visual_agent.mcp_server import get_pacer_memory_payload
+    from visual_agent.pacer_launch_context import initialize_active_launch, read_active_launch
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workspace = repo / ".agent-workspace"
+    manifest = workspace / "pacer_native" / "launches" / "launch-memory-use.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    initialize_active_launch(
+        workspace_root=workspace,
+        manifest_path=manifest,
+        launch={"launch_id": "launch-memory-use", "repo_root": str(repo)},
+    )
+    native = workspace / "pacer_native"
+    run_id = "20260715-120000-checkout123"
+    unrelated_run_id = "20260715-120100-almanac123"
+    history = [
+        {
+            "recorded_at": "2026-07-15T12:00:00+00:00",
+            "repo_root": str(repo.resolve()),
+            "goal": "fix checkout total rounding",
+            "summary": "verified checkout evidence",
+            "verification": f"run_id={run_id}",
+            "status": "completed",
+            "evidence_level": "verified_batch",
+            "batch_run_id": run_id,
+        },
+        {
+            "recorded_at": "2026-07-15T12:01:00+00:00",
+            "repo_root": str(repo.resolve()),
+            "goal": "translate a lunar astronomy almanac",
+            "summary": "verified but unrelated",
+            "verification": f"run_id={unrelated_run_id}",
+            "status": "completed",
+            "evidence_level": "verified_batch",
+            "batch_run_id": unrelated_run_id,
+        },
+    ]
+    (native / "history.jsonl").write_text(
+        "\n".join(json.dumps(item) for item in history) + "\n",
+        encoding="utf-8",
+    )
+    for batch_run_id in (run_id, unrelated_run_id):
+        run_dir = native / "commands" / batch_run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "summary.json").write_text(
+            json.dumps(trusted_verification_summary(batch_run_id)),
+            encoding="utf-8",
+        )
+
+    first = get_pacer_memory_payload(
+        {
+            "workspace_root": str(workspace),
+            "repo_root": str(repo),
+            "goal": "fix checkout total rounding",
+            "detail": "full",
+        }
+    )
+    memory_id = f"pacer-native:{run_id}"
+
+    assert [item["goal"] for item in first["native_codex_history"]] == ["fix checkout total rounding"]
+    assert first["response_cache"] == {"status": "miss", "reused": False}
+    assert first["relevance"]["retrieved_memory_ids"] == [memory_id]
+    assert first["memory_injection"]["memory_ids"] == [memory_id]
+    assert first["memory_use"]["used_hit"] is False
+    assert first["effective_memory"]["hit"] is True
+    assert first["pillars"]["memory"]["assessment"]["reason_codes"] == ["memory_use_unverified"]
+
+    reused = get_pacer_memory_payload(
+        {
+            "workspace_root": str(workspace),
+            "repo_root": str(repo),
+            "known_memory_receipt": first["memory_receipt"],
+            "memory_ids_used": [memory_id],
+            "detail": "full",
+        }
+    )
+
+    assert reused["response_cache"] == {"status": "hit", "reused": True}
+    assert reused["memory_use"]["used_hit"] is True
+    assert reused["memory_use"]["memory_ids_used"] == [memory_id]
+    assert reused["effective_memory"]["retrieved_memory_ids"] == [memory_id]
+    assert reused["effective_memory"]["injected_memory_ids"] == [memory_id]
+    assert reused["effective_memory"]["memory_ids_used"] == [memory_id]
+    assert reused["memory_assessment"]["status"] == "passed"
+    active_memory = read_active_launch(workspace)["pillars"]["memory"]
+    assert active_memory["retrieved_memory_ids"] == [memory_id]
+    assert active_memory["injected_memory_ids"] == [memory_id]
+    assert active_memory["memory_ids_used"] == [memory_id]
+
+    with pytest.raises(ValueError, match="not delivered as trusted memory"):
+        get_pacer_memory_payload(
+            {
+                "workspace_root": str(workspace),
+                "repo_root": str(repo),
+                "known_memory_receipt": first["memory_receipt"],
+                "memory_ids_used": ["pacer-native:20260715-999999-unknown123"],
+                "detail": "full",
+            }
+        )
 
 
 def test_pacer_native_memory_normalizes_repo_root_and_dot_workspace(tmp_path) -> None:
@@ -1740,10 +2016,12 @@ def test_complete_documentation_task_accepts_requested_compileall(tmp_path, monk
     assert payload["status"] == "completed"
     assert payload["verification"]["records"][0]["step_class"] == "compile"
     assert payload["task_review"]["trust"] == "yes"
-    assert payload["five_pillars_active"] is True
+    assert payload["five_pillars_active"] is False
+    assert payload["five_pillars_assessment"]["pillars"]["acceptance"]["status"] == "passed"
+    assert payload["pillars"]["acceptance"]["digest_verified"] is True
 
 
-def test_complete_pacer_task_success_activates_all_five_pillars(tmp_path, monkeypatch) -> None:
+def test_complete_pacer_task_success_does_not_overclaim_unproven_pillars(tmp_path, monkeypatch) -> None:
     from visual_agent.mcp_server import complete_pacer_task_payload
 
     workspace, repo = active_completion_context(tmp_path, monkeypatch)
@@ -1764,8 +2042,10 @@ def test_complete_pacer_task_success_activates_all_five_pillars(tmp_path, monkey
     assert payload["task_review"]["valid"] is True
     assert payload["task_review"]["verdict"] == "approved"
     assert payload["task_review"]["user_report"]["completed"] == ["test the project verified"]
-    assert all(item["active"] for item in payload["pillars"].values())
-    assert payload["five_pillars_active"] is True
+    assert payload["five_pillars_active"] is False
+    assert payload["five_pillars_assessment"]["status"] == "partial"
+    assert payload["five_pillars_assessment"]["pillars"]["acceptance"]["status"] == "partial"
+    assert payload["five_pillars_assessment"]["pillars"]["dogfood"]["status"] == "partial"
     assert payload["outcome"] == {
         "status": "recorded",
         "outcome_status": "completed",
@@ -1783,6 +2063,46 @@ def test_complete_pacer_task_success_activates_all_five_pillars(tmp_path, monkey
     assert history[-1]["batch_run_id"] == payload["run_id"]
     assert history[-1]["launch_id"] == "launch-complete"
     assert history[-1]["task_review"]["verdict"] == "approved"
+
+
+def test_complete_pacer_task_accepts_minimal_semantic_claim(tmp_path, monkeypatch) -> None:
+    from visual_agent.mcp_server import complete_pacer_task_payload
+    from visual_agent.task_review import build_task_contract
+
+    goal = "run existing tests with server-derived completion evidence"
+    workspace, repo = active_completion_context(
+        tmp_path,
+        monkeypatch,
+        launch_id="launch-minimal-evidence",
+        goal=goal,
+    )
+    requirement_id = build_task_contract(goal)["requirements"][0]["id"]
+
+    payload = complete_pacer_task_payload(
+        {
+            "workspace_root": str(workspace),
+            "repo_root": str(repo),
+            "goal": goal,
+            "summary": "existing tests passed through the trusted verification runner",
+            "completion_evidence": {
+                "claims": [
+                    {
+                        "requirement_ids": [requirement_id],
+                        "result": "existing project tests passed",
+                        "verification_steps": ["unittest"],
+                    }
+                ],
+                "unresolved_items": [],
+                "known_risks": [],
+            },
+            "steps": [passing_unittest_step(repo)],
+        }
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["task_review"]["evidence_origin"] == "server_derived"
+    assert payload["task_review"]["source_changes"] == []
+    assert payload["task_review"]["legacy_fields_ignored"] == []
 
 
 @pytest.mark.parametrize(
@@ -2013,20 +2333,18 @@ def test_complete_pacer_task_rejects_goal_drift_before_running_verification(
 def test_complete_pacer_task_failure_records_outcome_and_short_tail(tmp_path, monkeypatch) -> None:
     from visual_agent.mcp_server import complete_pacer_task_payload
 
+    failing_test = (
+        "import unittest\n\n"
+        "class FailureTest(unittest.TestCase):\n"
+        "    def test_fails(self):\n"
+        "        self.assertEqual('actual', 'expected')\n"
+    )
     workspace, repo = active_completion_context(
         tmp_path,
         monkeypatch,
         launch_id="launch-failure",
         goal="run failing regression",
-    )
-    tests_dir = repo / "tests"
-    tests_dir.mkdir()
-    (tests_dir / "test_failure.py").write_text(
-        "import unittest\n\n"
-        "class FailureTest(unittest.TestCase):\n"
-        "    def test_fails(self):\n"
-        "        self.assertEqual('actual', 'expected')\n",
-        encoding="utf-8",
+        initial_files={"tests/test_failure.py": failing_test},
     )
     payload = complete_pacer_task_payload({
         "workspace_root": str(workspace),
@@ -2103,7 +2421,9 @@ def test_complete_pacer_task_pins_launch_across_active_pointer_drift(tmp_path, m
     assert drifted is True
     assert payload["launch_id"] == "launch-a"
     assert payload["outcome"]["launch_id"] == "launch-a"
-    assert read_active_launch(workspace, launch_id="launch-a")["pillars"]["acceptance"]["active"] is True
+    launch_a_acceptance = read_active_launch(workspace, launch_id="launch-a")["pillars"]["acceptance"]
+    assert launch_a_acceptance["active"] is False
+    assert launch_a_acceptance["assessment"]["status"] == "partial"
     assert read_active_launch(workspace, launch_id="launch-b")["pillars"]["acceptance"]["active"] is False
 
 
@@ -2195,26 +2515,26 @@ def test_complete_pacer_task_pins_launch_before_verification_starts(
     assert drifted is True
     assert payload["launch_id"] == "launch-a"
     assert payload["verification"]["run_id"] == payload["run_id"]
-    assert read_active_launch(workspace, launch_id="launch-a")["pillars"]["acceptance"]["active"] is True
+    launch_a_acceptance = read_active_launch(workspace, launch_id="launch-a")["pillars"]["acceptance"]
+    assert launch_a_acceptance["active"] is False
+    assert launch_a_acceptance["assessment"]["status"] == "partial"
     assert read_active_launch(workspace, launch_id="launch-b")["pillars"]["acceptance"]["active"] is False
 
 
 def test_complete_pacer_task_success_response_stays_small_with_large_test_output(tmp_path, monkeypatch) -> None:
+    verbose_test = (
+        "import unittest\n\n"
+        "class VerboseTest(unittest.TestCase):\n"
+        "    def test_verbose(self):\n"
+        "        print('X' * 100000)\n"
+        "        self.assertTrue(True)\n"
+    )
     workspace, repo = active_completion_context(
         tmp_path,
         monkeypatch,
         launch_id="launch-size",
         goal="run existing tests with compact response verification",
-    )
-    tests_dir = repo / "tests"
-    tests_dir.mkdir()
-    (tests_dir / "test_verbose.py").write_text(
-        "import unittest\n\n"
-        "class VerboseTest(unittest.TestCase):\n"
-        "    def test_verbose(self):\n"
-        "        print('X' * 100000)\n"
-        "        self.assertTrue(True)\n",
-        encoding="utf-8",
+        initial_files={"tests/test_verbose.py": verbose_test},
     )
     result = asyncio.run(
         call_tool(
@@ -2494,11 +2814,15 @@ def test_pacer_memory_recovers_parent_launch_history_for_bound_nested_project(tm
     )
     assert memory["launch_id"] == "launch-1"
     assert [entry["goal"] for entry in memory["native_codex_history"]] == ["parent task"]
-    assert memory["effective_memory"]["hit"] is True
+    assert memory["effective_memory"]["hit"] is False
+    assert memory["effective_memory"]["lookup_hit"] is True
+    assert memory["effective_memory"]["relevant_hit"] is None
+    assert memory["effective_memory"]["injected_hit"] is False
     assert memory["effective_memory"]["total_returned"] == 1
     assert memory["effective_memory"]["formal_entries"] == 0
     assert memory["effective_memory"]["native_history_entries"] == 1
-    assert memory["effective_memory"]["sources"] == ["native_history"]
+    assert memory["effective_memory"]["sources"] == []
+    assert memory["effective_memory"]["returned_sources"] == ["native_history"]
     assert memory["effective_memory"]["duplicates_removed"] == 0
 
 
@@ -2529,19 +2853,29 @@ def test_pacer_memory_compact_projection_is_small_and_full_shape_is_unchanged(tm
         "memory_status",
         "cache_status",
         "memory_reused",
+        "response_cache",
         "memory_receipt",
         "launch_id",
         "goal",
+        "lookup",
+        "relevance",
+        "memory_injection",
+        "memory_use",
         "effective_memory",
         "entries",
         "native_codex_history",
         "native_history_total",
         "memory_budget",
         "five_pillars_active",
+        "five_pillars_assessment",
         "pillars",
     }
     assert set(compact["effective_memory"]) == {
         "hit",
+        "lookup_hit",
+        "relevant_hit",
+        "injected_hit",
+        "used_hit",
         "total_returned",
         "formal_entries",
         "native_history_entries",
@@ -2550,7 +2884,7 @@ def test_pacer_memory_compact_projection_is_small_and_full_shape_is_unchanged(tm
     assert compact["pillars"]["memory"]["active"] is True
     assert compact["effective_memory"]["hit"] is False
     assert "runtime" not in compact
-    assert len(json.dumps(compact, ensure_ascii=False, indent=2)) < 1600
+    assert len(json.dumps(compact, ensure_ascii=False, indent=2)) < 3000
 
     full = get_pacer_memory_payload(
         {"workspace_root": str(workspace), "repo_root": str(repo), "detail": "full"}
@@ -2568,14 +2902,20 @@ def test_pacer_memory_compact_projection_is_small_and_full_shape_is_unchanged(tm
         "patterns",
         "recommendations",
         "disclosure",
+        "entry_cache",
         "index",
         "status",
         "memory_status",
         "cache_status",
         "memory_reused",
+        "response_cache",
         "memory_receipt",
         "memory_goal_digest",
         "query_goal_digest",
+        "lookup",
+        "relevance",
+        "memory_injection",
+        "memory_use",
         "effective_memory",
         "memory_budget",
         "recovery_capsule",
@@ -2584,6 +2924,7 @@ def test_pacer_memory_compact_projection_is_small_and_full_shape_is_unchanged(tm
         "native_history_returned",
         "native_history_omitted",
         "five_pillars_active",
+        "five_pillars_assessment",
         "pillars",
         "launch_id",
         "runtime",
@@ -2670,6 +3011,7 @@ def test_runtime_telemetry_exposes_active_compaction_policy_and_uncached_usage(t
         "liveness",
         "pillars",
         "five_pillars_active",
+        "five_pillars_assessment",
     }
     assert compact["runtime"] == {
         "provider": "custom",
@@ -2692,7 +3034,7 @@ def test_runtime_telemetry_exposes_active_compaction_policy_and_uncached_usage(t
         "accumulated_uncached_input_tokens": 50000,
     }
     assert compact["pillars"]["routing"]["active"] is True
-    assert len(json.dumps(compact, ensure_ascii=False, indent=2)) < 1600
+    assert len(json.dumps(compact, ensure_ascii=False, indent=2)) < 2600
     stored = read_active_launch(workspace, launch_id="launch-1")["rollout_telemetry"]
     assert stored["current_context_usage"]["cached_input_tokens"] == 70000
     assert stored["context_control"]["usage_semantics"] == "cumulative_session_usage_not_current_context_size"
@@ -2766,6 +3108,15 @@ def test_five_pillars_require_current_launch_verified_closed_loop(tmp_path, monk
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "pyproject.toml").write_text("[project]\nname='repo'\n", encoding="utf-8")
+    tests_dir = repo / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_smoke.py").write_text(
+        "import unittest\n\n"
+        "class SmokeTest(unittest.TestCase):\n"
+        "    def test_passes(self):\n"
+        "        self.assertTrue(True)\n",
+        encoding="utf-8",
+    )
     workspace = repo / ".agent-workspace"
     manifest = workspace / "pacer_native" / "launches" / "launch-1.json"
     manifest.parent.mkdir(parents=True)
@@ -2829,8 +3180,12 @@ def test_five_pillars_require_current_launch_verified_closed_loop(tmp_path, monk
         "completion_evidence": completion_evidence("run existing closed-loop tests"),
         "steps": [step],
     })
-    assert outcome["five_pillars_active"] is True
-    assert all(item["active"] for item in outcome["pillars"].values())
+    assert outcome["five_pillars_active"] is False
+    assert outcome["five_pillars_assessment"]["status"] == "partial"
+    assert {
+        item["status"]
+        for item in outcome["five_pillars_assessment"]["pillars"].values()
+    } == {"partial"}
 
 
 def test_empty_memory_marks_capability_active_but_mimo_route_blocks_closed_loop(tmp_path, monkeypatch) -> None:
@@ -3116,9 +3471,10 @@ def test_mcp_generate_workflow_from_context_returns_data_display_match_summary(t
 def test_mcp_generate_workflow_from_context_can_read_git_diff(tmp_path) -> None:
     init_git_repo(tmp_path)
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
-    page = workspace.fixtures_dir / "login.html"
+    page = tmp_path / "web" / "login.html"
+    page.parent.mkdir()
     page.write_text("<form><input name='email'></form>\n", encoding="utf-8")
-    git(tmp_path, "add", "--force", ".agent-workspace/fixtures/login.html")
+    git(tmp_path, "add", "web/login.html")
     git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
     page.write_text(
         "<form action='/dashboard'><label for='email'>Email</label><input id='email' name='email'>"
@@ -3130,7 +3486,7 @@ def test_mcp_generate_workflow_from_context_can_read_git_diff(tmp_path) -> None:
         {
             "workspace_root": str(workspace.root),
             "task_description": "Verify login redirects to dashboard",
-            "base_url": "fixtures/login.html",
+            "base_url": "web/login.html",
             "repo_root": str(tmp_path),
             "include_untracked": False,
             "dry_run": True,

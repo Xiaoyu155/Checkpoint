@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Sequence
 
 from .codex_launcher import launch_codex
+from .cli_quality import QUALITY_COMMANDS
 from .pacer_support import build_pacer_support_snapshot, inspect_codex_account, support_snapshot_to_markdown
 from .user_profile import LocalUserProfile, load_user_profile, save_user_profile
 
@@ -15,7 +16,7 @@ def handle_pacer_management(argv: Sequence[str]) -> int | None:
     if not arguments:
         return None
     command = arguments[0]
-    if command == "dashboard":
+    if command == "dashboard" or command in QUALITY_COMMANDS:
         from .cli import main
 
         return main(arguments)

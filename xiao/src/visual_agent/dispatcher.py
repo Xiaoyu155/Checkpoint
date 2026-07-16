@@ -496,8 +496,8 @@ def selector_from_resolved(resolved: ResolvedTarget) -> str | None:
 
 
 def wait_after_browser_action(page: Any, params: dict[str, Any]) -> None:
-    wait_seconds = float(params.get("wait_after_seconds", 0.2) or 0.0)
-    if wait_seconds > 0 and hasattr(page, "wait_for_timeout"):
+    wait_seconds = float(params.get("wait_after_seconds", 0.0) or 0.0)
+    if "wait_after_seconds" in params and wait_seconds > 0 and hasattr(page, "wait_for_timeout"):
         page.wait_for_timeout(int(wait_seconds * 1000))
     if bool(params.get("wait_for_network_idle", False)) and hasattr(page, "wait_for_load_state"):
         page.wait_for_load_state("networkidle", timeout=int(params.get("network_idle_timeout_ms", 5_000)))

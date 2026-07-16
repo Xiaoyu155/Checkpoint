@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import shutil
 import subprocess
@@ -10,6 +11,10 @@ from visual_agent.task_review import (
     audit_task_completion,
     build_task_contract,
     capture_task_source_baseline,
+    derive_task_completion_evidence,
+    derive_task_source_changes,
+    task_contract_allows_compile_only,
+    task_review_error,
 )
 
 
@@ -88,12 +93,17 @@ def test_task_review_approves_goal_bound_file_and_passing_step(tmp_path) -> None
 
     assert review["valid"] is True
     assert review["verdict"] == "approved"
-    assert review["trust"] == "yes"
+    assert review["trust"] == "with_limits"
+    assert review["evidence_integrity"] == "verified"
+    assert review["acceptance_adequacy"] == "insufficient"
+    assert review["product_verdict"] == "indeterminate"
     assert review["goal_binding"] == {"pinned": True, "matches": True}
     assert review["user_report"]["completed"] == ["修复登录错误并增加失败状态处理"]
-    assert review["user_report"]["can_trust"] == "yes"
+    assert review["user_report"]["can_trust"] == "with_limits"
     assert "实际完成：" in review["user_report_markdown"]
-    assert "可信结论：可信" in review["user_report_markdown"]
+    assert "验收标准充分性：不足" in review["user_report_markdown"]
+    assert "产品结论：无法判定" in review["user_report_markdown"]
+    assert "可信结论：有限可信" in review["user_report_markdown"]
 
 
 def test_task_review_rejects_goal_replacement_before_verification(tmp_path) -> None:
@@ -381,7 +391,7 @@ def test_task_review_defaults_unknown_development_wording_to_implementation(tmp_
 def test_task_review_requires_every_locked_parallel_requirement_id(tmp_path) -> None:
     repo, baseline = _repo(tmp_path)
     goal = "fix login bug and add timeout tests"
-    contract = build_task_contract(goal)
+    contract = build_task_contract(goal, repo_root=repo)
     assert len(contract["requirements"]) == 2
     first = contract["requirements"][0]
     evidence = _evidence(requirement=str(first["text"]))
@@ -461,6 +471,59 @@ def test_task_review_rejects_unrelated_green_focused_test(tmp_path) -> None:
 
     assert review["valid"] is False
     assert "claim_without_relevant_acceptance" in _codes(review)
+
+
+def test_task_review_accepts_test_run_requirement_with_a_real_test_step(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    baseline = capture_task_source_baseline(repo)
+    goal = "run the focused tests"
+    contract = build_task_contract(goal, repo_root=repo)
+    requirement = contract["requirements"][0]
+    steps = [
+        {
+            "name": "dogfood-tests",
+            "argv": [sys.executable, "-m", "pytest", "tests/test_dogfood_provider_check.py", "-q"],
+        }
+    ]
+    review = audit_task_completion(
+        launch_goal=goal,
+        submitted_goal=goal,
+        summary="the focused Dogfood tests passed",
+        completion_evidence={
+            "result_kind": "test",
+            "claims": [
+                {
+                    "kind": "test",
+                    "requirement_ids": [requirement["id"]],
+                    "requirement": requirement["text"],
+                    "result": "the focused Dogfood tests passed",
+                    "files": [],
+                    "verification_steps": ["dogfood-tests"],
+                }
+            ],
+            "unresolved_items": [],
+            "known_risks": [],
+        },
+        requested_steps=steps,
+        repo_root=repo,
+        task_contract=contract,
+        source_baseline=baseline,
+        verification={
+            "status": "passed",
+            "records": [
+                {
+                    "name": "dogfood-tests",
+                    "status": "passed",
+                    "exit_code": 0,
+                    "elapsed_seconds": 0.1,
+                }
+            ],
+        },
+    )
+
+    assert review["valid"] is True, review["errors"]
+    assert "claim_without_relevant_acceptance" not in _codes(review)
 
 
 def test_task_review_does_not_use_self_reported_result_to_make_test_relevant(tmp_path) -> None:
@@ -574,7 +637,8 @@ def test_task_review_accepts_mixed_implementation_and_test_requirements(tmp_path
     )
 
     assert review["valid"] is True
-    assert review["trust"] == "yes"
+    assert review["trust"] == "with_limits"
+    assert review["product_verdict"] == "indeterminate"
 
 
 def test_task_contract_classifies_read_only_test_run_and_documentation() -> None:
@@ -601,6 +665,32 @@ def test_task_contract_keeps_documentation_scope_with_compileall_acceptance() ->
     ]
 
 
+def test_task_contract_inherits_documentation_role_for_adjacent_section_clause() -> None:
+    goal = (
+        "更新 README.md，增加“运行方式”小节，说明使用 python app.py 启动；"
+        "不要修改 app.py，并使用 python -m compileall -q app.py 验证示例代码可编译。"
+    )
+
+    contract = build_task_contract(goal)
+
+    assert [item["required_artifact_role"] for item in contract["requirements"]] == [
+        "documentation",
+        "documentation",
+        "",
+    ]
+    assert contract["protected_paths"] == ["app.py"]
+    assert task_contract_allows_compile_only(contract) is True
+
+
+def test_task_contract_does_not_inherit_documentation_role_for_implementation_clause() -> None:
+    contract = build_task_contract("更新 README.md，并修复 app.py 的返回值。")
+
+    assert [item["required_artifact_role"] for item in contract["requirements"]] == [
+        "documentation",
+        "implementation",
+    ]
+
+
 def test_task_contract_keeps_negated_implementation_constraint_read_only() -> None:
     goal = (
         "新增 tests/test_validator.py，为 validator.py 的 is_even 覆盖偶数和奇数，并使用 "
@@ -623,36 +713,42 @@ def test_task_review_accepts_documentation_change_with_requested_compileall(tmp_
     baseline = capture_task_source_baseline(repo)
     readme.write_text("# Sample App\n\n## Usage\n\n```bash\npython app.py\n```\n", encoding="utf-8")
     goal = (
-        "更新 README.md，增加 Usage 小节，写明 python app.py 启动命令，只修改该文档"
-        "并使用 python -m compileall -q app.py 验证。"
+        "更新 README.md，增加“运行方式”小节，说明使用 python app.py 启动；"
+        "不要修改 app.py，并使用 python -m compileall -q app.py 验证示例代码可编译。"
     )
     contract = build_task_contract(goal)
     step = {
         "name": "compile-app",
         "argv": [sys.executable, "-m", "compileall", "-q", "app.py"],
     }
-    claims = [
-        {
-            "kind": "change",
-            "requirement_ids": [requirement["id"]],
-            "requirement": requirement["text"],
-            "result": "README Usage 文档已更新，并保留指定启动命令。",
-            "files": [{"path": "README.md", "state": "modified"}],
-            "verification_steps": ["compile-app"],
-        }
-        for requirement in contract["requirements"]
+    results = [
+        "README.md 已更新。",
+        "README.md 已增加运行方式小节，并写明 python app.py 启动命令。",
+        "app.py 未修改，并由 compileall 验证示例代码可编译。",
     ]
+    evidence = derive_task_completion_evidence(
+        completion_evidence={
+            "claims": [
+                {
+                    "requirement_ids": [requirement["id"]],
+                    "result": result,
+                    "verification_steps": ["compile-app"],
+                }
+                for requirement, result in zip(contract["requirements"], results, strict=True)
+            ],
+            "unresolved_items": [],
+            "known_risks": [],
+        },
+        repo_root=repo,
+        task_contract=contract,
+        source_baseline=baseline,
+    )
 
     review = audit_task_completion(
         launch_goal=goal,
         submitted_goal=goal,
         summary="README 已增加 Usage 小节和 python app.py 启动命令。",
-        completion_evidence={
-            "result_kind": "change",
-            "claims": claims,
-            "unresolved_items": [],
-            "known_risks": [],
-        },
+        completion_evidence=evidence,
         requested_steps=[step],
         repo_root=repo,
         task_contract=contract,
@@ -820,6 +916,30 @@ def test_task_contract_rejects_silent_goal_or_requirement_truncation() -> None:
         build_task_contract(" and ".join(f"fix item {index}" for index in range(21)))
 
 
+def test_task_contract_keeps_explicit_numbered_requirements_atomic() -> None:
+    goal = """Implement the missing local Dogfood relay preflight in Pacer.
+
+Requirements:
+1. Add a product module and CLI command, and keep the implementation narrowly scoped.
+2. Reuse the installed Codex CLI and do not hand-roll Responses streaming.
+3. Accept provider configuration but never accept a raw key.
+4. Launch Codex in an empty directory and produce a bounded receipt.
+5. Fail closed on timeout, missing credentials, nonzero exit, or marker mismatch.
+6. Make the runner injectable and add focused tests for all failures.
+7. Wire the command through existing quality CLI patterns and do not commit.
+8. Run focused tests and do not run process-kill probes.
+
+Before editing, inspect AGENTS.md and existing Dogfood conventions."""
+
+    contract = build_task_contract(goal)
+    requirement_texts = [item["text"] for item in contract["requirements"]]
+
+    assert len(requirement_texts) == 11
+    assert requirement_texts[1].startswith("Add a product module and CLI command")
+    assert requirement_texts[2].startswith("Reuse the installed Codex CLI")
+    assert requirement_texts[8].startswith("Run focused tests")
+
+
 def test_task_contract_does_not_treat_latest_as_test_run() -> None:
     contract = build_task_contract("restyle latest dashboard")
 
@@ -922,3 +1042,276 @@ def test_git_baseline_attributes_clean_file_in_nested_project_root(tmp_path) -> 
 
     assert baseline["git_prefix"] == "project/"
     assert review["valid"] is True
+
+
+def test_server_derives_filesystem_created_modified_and_deleted_changes(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    modified = repo / "app.py"
+    deleted = repo / "old.py"
+    modified.write_text("value = 1\n", encoding="utf-8")
+    deleted.write_text("legacy = True\n", encoding="utf-8")
+    baseline = capture_task_source_baseline(repo)
+
+    modified.write_text("value = 2\n", encoding="utf-8")
+    deleted.unlink()
+    (repo / "new.py").write_text("created = True\n", encoding="utf-8")
+
+    payload = derive_task_source_changes(repo_root=repo, source_baseline=baseline)
+
+    assert payload["complete"] is True
+    assert {(item["path"], item["state"]) for item in payload["changes"]} == {
+        ("app.py", "modified"),
+        ("new.py", "created"),
+        ("old.py", "deleted"),
+    }
+
+
+def test_server_derives_git_rename_untracked_and_dirty_baseline_delta(tmp_path) -> None:
+    if shutil.which("git") is None:
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "original.py").write_text("original = True\n", encoding="utf-8")
+    (repo / "dirty.py").write_text("value = 'head'\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Pacer Test",
+            "-c",
+            "user.email=pacer@example.invalid",
+            "commit",
+            "-qm",
+            "baseline",
+        ],
+        check=True,
+    )
+    (repo / "dirty.py").write_text("value = 'user'\n", encoding="utf-8")
+    (repo / "scratch.py").write_text("value = 'user'\n", encoding="utf-8")
+    baseline = capture_task_source_baseline(repo)
+
+    (repo / "dirty.py").write_text("value = 'pacer'\n", encoding="utf-8")
+    (repo / "scratch.py").write_text("value = 'pacer'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "mv", "original.py", "renamed.py"], check=True)
+    (repo / "new.py").write_text("created = True\n", encoding="utf-8")
+
+    payload = derive_task_source_changes(repo_root=repo, source_baseline=baseline)
+    changes = {item["path"]: item for item in payload["changes"]}
+
+    assert payload["complete"] is True
+    assert changes["dirty.py"]["state"] == "modified"
+    assert changes["scratch.py"]["state"] == "modified"
+    assert changes["new.py"]["state"] == "created"
+    assert changes["original.py"] == {
+        "path": "original.py",
+        "state": "deleted",
+        "artifact_role": "implementation",
+        "renamed_to": "renamed.py",
+    }
+    assert changes["renamed.py"] == {
+        "path": "renamed.py",
+        "state": "created",
+        "artifact_role": "implementation",
+        "renamed_from": "original.py",
+    }
+
+
+def test_server_omits_unchanged_preexisting_dirty_file(tmp_path) -> None:
+    if shutil.which("git") is None:
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = repo / "app.py"
+    source.write_text("value = 'head'\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "app.py"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Pacer Test",
+            "-c",
+            "user.email=pacer@example.invalid",
+            "commit",
+            "-qm",
+            "baseline",
+        ],
+        check=True,
+    )
+    source.write_text("value = 'user'\n", encoding="utf-8")
+    baseline = capture_task_source_baseline(repo)
+
+    payload = derive_task_source_changes(repo_root=repo, source_baseline=baseline)
+
+    assert payload == {"complete": True, "changes": [], "errors": []}
+
+
+def test_server_builds_canonical_evidence_from_minimal_claim(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = repo / "app.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    goal = "修复 app.py 的结果错误"
+    contract = build_task_contract(goal)
+    baseline = capture_task_source_baseline(repo)
+    source.write_text("value = 2\n", encoding="utf-8")
+    requirement_id = contract["requirements"][0]["id"]
+
+    evidence = derive_task_completion_evidence(
+        completion_evidence={
+            "claims": [
+                {
+                    "requirement_ids": [requirement_id],
+                    "result": "app.py 现在返回正确结果",
+                    "verification_steps": ["focused-tests"],
+                }
+            ],
+            "unresolved_items": [],
+            "known_risks": [],
+        },
+        repo_root=repo,
+        task_contract=contract,
+        source_baseline=baseline,
+    )
+
+    assert evidence["evidence_origin"] == "server_derived"
+    assert evidence["result_kind"] == "change"
+    assert evidence["claims"][0]["requirement"] == contract["requirements"][0]["text"]
+    assert evidence["claims"][0]["files"] == [{"path": "app.py", "state": "modified"}]
+    assert evidence["legacy_fields_ignored"] == []
+
+
+def test_server_rejects_out_of_scope_and_protected_path_changes(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    tests_dir = repo / "tests"
+    tests_dir.mkdir(parents=True)
+    validator = repo / "validator.py"
+    validator.write_text("def is_even(value): return True\n", encoding="utf-8")
+    goal = "新增 tests/test_validator.py 覆盖 is_even；不要修改 validator.py。"
+    contract = build_task_contract(goal)
+    baseline = capture_task_source_baseline(repo)
+    validator.write_text("def is_even(value): return value % 2 == 0\n", encoding="utf-8")
+    (tests_dir / "test_validator.py").write_text("def test_even(): assert True\n", encoding="utf-8")
+
+    evidence = derive_task_completion_evidence(
+        completion_evidence={"claims": [], "unresolved_items": [], "known_risks": []},
+        repo_root=repo,
+        task_contract=contract,
+        source_baseline=baseline,
+    )
+    codes = {item["code"] for item in evidence["source_change_issues"]}
+
+    assert contract["protected_paths"] == ["validator.py"]
+    assert {"source_change_out_of_scope", "protected_path_changed"}.issubset(codes)
+
+
+def test_server_derives_changes_committed_after_launch(tmp_path) -> None:
+    if shutil.which("git") is None:
+        return
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = repo / "app.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "app.py"], check=True)
+    commit = [
+        "git",
+        "-C",
+        str(repo),
+        "-c",
+        "user.name=Pacer Test",
+        "-c",
+        "user.email=pacer@example.invalid",
+        "commit",
+        "-qm",
+    ]
+    subprocess.run([*commit, "baseline"], check=True)
+    baseline = capture_task_source_baseline(repo)
+    source.write_text("value = 2\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "app.py"], check=True)
+    subprocess.run([*commit, "task change"], check=True)
+
+    payload = derive_task_source_changes(repo_root=repo, source_baseline=baseline)
+
+    assert payload == {
+        "complete": True,
+        "changes": [{"path": "app.py", "state": "modified", "artifact_role": "implementation"}],
+        "errors": [],
+    }
+
+
+def test_completion_rejection_returns_structured_correction_without_rescan() -> None:
+    review = {
+        "errors": [
+            {
+                "code": "protected_path_changed",
+                "message": "protected file changed",
+                "paths": ["validator.py"],
+            }
+        ],
+        "task_contract": {
+            "requirements": [{"id": "R01-test", "text": "add validator tests"}]
+        },
+        "source_changes": [
+            {"path": "validator.py", "state": "modified", "artifact_role": "implementation"}
+        ],
+    }
+
+    message = task_review_error(review, retryable=False, attempt=3, max_attempts=3)
+    payload = json.loads(message.removeprefix("completion audit rejected: "))
+
+    assert payload["kind"] == "pacer_completion_correction"
+    assert payload["retryable"] is False
+    assert payload["completion_control"] == {"attempt": 3, "max_attempts": 3}
+    assert payload["errors"][0]["code"] == "protected_path_changed"
+    assert "Restore" in payload["errors"][0]["correction"]
+    assert payload["server_derived_changes"][0]["path"] == "validator.py"
+    assert payload["required_claim_fields"] == [
+        "requirement_ids",
+        "result",
+        "verification_steps",
+    ]
+
+
+def test_repository_acceptance_manifest_is_digest_locked_and_protected(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    manifest = repo / ".pacer" / "acceptance.json"
+    manifest.parent.mkdir(parents=True)
+    manifest_payload = {
+        "schema_version": 1,
+        "observable_outcomes": ["validator returns the expected value"],
+        "required_artifact_roles": ["implementation"],
+        "verification": {"required_commands": ["python -m pytest -q"]},
+        "boundary_cases": ["zero"],
+    }
+    manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
+    goal = "修复 validator.py；使用 python -m pytest -q 验证。"
+    contract = build_task_contract(goal, repo_root=repo)
+    baseline = capture_task_source_baseline(repo)
+
+    assert ".pacer/acceptance.json" in contract["protected_paths"]
+    original_digest = contract["acceptance_contract"]["digest"]
+
+    manifest_payload["observable_outcomes"] = ["different outcome"]
+    manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
+    rebuilt = build_task_contract(goal, repo_root=repo)
+    evidence = derive_task_completion_evidence(
+        completion_evidence={"claims": [], "unresolved_items": [], "known_risks": []},
+        repo_root=repo,
+        task_contract=contract,
+        source_baseline=baseline,
+    )
+
+    assert rebuilt["acceptance_contract"]["digest"] != original_digest
+    assert any(
+        issue["code"] == "protected_path_changed"
+        and ".pacer/acceptance.json" in issue.get("paths", [])
+        for issue in evidence["source_change_issues"]
+    )

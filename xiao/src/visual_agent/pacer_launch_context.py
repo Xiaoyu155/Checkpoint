@@ -122,6 +122,7 @@ def resolve_python_runtime(
     repo_root: str | Path,
     *,
     known_roots: list[str | Path] | tuple[str | Path, ...] = (),
+    pacer_executable: str | Path | None = None,
     environment: Mapping[str, str] | None = None,
     path_lookup: Callable[[str], str | None] | None = None,
     capability_probe: Callable[[Path], dict[str, Any]] | None = None,
@@ -161,6 +162,13 @@ def resolve_python_runtime(
                     break
             if candidate is not None:
                 break
+        if candidate is None and pacer_executable is not None:
+            current = Path(pacer_executable).expanduser()
+            if current.is_file() and current.name.lower().startswith("python"):
+                candidate = _absolute_path(current)
+                owning_root = candidate.parent.parent
+                source = "pacer_launcher"
+                trusted_venv = True
         if candidate is None:
             candidate = _resolve_path_python(lookup)
             if candidate is not None:
@@ -857,6 +865,76 @@ def update_active_launch(
         return active
 
 
+def register_completion_attempt(
+    workspace_root: str | Path,
+    *,
+    launch_id: str,
+    max_attempts: int,
+) -> dict[str, Any]:
+    """Atomically reserve one bounded completion attempt for a launch."""
+
+    workspace = Path(workspace_root).expanduser().resolve()
+    selected_launch_id = _validated_launch_id(launch_id)
+    limit = max(1, int(max_attempts))
+    with _launch_state_transaction(workspace):
+        active = read_active_launch(workspace, launch_id=selected_launch_id)
+        if not active or str(active.get("launch_id") or "") != selected_launch_id:
+            raise ValueError("completion attempt requires the active Pacer launch")
+        control = (
+            dict(active.get("completion_control"))
+            if isinstance(active.get("completion_control"), dict)
+            else {}
+        )
+        attempt = int(control.get("attempts") or 0) + 1
+        control.update(
+            {
+                "schema_version": 1,
+                "attempts": attempt,
+                "max_attempts": limit,
+                "status": "running" if attempt <= limit else "attempts_exhausted",
+                "retryable": attempt < limit,
+                "last_attempt_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        active["completion_control"] = control
+        _write_active_launch_unlocked(workspace, active)
+        return dict(control)
+
+
+def record_completion_rejection(
+    workspace_root: str | Path,
+    *,
+    launch_id: str,
+    reason_codes: list[str],
+    retryable: bool,
+) -> dict[str, Any]:
+    workspace = Path(workspace_root).expanduser().resolve()
+    selected_launch_id = _validated_launch_id(launch_id)
+    with _launch_state_transaction(workspace):
+        active = read_active_launch(workspace, launch_id=selected_launch_id)
+        if not active or str(active.get("launch_id") or "") != selected_launch_id:
+            raise ValueError("completion rejection requires the active Pacer launch")
+        control = (
+            dict(active.get("completion_control"))
+            if isinstance(active.get("completion_control"), dict)
+            else {}
+        )
+        normalized_codes = list(
+            dict.fromkeys(str(code or "completion_rejected")[:120] for code in reason_codes)
+        )[:12]
+        control.update(
+            {
+                "status": "correction_required" if retryable else "attempts_exhausted",
+                "retryable": bool(retryable),
+                "last_rejection_codes": normalized_codes,
+                "last_rejected_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        active["completion_control"] = control
+        _write_active_launch_unlocked(workspace, active)
+        return dict(control)
+
+
 def update_pillar(
     workspace_root: str | Path,
     pillar: str,
@@ -871,7 +949,11 @@ def update_pillar(
         if not active:
             return {}
         pillars = active.get("pillars") if isinstance(active.get("pillars"), dict) else {}
-        pillars[str(pillar)] = dict(evidence)
+        normalized = dict(evidence)
+        from .pacer_pillars import assess_pillar
+
+        normalized["assessment"] = assess_pillar(str(pillar), normalized)
+        pillars[str(pillar)] = normalized
         active["pillars"] = pillars
         _write_active_launch_unlocked(workspace, active)
         return active
@@ -1288,13 +1370,21 @@ def _validate_task_contract(payload: dict[str, Any], goal_digest: str) -> None:
         schema_version = int(payload.get("schema_version") or 0)
     except (TypeError, ValueError, OverflowError):
         schema_version = 0
-    if schema_version != 1:
+    if schema_version not in {1, 2}:
         raise ValueError("task contract schema version mismatch")
     if not hmac.compare_digest(str(payload.get("goal_digest") or ""), goal_digest):
         raise ValueError("task contract goal digest mismatch")
     requirements = payload.get("requirements")
     if not isinstance(requirements, list) or not requirements:
         raise ValueError("task contract requirements missing")
+    if schema_version >= 2:
+        acceptance_contract = payload.get("acceptance_contract")
+        if not isinstance(acceptance_contract, dict):
+            raise ValueError("task acceptance contract missing")
+        if int(acceptance_contract.get("schema_version") or 0) != 1:
+            raise ValueError("task acceptance contract schema version mismatch")
+        if not str(acceptance_contract.get("digest") or ""):
+            raise ValueError("task acceptance contract digest missing")
 
 
 def _task_source_baseline_trust_key(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from .model_router import route_task
 
 
 DEFAULT_SELECTOR_CONFIG = "model_pool.json"
+ROUTING_POLICY_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,9 @@ class ModelCandidate:
     max_context: int = 0
     modes: tuple[str, ...] = ()
     notes: str = ""
+    agent_backend: str = "codex"
+    capability_known: bool = True
+    cost_known: bool = True
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -39,6 +44,7 @@ class ModelSelection:
     reason: str
     quota_used_percentage: float
     route_signals: dict[str, Any]
+    decision_id: str
 
 
 def model_pool_path(workspace_root: str | Path | None = None) -> Path:
@@ -92,6 +98,7 @@ def select_model_for_task(
     selected_payload = viable[0] if viable else None
     selected = next((item for item in candidates if item.id == selected_payload["id"]), None) if selected_payload else None
     if selected is None:
+        decision_id = _routing_decision_id(objective, route.tier, None, scored)
         return ModelSelection(
             status="blocked",
             objective=str(objective or ""),
@@ -101,7 +108,9 @@ def select_model_for_task(
             reason="No configured model candidate can satisfy the task tier.",
             quota_used_percentage=used,
             route_signals=route.signals,
+            decision_id=decision_id,
         )
+    decision_id = _routing_decision_id(objective, route.tier, selected, scored)
     return ModelSelection(
         status="selected",
         objective=str(objective or ""),
@@ -111,12 +120,15 @@ def select_model_for_task(
         reason=_selection_reason(selected_payload, route.tier, used),
         quota_used_percentage=used,
         route_signals=route.signals,
+        decision_id=decision_id,
     )
 
 
 def selection_to_dict(selection: ModelSelection) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "policy_version": ROUTING_POLICY_VERSION,
+        "decision_id": selection.decision_id,
         "status": selection.status,
         "objective": selection.objective,
         "required_tier": selection.required_tier,
@@ -147,6 +159,53 @@ def selection_to_markdown(selection: ModelSelection) -> str:
             f"viable={item['viable']} {marker}".rstrip()
         )
     return "\n".join(lines).rstrip()
+
+
+def routing_request_evidence(
+    selection: Any,
+    *,
+    requested_provider: str,
+    requested_model: str,
+) -> dict[str, Any]:
+    decision = selection if isinstance(selection, dict) else {}
+    selected = decision.get("selected") if isinstance(decision.get("selected"), dict) else {}
+    decision_id = str(decision.get("decision_id") or "")
+    if not decision_id or not selected:
+        return {
+            "schema_version": 1,
+            "decision_id": decision_id,
+            "policy_version": int(decision.get("policy_version") or 0),
+            "verdict": "passthrough",
+            "policy_match": None,
+            "reason_codes": ["routing_decision_unavailable"],
+            "request": {
+                "provider": requested_provider,
+                "model": requested_model,
+            },
+        }
+    expected_provider = str(selected.get("provider") or "")
+    expected_model = str(selected.get("model") or "")
+    matched = (
+        expected_model.casefold() == str(requested_model or "").casefold()
+        and expected_provider.casefold() == str(requested_provider or "").casefold()
+    )
+    return {
+        "schema_version": 1,
+        "decision_id": decision_id,
+        "policy_version": int(decision.get("policy_version") or 0),
+        "verdict": "matched" if matched else "mismatched",
+        "policy_match": matched,
+        "reason_codes": [] if matched else ["routing_request_mismatch"],
+        "decision": {
+            "required_tier": str(decision.get("required_tier") or ""),
+            "provider": expected_provider,
+            "model": expected_model,
+        },
+        "request": {
+            "provider": requested_provider,
+            "model": requested_model,
+        },
+    }
 
 
 def _read_configured_candidates(path: Path) -> list[ModelCandidate]:
@@ -180,6 +239,7 @@ def _candidates_from_credentials(*, credential_source: str | Path | None = None)
                 reliability=0.75,
                 modes=tuple(defaults["modes"]),
                 notes="Auto-discovered from configured credentials.",
+                agent_backend="codex" if provider.lower() == "openai" else "unsupported",
             )
         )
     return candidates
@@ -196,17 +256,22 @@ def _provider_defaults(provider: str) -> dict[str, Any]:
 
 def _candidate_from_dict(item: dict[str, Any]) -> ModelCandidate:
     modes = item.get("modes")
+    capability_known = "capability" in item or "quality" in item
+    cost_known = "cost" in item
     return ModelCandidate(
         id=str(item.get("id") or ""),
         provider=str(item.get("provider") or ""),
         model=str(item.get("model") or ""),
-        capability=_clamp01(item.get("capability", item.get("quality", 0.5))),
-        cost=_clamp01(item.get("cost", 0.5)),
+        capability=_clamp01(item.get("capability", item.get("quality", 0.0))),
+        cost=_clamp01(item.get("cost", 1.0)),
         latency=_clamp01(item.get("latency", 0.5)),
         reliability=_clamp01(item.get("reliability", 0.8)),
         max_context=max(0, int(item.get("max_context") or 0)),
         modes=tuple(str(mode).strip() for mode in (modes or []) if str(mode).strip()),
         notes=str(item.get("notes") or ""),
+        agent_backend=str(item.get("agent_backend") or "codex"),
+        capability_known=capability_known,
+        cost_known=cost_known,
         raw=dict(item),
     )
 
@@ -214,7 +279,14 @@ def _candidate_from_dict(item: dict[str, Any]) -> ModelCandidate:
 def _score_candidate(candidate: ModelCandidate, *, required_tier: str, quota_used: float) -> dict[str, Any]:
     required_capability = {"cheap": 0.2, "standard": 0.45, "strong": 0.7}.get(required_tier, 0.45)
     allowed_by_mode = not candidate.modes or required_tier in candidate.modes
-    viable = candidate.capability >= required_capability and allowed_by_mode
+    backend_compatible = candidate.agent_backend == "codex"
+    viable = (
+        candidate.capability_known
+        and candidate.cost_known
+        and candidate.capability >= required_capability
+        and allowed_by_mode
+        and backend_compatible
+    )
     quota_pressure = max(0.0, min(1.0, quota_used / 100.0))
     capability_fit = 1.0 - min(1.0, abs(candidate.capability - required_capability))
     # High quota pressure increases the cost penalty. Strong tasks still require
@@ -235,6 +307,7 @@ def _score_candidate(candidate: ModelCandidate, *, required_tier: str, quota_use
         **_candidate_to_dict(candidate),
         "required_capability": required_capability,
         "viable": viable,
+        "backend_compatible": backend_compatible,
         "score": round(score, 6),
     }
 
@@ -260,7 +333,27 @@ def _candidate_to_dict(candidate: ModelCandidate | None) -> dict[str, Any] | Non
         "max_context": candidate.max_context,
         "modes": list(candidate.modes),
         "notes": candidate.notes,
+        "agent_backend": candidate.agent_backend,
+        "capability_known": candidate.capability_known,
+        "cost_known": candidate.cost_known,
     }
+
+
+def _routing_decision_id(
+    objective: str,
+    required_tier: str,
+    selected: ModelCandidate | None,
+    candidates: list[dict[str, Any]],
+) -> str:
+    payload = {
+        "policy_version": ROUTING_POLICY_VERSION,
+        "objective": str(objective or ""),
+        "required_tier": required_tier,
+        "selected": selected.id if selected else "",
+        "candidates": [str(item.get("id") or "") for item in candidates],
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
 
 
 def _clamp01(value: Any) -> float:
