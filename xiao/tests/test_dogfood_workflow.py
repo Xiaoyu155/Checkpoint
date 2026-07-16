@@ -51,10 +51,13 @@ def test_dogfood_producer_keeps_provider_secrets_out_of_reusable_verifier() -> N
     assert "[mcp_servers.pacer]" in workflow
     assert "required = true" in workflow
     assert "--sandbox danger-full-access" in workflow
-    assert '"${wheels[0]}" ruff' in workflow
-    assert "python -m pytest tests/test_dogfood_provider_check.py" in workflow
-    assert "python -m ruff check" in workflow
-    assert "kinds test and analyze respectively" in workflow
+    assert '"pytest>=8.0.0" ruff' in workflow
+    assert "Call complete_pacer_task exactly once" in workflow
+    assert "name targeted-tests with argv [python, -m," in workflow
+    assert "name targeted-analysis with argv [python, -m, ruff, check," in workflow
+    assert "Pacer derives the test and analyze classes from argv" in workflow
+    assert "Do not add or run any other verification step" in workflow
+    assert "stop without retrying it" in workflow
     assert "mkdir -p .dogfood" in workflow
     assert "permissions:\n      contents: read" in workflow
     assert "uses: ./.github/workflows/pacer-dogfood.yml" in workflow

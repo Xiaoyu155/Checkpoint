@@ -77,7 +77,8 @@ jobs:
           mapfile -t wheels < <(find "$RUNNER_TEMP/input-wheel" -maxdepth 1 -type f -name '*.whl' -print)
           test "${#wheels[@]}" -eq 1
           python -m venv "$RUNNER_TEMP/venv-a"
-          "$RUNNER_TEMP/venv-a/bin/python" -m pip install --disable-pip-version-check "${wheels[0]}" ruff
+          "$RUNNER_TEMP/venv-a/bin/python" -m pip install --disable-pip-version-check \
+            "${wheels[0]}" "pytest>=8.0.0" ruff
           echo "PACER_INPUT_WHEEL=${wheels[0]}" >> "$GITHUB_ENV"
           test -z "$(git status --porcelain)"
 
@@ -116,13 +117,18 @@ jobs:
         env:
           PACER_DOGFOOD_TASK: >-
             Apply the exact checked-in patch scripts/pacer_dogfood_candidate.patch and make no
-            other source changes. Run python -m pytest tests/test_dogfood_provider_check.py
-            tests/test_pacer_quality_cli.py -q. Run python -m ruff check
-            src/visual_agent/dogfood_provider_check.py tests/test_dogfood_provider_check.py
-            tests/test_pacer_quality_cli.py. In the single complete_pacer_task call, submit both
-            commands as verification steps with kinds test and analyze respectively. Complete this
-            Pacer task once with server-derived evidence for the exact implementation, test, and
-            analysis; do not commit.
+            other source changes and do not commit. Call complete_pacer_task exactly once. Its steps
+            array must contain exactly two objects: name targeted-tests with argv [python, -m,
+            pytest, tests/test_dogfood_provider_check.py, tests/test_pacer_quality_cli.py, -q], and
+            name targeted-analysis with argv [python, -m, ruff, check,
+            src/visual_agent/dogfood_provider_check.py, tests/test_dogfood_provider_check.py,
+            tests/test_pacer_quality_cli.py]. Pacer derives the test and analyze classes from argv;
+            do not send kind, result_kind, requirement, files, command, or env fields. Use a
+            separate completion-evidence claim for each locked requirement: bind a test-run or test
+            requirement only to targeted-tests, bind an analysis requirement only to
+            targeted-analysis, and bind every other requirement to the relevant one of those two
+            steps. Do not add or run any other verification step. If that one completion call is
+            rejected, stop without retrying it.
         run: |
           set -euo pipefail
           export PATH="$RUNNER_TEMP/venv-a/bin:$PATH"
