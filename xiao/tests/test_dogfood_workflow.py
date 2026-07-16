@@ -51,6 +51,11 @@ def test_dogfood_producer_keeps_provider_secrets_out_of_reusable_verifier() -> N
     assert "[mcp_servers.pacer]" in workflow
     assert "required = true" in workflow
     assert "--sandbox danger-full-access" in workflow
+    assert '"${wheels[0]}" ruff' in workflow
+    assert "python -m pytest tests/test_dogfood_provider_check.py" in workflow
+    assert "python -m ruff check" in workflow
+    assert "kinds test and analyze respectively" in workflow
+    assert "mkdir -p .dogfood" in workflow
     assert "permissions:\n      contents: read" in workflow
     assert "uses: ./.github/workflows/pacer-dogfood.yml" in workflow
     assert "secrets: inherit" not in workflow

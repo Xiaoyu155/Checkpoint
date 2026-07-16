@@ -77,7 +77,7 @@ jobs:
           mapfile -t wheels < <(find "$RUNNER_TEMP/input-wheel" -maxdepth 1 -type f -name '*.whl' -print)
           test "${#wheels[@]}" -eq 1
           python -m venv "$RUNNER_TEMP/venv-a"
-          "$RUNNER_TEMP/venv-a/bin/python" -m pip install --disable-pip-version-check "${wheels[0]}"
+          "$RUNNER_TEMP/venv-a/bin/python" -m pip install --disable-pip-version-check "${wheels[0]}" ruff
           echo "PACER_INPUT_WHEEL=${wheels[0]}" >> "$GITHUB_ENV"
           test -z "$(git status --porcelain)"
 
@@ -117,8 +117,12 @@ jobs:
           PACER_DOGFOOD_TASK: >-
             Apply the exact checked-in patch scripts/pacer_dogfood_candidate.patch and make no
             other source changes. Run python -m pytest tests/test_dogfood_provider_check.py
-            tests/test_pacer_quality_cli.py -q. Complete this Pacer task once with server-derived
-            evidence for the exact implementation and test; do not commit.
+            tests/test_pacer_quality_cli.py -q. Run python -m ruff check
+            src/visual_agent/dogfood_provider_check.py tests/test_dogfood_provider_check.py
+            tests/test_pacer_quality_cli.py. In the single complete_pacer_task call, submit both
+            commands as verification steps with kinds test and analyze respectively. Complete this
+            Pacer task once with server-derived evidence for the exact implementation, test, and
+            analysis; do not commit.
         run: |
           set -euo pipefail
           export PATH="$RUNNER_TEMP/venv-a/bin:$PATH"
@@ -170,6 +174,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p .dogfood
           "$RUNNER_TEMP/venv-a/bin/python" -m visual_agent.dogfood_ci \
             --repo-root . \
             --workspace-root .agent-workspace \
