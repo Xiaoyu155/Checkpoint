@@ -55,6 +55,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          source_date_epoch="$(git -C "$GITHUB_WORKSPACE" show -s --format=%ct "$GITHUB_SHA")"
+          test -n "$source_date_epoch"
+          echo "PACER_SOURCE_DATE_EPOCH=$source_date_epoch" >> "$GITHUB_ENV"
           git init
           git config user.name "pacer-dogfood"
           git config user.email "pacer-dogfood@users.noreply.github.com"
@@ -70,7 +73,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          export SOURCE_DATE_EPOCH="$PACER_SOURCE_DATE_EPOCH"
           mkdir -p "$RUNNER_TEMP/input-wheel"
           python -m build --wheel --outdir "$RUNNER_TEMP/input-wheel"
           rm -rf build visual_agent.egg-info
@@ -163,7 +166,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct)"
+          export SOURCE_DATE_EPOCH="$PACER_SOURCE_DATE_EPOCH"
           mkdir -p "$RUNNER_TEMP/candidate-wheel"
           python -m build --wheel --outdir "$RUNNER_TEMP/candidate-wheel"
           rm -rf build visual_agent.egg-info

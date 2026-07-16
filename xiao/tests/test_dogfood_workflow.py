@@ -51,6 +51,9 @@ def test_dogfood_producer_keeps_provider_secrets_out_of_reusable_verifier() -> N
     assert "[mcp_servers.pacer]" in workflow
     assert "required = true" in workflow
     assert "--sandbox danger-full-access" in workflow
+    assert 'git -C "$GITHUB_WORKSPACE" show -s --format=%ct "$GITHUB_SHA"' in workflow
+    assert 'echo "PACER_SOURCE_DATE_EPOCH=$source_date_epoch"' in workflow
+    assert workflow.count('export SOURCE_DATE_EPOCH="$PACER_SOURCE_DATE_EPOCH"') == 2
     assert '"pytest>=8.0.0" ruff' in workflow
     assert "Call complete_pacer_task exactly once" in workflow
     assert "name targeted-tests with argv [python, -m," in workflow
