@@ -124,7 +124,7 @@ jobs:
           export PATH="$RUNNER_TEMP/venv-a/bin:$PATH"
           pacer \
             --ask-for-approval never \
-            --sandbox workspace-write \
+            --sandbox danger-full-access \
             exec \
             --skip-git-repo-check \
             --model "$PACER_PROVIDER_MODEL" \
