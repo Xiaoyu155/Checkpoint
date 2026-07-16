@@ -1,0 +1,21 @@
+diff --git a/xiao/src/visual_agent/dashboard/data.py b/xiao/src/visual_agent/dashboard/data.py
+--- a/xiao/src/visual_agent/dashboard/data.py
++++ b/xiao/src/visual_agent/dashboard/data.py
+@@ -176,7 +176,7 @@ def _build_dashboard_data_uncached(root: Path) -> dict[str, Any]:
+     subscription_summary = quota_summary(subscription_snapshot)
+     commercial_config = load_commercial_config()
+     status = _read_status(root)
+-    worker = worker_status()
++    worker = worker_status(root)
+     value = _build_value(root, missions, plans)
+ 
+     counts: dict[str, int] = {}
+@@ -959,7 +959,7 @@ def _launch_snapshot() -> list[dict[str, Any]]:
+         return [dict(item) for item in _LAUNCHES.values()]
+ 
+ 
+-def worker_status() -> dict[str, Any]:
++def worker_status(workspace_root: str | Path | None = None) -> dict[str, Any]:
+     global _WORKER_PROC
+     with _WORKER_LOCK:
+         if _WORKER_PROC is None:

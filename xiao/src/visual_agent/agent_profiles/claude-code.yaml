@@ -1,0 +1,97 @@
+schema_version: 1
+agent: claude-code
+display_name: Claude Code CLI
+executable: claude
+version_command: claude --version
+verified_on: "2026-07-02"
+source: https://docs.claude.com/en/docs/claude-code
+summary: >-
+  Claude Code is Anthropic's terminal coding agent. It runs interactively or
+  headless (`claude -p`), gates edits behind permission modes, can spawn
+  parallel subagents, and integrates MCP servers and hooks.
+
+headless:
+  command: claude -p "<prompt>"
+  # Flags that make an unattended worker run safely without hanging on prompts.
+  permission_flag: "--permission-mode acceptEdits"
+  extra_flags: "--output-format json"
+  why: >-
+    Print mode runs one task non-interactively and can emit JSON
+    (`--output-format json`) so an orchestrator can capture the result and
+    detect completion. acceptEdits auto-applies file edits (still gating other
+    actions) so the worker does not block waiting for permission.
+
+model_flag: "--model <sonnet|opus|haiku|id>"
+models:
+  - id: opus
+    role: default
+    use_for: [complex-refactor, architecture, multi-file-change]
+  - id: sonnet
+    role: balanced
+    use_for: [general-implementation, review]
+  - id: haiku
+    role: fast
+    use_for: [small-edit, mechanical-change, batch]
+models_note: >-
+  Aliases (opus/sonnet/haiku) track the latest snapshot; pass a full id to
+  pin one. Confirm current ids via the source link, then update this file.
+
+sandbox_modes:
+  - name: plan
+    flag: "--permission-mode plan"
+    when: read-only planning; proposes a plan before any edit
+    risk: none
+  - name: default
+    flag: "--permission-mode default"
+    when: prompts for permission on each new action (safe interactive default)
+    risk: low
+  - name: acceptEdits
+    flag: "--permission-mode acceptEdits"
+    when: auto-accept file edits, still gate other actions
+    risk: low
+  - name: bypassPermissions
+    flag: "--dangerously-skip-permissions"
+    when: fully unattended trusted runs only; skips all prompts
+    risk: high
+
+approval_modes:
+  - name: default
+    flag: "--permission-mode default"
+    when: ask before each new action
+  - name: acceptEdits
+    flag: "--permission-mode acceptEdits"
+    when: trusted implementation; auto-accept edits
+  - name: bypass
+    flag: "--dangerously-skip-permissions"
+    when: unattended trusted batch only
+    risk: high
+
+parallelism:
+  - name: subagents
+    how: >-
+      The Task tool spawns subagents that run in parallel with isolated context;
+      define reusable ones in `.claude/agents/`.
+  - name: background_tasks
+    how: Long-running commands can run in the background while the agent continues.
+  - name: local_worktrees
+    how: Run one Claude Code session per git worktree for parallel tracks.
+
+context_files: [CLAUDE.md]
+integrations:
+  - id: mcp
+    how: >-
+      `claude mcp add` / `.mcp.json` connects MCP servers; connect Checkpoint so
+      the agent can run real product verification.
+  - id: hooks
+    how: >-
+      settings.json hooks run commands on events (e.g. run Checkpoint after
+      edits) — automation the model itself cannot forget.
+  - id: resume
+    how: "`claude --continue` / `--resume` restores a prior session."
+
+capabilities_often_missed:
+  - Headless `claude -p` with `--output-format json` for orchestration.
+  - Plan mode (`--permission-mode plan`) to review the approach before edits.
+  - Parallel subagents via the Task tool and `.claude/agents/`.
+  - Hooks in settings.json to auto-run verification after edits.
+  - MCP tool servers (such as Checkpoint) for real verification evidence.

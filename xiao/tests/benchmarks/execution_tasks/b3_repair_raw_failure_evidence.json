@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "id": "B3",
+  "title": "Preserve raw verification evidence in repair handoffs",
+  "category": "historical_failure_reproduction",
+  "status": "defined_not_run",
+  "source": {
+    "kind": "documented_execution_gap",
+    "document": "docs/\u6267\u884c\u5c42\u5dee\u8ddd\u4fee\u590d\u8ba1\u5212_2026-07.md",
+    "gap": "D4"
+  },
+  "objective": "When command verification fails and a repair attempt is prepared, preserve the original stdout and stderr as repair evidence instead of relying only on a lossy summary. Keep the summary as an index, cap the raw evidence to the final 32768 bytes without breaking Unicode text, and include the failed command. Add deterministic tests that do not invoke a real Codex process.",
+  "acceptance_criteria": [
+    "The repair handoff includes the failed command and original failure output.",
+    "Raw evidence is tail-capped at 32768 encoded bytes or a documented equivalent that never exceeds the transport limit.",
+    "Unicode output remains valid after truncation.",
+    "The compact repair summary remains available as a guide but is not the only evidence.",
+    "Tests use injected runners or fixtures and make no network/model request."
+  ],
+  "likely_relevant_files": [
+    "src/visual_agent/repair.py",
+    "src/visual_agent/chief_dispatch.py",
+    "tests/test_chief_dispatch.py"
+  ],
+  "target": {
+    "kind": "repository_snapshot_patch",
+    "base_revision": "e8583099bd8ab073d578fcbe0c6199ab289bcb0e",
+    "seed_patch": "tests/benchmarks/fixtures/common_target_seed.patch",
+    "seed_patch_sha256": "bfec72342daef270757f32b51f76e2970ea8e778e756f1a8665d544b158b32d2"
+  },
+  "verification": {
+    "commands": [
+      "python -m pytest tests/test_chief_dispatch.py -k \"repair or verification_failure\""
+    ]
+  },
+  "operator_verification": {
+    "kind": "operator_private_verifier",
+    "verifier": "tests/benchmarks/private_verifiers/b3_repair_raw_failure_evidence.py",
+    "verifier_sha256": "f093a4aa5f7a10332b0c6c3a49d7794f7f4dcc0acfa83a969f6e0c386a72a598",
+    "command_template": "python tests/benchmarks/private_verifiers/b3_repair_raw_failure_evidence.py {target_root}",
+    "additional_acceptance": "The repair handoff retains a compact summary and the final UTF-8-safe 32768-byte raw evidence tail."
+  },
+  "protocol": {
+    "max_worker_turns": 1,
+    "requires_isolated_worktree": true,
+    "baseline_snapshot": "record_commit_and_dirty_patch_digest_before_run",
+    "allow_test_edits": true
+  }
+}

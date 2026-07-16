@@ -1,0 +1,16 @@
+include README.md LICENSE pyproject.toml
+include docker-compose.gateway.yml
+recursive-include cloud_api *.css *.example *.html *.js *.py Dockerfile
+recursive-include docs *.md
+recursive-include src/visual_agent/agent_profiles *.yaml
+recursive-include src/visual_agent/dashboard/static *.css *.html *.js
+recursive-include templates *.html *.json *.yaml
+recursive-include workflows *.yaml
+recursive-include examples *.css *.html *.json *.md *.mjs *.ts *.tsx *.vue *.yaml
+prune examples/demo-app/node_modules
+prune examples/nextjs-demo/.next
+prune examples/nextjs-demo/node_modules
+prune examples/reports
+prune examples/runs
+recursive-exclude examples agent_session.json run_history.jsonl workflow_index.json
+global-exclude __pycache__ *.py[cod]

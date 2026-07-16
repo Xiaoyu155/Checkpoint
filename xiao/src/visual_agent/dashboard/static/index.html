@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pacer 工作台</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="logo">Pacer <small>托管控制台</small></div>
+  <span class="hdr-sep">/</span>
+  <button class="ghost" onclick="openProjModal()">切换项目</button>
+  <div id="projPath" title="当前工作空间">未选择工作空间</div>
+  <select id="mobileViewNav" class="mobile-view-nav" aria-label="板块导航" onchange="this.value==='five-pillars-link' ? (window.location.href='/five-pillars') : switchWorkbenchView(this.value)">
+    <option value="mission-control">新建任务</option>
+    <option value="core-readiness-panel">产品可用度</option>
+    <option value="mission-desk">任务列表</option>
+    <option value="trace-ledger">流式工作任务</option>
+    <option value="observability-panel">Pacer 可观测性</option>
+    <option value="queue-panel">托管队列</option>
+    <option value="programs-panel">项目托管</option>
+    <option value="relay-panel">中转站</option>
+    <option value="quota-panel">订阅额度</option>
+    <option value="value-panel">低成本效率</option>
+    <option value="autopilot-panel">托管闭环</option>
+    <option value="readiness-panel">推广就绪</option>
+    <option value="five-pillars-link">五项闭环实证</option>
+  </select>
+  <div class="spc"></div>
+  <div id="agentsRow"></div>
+  <button onclick="openChat()">对话</button>
+  <button onclick="openSettings()">设置</button>
+  <div class="worker-ctl">
+    <span id="wDot" class="wdot"></span>
+    <span id="wLabel">Worker 已停止</span>
+    <button id="btnWorker" class="ghost" onclick="toggleWorker()">启动 Worker</button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="sidebar">
+    <nav class="side-nav" aria-label="功能导航">
+      <div class="side-title">功能导航</div>
+      <details class="side-group" open>
+        <summary>开发入口</summary>
+        <button data-nav-view="mission-control" onclick="focusWorkbenchPanel('mission-control','#fGoal')">新建任务</button>
+        <button onclick="focusWorkbenchPanel('mission-control','#fGoal');sendMainChat()">需求收口</button>
+        <button onclick="openChat()">AI 需求架构师</button>
+      </details>
+      <details class="side-group" open>
+        <summary>任务管理</summary>
+        <button data-nav-view="mission-desk" onclick="focusWorkbenchPanel('mission-desk')">任务列表</button>
+        <button data-nav-view="trace-ledger" onclick="focusWorkbenchPanel('trace-ledger')">流式工作任务</button>
+        <button data-nav-view="observability-panel" onclick="focusWorkbenchPanel('observability-panel')">Pacer 可观测性</button>
+        <button data-nav-view="queue-panel" onclick="focusWorkbenchPanel('queue-panel')">托管队列</button>
+        <button data-nav-view="programs-panel" onclick="focusWorkbenchPanel('programs-panel')">项目托管</button>
+      </details>
+      <details class="side-group" open>
+        <summary>资源与设置</summary>
+        <button data-nav-view="relay-panel" onclick="focusWorkbenchPanel('relay-panel','#relayBaseUrl')">中转站</button>
+        <button data-nav-view="quota-panel" onclick="focusWorkbenchPanel('quota-panel')">订阅额度</button>
+        <button data-nav-view="value-panel" onclick="focusWorkbenchPanel('value-panel')">低成本效率</button>
+        <button data-nav-view="core-readiness-panel" onclick="focusWorkbenchPanel('core-readiness-panel')">产品可用度</button>
+        <button data-nav-view="autopilot-panel" onclick="focusWorkbenchPanel('autopilot-panel')">托管闭环</button>
+        <button data-nav-view="readiness-panel" onclick="focusWorkbenchPanel('readiness-panel')">推广就绪</button>
+        <button onclick="window.location.href='/five-pillars'">五项闭环实证</button>
+        <button onclick="toggleWorker()">启动 / 停止 Worker</button>
+        <button onclick="openProjModal()">切换项目</button>
+        <button onclick="openSettings()">模型与通知设置</button>
+      </details>
+    </nav>
+  </aside>
+
+  <main class="main">
+    <section class="status-strip" aria-label="工作台总览">
+      <div class="status-left">
+        <span class="status-title">工作台总览</span>
+        <div class="page-meta" id="pageMeta"></div>
+      </div>
+      <div class="status-metrics">
+        <span class="status-metric ok"><b id="kVerified">0</b><small>已验收</small></span>
+        <span class="status-metric acc"><b id="kRunning">0</b><small>执行中</small></span>
+        <span class="status-metric warn"><b id="kQueue">0</b><small>队列</small></span>
+      </div>
+    </section>
+
+    <div class="cockpit-layout">
+      <section class="primary-stage">
+    <div class="workbench-grid" aria-live="polite">
+      <section class="main-chat collapsible-panel workbench-view is-active-view" data-workbench-view="mission-control" data-collapse-key="mission-control">
+        <div class="main-chat-head">
+          <div>
+            <div class="eyebrow">New Mission</div>
+            <h1>新建任务</h1>
+          </div>
+          <div class="panel-head-actions">
+            <button class="panel-toggle" onclick="togglePanel(event,'mission-control')">收起</button>
+          </div>
+        </div>
+        <div class="collapsible-body">
+          <div class="main-chat-input">
+            <label for="fGoal">任务目标</label>
+            <textarea id="fGoal" onkeydown="mainChatKeyDown(event)" placeholder="例如：把已经做好的元思轻语 app 通过数据线安装到我的 Android 手机上"></textarea>
+            <div class="contract-grid">
+              <div>
+                <label for="fRepo">项目目录</label>
+                <input id="fRepo" class="repo-input" placeholder="D:\Projects\my-app">
+              </div>
+              <div>
+                <label for="fTest">验收命令 / 人工验收说明</label>
+                <input id="fTest" class="repo-input" placeholder="python -m pytest -q / npm test / 人工现场验收">
+              </div>
+            </div>
+            <div class="main-chat-toolbar">
+              <select id="fAgent"><option value="codex">codex</option><option value="claude-code">claude-code</option></select>
+              <select id="fDispatchMode" aria-label="派工模式" title="派工模式"><option value="tracked">跟踪模式</option><option value="delegated">委托模式</option></select>
+              <label><input id="fAutoMerge" type="checkbox"> 自动合并</label>
+              <span id="launchMsg"></span>
+              <button id="btnClarify" onclick="sendMainChat()">收口</button>
+              <button id="btnPreview" onclick="startMission(false)">预览</button>
+              <button id="btnRun" class="primary" onclick="startMission(true)">派发执行</button>
+            </div>
+          </div>
+          <div class="main-chat-actions" id="mainIntakeActions" style="display:none;">
+            <button class="primary" onclick="applyMainDraftToMission()">采用执行稿</button>
+            <button onclick="startMission(false)">预览计划</button>
+            <button onclick="startMission(true)">派发给模型开发</button>
+          </div>
+          <details class="intake-log" id="intakeLog" open>
+            <summary>收口记录</summary>
+            <div class="main-chat-thread" id="mainChatMsgs">
+              <div class="main-chat-empty">等待任务收口。</div>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <section class="desk-panel collapsible-panel workbench-view" data-workbench-view="mission-desk" data-collapse-key="mission-desk">
+        <div class="desk-head">
+          <div>
+            <div class="eyebrow">Mission Desk</div>
+            <h2>任务列表</h2>
+          </div>
+          <div class="desk-actions">
+            <div class="mission-filters" id="missionFilters" aria-label="任务状态筛选">
+              <button class="active" data-mission-filter="all" onclick="setMissionFilter('all')">全部 <span>0</span></button>
+              <button data-mission-filter="active" onclick="setMissionFilter('active')">执行中 <span>0</span></button>
+              <button data-mission-filter="review" onclick="setMissionFilter('review')">待处理 <span>0</span></button>
+              <button data-mission-filter="done" onclick="setMissionFilter('done')">完成 <span>0</span></button>
+              <button data-mission-filter="blocked" onclick="setMissionFilter('blocked')">停止 <span>0</span></button>
+            </div>
+            <button class="tiny-danger" onclick="deleteAllMissions(event)">清理非运行任务</button>
+            <button class="panel-toggle" onclick="togglePanel(event,'mission-desk')">展开</button>
+          </div>
+        </div>
+        <div class="collapsible-body">
+          <div class="mission-list-head" aria-hidden="true">
+            <span>任务</span><span>状态 / 更新时间</span><span>操作</span>
+          </div>
+          <div id="missionList" class="mission-list" aria-label="任务列表"></div>
+        </div>
+      </section>
+
+      <section class="trace-console collapsible-panel workbench-view" data-workbench-view="trace-ledger" data-collapse-key="trace-ledger" aria-label="工作痕迹">
+        <div class="trace-head">
+          <span>流式工作任务</span>
+          <span class="trace-head-actions"><span class="stream-state" id="streamState">连接中</span><span class="cnt" id="traceCount">0</span><button class="panel-toggle" onclick="togglePanel(event,'trace-ledger')">展开</button></span>
+        </div>
+        <div class="collapsible-body">
+          <div id="traceStream" class="trace-stream">
+            <div class="empty">暂无工作痕迹。创建 mission 后，这里会显示 launch、worker、日志、报告、验收和队列状态。</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="observability-workbench collapsible-panel workbench-view" data-workbench-view="observability-panel" data-collapse-key="observability-panel" aria-labelledby="obsTitle">
+        <div class="obs-toolbar">
+          <div>
+            <div class="eyebrow">Runtime Evidence</div>
+            <h2 id="obsTitle">Pacer 可观测性</h2>
+          </div>
+          <div class="obs-toolbar-actions">
+            <span id="obsStatus" class="obs-status is-idle" role="status" aria-live="polite">等待加载</span>
+            <button id="obsRefresh" onclick="refreshObservability()">刷新</button>
+            <button class="panel-toggle" onclick="togglePanel(event,'observability-panel')">收起</button>
+          </div>
+        </div>
+        <div class="collapsible-body">
+          <div class="obs-selectors" aria-label="可观测性范围">
+            <label for="obsLaunchSelect">Launch
+              <select id="obsLaunchSelect" onchange="selectObservabilityLaunch(this.value)" disabled>
+                <option value="">等待加载</option>
+              </select>
+            </label>
+            <label for="obsSessionSelect">Session
+              <select id="obsSessionSelect" onchange="selectObservabilitySession(this.value)" disabled>
+                <option value="">选择 launch 后加载</option>
+              </select>
+            </label>
+            <div id="obsRuntimeMeta" class="obs-runtime-meta">尚未选择运行记录</div>
+          </div>
+
+          <div id="obsLoadState" class="obs-state" data-level="idle">打开本板块后加载 Pacer launch 证据。</div>
+
+          <div id="obsContent" hidden>
+            <div class="obs-ledger-head">
+              <div>
+                <span class="obs-section-kicker">Launch 总账</span>
+                <b id="obsLedgerTitle">未命名 launch</b>
+              </div>
+              <div id="obsUsageMeta" class="obs-ledger-meta"></div>
+            </div>
+            <div class="obs-metric-grid" aria-label="Launch token 总账">
+              <div><span>Actual added</span><b id="obsActualAdded">0</b><small>去重后实际增加</small></div>
+              <div><span>Raw ledger</span><b id="obsRawLedger">0</b><small>原始累计账本</small></div>
+              <div><span>Cached input</span><b id="obsCached">0</b><small>实际缓存输入</small></div>
+              <div><span>Uncached input</span><b id="obsUncached">0</b><small>实际非缓存输入</small></div>
+              <div><span>Output</span><b id="obsOutput">0</b><small>输出 token</small></div>
+              <div class="reasoning"><span>Reasoning</span><b id="obsReasoning">0</b><small>已包含于 output，勿重复相加</small></div>
+            </div>
+
+            <section class="obs-band" aria-labelledby="obsTurnsTitle">
+              <div class="obs-band-head">
+                <div><span class="obs-section-kicker">Token ledger</span><h3 id="obsTurnsTitle">逐轮 token</h3></div>
+                <span id="obsTurnCount" class="obs-count">0 轮</span>
+              </div>
+              <div class="obs-token-legend" aria-label="Token 堆叠条图例">
+                <span><i class="cached"></i>Cached input</span>
+                <span><i class="uncached"></i>Uncached input</span>
+                <span><i class="output"></i>Output</span>
+                <span><i class="reasoning"></i>Reasoning（包含于 Output）</span>
+              </div>
+              <div class="obs-table-wrap">
+                <table class="obs-token-table">
+                  <thead><tr><th>轮次 / 事件</th><th>时间</th><th>Actual</th><th>Raw</th><th>Cached</th><th>Uncached</th><th>Output</th><th>Reasoning</th><th>构成</th></tr></thead>
+                  <tbody id="obsTurnsBody"></tbody>
+                </table>
+              </div>
+              <div id="obsTurnsState" class="obs-inline-state">选择 session 后显示逐轮 token。</div>
+            </section>
+
+            <div class="obs-split">
+              <section class="obs-band" aria-labelledby="obsAgentsTitle">
+                <div class="obs-band-head">
+                  <div><span class="obs-section-kicker">Delegation</span><h3 id="obsAgentsTitle">Agent 父子树</h3></div>
+                  <span id="obsAgentCount" class="obs-count">0 个</span>
+                </div>
+                <div id="obsAgentTree" class="obs-agent-tree"></div>
+              </section>
+
+              <section class="obs-band" aria-labelledby="obsToolsTitle">
+                <div class="obs-band-head">
+                  <div><span class="obs-section-kicker">Execution</span><h3 id="obsToolsTitle">Tool / MCP 时间线</h3></div>
+                  <span id="obsToolCount" class="obs-count">0 条</span>
+                </div>
+                <div id="obsToolTimeline" class="obs-timeline"></div>
+                <div class="obs-more-row"><button id="obsLoadMore" onclick="loadMoreObservabilityTimeline()" hidden>加载更多事件</button></div>
+              </section>
+            </div>
+
+            <section class="obs-band obs-evidence-band" aria-labelledby="obsEvidenceTitle">
+              <div class="obs-band-head">
+                <div><span class="obs-section-kicker">Operational evidence</span><h3 id="obsEvidenceTitle">闭环证据</h3></div>
+              </div>
+              <div class="obs-evidence-grid">
+                <section><h4>Compaction</h4><div id="obsEvidenceCompaction" class="obs-evidence-list"></div></section>
+                <section><h4>Memory</h4><div id="obsEvidenceMemory" class="obs-evidence-list"></div></section>
+                <section><h4>Verification</h4><div id="obsEvidenceVerification" class="obs-evidence-list"></div></section>
+                <section><h4>Outcome</h4><div id="obsEvidenceOutcome" class="obs-evidence-list"></div></section>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="sec2">
+      <div class="section collapsible-panel workbench-view" data-workbench-view="queue-panel" data-collapse-key="queue-panel">
+        <div class="section-title">托管队列 <span class="cnt" id="cQueueSec">0</span><button class="panel-toggle" onclick="togglePanel(event,'queue-panel')">展开</button></div>
+        <div class="collapsible-body"><div id="queue"></div></div>
+      </div>
+      <div class="section collapsible-panel workbench-view" data-workbench-view="programs-panel" data-collapse-key="programs-panel">
+        <div class="section-title">项目托管 <button class="panel-toggle" onclick="togglePanel(event,'programs-panel')">展开</button></div>
+        <div class="collapsible-body"><div id="programs"></div></div>
+      </div>
+    </section>
+      </section>
+
+      <aside class="ops-rail" aria-label="资源与中转站">
+        <section class="ops-card relay-card collapsible-panel workbench-view" data-workbench-view="relay-panel" data-collapse-key="relay-panel">
+          <div class="ops-card-head">
+            <div>
+              <div class="eyebrow">Model Gateway</div>
+              <h2>中转站</h2>
+            </div>
+            <span class="ops-badge" id="relayConfigured">未配置</span>
+          </div>
+          <div class="relay-intent">
+            <b>自己的付费模型网关</b>
+            <span>当前版本接 OpenAI-compatible 网关；后续可升级为 Pacer 自有订阅、按用户余额和任务优先级路由。</span>
+          </div>
+          <div class="relay-flow" aria-label="中转站路由">
+            <div><b>01</b><span>订阅优先</span><small>先用用户自己的 Codex / Claude</small></div>
+            <div><b>02</b><span>额度告警</span><small>五小时窗 / 周额度紧张时切换</small></div>
+            <div><b>03</b><span>Pacer 订阅</span><small>自有余额、账单、限额和模型池</small></div>
+          </div>
+          <div class="relay-fields">
+            <label for="relayBaseUrl">Base URL</label>
+            <input id="relayBaseUrl" placeholder="127.0.0.1:8788/v1">
+            <label for="relayApiKey">API Key</label>
+            <input id="relayApiKey" type="password" placeholder="中转站后台生成的 key">
+            <label for="relayModel">Model</label>
+            <input id="relayModel" placeholder="gpt-4o-mini / claude-sonnet">
+            <label for="relayReasoning">Reasoning</label>
+            <select id="relayReasoning">
+              <option value="">默认</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="xhigh">Extra high</option>
+            </select>
+            <label for="relayMonthlyBudget">月预算 USD</label>
+            <input id="relayMonthlyBudget" type="number" min="0" step="0.01" placeholder="例如 20">
+            <label for="relayMissionBudget">单任务上限 USD</label>
+            <input id="relayMissionBudget" type="number" min="0" step="0.01" placeholder="例如 1.5">
+            <label for="relayQuotaThreshold">额度切换阈值 %</label>
+            <input id="relayQuotaThreshold" type="number" min="0" max="100" step="1" placeholder="80">
+          </div>
+          <div class="relay-actions">
+            <button class="primary" onclick="saveRelayConfig()">保存中转站</button>
+            <button onclick="testRelayConfig()">测试接口</button>
+          </div>
+          <div id="relayStatus" class="rail-note">未连接中转站。</div>
+          <div id="relayBudgetHint" class="rail-note">预算护栏未配置。</div>
+        </section>
+
+        <section class="ops-card quota-card collapsible-panel workbench-view" data-workbench-view="quota-panel" data-collapse-key="quota-panel">
+          <div class="ops-card-head">
+            <div>
+              <div class="eyebrow">Quota Routing</div>
+              <h2>订阅额度</h2>
+            </div>
+            <span class="ops-badge" id="quotaRailState">未采集</span>
+          </div>
+          <div class="quota-gauge">
+            <span id="quotaRailHeadline">未采集</span>
+            <small>Codex / Claude 额度窗口</small>
+          </div>
+          <div id="quotaRailList" class="quota-window-list"></div>
+          <div class="rail-actions">
+            <button onclick="openSettings()">配置采集</button>
+            <button onclick="focusWorkbenchPanel('relay-panel','#relayBaseUrl')">额度不足时用中转站</button>
+          </div>
+        </section>
+
+        <section class="ops-card value-card collapsible-panel workbench-view" data-workbench-view="value-panel" data-collapse-key="value-panel">
+          <div class="ops-card-head">
+            <div>
+              <div class="eyebrow">Saved Capacity</div>
+              <h2>低成本后端效率</h2>
+            </div>
+          </div>
+          <div class="rail-metrics">
+            <div><span>后端节省</span><b id="rSavedUsd">$0.00</b></div>
+            <div><span>套餐额度</span><b id="rQuotaSave">0%</b></div>
+            <div><span>时间节省</span><b id="rSavedMin">0.0 分钟</b></div>
+            <div><span>综合效率</span><b id="rEfficiency">0%</b></div>
+          </div>
+        </section>
+
+        <section class="ops-card collapsible-panel workbench-view" data-workbench-view="autopilot-panel" data-collapse-key="autopilot-panel">
+          <div class="ops-card-head">
+            <div>
+              <div class="eyebrow">Autopilot</div>
+              <h2>托管闭环</h2>
+            </div>
+          </div>
+          <ol class="loop-steps">
+            <li><b>收口</b><span>用选中的编码 Agent 追问需求</span></li>
+            <li><b>开发</b><span>多任务进入 Worker 队列</span></li>
+            <li><b>验收</b><span>测试失败回到继续开发</span></li>
+            <li><b>通知</b><span>额度、失败、完成可邮件提醒</span></li>
+          </ol>
+        </section>
+
+        <section class="ops-card core-readiness-card collapsible-panel workbench-view" data-workbench-view="core-readiness-panel" data-collapse-key="core-readiness-panel">
+          <div class="ops-card-head">
+            <div>
+              <div class="eyebrow">Product Usability</div>
+              <h2>产品可用度</h2>
+            </div>
+            <span class="ops-badge" id="coreReadinessBadge">待检查</span>
+          </div>
+          <div class="readiness-score core-readiness-score">
+            <b id="coreReadinessScore">0</b>
+            <span id="coreReadinessHeadline">等待数据</span>
+          </div>
+          <div id="coreReadinessChecks" class="readiness-checks"></div>
+          <div id="coreReadinessActions" class="rail-note"></div>
+        </section>
+
+        <section class="ops-card readiness-card collapsible-panel workbench-view" data-workbench-view="readiness-panel" data-collapse-key="readiness-panel">
+          <div class="ops-card-head">
+            <div>
+              <div class="eyebrow">Launch Readiness</div>
+              <h2>推广就绪</h2>
+            </div>
+            <span class="ops-badge" id="readinessBadge">待检查</span>
+          </div>
+          <div class="readiness-score">
+            <b id="readinessScore">0</b>
+            <span id="readinessHeadline">等待数据</span>
+          </div>
+          <div id="readinessChecks" class="readiness-checks"></div>
+          <div class="rail-actions">
+            <button onclick="openSettings()">补齐配置</button>
+            <button onclick="exportDiagnostic()">导出诊断包</button>
+          </div>
+          <div id="readinessNeeds" class="rail-note"></div>
+        </section>
+      </aside>
+    </div>
+  </main>
+</div>
+
+<div id="drawer">
+  <div class="panel">
+    <div class="panel-top"><button class="close-btn" onclick="closeDrawer()">关闭</button></div>
+    <div id="drawerBody"></div>
+  </div>
+</div>
+
+<div id="chatPanel">
+  <div class="chat-shell">
+    <div class="chat-hdr">
+      <div class="chat-hdr-title">AI 需求架构师</div>
+      <select id="chatAgent" class="chat-agent-sel"></select>
+      <button onclick="clearChat()">清空</button>
+      <button class="close-btn" onclick="closeChat()">关闭</button>
+    </div>
+    <div class="chat-msgs" id="chatMsgs">
+      <div class="chat-empty" id="chatEmpty">对 AI 说点什么吧。<br>对话历史保存在本页面，刷新后清空。</div>
+    </div>
+    <div class="chat-foot">
+      <textarea id="chatInput" onkeydown="chatKeyDown(event)" placeholder="Ctrl+Enter 发送"></textarea>
+      <div class="chat-send-col">
+        <button id="chatSendBtn" class="primary" onclick="sendChat()">发送</button>
+        <span class="chat-thinking" id="chatThinking" style="display:none;">思考中...</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="settingsPanel">
+  <div class="panel settings-panel">
+    <div class="panel-top"><button class="close-btn" onclick="closeSettings()">关闭</button></div>
+    <h2>设置</h2>
+    <p>配置总工作台模型接口、任务完成后的邮件通知，并导出诊断包。</p>
+    <h3>邮箱身份</h3>
+    <div class="field"><label for="cfgProfileEmail">邮箱</label><input id="cfgProfileEmail" type="email" placeholder="you@example.com"></div>
+    <div class="field"><label for="cfgProfileName">称呼</label><input id="cfgProfileName" placeholder="例如 小鱼"></div>
+    <div class="field"><label for="cfgProfileOrg">组织 / 项目</label><input id="cfgProfileOrg" placeholder="例如 Pacer dogfood"></div>
+    <div class="btns">
+      <button class="primary" onclick="saveProfileConfig()">保存邮箱身份</button>
+    </div>
+    <div id="profileCfgStatus" class="composer-hint">尚未加载邮箱身份</div>
+    <h3>登录与付费</h3>
+    <div class="settings-note">登录：Supabase Auth + Google OAuth。账单：Stripe Billing + Stripe Customer Portal。</div>
+    <div class="commercial-grid">
+      <div class="field"><label for="cfgSupabaseUrl">Supabase Project URL</label><input id="cfgSupabaseUrl" placeholder="https://xxx.supabase.co"></div>
+      <div class="field"><label for="cfgSupabaseAnonKey">Supabase anon public key</label><input id="cfgSupabaseAnonKey" type="password" autocomplete="off"></div>
+      <div class="field"><label for="cfgSupabaseServiceRoleKey">Supabase service role key</label><input id="cfgSupabaseServiceRoleKey" type="password" autocomplete="off"></div>
+      <div class="rowline commercial-wide"><label><input id="cfgGoogleOauthConfigured" type="checkbox"> Google OAuth 已在 Supabase Auth 开启</label></div>
+      <div class="field"><label for="cfgGoogleClientId">Google OAuth Client ID</label><input id="cfgGoogleClientId" autocomplete="off"></div>
+      <div class="field"><label for="cfgGoogleClientSecret">Google OAuth Client Secret</label><input id="cfgGoogleClientSecret" type="password" autocomplete="off"></div>
+      <div class="field"><label for="cfgStripePublishableKey">Stripe publishable key</label><input id="cfgStripePublishableKey" autocomplete="off"></div>
+      <div class="field"><label for="cfgStripeSecretKey">Stripe secret key</label><input id="cfgStripeSecretKey" type="password" autocomplete="off"></div>
+      <div class="field"><label for="cfgStripeWebhookSecret">Stripe webhook signing secret</label><input id="cfgStripeWebhookSecret" type="password" autocomplete="off"></div>
+      <div class="field"><label for="cfgStripePriceId">Stripe recurring Price ID</label><input id="cfgStripePriceId" placeholder="price_..."></div>
+      <div class="field"><label for="cfgStripePortalUrl">Stripe Customer Portal URL</label><input id="cfgStripePortalUrl" placeholder="https://billing.stripe.com/..."></div>
+      <div class="field"><label for="cfgStripeUsageMeterEvent">Stripe Usage Meter event</label><input id="cfgStripeUsageMeterEvent" placeholder="pacer_managed_minutes"></div>
+    </div>
+    <div class="btns">
+      <button class="primary" onclick="saveCommercialConfig()">保存登录与付费</button>
+    </div>
+    <div id="commercialCfgStatus" class="composer-hint">尚未加载登录与付费配置</div>
+    <h3>总工作台模型接口</h3>
+    <div class="rowline"><label><input id="cfgPreferSub2api" type="checkbox" checked> 优先使用 sub2api 的额度</label></div>
+    <div class="field"><label for="cfgModelBaseUrl">Base URL</label><input id="cfgModelBaseUrl" placeholder="例如 127.0.0.1:8788/v1"></div>
+    <div class="field"><label for="cfgModelApiKey">API Key</label><input id="cfgModelApiKey" type="password" placeholder="sub2api 后台生成的 key"></div>
+    <div class="field"><label for="cfgModelName">Model</label><input id="cfgModelName" placeholder="gpt-4o-mini"></div>
+    <div class="field"><label for="cfgReasoningEffort">Reasoning</label><select id="cfgReasoningEffort"><option value="">默认</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option></select></div>
+    <div class="field"><label for="cfgMonthlyBudget">月预算 USD</label><input id="cfgMonthlyBudget" type="number" min="0" step="0.01" placeholder="例如 20"></div>
+    <div class="field"><label for="cfgMissionBudget">单任务上限 USD</label><input id="cfgMissionBudget" type="number" min="0" step="0.01" placeholder="例如 1.5"></div>
+    <div class="field"><label for="cfgQuotaThreshold">额度切换阈值 %</label><input id="cfgQuotaThreshold" type="number" min="0" max="100" step="1" placeholder="80"></div>
+    <div class="btns">
+      <button class="primary" onclick="saveModelConfig()">保存模型接口</button>
+      <button onclick="testModelConfig()">测试模型接口</button>
+    </div>
+    <div id="modelCfgStatus" class="composer-hint">尚未加载模型接口</div>
+    <h3>邮件通知</h3>
+    <div class="field"><label for="cfgSmtpHost">SMTP 服务器</label><input id="cfgSmtpHost" placeholder="smtp.gmail.com"></div>
+    <div class="field"><label for="cfgSmtpPort">SMTP 端口</label><input id="cfgSmtpPort" type="number" value="587"></div>
+    <div class="rowline"><label><input id="cfgUseTls" type="checkbox" checked> 使用 TLS</label></div>
+    <div class="field"><label for="cfgUsername">用户名</label><input id="cfgUsername" placeholder="Google 邮箱地址"></div>
+    <div class="field"><label for="cfgPassword">密码 / 授权码</label><input id="cfgPassword" type="password" placeholder="Google 应用专用密码"></div>
+    <div class="field"><label for="cfgSender">发件人</label><input id="cfgSender" placeholder="通常同用户名"></div>
+    <div class="field"><label for="cfgRecipient">收件人邮箱</label><input id="cfgRecipient"></div>
+    <div class="btns">
+      <button class="primary" onclick="saveNotifyConfig()">保存通知配置</button>
+      <button onclick="testNotify()">发送测试邮件</button>
+      <button onclick="exportDiagnostic()">导出诊断包</button>
+    </div>
+    <div id="cfgStatus" class="composer-hint">尚未加载配置</div>
+  </div>
+</div>
+
+<div id="projModal">
+  <div class="modal-card">
+    <div class="panel-top"><button class="close-btn" onclick="closeProjModal()">关闭</button></div>
+    <h2>切换项目</h2>
+    <p>输入项目目录或 `.agent-workspace` 目录。</p>
+    <div class="field"><label for="switchPath">路径</label><input id="switchPath" placeholder="D:\Projects\my-app"></div>
+    <div class="btns"><button class="primary" onclick="switchWorkspace()">切换项目</button></div>
+    <div id="switchMsg" class="composer-hint"></div>
+    <h3>已知工作空间</h3>
+    <div id="knownProjects"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pacer 五项闭环 · 成果与证据</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/five-pillars.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/dashboard">Pacer <small>成果与证据</small></a>
+  <div class="workspace" id="workspacePath"></div>
+  <div class="spacer"></div>
+  <button class="icon-button" id="refreshButton" type="button" title="刷新证据" aria-label="刷新证据"><span aria-hidden="true">↻</span></button>
+</header>
+<main class="page">
+  <section class="account-strip" aria-label="运行身份">
+    <div><span>Codex 运行身份</span><b id="accountStatus">检查中</b><small id="accountMethod">-</small></div>
+    <div><span>Pacer 本地资料</span><b id="profileStatus">未绑定</b><small>不复制 Codex 凭证</small></div>
+    <div><span>本地记忆</span><b id="memoryMetric">0 条</b><small id="memoryDetail">outcome ledger</small></div>
+    <div><span>批量验收</span><b id="commandMetric">0 / 0</b><small id="commandDetail">真实命令步骤</small></div>
+    <div><span>上下文成本</span><b id="telemetryMetric">等待数据</b><small id="telemetryDetail">Codex rollout</small></div>
+  </section>
+  <section class="program-head" aria-label="闭环总览">
+    <div class="program-title">
+      <div class="eyebrow" id="evidenceMode">Pacer native evidence</div>
+      <h1 id="programTitle">正在读取本地证据</h1>
+      <div class="program-state"><span class="status-dot"></span><span id="programStatus">读取中</span></div>
+    </div>
+    <div class="summary-grid">
+      <div><span>Program</span><b id="programId">-</b></div>
+      <div><span>Mission</span><b id="missionIds">-</b></div>
+      <div><span>Provider / Model</span><b id="providerModel">-</b></div>
+      <div><span>Runs / Failed outcomes</span><b id="workerRepair">-</b></div>
+    </div>
+  </section>
+
+  <section class="flow" aria-label="闭环顺序">
+    <span>运行身份</span><i>→</i><span>本地记忆</span><i>→</i><span>托管执行</span><i>→</i><span>批量验收</span><i>→</i><span>结果交接</span>
+  </section>
+
+  <section class="toolbar" aria-label="状态筛选">
+    <div class="segments" id="filterSegments">
+      <button class="active" type="button" data-filter="all">全部</button>
+      <button type="button" data-filter="passed">已通过</button>
+      <button type="button" data-filter="failed">未通过</button>
+      <button type="button" data-filter="partial">部分满足</button>
+      <button type="button" data-filter="indeterminate">无法判定</button>
+    </div>
+    <div class="acceptance" id="acceptanceLine"></div>
+  </section>
+
+  <section class="evidence-layout">
+    <div class="pillar-list" id="pillarList" aria-label="五项状态"></div>
+    <aside class="evidence-panel" id="evidencePanel" aria-live="polite"></aside>
+  </section>
+</main>
+<script src="/five-pillars.js"></script>
+</body>
+</html>

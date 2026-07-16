@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "groups": [
+    {
+      "id": "readonly",
+      "title": "Read-only workflows",
+      "workflows": [
+        "readonly/minimal_testable_workflow.yaml",
+        "readonly/vision_mock_workflow.yaml"
+      ]
+    },
+    {
+      "id": "form-fill",
+      "title": "Form fill workflows",
+      "workflows": [
+        "form-fill/local_html_form_workflow.yaml",
+        "form-fill/browser_form_workflow.yaml"
+      ]
+    },
+    {
+      "id": "download",
+      "title": "Download workflows",
+      "workflows": [
+        "download/browser_download_workflow.yaml"
+      ]
+    },
+    {
+      "id": "auth",
+      "title": "Auth state workflows",
+      "workflows": [
+        "auth/browser_auth_save_workflow.yaml",
+        "auth/browser_auth_restore_workflow.yaml"
+      ]
+    },
+    {
+      "id": "applications",
+      "title": "Demo application workflows",
+      "workflows": [
+        "examples/demo-app/workflows/home_smoke.yaml",
+        "examples/demo-app/workflows/login_smoke.yaml",
+        "examples/demo-app/workflows/login_regression.yaml",
+        "examples/demo-app/workflows/list_smoke.yaml",
+        "examples/demo-app/workflows/list_regression.yaml",
+        "examples/demo-app/workflows/form_smoke.yaml",
+        "examples/demo-app/workflows/form_regression.yaml",
+        "examples/nextjs-demo/workflows/home_smoke.yaml",
+        "examples/nextjs-demo/workflows/login_smoke.yaml",
+        "examples/nextjs-demo/workflows/login_regression.yaml",
+        "examples/nextjs-demo/workflows/list_smoke.yaml",
+        "examples/nextjs-demo/workflows/list_regression.yaml",
+        "examples/nextjs-demo/workflows/form_smoke.yaml",
+        "examples/nextjs-demo/workflows/form_regression.yaml"
+      ]
+    },
+    {
+      "id": "checkout",
+      "title": "Checkout verification workflows",
+      "workflows": [
+        {
+          "name": "checkout_verification",
+          "path": "workflows/checkout/checkout_verification.yaml",
+          "tags": ["verification"],
+          "description": "Verify checkout page copy and structure."
+        }
+      ]
+    },
+    {
+      "id": "pacer",
+      "title": "Pacer product workflows",
+      "workflows": [
+        {
+          "name": "pacer_workbench_static_acceptance",
+          "path": "workflows/pacer/pacer_workbench_static_acceptance.yaml",
+          "tags": ["verification", "fast", "pacer", "dashboard", "workbench"],
+          "description": "Validate Pacer workbench mission intake, value metrics, and requirement-contract evidence."
+        }
+      ]
+    },
+    {
+      "id": "miniprogram",
+      "title": "WeChat Mini Program workflows",
+      "workflows": [
+        {
+          "name": "wechat_devtools_shell",
+          "path": "workflows/miniprogram/wechat_devtools_shell.yaml",
+          "tags": ["verification", "miniprogram"],
+          "description": "Verify WeChat DevTools is open and the miniprogram project shell is visible."
+        },
+        {
+          "name": "miniprogram_simulator_capture",
+          "path": "workflows/miniprogram/miniprogram_simulator_capture.yaml",
+          "tags": ["verification", "miniprogram"],
+          "description": "Capture the WeChat DevTools simulator region as visual evidence."
+        },
+        {
+          "name": "miniprogram_visual_text_contract",
+          "path": "workflows/miniprogram/miniprogram_visual_text_contract.yaml",
+          "tags": ["miniprogram", "visual-contract"],
+          "description": "OCR the simulator region and assert a required mini program text."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,157 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "visual-agent"
+version = "0.1.2"
+description = "Local-first workflow automation runtime for AI assistants with MCP, audit trails, and safety profiles."
+keywords = [
+    "checkpoint",
+    "ai-agents",
+    "coding-agents",
+    "mcp",
+    "playwright",
+    "acceptance-testing",
+    "workflow-automation",
+    "local-first",
+]
+requires-python = ">=3.10"
+authors = [
+    { name = "Checkpoint contributors" },
+]
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "mss>=9.0.1",
+    "Pillow>=10.0.0",
+    "portalocker>=2.7",
+    "pydantic>=2.11.0,<3",
+    "pyautogui>=0.9.54",
+    "PyYAML>=6.0.0",
+]
+
+[project.optional-dependencies]
+web = [
+    "playwright>=1.44.0",
+]
+desktop = [
+    "screen-ocr[winrt]>=0.3.0; platform_system == 'Windows'",
+    "uiautomation>=2.0.20",
+]
+test = [
+    "pytest>=8.0.0",
+]
+eval = [
+    "ir-measures>=0.4.3,<1",
+]
+otel = [
+    "opentelemetry-api>=1.25.0,<2",
+    "opentelemetry-sdk>=1.25.0,<2",
+]
+# Compatibility alias: MCP is required by the core Pacer runtime as of 0.1.2.
+mcp = []
+cloud = [
+    "boto3>=1.34.0",
+    "celery[redis]>=5.3.0",
+    "fastapi>=0.111.0",
+    "httpx>=0.27.0",
+    "uvicorn[standard]>=0.29.0",
+]
+
+[project.scripts]
+pacer = "visual_agent.cli:main"
+checkpoint = "visual_agent.cli:main"
+visual-agent = "visual_agent.cli:main"
+visual-agent-mcp = "visual_agent.mcp_server:main"
+
+[project.entry-points."pytest11"]
+visual_agent = "visual_agent.pytest_plugin"
+
+[project.urls]
+Homepage = "https://github.com/Xiaoyu155/Checkpoint"
+Repository = "https://github.com/Xiaoyu155/Checkpoint"
+Issues = "https://github.com/Xiaoyu155/Checkpoint/issues"
+Documentation = "https://github.com/Xiaoyu155/Checkpoint/blob/main/xiao/docs/quickstart.md"
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["visual_agent*", "cloud_api*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+visual_agent = [
+    "agent_profiles/*.yaml",
+    "dashboard/static/*.css",
+    "dashboard/static/*.html",
+    "dashboard/static/*.js",
+]
+cloud_api = [
+    "gateway_static/*.css",
+    "gateway_static/*.html",
+    "gateway_static/*.js",
+]
+
+[tool.setuptools.data-files]
+"share/visual-agent/templates/desktop_ocr_real_acceptance" = ["templates/desktop_ocr_real_acceptance/*"]
+"share/visual-agent/templates/ecommerce_download" = ["templates/ecommerce_download/*"]
+"share/visual-agent/templates/external_readonly_probe" = ["templates/external_readonly_probe/*"]
+"share/visual-agent/templates/login_form" = ["templates/login_form/*"]
+"share/visual-agent/templates/order_entry" = ["templates/order_entry/*"]
+"share/visual-agent/workflows/examples/admin" = ["workflows/examples/admin/*.yaml"]
+"share/visual-agent/workflows/examples/auth" = ["workflows/examples/auth/*.yaml"]
+"share/visual-agent/workflows/examples/desktop_vision" = ["workflows/examples/desktop_vision/*.yaml"]
+"share/visual-agent/workflows/examples/ecommerce" = ["workflows/examples/ecommerce/*.yaml"]
+"share/visual-agent/workflows/examples/forms" = ["workflows/examples/forms/*.yaml"]
+"share/visual-agent/workflows/examples/mobile_h5" = ["workflows/examples/mobile_h5/*.yaml"]
+"share/visual-agent/workflows/examples/navigation" = ["workflows/examples/navigation/*.yaml"]
+"share/visual-agent/workflows/examples/states" = ["workflows/examples/states/*.yaml"]
+"share/visual-agent/examples" = ["examples/browser_smoke_suite.json", "examples/screen_click_workflow.json", "examples/*.yaml"]
+"share/visual-agent/examples/demo-app" = ["examples/demo-app/index.html", "examples/demo-app/package-lock.json", "examples/demo-app/package.json", "examples/demo-app/README.md", "examples/demo-app/tsconfig.json", "examples/demo-app/vite.config.ts"]
+"share/visual-agent/examples/demo-app/src" = ["examples/demo-app/src/*.css", "examples/demo-app/src/*.ts", "examples/demo-app/src/*.vue"]
+"share/visual-agent/examples/demo-app/workflows" = ["examples/demo-app/workflows/*.yaml"]
+"share/visual-agent/examples/external_samples" = ["examples/external_samples/*.json", "examples/external_samples/*.yaml"]
+"share/visual-agent/examples/external_samples/fixtures" = ["examples/external_samples/fixtures/*.html"]
+"share/visual-agent/examples/fixtures" = ["examples/fixtures/*.json", "examples/fixtures/*.yaml"]
+"share/visual-agent/examples/inputs" = ["examples/inputs/*.json"]
+"share/visual-agent/examples/mcp_config" = ["examples/mcp_config/*.json"]
+"share/visual-agent/examples/nextjs-demo" = ["examples/nextjs-demo/next-env.d.ts", "examples/nextjs-demo/next.config.mjs", "examples/nextjs-demo/package-lock.json", "examples/nextjs-demo/package.json", "examples/nextjs-demo/README.md", "examples/nextjs-demo/tsconfig.json"]
+"share/visual-agent/examples/nextjs-demo/app" = ["examples/nextjs-demo/app/*.css", "examples/nextjs-demo/app/*.tsx"]
+"share/visual-agent/examples/nextjs-demo/app/form" = ["examples/nextjs-demo/app/form/*.tsx"]
+"share/visual-agent/examples/nextjs-demo/app/list" = ["examples/nextjs-demo/app/list/*.tsx"]
+"share/visual-agent/examples/nextjs-demo/app/login" = ["examples/nextjs-demo/app/login/*.tsx"]
+"share/visual-agent/examples/nextjs-demo/workflows" = ["examples/nextjs-demo/workflows/*.yaml"]
+"share/visual-agent/examples/web" = ["examples/web/*.html"]
+"share/visual-agent/examples/workflows" = ["examples/workflows/*.json", "examples/workflows/*.md"]
+"share/visual-agent/examples/workflows/auth" = ["examples/workflows/auth/*.yaml"]
+"share/visual-agent/examples/workflows/checkout" = ["examples/workflows/checkout/*.yaml"]
+"share/visual-agent/examples/workflows/download" = ["examples/workflows/download/*.yaml"]
+"share/visual-agent/examples/workflows/form-fill" = ["examples/workflows/form-fill/*.yaml"]
+"share/visual-agent/examples/workflows/miniprogram" = ["examples/workflows/miniprogram/*.yaml"]
+"share/visual-agent/examples/workflows/pacer" = ["examples/workflows/pacer/*.yaml"]
+"share/visual-agent/examples/workflows/readonly" = ["examples/workflows/readonly/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+cache_dir = ".pytest_cache_local"
+markers = [
+    "e2e: end-to-end tests that run real CLI/workflows",
+    "browser: tests that require Playwright Chromium",
+    "slow: tests using OCR/VLM or other slow visual integrations",
+]

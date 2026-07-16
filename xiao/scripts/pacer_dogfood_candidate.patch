@@ -1,0 +1,52 @@
+diff --git a/src/visual_agent/dogfood_provider_check.py b/src/visual_agent/dogfood_provider_check.py
+--- a/src/visual_agent/dogfood_provider_check.py
++++ b/src/visual_agent/dogfood_provider_check.py
+@@ -18,6 +18,7 @@ from .codex_launcher import _native_codex_command
+ 
+ 
+ PROVIDER_CHECK_MARKER = "PACER_DOGFOOD_PROVIDER_OK_V1"
++PROVIDER_CHECK_RECEIPT_SCHEMA_VERSION = 1
+ DEFAULT_PROVIDER_CHECK_TIMEOUT_SECONDS = 60.0
+ MAX_PROVIDER_CHECK_TIMEOUT_SECONDS = 300.0
+ 
+@@ -342,7 +343,7 @@ def _receipt(
+ ) -> dict[str, Any]:
+     duration_ms = max(0, int(round((monotonic() - started) * 1000)))
+     receipt = {
+-        "schema_version": 1,
++        "schema_version": PROVIDER_CHECK_RECEIPT_SCHEMA_VERSION,
+         "kind": "pacer_dogfood_provider_check",
+         "status": status,
+         "passed": status == "passed",
+@@ -374,7 +375,10 @@ def _receipt_digest(receipt: Mapping[str, Any]) -> str:
+ 
+ def _valid_public_receipt_fields(receipt: Mapping[str, Any]) -> bool:
+     schema_version = receipt.get("schema_version")
+-    if isinstance(schema_version, bool) or schema_version != 1:
++    if (
++        isinstance(schema_version, bool)
++        or schema_version != PROVIDER_CHECK_RECEIPT_SCHEMA_VERSION
++    ):
+         return False
+     if receipt.get("kind") != "pacer_dogfood_provider_check":
+         return False
+diff --git a/tests/test_dogfood_provider_check.py b/tests/test_dogfood_provider_check.py
+--- a/tests/test_dogfood_provider_check.py
++++ b/tests/test_dogfood_provider_check.py
+@@ -9,6 +9,7 @@ import pytest
+ import visual_agent.dogfood_provider_check as provider_check
+ from visual_agent.dogfood_provider_check import (
+     PROVIDER_CHECK_MARKER,
++    PROVIDER_CHECK_RECEIPT_SCHEMA_VERSION,
+     dogfood_provider_receipt_to_markdown,
+     run_dogfood_provider_check,
+     verify_dogfood_provider_receipt,
+@@ -66,7 +67,7 @@ def test_provider_check_runs_codex_in_empty_read_only_directory_with_minimal_env
+     assert len(result["receipt_digest"]) == 64
+     int(result["receipt_digest"], 16)
+     assert {key: value for key, value in result.items() if key != "receipt_digest"} == {
+-        "schema_version": 1,
++        "schema_version": PROVIDER_CHECK_RECEIPT_SCHEMA_VERSION,
+         "kind": "pacer_dogfood_provider_check",
+         "status": "passed",
+         "passed": True,

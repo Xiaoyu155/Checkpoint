@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "repositories": [
+    "pacer",
+    "demo-app",
+    "nextjs-demo"
+  ],
+  "repository_roots": {
+    "pacer": ".",
+    "demo-app": "examples/demo-app",
+    "nextjs-demo": "examples/nextjs-demo"
+  },
+  "scenarios": [
+    "implementation",
+    "test",
+    "documentation",
+    "read_only",
+    "fault_recovery"
+  ],
+  "required_clean_dogfood_streak": 3,
+  "release_attestation_key_id": "pacer-release-ci-v1",
+  "performance_policy": {
+    "managed_sample": {
+      "max_duration_seconds": 300,
+      "max_total_tokens": 250000
+    },
+    "managed_aggregate": {
+      "max_mean_duration_seconds": 180,
+      "max_p95_duration_seconds": 300,
+      "max_mean_total_tokens": 180000
+    },
+    "dogfood": {
+      "max_duration_seconds": 900,
+      "max_total_tokens": 600000
+    }
+  },
+  "cases": [
+    {
+      "case_id": "deterministic-core",
+      "kind": "deterministic"
+    },
+    {
+      "case_id": "pacer-implementation",
+      "kind": "managed_sample",
+      "repository": "pacer",
+      "scenario": "implementation"
+    },
+    {
+      "case_id": "pacer-test",
+      "kind": "managed_sample",
+      "repository": "pacer",
+      "scenario": "test"
+    },
+    {
+      "case_id": "pacer-documentation",
+      "kind": "managed_sample",
+      "repository": "pacer",
+      "scenario": "documentation"
+    },
+    {
+      "case_id": "pacer-read-only",
+      "kind": "managed_sample",
+      "repository": "pacer",
+      "scenario": "read_only"
+    },
+    {
+      "case_id": "pacer-fault-recovery",
+      "kind": "managed_sample",
+      "repository": "pacer",
+      "scenario": "fault_recovery"
+    },
+    {
+      "case_id": "demo-app-implementation",
+      "kind": "managed_sample",
+      "repository": "demo-app",
+      "scenario": "implementation"
+    },
+    {
+      "case_id": "demo-app-test",
+      "kind": "managed_sample",
+      "repository": "demo-app",
+      "scenario": "test"
+    },
+    {
+      "case_id": "demo-app-documentation",
+      "kind": "managed_sample",
+      "repository": "demo-app",
+      "scenario": "documentation"
+    },
+    {
+      "case_id": "demo-app-read-only",
+      "kind": "managed_sample",
+      "repository": "demo-app",
+      "scenario": "read_only"
+    },
+    {
+      "case_id": "demo-app-fault-recovery",
+      "kind": "managed_sample",
+      "repository": "demo-app",
+      "scenario": "fault_recovery"
+    },
+    {
+      "case_id": "nextjs-demo-implementation",
+      "kind": "managed_sample",
+      "repository": "nextjs-demo",
+      "scenario": "implementation"
+    },
+    {
+      "case_id": "nextjs-demo-test",
+      "kind": "managed_sample",
+      "repository": "nextjs-demo",
+      "scenario": "test"
+    },
+    {
+      "case_id": "nextjs-demo-documentation",
+      "kind": "managed_sample",
+      "repository": "nextjs-demo",
+      "scenario": "documentation"
+    },
+    {
+      "case_id": "nextjs-demo-read-only",
+      "kind": "managed_sample",
+      "repository": "nextjs-demo",
+      "scenario": "read_only"
+    },
+    {
+      "case_id": "nextjs-demo-fault-recovery",
+      "kind": "managed_sample",
+      "repository": "nextjs-demo",
+      "scenario": "fault_recovery"
+    },
+    {
+      "case_id": "dogfood-1",
+      "kind": "dogfood",
+      "repository_root": ".",
+      "attestation_key_id": "github:Xiaoyu155/Checkpoint",
+      "minimum_score": 100
+    },
+    {
+      "case_id": "dogfood-2",
+      "kind": "dogfood",
+      "repository_root": ".",
+      "attestation_key_id": "github:Xiaoyu155/Checkpoint",
+      "minimum_score": 100
+    },
+    {
+      "case_id": "dogfood-3",
+      "kind": "dogfood",
+      "repository_root": ".",
+      "attestation_key_id": "github:Xiaoyu155/Checkpoint",
+      "minimum_score": 100
+    }
+  ]
+}

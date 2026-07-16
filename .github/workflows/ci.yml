@@ -14,6 +14,9 @@ jobs:
     name: Python tests and lint
     runs-on: windows-latest
     timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: xiao
 
     steps:
       - name: Checkout
@@ -58,9 +61,9 @@ jobs:
         with:
           name: checkpoint-quality-reports
           path: |
-            .runs/quality_gates/**
-            .agent-workspace/reports/quality_gates/**
-            .agent-workspace/reports/regression_runs/**
+            xiao/.runs/quality_gates/**
+            xiao/.agent-workspace/reports/quality_gates/**
+            xiao/.agent-workspace/reports/regression_runs/**
           if-no-files-found: ignore
 
       - name: Comment PR failure
@@ -77,6 +80,9 @@ jobs:
     name: VS Code extension compile
     runs-on: windows-latest
     timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: xiao/vscode-extension
 
     steps:
       - name: Checkout
@@ -87,12 +93,10 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: vscode-extension/package-lock.json
+          cache-dependency-path: xiao/vscode-extension/package-lock.json
 
       - name: Install dependencies
-        working-directory: vscode-extension
         run: npm ci
 
       - name: Compile and test
-        working-directory: vscode-extension
         run: npm test

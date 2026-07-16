@@ -5,10 +5,16 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   quality-gate:
     runs-on: windows-latest
     timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: xiao
 
     steps:
       - name: Checkout
@@ -56,7 +62,7 @@ jobs:
         with:
           name: checkpoint-quality-reports
           path: |
-            .runs/quality_gates/**
-            .agent-workspace/reports/quality_gates/**
-            .agent-workspace/reports/regression_runs/**
+            xiao/.runs/quality_gates/**
+            xiao/.agent-workspace/reports/quality_gates/**
+            xiao/.agent-workspace/reports/regression_runs/**
           if-no-files-found: ignore

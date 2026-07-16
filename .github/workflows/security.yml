@@ -13,6 +13,9 @@ jobs:
     name: Python dependency audit
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: xiao
 
     steps:
       - name: Checkout
@@ -36,10 +39,9 @@ jobs:
     name: VS Code extension audit
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
     defaults:
       run:
-        working-directory: vscode-extension
+        working-directory: xiao/vscode-extension
 
     steps:
       - name: Checkout
@@ -50,7 +52,7 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: vscode-extension/package-lock.json
+          cache-dependency-path: xiao/vscode-extension/package-lock.json
 
       - name: Install dependencies
         run: npm ci

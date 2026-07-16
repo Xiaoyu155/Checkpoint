@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "id": "B2",
+  "title": "Add an installed-only filter to the agents doctor CLI",
+  "category": "cross_file_feature",
+  "status": "defined_not_run",
+  "source": {
+    "kind": "benchmark_design",
+    "observed_on": null,
+    "failure": null
+  },
+  "objective": "Add an --installed-only option to `checkpoint agents doctor`. In JSON and markdown modes it must omit unavailable agents while preserving the existing record shape and explicit single-agent filtering. The option must be rejected or clearly ignored for `agents list` and `agents show` rather than silently changing their output. Add focused tests and keep the default command backward compatible.",
+  "acceptance_criteria": [
+    "Without --installed-only, agents doctor output is unchanged.",
+    "With --installed-only, every returned doctor record has installed=true.",
+    "JSON and markdown output apply the same filter.",
+    "An explicit unavailable agent produces an empty successful doctor result rather than a fabricated installed record.",
+    "Focused CLI and capability tests cover default and filtered behavior."
+  ],
+  "likely_relevant_files": [
+    "src/visual_agent/cli.py",
+    "src/visual_agent/cli_chief.py",
+    "src/visual_agent/agent_capabilities.py",
+    "tests/test_cli.py",
+    "tests/test_agent_capabilities.py"
+  ],
+  "target": {
+    "kind": "repository_snapshot_patch",
+    "base_revision": "e8583099bd8ab073d578fcbe0c6199ab289bcb0e",
+    "seed_patch": "tests/benchmarks/fixtures/common_target_seed.patch",
+    "seed_patch_sha256": "bfec72342daef270757f32b51f76e2970ea8e778e756f1a8665d544b158b32d2"
+  },
+  "verification": {
+    "commands": [
+      "python -m pytest tests/test_agent_capabilities.py -k agents",
+      "python -m pytest tests/test_cli.py -k agents"
+    ]
+  },
+  "operator_verification": {
+    "kind": "operator_private_verifier",
+    "verifier": "tests/benchmarks/private_verifiers/b2_agents_doctor_installed_only.py",
+    "verifier_sha256": "222a132e06f96f4df4cc7fee87d4e2ba76e63f4909a3a9c37aed32c8d49f261b",
+    "command_template": "python tests/benchmarks/private_verifiers/b2_agents_doctor_installed_only.py {target_root}",
+    "additional_acceptance": "Use deterministic installed and unavailable agent probes to verify default, JSON, markdown, explicit-agent behavior, and that agents list/show reject --installed-only or report an explicit doctor-only ignore notice."
+  },
+  "protocol": {
+    "max_worker_turns": 1,
+    "requires_isolated_worktree": true,
+    "baseline_snapshot": "record_commit_and_dirty_patch_digest_before_run",
+    "allow_test_edits": true
+  }
+}

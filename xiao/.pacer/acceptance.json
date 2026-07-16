@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "observable_outcomes": [
+    "Five-pillar status is derived from evidence and uses passed, failed, partial, or indeterminate semantics.",
+    "Memory distinguishes cache reuse from relevant retrieval, prompt injection, and trusted use.",
+    "Routing proves that the policy decision, worker request, and observed runtime identity match.",
+    "Managed runs enforce legal state transitions, idempotency, retry allowlists, and hard budgets.",
+    "Acceptance separates evidence integrity, standard adequacy, and the product verdict.",
+    "Dogfood requires an installed wheel A to manage a Pacer change, a fresh wheel B to pass its own trusted check, and GitHub OIDC provenance to reach the 95-point CI target.",
+    "Release readiness stops on the first failure and requires a clean three-repository by five-scenario matrix."
+  ],
+  "required_artifact_roles": [
+    "implementation",
+    "test",
+    "acceptance_contract",
+    "release_evidence"
+  ],
+  "protected_paths": [
+    "AGENTS.md",
+    ".pacer/acceptance.json",
+    ".pacer/dogfood.json",
+    ".pacer/release.json"
+  ],
+  "verification": {
+    "required_step_classes": [
+      "test",
+      "analyze"
+    ],
+    "required_commands": []
+  },
+  "boundary_cases": [
+    "A new launch with no evidence is indeterminate rather than failed.",
+    "A successful response cache lookup without relevant memory cannot pass Memory.",
+    "Timeouts, HTTP 5xx responses, crashes, and rejected evidence remain failures.",
+    "Template-only acceptance criteria cannot produce a product pass.",
+    "Repeated evidence or run identity and candidate wheel drift reset the clean release streak."
+  ],
+  "manual_checks": []
+}

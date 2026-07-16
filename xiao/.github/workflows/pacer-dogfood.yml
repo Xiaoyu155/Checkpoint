@@ -1,0 +1,105 @@
+name: Pacer Dogfood Attestation
+
+on:
+  workflow_call:
+    inputs:
+      candidate_artifact_name:
+        description: Artifact containing exactly one visual-agent wheel produced by Pacer A.
+        required: true
+        type: string
+      evidence_artifact_name:
+        description: Artifact containing exactly one canonical dogfood-evidence.json.
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: pacer-dogfood-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  attest-and-verify:
+    name: Attest and independently verify Pacer A-to-B
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Check out the immutable verification policy
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Download candidate wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.candidate_artifact_name }}
+          path: .dogfood/candidate
+
+      - name: Download canonical evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.evidence_artifact_name }}
+          path: .dogfood/evidence
+
+      - name: Normalize and inspect immutable subjects
+        id: subjects
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t wheels < <(find .dogfood/candidate -type f -name '*.whl' -print)
+          mapfile -t evidence < <(find .dogfood/evidence -type f -name 'dogfood-evidence.json' -print)
+          test "${#wheels[@]}" -eq 1
+          test "${#evidence[@]}" -eq 1
+          mkdir -p .pacer
+          cp -- "${evidence[0]}" .pacer/dogfood-evidence.json
+          echo "candidate=${wheels[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate checked-in Dogfood policy
+        run: |
+          python -m pip install --disable-pip-version-check "${{ steps.subjects.outputs.candidate }}"
+          pacer pacer-dogfood-policy-check --repo-root . --format json
+
+      - name: Attest immutable candidate wheel
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: ${{ steps.subjects.outputs.candidate }}
+
+      - name: Attest canonical Dogfood evidence
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: .pacer/dogfood-evidence.json
+
+      - name: Verify candidate installation and GitHub provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip check
+          pacer pacer-dogfood-check \
+            --repo-root . \
+            --artifact-root .dogfood/candidate \
+            --github-repository "${{ github.repository }}" \
+            --signer-workflow "${{ github.repository }}/.github/workflows/pacer-dogfood.yml@${{ github.ref }}" \
+            --require-github-provenance \
+            --minimum-score 95 \
+            --format json | tee .dogfood/verification-result.json
+
+      - name: Upload independent verification result
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: pacer-dogfood-verification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .dogfood/verification-result.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attest independent verification result
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: .dogfood/verification-result.json

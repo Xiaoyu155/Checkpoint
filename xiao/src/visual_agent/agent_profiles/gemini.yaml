@@ -1,0 +1,77 @@
+schema_version: 1
+agent: gemini
+display_name: Google Gemini CLI
+executable: gemini
+version_command: gemini --version
+verified_on: "2026-07-02"
+source: https://developers.google.com/gemini-code-assist/docs/gemini-cli
+multimodal_source: https://ai.google.dev/gemini-api/docs/image-understanding
+primary_role: multimodal_inspection
+summary: >-
+  Gemini CLI is Google's terminal AI agent. Checkpoint treats Gemini as a
+  multimodal inspection and product-understanding specialist first, not as the
+  default coding worker. It is useful for reading screenshots, describing visual
+  states, checking workflow evidence, and helping turn vague UI intent into
+  observable acceptance criteria.
+
+headless:
+  command: gemini -p "<prompt>"
+  why: >-
+    Use prompt mode for one-shot inspection tasks where Checkpoint supplies
+    screenshots, report excerpts, and a bounded question. Do not make it the
+    default implementation worker until the Codex adapter path is stable.
+
+model_flag: "--model <id>"
+models:
+  - id: gemini-3.5-flash
+    role: default
+    use_for: [multimodal-inspection, screenshot-review, failure-triage]
+  - id: gemini-2.5-flash
+    role: fast
+    use_for: [quick-visual-summary, low-latency-triage]
+models_note: >-
+  Gemini model ids move quickly. Check the official Gemini API model list before
+  updating this file. Selection logic keys off `role`.
+
+sandbox_modes:
+  - name: read-only
+    flag: "--approval-mode default"
+    when: inspection only; no code edits should be requested by Checkpoint
+    risk: none
+  - name: yolo
+    flag: "--yolo"
+    when: never for Checkpoint dispatch; bypasses prompts for tool execution
+    risk: high
+
+approval_modes:
+  - name: default
+    flag: "--approval-mode default"
+    when: ask before tool execution
+  - name: yolo
+    flag: "--yolo"
+    when: unattended trusted local automation only
+    risk: high
+
+parallelism:
+  - name: inspector_lane
+    how: >-
+      Run Gemini separately from implementation workers to review visual
+      evidence and product semantics. Its output becomes acceptance guidance,
+      not a competing code diff.
+
+context_files: [GEMINI.md, AGENTS.md]
+integrations:
+  - id: mcp
+    how: >-
+      Gemini CLI supports MCP servers; connect Checkpoint when using Gemini to
+      inspect local reports and screenshots.
+  - id: visual_world_model
+    how: >-
+      Gemini API accepts image input for captioning, classification, and visual
+      question answering; use it when DOM/UIA/OCR evidence is insufficient.
+
+capabilities_often_missed:
+  - Treat Gemini as a multimodal reviewer for screenshots and evidence, not as a default code writer.
+  - Use Gemini for visual question answering over failed Checkpoint artifacts.
+  - Use MCP to let Gemini read bounded reports instead of pasting large logs.
+  - Keep Gemini in read-only/inspection posture unless a human deliberately changes that policy.
