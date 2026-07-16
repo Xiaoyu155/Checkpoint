@@ -1145,6 +1145,10 @@ def _inject_pacer_mcp_config(argv: Sequence[str]) -> list[str]:
         "mcp_servers.pacer.args=" + json.dumps(["-m", "visual_agent.mcp_server"]),
         "-c",
         "mcp_servers.pacer.env_vars=" + json.dumps(environment_names),
+        "-c",
+        "mcp_servers.pacer.required=true",
+        "-c",
+        "mcp_servers.pacer.startup_timeout_sec=30",
     ]
     return [*arguments[:insert_at], *config, *arguments[insert_at:]]
 

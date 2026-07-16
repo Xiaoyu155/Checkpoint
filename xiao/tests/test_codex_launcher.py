@@ -215,6 +215,10 @@ def test_launch_codex_forwards_terminal_and_arguments(tmp_path, monkeypatch) -> 
                 "PACER_PRELAUNCH_SOURCE_BASELINE_DIGEST",
             ]
         ),
+        "-c",
+        "mcp_servers.pacer.required=true",
+        "-c",
+        "mcp_servers.pacer.startup_timeout_sec=30",
         "resume",
         "--last",
     ]
@@ -854,6 +858,8 @@ def test_pacer_mcp_config_overrides_user_transport_and_forwards_launch_trust() -
         expected_command,
         'mcp_servers.pacer.args=["-m", "visual_agent.mcp_server"]',
         expected_environment,
+        "mcp_servers.pacer.required=true",
+        "mcp_servers.pacer.startup_timeout_sec=30",
     ]
     assert configured[-2:] == ["exec", "修复错误"]
 
