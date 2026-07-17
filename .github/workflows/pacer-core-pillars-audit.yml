@@ -89,7 +89,7 @@ jobs:
             printf '[mcp_servers.pacer]\n'
             printf 'command = "%s"\n' "$RUNNER_TEMP/venv-a/bin/python"
             printf 'args = ["-m", "visual_agent.mcp_server"]\n'
-            printf 'env_vars = ["PACER_LAUNCH_ID", "PACER_PRELAUNCH_TASK_REQUIRED", "PACER_PRELAUNCH_TASK_CONTRACT_DIGEST", "PACER_PRELAUNCH_SOURCE_BASELINE_DIGEST"]\n'
+            printf 'env_vars = ["PACER_LAUNCH_ID", "PACER_PRELAUNCH_TASK_REQUIRED", "PACER_PRELAUNCH_TASK_CONTRACT_DIGEST", "PACER_PRELAUNCH_SOURCE_BASELINE_DIGEST", "PACER_AUDIT_MODEL_POOL"]\n'
             printf 'required = true\n'
             printf 'startup_timeout_sec = 30\n'
           } > "$CODEX_HOME/config.toml"
@@ -114,7 +114,7 @@ jobs:
             -c "model_providers.$PACER_PROVIDER_ID.base_url='$PACER_PROVIDER_BASE_URL'" \
             -c "model_providers.$PACER_PROVIDER_ID.env_key='PACER_PROVIDER_API_KEY'" \
             -c "model_providers.$PACER_PROVIDER_ID.wire_api='responses'" \
-            "$seed_goal Run the existing focused memory tests with python -m pytest tests/test_pacer_pillars.py -q. Use exactly one Pacer completion call with one named targeted-tests step as an argv array. Do not retry." \
+            "$seed_goal Do not modify tracked source files. The optional .visual-agent-status.md file is outside this audit scope; its absence is not unfinished work and must not be listed in unresolved_items or known_risks. Run the existing focused memory tests with python -m pytest tests/test_pacer_pillars.py -q. Use exactly one Pacer completion call with one named targeted-tests step as an argv array. When the test passes, unresolved_items must be empty. Do not retry." \
             | tee "$RUNNER_TEMP/pacer-memory-seed-rollout.txt"
 
       - name: Prepare runtime-owned routing evidence
