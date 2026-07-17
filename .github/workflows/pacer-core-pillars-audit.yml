@@ -126,6 +126,10 @@ jobs:
           PILLAR: ${{ matrix.pillar }}
         run: |
           set -euo pipefail
+          echo "baseline=$PACER_NESTED_BASELINE"
+          echo "current=$(git rev-parse HEAD)"
+          git status --porcelain --untracked-files=all | tee "$RUNNER_TEMP/${PILLAR}-git-status.txt"
+          git diff --name-only HEAD -- | tee "$RUNNER_TEMP/${PILLAR}-git-diff-files.txt"
           test "$(git rev-parse HEAD)" = "$PACER_NESTED_BASELINE"
           git diff --exit-code HEAD -- .
           test -z "$(git status --porcelain --untracked-files=all)"
@@ -212,6 +216,8 @@ jobs:
             xiao/.agent-workspace/pacer_native/active_launch.json
             xiao/.agent-workspace/pacer_native/history.jsonl
             ${{ runner.temp }}/pacer-${{ matrix.pillar }}-rollout.txt
+            ${{ runner.temp }}/${{ matrix.pillar }}-git-status.txt
+            ${{ runner.temp }}/${{ matrix.pillar }}-git-diff-files.txt
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 30
