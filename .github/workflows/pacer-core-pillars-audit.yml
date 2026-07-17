@@ -1,0 +1,208 @@
+name: Pacer Core Pillar Freedom Audit
+run-name: Pacer Core Pillar Freedom Audit / ${{ github.run_id }}
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: pacer-core-pillars-audit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Audit ${{ matrix.pillar }} with unrestricted Codex worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pillar: routing
+            test_command: python -m pytest tests/test_model_router.py tests/test_dynamic_model_selector.py tests/test_execution_alignment.py tests/test_codex_launcher.py -q
+            analysis_command: python -m ruff check src/visual_agent/model_router.py src/visual_agent/dynamic_model_selector.py src/visual_agent/execution_alignment.py src/visual_agent/codex_launcher.py
+          - pillar: memory
+            test_command: python -m pytest tests/test_project_memory.py tests/test_memory_evaluation.py tests/test_context_workflow_synthesis.py tests/test_pacer_context.py tests/test_pacer_events.py -q
+            analysis_command: python -m ruff check src/visual_agent/project_memory.py src/visual_agent/memory_evaluation.py src/visual_agent/pacer_context.py src/visual_agent/pacer_events.py
+          - pillar: managed
+            test_command: python -m pytest tests/test_managed_state.py tests/test_chief_dispatch.py tests/test_chief_run.py tests/test_pacer_launch_context.py tests/test_program_scheduler.py tests/test_scheduler.py -q
+            analysis_command: python -m ruff check src/visual_agent/managed_state.py src/visual_agent/chief_dispatch.py src/visual_agent/chief_run.py src/visual_agent/pacer_launch_context.py src/visual_agent/program_scheduler.py src/visual_agent/scheduler.py
+          - pillar: acceptance
+            test_command: python -m pytest tests/test_acceptance_contract.py tests/test_acceptance_grade.py tests/test_real_acceptance.py tests/test_command_verification.py tests/test_acceptance_chain_guard.py tests/test_codex_check.py -q
+            analysis_command: python -m ruff check src/visual_agent/acceptance_contract.py src/visual_agent/acceptance.py src/visual_agent/acceptance_grade.py src/visual_agent/real_acceptance.py src/visual_agent/command_verification.py src/visual_agent/codex_check.py
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: xiao
+    env:
+      PACER_PROVIDER_API_KEY: ${{ secrets.PACER_DOGFOOD_PROVIDER_API_KEY }}
+      PACER_PROVIDER_BASE_URL: ${{ secrets.PACER_DOGFOOD_PROVIDER_BASE_URL }}
+      PACER_PROVIDER_ID: sub2api_dogfood
+      PACER_PROVIDER_MODEL: gpt-5.6-sol
+      PACER_AUTO_COMPACT_TOKEN_LIMIT: "96000"
+    steps:
+      - name: Check out main
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: xiao/pyproject.toml
+
+      - name: Install isolated Pacer worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global @openai/codex@0.144.4
+          python -m pip install --disable-pip-version-check build pytest ruff
+          mkdir -p "$RUNNER_TEMP/input-wheel"
+          python -m build --wheel --outdir "$RUNNER_TEMP/input-wheel"
+          mapfile -t wheels < <(find "$RUNNER_TEMP/input-wheel" -maxdepth 1 -type f -name '*.whl' -print)
+          test "${#wheels[@]}" -eq 1
+          python -m venv "$RUNNER_TEMP/venv-a"
+          "$RUNNER_TEMP/venv-a/bin/python" -m pip install --disable-pip-version-check "${wheels[0]}" pytest ruff
+          echo "PACER_INPUT_WHEEL=${wheels[0]}" >> "$GITHUB_ENV"
+
+      - name: Create immutable read-only audit baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init
+          git config user.name "pacer-core-audit"
+          git config user.email "pacer-core-audit@users.noreply.github.com"
+          git add --all
+          git commit -m "Immutable Pacer core pillar audit baseline"
+          echo "PACER_NESTED_BASELINE=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          test -z "$(git status --porcelain)"
+
+      - name: Configure required Pacer MCP
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CODEX_HOME="$RUNNER_TEMP/codex-home"
+          mkdir -p "$CODEX_HOME"
+          {
+            printf '[mcp_servers.pacer]\n'
+            printf 'command = "%s"\n' "$RUNNER_TEMP/venv-a/bin/python"
+            printf 'args = ["-m", "visual_agent.mcp_server"]\n'
+            printf 'env_vars = ["PACER_LAUNCH_ID", "PACER_PRELAUNCH_TASK_REQUIRED", "PACER_PRELAUNCH_TASK_CONTRACT_DIGEST", "PACER_PRELAUNCH_SOURCE_BASELINE_DIGEST"]\n'
+            printf 'required = true\n'
+            printf 'startup_timeout_sec = 30\n'
+          } > "$CODEX_HOME/config.toml"
+          echo "CODEX_HOME=$CODEX_HOME" >> "$GITHUB_ENV"
+          codex mcp list | tee "$RUNNER_TEMP/codex-mcp-list.txt"
+          grep -E '^pacer[[:space:]].*[[:space:]]enabled[[:space:]]' "$RUNNER_TEMP/codex-mcp-list.txt"
+
+      - name: Run Codex with maximum isolated worker freedom
+        shell: bash
+        env:
+          PILLAR: ${{ matrix.pillar }}
+          PILLAR_TEST_COMMAND: ${{ matrix.test_command }}
+          PILLAR_ANALYSIS_COMMAND: ${{ matrix.analysis_command }}
+        run: |
+          set -euo pipefail
+          export PATH="$RUNNER_TEMP/venv-a/bin:$PATH"
+          export PACER_PILLAR_TASK="Audit the ${PILLAR} Pacer core pillar with maximum worker autonomy in this isolated runner. You may inspect the repository freely, use the required Pacer MCP, and run any additional read-only probes needed to understand the actual implementation. Do not modify source files, tests, manifests, workflows, or commit. Do not fabricate a passed pillar: report missing, partial, or indeterminate evidence honestly. The required focused test command is: ${PILLAR_TEST_COMMAND}. The required static analysis command is: ${PILLAR_ANALYSIS_COMMAND}. Call complete_pacer_task exactly once with exactly two final steps named targeted-tests and targeted-analysis using argv arrays that represent those two commands. Pacer derives test and analyze classes from argv; do not send kind, result_kind, requirement, files, command, or env fields. Bind each locked requirement to the relevant final step, quote the exact locked requirement text in each result, and use unresolved_items [] and known_risks [] only when the evidence truly supports that conclusion. The worker approval mode is never and the sandbox is danger-full-access because this is an ephemeral disposable audit runner."
+          pacer \
+            --ask-for-approval never \
+            --sandbox danger-full-access \
+            exec \
+            --skip-git-repo-check \
+            --model "$PACER_PROVIDER_MODEL" \
+            -c "model_provider='$PACER_PROVIDER_ID'" \
+            -c "model_providers.$PACER_PROVIDER_ID.name='Pacer Core Audit Provider'" \
+            -c "model_providers.$PACER_PROVIDER_ID.base_url='$PACER_PROVIDER_BASE_URL'" \
+            -c "model_providers.$PACER_PROVIDER_ID.env_key='PACER_PROVIDER_API_KEY'" \
+            -c "model_providers.$PACER_PROVIDER_ID.wire_api='responses'" \
+            "$PACER_PILLAR_TASK" | tee "$RUNNER_TEMP/pacer-${PILLAR}-rollout.txt"
+
+      - name: Build pillar and freedom audit report
+        id: audit
+        shell: bash
+        env:
+          PILLAR: ${{ matrix.pillar }}
+        run: |
+          set -euo pipefail
+          mkdir -p .dogfood/pillar-audit
+          "$RUNNER_TEMP/venv-a/bin/python" - "$PILLAR" <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          from visual_agent.pacer_pillars import assess_pillar
+
+          pillar_name = sys.argv[1]
+          workspace = Path(".agent-workspace")
+          native = workspace / "pacer_native"
+          active_path = native / "active_launch.json"
+          history_path = native / "history.jsonl"
+          active = json.loads(active_path.read_text(encoding="utf-8"))
+          launch_id = str(active.get("launch_id") or "")
+          records = [
+              json.loads(line)
+              for line in history_path.read_text(encoding="utf-8").splitlines()
+              if line.strip()
+          ]
+          record = next(
+              (item for item in reversed(records) if str(item.get("launch_id") or "") == launch_id),
+              {},
+          )
+          review = record.get("task_review") if isinstance(record.get("task_review"), dict) else {}
+          control = active.get("completion_control") if isinstance(active.get("completion_control"), dict) else {}
+          pillars = active.get("pillars") if isinstance(active.get("pillars"), dict) else {}
+          pillar_evidence = pillars.get(pillar_name) if isinstance(pillars.get(pillar_name), dict) else {}
+          assessment = assess_pillar(pillar_name, pillar_evidence)
+          freedom = {
+              "approval_mode": "never",
+              "sandbox": "danger-full-access",
+              "mcp_required": True,
+              "provider": (active.get("runtime") or {}).get("provider", ""),
+              "model": (active.get("runtime") or {}).get("model", ""),
+              "source_change_count": len(review.get("source_changes") or []),
+              "completion_attempts": control.get("attempts"),
+              "completion_resubmissions": control.get("last_rejection_codes") or [],
+              "launch_id": launch_id,
+          }
+          report = {
+              "schema_version": 1,
+              "pillar": pillar_name,
+              "status": str(active.get("status") or ""),
+              "task_review": {
+                  "verdict": review.get("verdict"),
+                  "trust": review.get("trust"),
+                  "evidence_integrity": review.get("evidence_integrity"),
+                  "warnings": review.get("warnings") or [],
+                  "errors": review.get("errors") or [],
+              },
+              "pillar_evidence": pillar_evidence,
+              "assessment": assessment,
+              "freedom": freedom,
+          }
+          output = Path(".dogfood/pillar-audit") / f"{pillar_name}-audit.json"
+          output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps({"pillar": pillar_name, "passed": assessment["passed"], "status": assessment["status"]}))
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as handle:
+              handle.write(f"passed={str(assessment['passed']).lower()}\n")
+          PY
+
+      - name: Upload pillar freedom audit artifacts
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: pacer-core-pillars-audit-${{ matrix.pillar }}
+          path: |
+            xiao/.dogfood/pillar-audit/**
+            xiao/.agent-workspace/pacer_native/active_launch.json
+            xiao/.agent-workspace/pacer_native/history.jsonl
+            ${{ runner.temp }}/pacer-${{ matrix.pillar }}-rollout.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce target pillar assessment
+        if: always()
+        run: test "${{ steps.audit.outputs.passed }}" = "true"
