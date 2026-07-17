@@ -210,6 +210,48 @@ def mcp_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="acknowledge_pacer_memory_use",
+            description=(
+                "Mark trusted Pacer memory IDs as actually used after get_pacer_memory delivered them. "
+                "This is a read-only evidence acknowledgement: pass the exact memory_receipt and IDs from "
+                "the prior response. It is required for Memory pillar used_hit evidence."
+            ),
+            annotations={
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "openWorldHint": False,
+            },
+            inputSchema={
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "workspace_root": {"type": "string", "default": ".agent-workspace"},
+                    "repo_root": {"type": "string", "default": "."},
+                    "known_memory_receipt": {"type": "string", "minLength": 1},
+                    "memory_ids_used": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 20,
+                        "items": {"type": "string", "minLength": 1, "maxLength": 200},
+                    },
+                },
+                "required": ["workspace_root", "repo_root", "known_memory_receipt", "memory_ids_used"],
+            },
+            outputSchema={
+                "type": "object",
+                "properties": {
+                    "schema_version": {"type": "integer"},
+                    "status": {"type": "string"},
+                    "memory_use": {"type": "object"},
+                    "effective_memory": {"type": "object"},
+                    "error": {"type": "string"},
+                },
+                "required": ["schema_version"],
+                "additionalProperties": True,
+            },
+        ),
+        Tool(
             name="record_pacer_outcome",
             description=(
                 "Legacy failure/blocker recorder. Successful tasks must use complete_pacer_task so goal, source "
@@ -1268,6 +1310,7 @@ async def call_tool_payload(name: str, arguments: dict[str, Any] | None = None) 
         handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "begin_pacer_task": begin_pacer_task_payload,
             "get_pacer_memory": get_pacer_memory_payload,
+            "acknowledge_pacer_memory_use": acknowledge_pacer_memory_use_payload,
             "record_pacer_outcome": record_pacer_outcome_payload,
             "get_pacer_runtime_telemetry": get_pacer_runtime_telemetry_payload,
             "get_pacer_events": get_pacer_events_payload,
@@ -1674,6 +1717,23 @@ def _normalized_memory_ids_used(value: Any) -> list[str]:
         if memory_id not in normalized:
             normalized.append(memory_id)
     return normalized
+
+
+def acknowledge_pacer_memory_use_payload(args: dict[str, Any]) -> dict[str, Any]:
+    receipt = str(args.get("known_memory_receipt") or "").strip()
+    raw_ids = args.get("memory_ids_used")
+    if not receipt:
+        raise ValueError("known_memory_receipt is required")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise ValueError("memory_ids_used must contain at least one trusted memory ID")
+    return get_pacer_memory_payload(
+        {
+            **args,
+            "detail": "full",
+            "known_memory_receipt": receipt,
+            "memory_ids_used": raw_ids,
+        }
+    )
 
 
 def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:

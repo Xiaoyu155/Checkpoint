@@ -211,6 +211,7 @@ def test_mcp_tools_include_expected_names() -> None:
     assert names == {
         "begin_pacer_task",
         "get_pacer_memory",
+        "acknowledge_pacer_memory_use",
         "get_pacer_runtime_telemetry",
         "get_pacer_events",
         "record_pacer_outcome",
