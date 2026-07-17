@@ -3540,24 +3540,36 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
     launch_id = str(active.get("launch_id") or resolved_launch_id)
     if not launch_id:
         raise ValueError("complete_pacer_task requires an active Pacer launch")
-    completion_control = register_completion_attempt(
-        workspace_root,
-        launch_id=launch_id,
-        max_attempts=MAX_PACER_COMPLETION_ATTEMPTS,
-    )
-    completion_attempt = int(completion_control.get("attempts") or 0)
-    if completion_attempt > MAX_PACER_COMPLETION_ATTEMPTS:
-        raise ValueError(
-            _completion_attempts_exhausted_error(
-                attempt=completion_attempt,
-                max_attempts=MAX_PACER_COMPLETION_ATTEMPTS,
-            )
-        )
     task_contract = _load_trusted_pacer_task_contract(
         workspace_root=workspace_root,
         repo_root=repo_root,
         active=active,
     )
+    completion_policy = (
+        task_contract.get("completion_policy")
+        if isinstance(task_contract.get("completion_policy"), dict)
+        else {}
+    )
+    max_attempts = max(
+        1,
+        min(
+            MAX_PACER_COMPLETION_ATTEMPTS,
+            int(completion_policy.get("max_attempts") or MAX_PACER_COMPLETION_ATTEMPTS),
+        ),
+    )
+    completion_control = register_completion_attempt(
+        workspace_root,
+        launch_id=launch_id,
+        max_attempts=max_attempts,
+    )
+    completion_attempt = int(completion_control.get("attempts") or 0)
+    if completion_attempt > max_attempts:
+        raise ValueError(
+            _completion_attempts_exhausted_error(
+                attempt=completion_attempt,
+                max_attempts=max_attempts,
+            )
+        )
     allow_compile_only = task_contract_allows_compile_only(task_contract)
     source_baseline, source_baseline_digest = _load_trusted_task_source_baseline(
         workspace_root=workspace_root,
@@ -3581,7 +3593,7 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
         source_baseline=source_baseline,
     )
     if not bool(preflight_review.get("valid")):
-        retryable = completion_attempt < MAX_PACER_COMPLETION_ATTEMPTS
+        retryable = completion_attempt < max_attempts
         record_completion_rejection(
             workspace_root,
             launch_id=launch_id,
@@ -3593,7 +3605,7 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
                 preflight_review,
                 retryable=retryable,
                 attempt=completion_attempt,
-                max_attempts=MAX_PACER_COMPLETION_ATTEMPTS,
+                max_attempts=max_attempts,
             )
         )
     pinned_args = {
@@ -3660,7 +3672,7 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
         verification=verification,
     )
     if verification_status == "passed" and not bool(task_review.get("valid")):
-        retryable = completion_attempt < MAX_PACER_COMPLETION_ATTEMPTS
+        retryable = completion_attempt < max_attempts
         record_completion_rejection(
             workspace_root,
             launch_id=launch_id,
@@ -3672,7 +3684,7 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
                 task_review,
                 retryable=retryable,
                 attempt=completion_attempt,
-                max_attempts=MAX_PACER_COMPLETION_ATTEMPTS,
+                max_attempts=max_attempts,
             )
         )
     task_review["source_baseline_trust"] = {

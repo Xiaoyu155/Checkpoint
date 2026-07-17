@@ -40,7 +40,7 @@ def _isolate_playwright_browsers_path():
 
 
 @pytest.fixture(autouse=True)
-def _isolate_pacer_runtime_environment(tmp_path, monkeypatch):
+def _isolate_pacer_runtime_environment(monkeypatch):
     """Prevent a host Pacer launch from binding tests to its workspace."""
     for name in (
         "PACER_LAUNCH_ID",
@@ -50,11 +50,6 @@ def _isolate_pacer_runtime_environment(tmp_path, monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
 
-    isolated_home = tmp_path / "home"
-    isolated_home.mkdir()
-    # Path.home() uses HOME on POSIX and USERPROFILE on Windows.
-    monkeypatch.setenv("HOME", str(isolated_home))
-    monkeypatch.setenv("USERPROFILE", str(isolated_home))
     # Temporary Git repositories must not depend on a developer's global config.
     monkeypatch.setenv("GIT_AUTHOR_NAME", "Pacer Test")
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "pacer-test@example.invalid")

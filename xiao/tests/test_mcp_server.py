@@ -2065,6 +2065,33 @@ def test_complete_pacer_task_success_does_not_overclaim_unproven_pillars(tmp_pat
     assert history[-1]["task_review"]["verdict"] == "approved"
 
 
+def test_single_completion_contract_rejects_a_second_attempt(tmp_path, monkeypatch) -> None:
+    from visual_agent.mcp_server import complete_pacer_task_payload
+
+    goal = "Read-only audit. Use exactly one Pacer completion call. Do not retry."
+    workspace, repo = active_completion_context(
+        tmp_path,
+        monkeypatch,
+        launch_id="launch-single-completion",
+        goal=goal,
+    )
+    evidence = completion_evidence(goal)
+    evidence["unresolved_items"] = ["intentional rejection"]
+    args = {
+        "workspace_root": str(workspace),
+        "repo_root": str(repo),
+        "goal": goal,
+        "summary": "audit rejected for protocol test",
+        "completion_evidence": evidence,
+        "steps": [passing_unittest_step(repo)],
+    }
+
+    with pytest.raises(ValueError, match='"retryable":false'):
+        complete_pacer_task_payload(args)
+    with pytest.raises(ValueError, match="completion_attempts_exhausted"):
+        complete_pacer_task_payload(args)
+
+
 def test_complete_pacer_task_accepts_minimal_semantic_claim(tmp_path, monkeypatch) -> None:
     from visual_agent.mcp_server import complete_pacer_task_payload
     from visual_agent.task_review import build_task_contract

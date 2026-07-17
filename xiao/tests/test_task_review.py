@@ -651,6 +651,18 @@ def test_task_contract_classifies_read_only_test_run_and_documentation() -> None
     assert documentation["requirements"][0]["required_artifact_role"] == "documentation"
 
 
+def test_single_completion_policy_is_locked_in_task_contract() -> None:
+    contract = build_task_contract(
+        "Read-only audit. Use exactly one Pacer completion call. Do not retry."
+    )
+
+    assert contract["completion_policy"] == {
+        "schema_version": 1,
+        "max_attempts": 1,
+        "retry_on_rejection": False,
+    }
+
+
 def test_task_contract_keeps_documentation_scope_with_compileall_acceptance() -> None:
     goal = (
         "更新 README.md，增加 Usage 小节，写明 python app.py 启动命令，只修改该文档"

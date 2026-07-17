@@ -258,6 +258,12 @@ def build_task_contract(goal: str, *, repo_root: str | Path | None = None) -> di
         "protected_paths": protected_paths,
         "requirements": requirements[:20],
     }
+    if _goal_requires_single_completion(clean_goal):
+        contract["completion_policy"] = {
+            "schema_version": 1,
+            "max_attempts": 1,
+            "retry_on_rejection": False,
+        }
     acceptance_contract = build_acceptance_contract(
         goal=clean_goal,
         task_contract=contract,
@@ -272,6 +278,14 @@ def build_task_contract(goal: str, *, repo_root: str | Path | None = None) -> di
     )[:20]
     contract["acceptance_contract"] = acceptance_contract
     return contract
+
+
+def _goal_requires_single_completion(goal: str) -> bool:
+    normalized = _normalize_text(goal)
+    return bool(
+        re.search(r"\bexactly\s+one\s+(?:pacer\s+)?completion\s+call\b", normalized)
+        or re.search(r"\bdo\s+not\s+retry\b", normalized)
+    )
 
 
 def _inherit_requirement_artifact_context(requirements: list[dict[str, Any]]) -> None:
