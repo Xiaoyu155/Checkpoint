@@ -1567,6 +1567,87 @@ def test_pacer_memory_binds_trusted_used_ids_to_prior_injection_receipt(tmp_path
         )
 
 
+def test_pacer_memory_ack_rebinds_when_environment_points_to_prelaunch_marker(
+    tmp_path, monkeypatch
+) -> None:
+    from visual_agent.mcp_server import (
+        _PACER_PINNED_LAUNCH_SENTINEL,
+        acknowledge_pacer_memory_use_payload,
+        get_pacer_memory_payload,
+    )
+    from visual_agent.pacer_launch_context import initialize_active_launch, read_active_launch
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workspace = repo / ".agent-workspace"
+    native = workspace / "pacer_native"
+    prelaunch_manifest = native / "launches" / "prelaunch-marker.json"
+    actual_manifest = native / "launches" / "actual-launch.json"
+    prelaunch_manifest.parent.mkdir(parents=True)
+    prelaunch_manifest.write_text("{}", encoding="utf-8")
+    actual_manifest.write_text("{}", encoding="utf-8")
+    initialize_active_launch(
+        workspace_root=workspace,
+        manifest_path=prelaunch_manifest,
+        launch={"launch_id": "prelaunch-marker", "repo_root": str(repo)},
+    )
+    initialize_active_launch(
+        workspace_root=workspace,
+        manifest_path=actual_manifest,
+        launch={"launch_id": "actual-launch", "repo_root": str(repo)},
+    )
+    run_id = "20260715-130000-memory123"
+    (native / "history.jsonl").write_text(
+        json.dumps(
+            {
+                "recorded_at": "2026-07-15T13:00:00+00:00",
+                "repo_root": str(repo.resolve()),
+                "goal": "audit memory retrieval",
+                "summary": "verified memory evidence",
+                "verification": f"run_id={run_id}",
+                "status": "completed",
+                "evidence_level": "verified_batch",
+                "batch_run_id": run_id,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    command_dir = native / "commands" / run_id
+    command_dir.mkdir(parents=True)
+    (command_dir / "summary.json").write_text(
+        json.dumps(trusted_verification_summary(run_id)), encoding="utf-8"
+    )
+
+    monkeypatch.setenv("PACER_LAUNCH_ID", "prelaunch-marker")
+    first = get_pacer_memory_payload(
+        {
+            "workspace_root": str(workspace),
+            "repo_root": str(repo),
+            "goal": "audit memory retrieval",
+            "detail": "full",
+            "_pacer_pinned_launch_id": "actual-launch",
+            "_pacer_pinned_launch_sentinel": _PACER_PINNED_LAUNCH_SENTINEL,
+        }
+    )
+    memory_id = f"pacer-native:{run_id}"
+    assert first["relevance"]["retrieved_memory_ids"] == [memory_id]
+
+    acknowledged = acknowledge_pacer_memory_use_payload(
+        {
+            "workspace_root": str(workspace),
+            "repo_root": str(repo),
+            "known_memory_receipt": first["memory_receipt"],
+            "memory_ids_used": [memory_id],
+            "detail": "full",
+        }
+    )
+
+    assert acknowledged["memory_use"]["used_hit"] is True
+    assert acknowledged["memory_use"]["memory_ids_used"] == [memory_id]
+    assert read_active_launch(workspace, launch_id="actual-launch")["pillars"]["memory"]["used_hit"] is True
+
+
 def test_pacer_native_memory_normalizes_repo_root_and_dot_workspace(tmp_path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()

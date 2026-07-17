@@ -1740,7 +1740,7 @@ def acknowledge_pacer_memory_use_payload(args: dict[str, Any]) -> dict[str, Any]
         # only when every requested ID was actually delivered there.
         from .pacer_launch_context import read_active_launch
 
-        workspace_root, _, launch_id = _resolve_pacer_roots(args)
+        workspace_root, repo_root, launch_id = _resolve_pacer_roots(args)
         active = read_active_launch(workspace_root, launch_id=launch_id)
         cache = active.get("memory_cache") if isinstance(active.get("memory_cache"), dict) else {}
         cached_receipt = str(cache.get("receipt") or "").strip()
@@ -1751,14 +1751,64 @@ def acknowledge_pacer_memory_use_payload(args: dict[str, Any]) -> dict[str, Any]
             if str(item).strip()
         }
         requested = {str(item).strip() for item in raw_ids if str(item).strip()}
-        if not cached_receipt or not requested or not requested <= delivered:
-            raise
-        return get_pacer_memory_payload(
-            {
-                **payload,
-                "known_memory_receipt": cached_receipt,
-            }
-        )
+        if cached_receipt and requested and requested <= delivered:
+            return get_pacer_memory_payload(
+                {
+                    **payload,
+                    "known_memory_receipt": cached_receipt,
+                }
+            )
+
+        # A launcher may leave PACER_LAUNCH_ID pointing at a prelaunch marker
+        # while its real runtime launch has a newer ID. The bootstrap payload
+        # still carries the real launch's receipt, so search only this repo's
+        # launch manifests for an exact receipt and trusted-ID match. Never
+        # accept a receipt or memory ID that is not present in that cache.
+        candidate_ids: list[str] = []
+        for directory in (
+            workspace_root / "pacer_native" / "launches",
+            workspace_root / "pacer_native" / "launch-contexts",
+        ):
+            try:
+                paths = directory.glob("*.json")
+            except OSError:
+                continue
+            for path in paths:
+                candidate_id = path.stem
+                if not candidate_id or candidate_id == launch_id:
+                    continue
+                candidate = read_active_launch(workspace_root, launch_id=candidate_id)
+                candidate_repo = str(
+                    candidate.get("project_root")
+                    or candidate.get("effective_repo_root")
+                    or candidate.get("launch_cwd")
+                    or ""
+                ).strip()
+                if not candidate or os.path.normcase(candidate_repo) != os.path.normcase(str(repo_root)):
+                    continue
+                candidate_cache = candidate.get("memory_cache") if isinstance(candidate.get("memory_cache"), dict) else {}
+                candidate_injection = candidate_cache.get("injection") if isinstance(candidate_cache.get("injection"), dict) else {}
+                candidate_delivered = {
+                    str(item).strip()
+                    for item in (candidate_injection.get("memory_ids") or [])
+                    if str(item).strip()
+                }
+                if (
+                    str(candidate_cache.get("receipt") or "").strip() == receipt
+                    and requested
+                    and requested <= candidate_delivered
+                    and candidate_id not in candidate_ids
+                ):
+                    candidate_ids.append(candidate_id)
+        if len(candidate_ids) == 1:
+            return get_pacer_memory_payload(
+                {
+                    **payload,
+                    "_pacer_pinned_launch_id": candidate_ids[0],
+                    "_pacer_pinned_launch_sentinel": _PACER_PINNED_LAUNCH_SENTINEL,
+                }
+            )
+        raise
 
 
 def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
