@@ -1899,14 +1899,31 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
         view_digest=view_digest,
     )
     cached = active.get("memory_cache") if isinstance(active.get("memory_cache"), dict) else {}
+    cached_receipt = str(cached.get("receipt") or "")
+    cached_source_matches = str(cached.get("source_digest") or "") == source_digest
+    cached_repo_matches = os.path.normcase(str(cached.get("repo_root") or "")) == os.path.normcase(
+        str(repo_root)
+    )
+    acknowledges_cached_delivery = bool(
+        requested_used_ids
+        and known_receipt
+        and known_receipt == cached_receipt
+        and cached_source_matches
+        and cached_repo_matches
+    )
+    if acknowledges_cached_delivery:
+        # Memory-use acknowledgement is bound to the exact view that was
+        # delivered, even when the acknowledgement response asks for a
+        # different detail level than the bootstrap response.
+        receipt = cached_receipt
     can_reuse = bool(
         launch_id
         and known_receipt
         and known_receipt == receipt
-        and str(cached.get("receipt") or "") == receipt
-        and str(cached.get("source_digest") or "") == source_digest
-        and str(cached.get("view_digest") or "") == view_digest
-        and os.path.normcase(str(cached.get("repo_root") or "")) == os.path.normcase(str(repo_root))
+        and cached_receipt == receipt
+        and cached_source_matches
+        and (acknowledges_cached_delivery or str(cached.get("view_digest") or "") == view_digest)
+        and cached_repo_matches
     )
     if requested_used_ids and not can_reuse:
         raise ValueError("memory_ids_used requires a matching known_memory_receipt from this launch")

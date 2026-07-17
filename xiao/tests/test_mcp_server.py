@@ -1625,7 +1625,7 @@ def test_pacer_memory_ack_rebinds_when_environment_points_to_prelaunch_marker(
             "workspace_root": str(workspace),
             "repo_root": str(repo),
             "goal": "audit memory retrieval",
-            "detail": "full",
+            "detail": "compact",
             "_pacer_pinned_launch_id": "actual-launch",
             "_pacer_pinned_launch_sentinel": _PACER_PINNED_LAUNCH_SENTINEL,
         }
