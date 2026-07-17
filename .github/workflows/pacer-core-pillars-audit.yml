@@ -106,7 +106,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$RUNNER_TEMP/venv-a/bin:$PATH"
-          export PACER_PILLAR_TASK="Audit the ${PILLAR} Pacer core pillar with maximum worker autonomy in this isolated runner. Inspect the repository freely, use the required Pacer MCP, and report the actual evidence without inventing a product verdict. Run the exact focused test command ${PILLAR_TEST_COMMAND} and exact static analysis command ${PILLAR_ANALYSIS_COMMAND} in one final completion call. Call complete_pacer_task exactly once with exactly two steps named targeted-tests and targeted-analysis using argv arrays for those commands. Pacer derives classes from argv; never send kind, result_kind, requirement, files, command, or env fields. Submit one claim per locked requirement. A requirement about tests must bind only to targeted-tests; a requirement about analysis must bind only to targeted-analysis; never bind an analysis claim to targeted-tests. Start every result with the exact locked requirement text followed by its concrete completed result. When both commands pass, use unresolved_items [] and put only genuine observed limitations in known_risks. Do not retry the completion call."
+          export PACER_PILLAR_TASK="Audit the ${PILLAR} Pacer core pillar with maximum worker autonomy in this isolated runner. Inspect the repository freely, use the required Pacer MCP, and write the actual audit report only to audit-output/${PILLAR}.md. Do not change product source, tests, manifests, or workflows, and do not commit; that one report file is the only permitted write. Run the exact focused test command ${PILLAR_TEST_COMMAND} and exact static analysis command ${PILLAR_ANALYSIS_COMMAND} in one final completion call. Call complete_pacer_task exactly once with exactly two steps named targeted-tests and targeted-analysis using argv arrays for those commands. Pacer derives classes from argv; never send kind, result_kind, requirement, files, command, or env fields. Submit one claim per locked requirement. A requirement about tests must bind only to targeted-tests; a requirement about analysis must bind only to targeted-analysis; never bind an analysis claim to targeted-tests. Start every result with the exact locked requirement text followed by its concrete completed result. When both commands pass, use unresolved_items [] and put only genuine observed limitations in known_risks. Do not retry the completion call."
           pacer \
             --ask-for-approval never \
             --sandbox danger-full-access \
@@ -120,12 +120,16 @@ jobs:
             -c "model_providers.$PACER_PROVIDER_ID.wire_api='responses'" \
             "$PACER_PILLAR_TASK" | tee "$RUNNER_TEMP/pacer-${PILLAR}-rollout.txt"
 
-      - name: Verify the audit stayed read-only
+      - name: Verify audit file scope and source integrity
         shell: bash
+        env:
+          PILLAR: ${{ matrix.pillar }}
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PACER_NESTED_BASELINE"
           git diff --exit-code HEAD -- .
-          test -z "$(git status --porcelain)"
+          test -f "audit-output/${PILLAR}.md"
+          test "$(git status --porcelain)" = "?? audit-output/${PILLAR}.md"
 
       - name: Build pillar and freedom audit report
         id: audit
@@ -206,6 +210,7 @@ jobs:
           name: pacer-core-pillars-audit-${{ matrix.pillar }}
           path: |
             xiao/.dogfood/pillar-audit/**
+            xiao/audit-output/**
             xiao/.agent-workspace/pacer_native/active_launch.json
             xiao/.agent-workspace/pacer_native/history.jsonl
             ${{ runner.temp }}/pacer-${{ matrix.pillar }}-rollout.txt
