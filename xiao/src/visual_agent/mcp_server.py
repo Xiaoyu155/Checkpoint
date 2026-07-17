@@ -2518,10 +2518,34 @@ def get_pacer_runtime_telemetry_payload(args: dict[str, Any]) -> dict[str, Any]:
         try:
             from .dynamic_model_selector import select_model_for_task, selection_to_dict
 
+            configured_pool = str(os.environ.get("PACER_AUDIT_MODEL_POOL") or "").strip()
+            if not configured_pool:
+                runtime_pool = workspace_root / "pacer_native" / "runtime-model-pool.json"
+                runtime_pool.parent.mkdir(parents=True, exist_ok=True)
+                runtime_pool.write_text(
+                    json.dumps(
+                        {
+                            "models": [
+                                {
+                                    "id": f"runtime-{provider}-{model}",
+                                    "provider": provider,
+                                    "model": model,
+                                    "capability": 1.0,
+                                    "cost": 0.1,
+                                    "latency": 0.1,
+                                    "reliability": 1.0,
+                                    "modes": ["cheap", "standard", "strong"],
+                                }
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                configured_pool = str(runtime_pool)
             selection = select_model_for_task(
                 objective=str(active.get("launch_goal") or "Pacer runtime audit"),
                 workspace_root=workspace_root,
-                config_path=(os.environ.get("PACER_AUDIT_MODEL_POOL") or None),
+                config_path=configured_pool,
             )
             if selection.selected is not None:
                 routing_decision = selection_to_dict(selection)
