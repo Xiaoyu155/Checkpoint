@@ -8,7 +8,9 @@ only enabled when credentials are present.
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -256,7 +258,7 @@ def record_quota_failure(agent: str, *, store_path: Path | None = None) -> None:
     except (OSError, ValueError):
         data = {}
     data[agent.lower()] = time.time()
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _write_quota_failure_store(path, data)
 
 
 def has_recent_quota_failure(agent: str, *, store_path: Path | None = None) -> bool:
@@ -275,12 +277,38 @@ def has_recent_quota_failure(agent: str, *, store_path: Path | None = None) -> b
 def clear_quota_failure(agent: str, *, store_path: Path | None = None) -> None:
     """Clear a recorded quota failure (e.g., after a successful run)."""
     path = store_path or _QUOTA_FAILURE_STORE
+    if not path.exists():
+        return
     try:
-        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
     data.pop(agent.lower(), None)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _write_quota_failure_store(path, data)
+
+
+def _write_quota_failure_store(path: Path, data: dict[str, Any]) -> None:
+    """Persist quota state even when a clean install lost its state directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def get_available_agents(*, store_path: Path | None = None) -> list[str]:
