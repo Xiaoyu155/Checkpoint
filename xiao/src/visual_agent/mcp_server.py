@@ -1721,8 +1721,20 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
     limit = max(1, min(20, int(args.get("limit") or 8)))
     detail = str(args.get("detail") or "compact")
     memory_budget = max(1000, min(20000, int(args.get("memory_budget_chars") or 6000)))
-    known_receipt = str(args.get("known_memory_receipt") or "").strip()
-    requested_used_ids = _normalized_memory_ids_used(args.get("memory_ids_used"))
+    known_receipt = str(
+        args.get("known_memory_receipt")
+        or args.get("memory_receipt")
+        or args.get("receipt")
+        or ""
+    ).strip()
+    raw_used_ids = args.get("memory_ids_used")
+    if raw_used_ids is None:
+        raw_used_ids = args.get("memory_ids")
+    if raw_used_ids is None:
+        raw_used_ids = args.get("memory_id")
+    if isinstance(raw_used_ids, str):
+        raw_used_ids = [raw_used_ids]
+    requested_used_ids = _normalized_memory_ids_used(raw_used_ids)
     launch_id = str(active.get("launch_id") or launch_id)
     memory_goal_digest = _pacer_goal_digest(memory_goal)
     query_goal_digest = _pacer_goal_digest(query_goal)
@@ -2509,6 +2521,7 @@ def get_pacer_runtime_telemetry_payload(args: dict[str, Any]) -> dict[str, Any]:
             selection = select_model_for_task(
                 objective=str(active.get("launch_goal") or "Pacer runtime audit"),
                 workspace_root=workspace_root,
+                config_path=(os.environ.get("PACER_AUDIT_MODEL_POOL") or None),
             )
             if selection.selected is not None:
                 routing_decision = selection_to_dict(selection)

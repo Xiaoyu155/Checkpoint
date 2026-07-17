@@ -145,7 +145,6 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$RUNNER_TEMP/venv-a/bin:$PATH"
-          export CHECKPOINT_MODEL_POOL="$PACER_AUDIT_MODEL_POOL"
           memory_instruction=""
           if [[ "$PILLAR" == "memory" ]]; then
             memory_instruction="Read-only memory protocol step-1: call get_pacer_memory with {detail:full}. Read-only memory protocol step-2 required before completion: call get_pacer_memory with {known_memory_receipt:<receipt from step-1>,memory_ids_used:[<ID from step-1>]}. Treat the memory pillar as used only when the response reports used_hit=true."
