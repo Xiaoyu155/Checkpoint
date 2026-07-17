@@ -3226,12 +3226,19 @@ def _apply_toolchain_policy_env(env: dict[str, str] | None, policy: dict[str, An
     if base_path and forbidden_dirs:
         normalized_forbidden = {_normalize_toolchain_text(item).rstrip("/") for item in forbidden_dirs}
         kept_parts: list[str] = []
-        for part in base_path.split(os.pathsep):
+        path_parts = base_path.split(os.pathsep)
+        # Verification commands may carry a Windows toolchain PATH even when
+        # the audit itself runs on Linux. Keep synthetic cross-platform
+        # environments testable without changing native PATH semantics.
+        if os.pathsep != ";" and ";" in base_path:
+            path_parts = [item for part in path_parts for item in part.split(";")]
+        for part in path_parts:
             normalized_part = _normalize_toolchain_text(part).rstrip("/")
             if normalized_part and normalized_part in normalized_forbidden:
                 continue
             kept_parts.append(part)
-        merged["PATH"] = os.pathsep.join(kept_parts)
+        joiner = ";" if os.pathsep != ";" and ";" in base_path else os.pathsep
+        merged["PATH"] = joiner.join(kept_parts)
         merged.pop("Path", None)
     merged["DEVPACER_TOOLCHAIN_POLICY"] = str(policy.get("kind") or "active")
     merged["DEVPACER_EXPECTED_DART_EXE"] = str(policy.get("expected_executable") or "")

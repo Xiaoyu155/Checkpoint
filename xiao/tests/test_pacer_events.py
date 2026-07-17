@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
+
+import pytest
 
 from visual_agent.pacer_events import append_pacer_event, list_pacer_events
 
@@ -50,6 +53,7 @@ def test_events_with_identical_timestamps_keep_append_order(tmp_path, monkeypatc
     assert [event["type"] for event in events] == ["launch_started", "launch_finished"]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows ctypes process probing requires Windows")
 def test_windows_access_denied_process_probe_means_process_exists(monkeypatch) -> None:
     import ctypes
 

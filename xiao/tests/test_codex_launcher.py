@@ -288,14 +288,15 @@ def test_launch_binds_relative_sibling_without_changing_process_cwd(
         lambda **kwargs: watchdog_calls.append(kwargs),
     )
 
+    relative_source = os.path.join("..", "source-project")
     assert codex_launcher.launch_codex(
-        ["-C", r"..\source-project", "exec", "检查项目"],
+        ["-C", relative_source, "exec", "检查项目"],
         cwd=process_cwd,
     ) == 0
 
     command, options = calls[0]
     cd_index = command.index("-C")
-    assert command[cd_index : cd_index + 2] == ["-C", r"..\source-project"]
+    assert command[cd_index : cd_index + 2] == ["-C", relative_source]
     assert options["cwd"] == str(process_cwd.resolve())
     assert runtime_roots == [repo.resolve()]
     assert baseline_calls[0]["workspace_root"] == repo.resolve() / ".agent-workspace"
