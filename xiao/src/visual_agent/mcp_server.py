@@ -2498,6 +2498,27 @@ def get_pacer_runtime_telemetry_payload(args: dict[str, Any]) -> dict[str, Any]:
         if isinstance(active.get("routing_decision"), dict)
         else {}
     )
+    if not routing_decision and provider and model:
+        # Standalone Pacer launches do not pass through chief_dispatch, but the
+        # runtime still needs a policy decision to prove routing. Resolve one
+        # through the same selector used by dispatch when a model pool is
+        # available, then bind it to this launch before comparing identities.
+        try:
+            from .dynamic_model_selector import select_model_for_task, selection_to_dict
+
+            selection = select_model_for_task(
+                objective=str(active.get("launch_goal") or "Pacer runtime audit"),
+                workspace_root=workspace_root,
+            )
+            if selection.selected is not None:
+                routing_decision = selection_to_dict(selection)
+                active = update_active_launch(
+                    workspace_root,
+                    expected_launch_id=launch_id,
+                    routing_decision=routing_decision,
+                )
+        except (OSError, TypeError, ValueError):
+            routing_decision = {}
     selected = (
         routing_decision.get("selected")
         if isinstance(routing_decision.get("selected"), dict)
