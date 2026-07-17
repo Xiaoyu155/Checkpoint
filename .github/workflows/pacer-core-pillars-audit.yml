@@ -106,7 +106,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$RUNNER_TEMP/venv-a/bin:$PATH"
-          export PACER_PILLAR_TASK="Audit the ${PILLAR} Pacer core pillar with maximum worker autonomy in this isolated runner. You may inspect the repository freely, use the required Pacer MCP, and run any additional read-only probes needed to understand the actual implementation. Do not modify source files, tests, manifests, workflows, or commit. Do not fabricate a passed pillar: report missing, partial, or indeterminate evidence honestly. The required focused test command is: ${PILLAR_TEST_COMMAND}. The required static analysis command is: ${PILLAR_ANALYSIS_COMMAND}. Call complete_pacer_task exactly once with exactly two final steps named targeted-tests and targeted-analysis using argv arrays that represent those two commands. Pacer derives test and analyze classes from argv; do not send kind, result_kind, requirement, files, command, or env fields. Bind each locked requirement to the relevant final step, quote the exact locked requirement text in each result, and use unresolved_items [] and known_risks [] only when the evidence truly supports that conclusion. The worker approval mode is never and the sandbox is danger-full-access because this is an ephemeral disposable audit runner."
+          export PACER_PILLAR_TASK="Audit the ${PILLAR} Pacer core pillar with maximum worker autonomy in this isolated runner. Inspect the repository freely, use the required Pacer MCP, and report the actual evidence without inventing a product verdict. Run the exact focused test command ${PILLAR_TEST_COMMAND} and exact static analysis command ${PILLAR_ANALYSIS_COMMAND} in one final completion call. Call complete_pacer_task exactly once with exactly two steps named targeted-tests and targeted-analysis using argv arrays for those commands. Pacer derives classes from argv; never send kind, result_kind, requirement, files, command, or env fields. Submit one claim per locked requirement. A requirement about tests must bind only to targeted-tests; a requirement about analysis must bind only to targeted-analysis; never bind an analysis claim to targeted-tests. Start every result with the exact locked requirement text followed by its concrete completed result. When both commands pass, use unresolved_items [] and put only genuine observed limitations in known_risks. Do not retry the completion call."
           pacer \
             --ask-for-approval never \
             --sandbox danger-full-access \
@@ -119,6 +119,13 @@ jobs:
             -c "model_providers.$PACER_PROVIDER_ID.env_key='PACER_PROVIDER_API_KEY'" \
             -c "model_providers.$PACER_PROVIDER_ID.wire_api='responses'" \
             "$PACER_PILLAR_TASK" | tee "$RUNNER_TEMP/pacer-${PILLAR}-rollout.txt"
+
+      - name: Verify the audit stayed read-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code HEAD -- .
+          test -z "$(git status --porcelain)"
 
       - name: Build pillar and freedom audit report
         id: audit
@@ -147,7 +154,7 @@ jobs:
               json.loads(line)
               for line in history_path.read_text(encoding="utf-8").splitlines()
               if line.strip()
-          ]
+          ] if history_path.is_file() else []
           record = next(
               (item for item in reversed(records) if str(item.get("launch_id") or "") == launch_id),
               {},
@@ -182,12 +189,14 @@ jobs:
               "pillar_evidence": pillar_evidence,
               "assessment": assessment,
               "freedom": freedom,
+              "history_available": history_path.is_file(),
           }
           output = Path(".dogfood/pillar-audit") / f"{pillar_name}-audit.json"
           output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-          print(json.dumps({"pillar": pillar_name, "passed": assessment["passed"], "status": assessment["status"]}))
+          passed = bool(assessment["passed"] and history_path.is_file() and review.get("trust") == "yes")
+          print(json.dumps({"pillar": pillar_name, "passed": passed, "status": assessment["status"]}))
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as handle:
-              handle.write(f"passed={str(assessment['passed']).lower()}\n")
+              handle.write(f"passed={str(passed).lower()}\n")
           PY
 
       - name: Upload pillar freedom audit artifacts
@@ -201,6 +210,7 @@ jobs:
             xiao/.agent-workspace/pacer_native/history.jsonl
             ${{ runner.temp }}/pacer-${{ matrix.pillar }}-rollout.txt
           if-no-files-found: error
+          include-hidden-files: true
           retention-days: 30
 
       - name: Enforce target pillar assessment

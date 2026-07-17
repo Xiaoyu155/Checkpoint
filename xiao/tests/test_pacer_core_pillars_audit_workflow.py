@@ -18,6 +18,7 @@ def test_core_pillar_audit_grants_isolated_codex_freedom_without_release_gate_by
     assert "--sandbox danger-full-access" in workflow
     assert "required = true" in workflow
     assert "Call complete_pacer_task exactly once" in workflow
-    assert "Do not modify source files, tests, manifests, workflows, or commit" in workflow
+    assert "Verify the audit stayed read-only" in workflow
+    assert "git diff --exit-code HEAD -- ." in workflow
     assert "pacer-core-pillars-audit-${{ matrix.pillar }}" in workflow
     assert "uses: actions/attest-build-provenance" not in workflow
