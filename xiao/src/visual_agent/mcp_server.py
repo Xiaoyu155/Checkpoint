@@ -1726,14 +1726,39 @@ def acknowledge_pacer_memory_use_payload(args: dict[str, Any]) -> dict[str, Any]
         raise ValueError("known_memory_receipt is required")
     if not isinstance(raw_ids, list) or not raw_ids:
         raise ValueError("memory_ids_used must contain at least one trusted memory ID")
-    return get_pacer_memory_payload(
-        {
-            **args,
-            "detail": "full",
-            "known_memory_receipt": receipt,
-            "memory_ids_used": raw_ids,
+    payload = {
+        **args,
+        "detail": "full",
+        "known_memory_receipt": receipt,
+        "memory_ids_used": raw_ids,
+    }
+    try:
+        return get_pacer_memory_payload(payload)
+    except ValueError:
+        # Codex launchers may expose a bootstrap receipt that was produced by
+        # an earlier memory view. Rebind only to the current launch cache and
+        # only when every requested ID was actually delivered there.
+        from .pacer_launch_context import read_active_launch
+
+        workspace_root, _, launch_id = _resolve_pacer_roots(args)
+        active = read_active_launch(workspace_root, launch_id=launch_id)
+        cache = active.get("memory_cache") if isinstance(active.get("memory_cache"), dict) else {}
+        cached_receipt = str(cache.get("receipt") or "").strip()
+        injection = cache.get("injection") if isinstance(cache.get("injection"), dict) else {}
+        delivered = {
+            str(item).strip()
+            for item in (injection.get("memory_ids") or [])
+            if str(item).strip()
         }
-    )
+        requested = {str(item).strip() for item in raw_ids if str(item).strip()}
+        if not cached_receipt or not requested or not requested <= delivered:
+            raise
+        return get_pacer_memory_payload(
+            {
+                **payload,
+                "known_memory_receipt": cached_receipt,
+            }
+        )
 
 
 def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
