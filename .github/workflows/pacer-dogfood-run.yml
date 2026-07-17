@@ -132,6 +132,10 @@ jobs:
             targeted-analysis, and bind every other requirement to the relevant one of those two
             steps. Begin every claim result by repeating that claim's exact locked requirement text,
             then append the concrete completed or passed result so the semantic binding is exact.
+            Binding rule is strict: any locked requirement containing pytest, test, or targeted-tests
+            must use targeted-tests only; any locked requirement containing ruff, analyze, or
+            targeted-analysis must use targeted-analysis only. Never bind a test claim to
+            targeted-analysis or an analysis claim to targeted-tests.
             If the patch is exact and both steps pass, submit unresolved_items [] and known_risks
             []; the absent ignored .visual-agent-status.md file and product pillars outside this
             bounded task are not unfinished work or risks of this task.
