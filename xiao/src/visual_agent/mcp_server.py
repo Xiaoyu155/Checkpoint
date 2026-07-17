@@ -2519,7 +2519,7 @@ def get_pacer_runtime_telemetry_payload(args: dict[str, Any]) -> dict[str, Any]:
             from .dynamic_model_selector import select_model_for_task, selection_to_dict
 
             configured_pool = str(os.environ.get("PACER_AUDIT_MODEL_POOL") or "").strip()
-            if not configured_pool:
+            if not configured_pool or not Path(configured_pool).is_file():
                 runtime_pool = workspace_root / "pacer_native" / "runtime-model-pool.json"
                 runtime_pool.parent.mkdir(parents=True, exist_ok=True)
                 runtime_pool.write_text(
