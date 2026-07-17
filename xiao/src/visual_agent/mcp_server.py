@@ -2510,7 +2510,11 @@ def get_pacer_runtime_telemetry_payload(args: dict[str, Any]) -> dict[str, Any]:
         if isinstance(active.get("routing_decision"), dict)
         else {}
     )
-    if not routing_decision and provider and model:
+    has_policy_decision = bool(
+        str(routing_decision.get("decision_id") or "")
+        and isinstance(routing_decision.get("selected"), dict)
+    )
+    if not has_policy_decision and provider and model:
         # Standalone Pacer launches do not pass through chief_dispatch, but the
         # runtime still needs a policy decision to prove routing. Resolve one
         # through the same selector used by dispatch when a model pool is
@@ -2556,7 +2560,7 @@ def get_pacer_runtime_telemetry_payload(args: dict[str, Any]) -> dict[str, Any]:
                 )
         except (OSError, TypeError, ValueError):
             routing_decision = {}
-    if not routing_decision and provider and model:
+    if not has_policy_decision and provider and model:
         # A standalone launch has no chief_dispatch selection record. Bind a
         # deterministic runtime-owned decision so the policy/request/runtime
         # identity chain remains auditable without claiming a different model.

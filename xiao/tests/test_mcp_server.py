@@ -3205,6 +3205,7 @@ def test_five_pillars_require_current_launch_verified_closed_loop(tmp_path, monk
     )
     runtime = get_pacer_runtime_telemetry_payload({"workspace_root": str(workspace), "repo_root": str(repo)})
     assert runtime["pillars"]["routing"]["active"] is True
+    assert runtime["pillars"]["routing"]["assessment"]["status"] == "passed"
     step = passing_unittest_step(repo)
     outcome = complete_pacer_task_payload({
         "workspace_root": str(workspace),
