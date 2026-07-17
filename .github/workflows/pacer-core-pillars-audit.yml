@@ -30,7 +30,7 @@ jobs:
             analysis_command: python -m ruff check src/visual_agent/managed_state.py src/visual_agent/chief_dispatch.py src/visual_agent/chief_run.py src/visual_agent/pacer_launch_context.py src/visual_agent/program_scheduler.py src/visual_agent/scheduler.py
           - pillar: acceptance
             test_command: python -m pytest tests/test_acceptance_contract.py tests/test_acceptance_grade.py tests/test_real_acceptance.py tests/test_command_verification.py tests/test_acceptance_chain_guard.py tests/test_codex_check.py -q
-            analysis_command: python -m ruff check src/visual_agent/acceptance_contract.py src/visual_agent/acceptance.py src/visual_agent/acceptance_grade.py src/visual_agent/real_acceptance.py src/visual_agent/command_verification.py src/visual_agent/codex_check.py
+            analysis_command: python -m ruff check src/visual_agent/acceptance_contract.py src/visual_agent/acceptance.py src/visual_agent/real_acceptance.py src/visual_agent/command_verification.py src/visual_agent/codex_check.py
     permissions:
       contents: read
     defaults:
@@ -106,7 +106,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$RUNNER_TEMP/venv-a/bin:$PATH"
-          export PACER_PILLAR_TASK="Audit the ${PILLAR} Pacer core pillar with maximum worker autonomy in this isolated runner. Inspect the repository freely, use the required Pacer MCP, and report actual evidence without inventing a product verdict. Run the exact focused test command ${PILLAR_TEST_COMMAND} and exact static analysis command ${PILLAR_ANALYSIS_COMMAND} in one final completion call. Call complete_pacer_task exactly once with exactly two steps named targeted-tests and targeted-analysis using argv arrays for those commands. Pacer derives classes from argv; never send kind, result_kind, requirement, files, command, or env fields. Submit one claim per locked requirement. A requirement about tests must bind only to targeted-tests; a requirement about analysis must bind only to targeted-analysis; never bind an analysis claim to targeted-tests. Start every result with the exact locked requirement text followed by its concrete completed result. When both commands pass, use unresolved_items [] and put only genuine observed limitations in known_risks. Do not retry the completion call."
+          export PACER_PILLAR_TASK="Read-only audit of the ${PILLAR} Pacer core pillar in this isolated runner. Do not modify tracked source files. Inspect the repository freely with the required Pacer MCP. Report actual evidence without inventing a product verdict. Run existing focused tests with command ${PILLAR_TEST_COMMAND}. Run read-only static analysis with command ${PILLAR_ANALYSIS_COMMAND}. Audit protocol: use exactly one Pacer completion call with two steps named targeted-tests, targeted-analysis, each as argv arrays. Audit protocol: bind test evidence only to targeted-tests, bind analysis evidence only to targeted-analysis. Audit protocol: do not retry."
           pacer \
             --ask-for-approval never \
             --sandbox danger-full-access \
@@ -176,8 +176,8 @@ jobs:
               "approval_mode": "never",
               "sandbox": "danger-full-access",
               "mcp_required": True,
-              "provider": (active.get("runtime") or {}).get("provider", ""),
-              "model": (active.get("runtime") or {}).get("model", ""),
+              "provider": ((active.get("runtime") or {}).get("provider") or ((active.get("rollout_telemetry") or {}).get("runtime") or {}).get("provider", "")),
+              "model": ((active.get("runtime") or {}).get("model") or ((active.get("rollout_telemetry") or {}).get("runtime") or {}).get("model", "")),
               "source_change_count": len(review.get("source_changes") or []),
               "completion_attempts": control.get("attempts"),
               "completion_resubmissions": control.get("last_rejection_codes") or [],

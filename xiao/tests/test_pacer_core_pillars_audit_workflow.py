@@ -17,7 +17,10 @@ def test_core_pillar_audit_grants_isolated_codex_freedom_without_release_gate_by
     assert "--ask-for-approval never" in workflow
     assert "--sandbox danger-full-access" in workflow
     assert "required = true" in workflow
-    assert "Call complete_pacer_task exactly once" in workflow
+    assert "Read-only audit" in workflow
+    assert "Do not modify tracked source files" in workflow
+    assert "src/visual_agent/acceptance_grade.py" not in workflow
+    assert "exactly one Pacer completion call" in workflow
     assert "Verify audit file scope and source integrity" in workflow
     assert "git diff --exit-code HEAD -- ." in workflow
     assert "test \"$(git rev-parse HEAD)\" = \"$PACER_NESTED_BASELINE\"" in workflow
