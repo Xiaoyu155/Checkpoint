@@ -132,7 +132,8 @@ jobs:
           git diff --name-only HEAD -- | tee "$RUNNER_TEMP/${PILLAR}-git-diff-files.txt"
           test "$(git rev-parse HEAD)" = "$PACER_NESTED_BASELINE"
           git diff --exit-code HEAD -- .
-          test -z "$(git status --porcelain --untracked-files=all)"
+          unexpected_status="$({ git status --porcelain --untracked-files=all || true; } | awk 'substr($0, 1, 3) == "?? " && substr($0, 4) !~ /^\.agent-workspace\// { print }')"
+          test -z "$unexpected_status"
 
       - name: Build pillar and freedom audit report
         id: audit

@@ -22,5 +22,6 @@ def test_core_pillar_audit_grants_isolated_codex_freedom_without_release_gate_by
     assert "git diff --exit-code HEAD -- ." in workflow
     assert "test \"$(git rev-parse HEAD)\" = \"$PACER_NESTED_BASELINE\"" in workflow
     assert "git status --porcelain --untracked-files=all" in workflow
+    assert "^\\.agent-workspace\\/" in workflow
     assert "pacer-core-pillars-audit-${{ matrix.pillar }}" in workflow
     assert "uses: actions/attest-build-provenance" not in workflow
