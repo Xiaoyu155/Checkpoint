@@ -133,7 +133,6 @@ jobs:
             --model-pool "$model_pool"
           {
             echo "PACER_LAUNCH_ID=$launch_id"
-            echo "CHECKPOINT_MODEL_POOL=$model_pool"
           } >> "$GITHUB_ENV"
 
       - name: Run Codex with maximum isolated worker freedom
@@ -147,7 +146,7 @@ jobs:
           export PATH="$RUNNER_TEMP/venv-a/bin:$PATH"
           memory_instruction=""
           if [[ "$PILLAR" == "memory" ]]; then
-            memory_instruction="Before running the tests, call the required Pacer get_pacer_memory tool with detail=full. Use the returned trusted relevant memory in the audit, then call get_pacer_memory again with the returned memory_receipt and the exact retrieved memory ID in memory_ids_used so the evidence records retrieval, injection, and trusted use."
+            memory_instruction="Read-only get_pacer_memory detail=full; read-only get_pacer_memory known_memory_receipt=<memory_receipt> memory_ids_used=[<memory_id>]."
           fi
           export PACER_PILLAR_TASK="Read-only audit of the ${PILLAR} Pacer core pillar in this isolated runner. Do not modify tracked source files. Inspect the repository freely with the required Pacer MCP. Report actual evidence without inventing a product verdict. ${memory_instruction} Run existing focused tests with command ${PILLAR_TEST_COMMAND}. Run read-only static analysis with command ${PILLAR_ANALYSIS_COMMAND}. The optional .visual-agent-status.md file is outside this audit scope. Its absence is not unfinished work and must not be listed in unresolved_items or known_risks. When both commands pass, unresolved_items must be empty. Audit protocol: use exactly one Pacer completion call with two steps named targeted-tests, targeted-analysis, each as argv arrays. Audit protocol: bind test evidence only to targeted-tests, bind analysis evidence only to targeted-analysis. Audit protocol: do not retry."
           pacer \
