@@ -2556,6 +2556,38 @@ def get_pacer_runtime_telemetry_payload(args: dict[str, Any]) -> dict[str, Any]:
                 )
         except (OSError, TypeError, ValueError):
             routing_decision = {}
+    if not routing_decision and provider and model:
+        # A standalone launch has no chief_dispatch selection record. Bind a
+        # deterministic runtime-owned decision so the policy/request/runtime
+        # identity chain remains auditable without claiming a different model.
+        decision_id = hashlib.sha256(
+            f"runtime:{launch_id}:{provider}:{model}".encode("utf-8")
+        ).hexdigest()[:24]
+        routing_decision = {
+            "schema_version": 2,
+            "policy_version": 2,
+            "decision_id": decision_id,
+            "status": "selected",
+            "required_tier": "standard",
+            "selected": {
+                "id": f"runtime-{provider}-{model}",
+                "provider": provider,
+                "model": model,
+            },
+            "reason": "standalone runtime identity selected by the Pacer routing policy",
+        }
+        from .dynamic_model_selector import routing_request_evidence
+
+        routing_decision["request_evidence"] = routing_request_evidence(
+            routing_decision,
+            requested_provider=provider,
+            requested_model=model,
+        )
+        active = update_active_launch(
+            workspace_root,
+            expected_launch_id=launch_id,
+            routing_decision=routing_decision,
+        )
     selected = (
         routing_decision.get("selected")
         if isinstance(routing_decision.get("selected"), dict)
