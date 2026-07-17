@@ -58,7 +58,7 @@ def test_dogfood_producer_keeps_provider_secrets_out_of_reusable_verifier() -> N
     assert "Call complete_pacer_task exactly once" in workflow
     assert "name targeted-tests with argv [python, -m," in workflow
     assert "name targeted-analysis with argv [python, -m, ruff, check," in workflow
-    assert "Pacer derives the test and analyze classes from argv" in workflow
+    assert "Pacer derives step classes from argv, with analyze" in workflow
     assert "repeating that claim's exact locked requirement text" in workflow
     assert "submit unresolved_items [] and known_risks" in workflow
     assert "Do not add or run any other verification step" in workflow

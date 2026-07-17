@@ -125,7 +125,8 @@ jobs:
             pytest, tests/test_dogfood_provider_check.py, tests/test_pacer_quality_cli.py, -q], and
             name targeted-analysis with argv [python, -m, ruff, check,
             src/visual_agent/dogfood_provider_check.py, tests/test_dogfood_provider_check.py,
-            tests/test_pacer_quality_cli.py]. Pacer derives the test and analyze classes from argv;
+            tests/test_pacer_quality_cli.py]. Pacer derives step classes from argv, with analyze
+            semantics;
             do not send kind, result_kind, requirement, files, command, or env fields. Use a
             separate completion-evidence claim for each locked requirement: bind a test-run or test
             requirement only to targeted-tests, bind an analysis requirement only to
