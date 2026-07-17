@@ -106,7 +106,7 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$RUNNER_TEMP/venv-a/bin:$PATH"
-          export PACER_PILLAR_TASK="Read-only audit of the ${PILLAR} Pacer core pillar in this isolated runner. Do not modify tracked source files. Inspect the repository freely with the required Pacer MCP. Report actual evidence without inventing a product verdict. Run existing focused tests with command ${PILLAR_TEST_COMMAND}. Run read-only static analysis with command ${PILLAR_ANALYSIS_COMMAND}. Audit protocol: use exactly one Pacer completion call with two steps named targeted-tests, targeted-analysis, each as argv arrays. Audit protocol: bind test evidence only to targeted-tests, bind analysis evidence only to targeted-analysis. Audit protocol: do not retry."
+          export PACER_PILLAR_TASK="Read-only audit of the ${PILLAR} Pacer core pillar in this isolated runner. Do not modify tracked source files. Inspect the repository freely with the required Pacer MCP. Report actual evidence without inventing a product verdict. Run existing focused tests with command ${PILLAR_TEST_COMMAND}. Run read-only static analysis with command ${PILLAR_ANALYSIS_COMMAND}. The optional .visual-agent-status.md file is outside this audit scope; its absence is not unfinished work and must not be listed in unresolved_items or known_risks. When both commands pass, unresolved_items must be empty. Audit protocol: use exactly one Pacer completion call with two steps named targeted-tests, targeted-analysis, each as argv arrays. Audit protocol: bind test evidence only to targeted-tests, bind analysis evidence only to targeted-analysis. Audit protocol: do not retry."
           pacer \
             --ask-for-approval never \
             --sandbox danger-full-access \
