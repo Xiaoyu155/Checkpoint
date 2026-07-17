@@ -1765,6 +1765,15 @@ def acknowledge_pacer_memory_use_payload(args: dict[str, Any]) -> dict[str, Any]
         # launch manifests for an exact receipt and trusted-ID match. Never
         # accept a receipt or memory ID that is not present in that cache.
         candidate_ids: list[str] = []
+        candidate_names: list[str] = []
+        pointer_path = workspace_root / "pacer_native" / "active_launch.json"
+        try:
+            pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, json.JSONDecodeError):
+            pointer = {}
+        pointer_id = str(pointer.get("launch_id") or "").strip() if isinstance(pointer, dict) else ""
+        if pointer_id and pointer_id != launch_id:
+            candidate_names.append(pointer_id)
         for directory in (
             workspace_root / "pacer_native" / "launches",
             workspace_root / "pacer_native" / "launch-contexts",
@@ -1775,31 +1784,34 @@ def acknowledge_pacer_memory_use_payload(args: dict[str, Any]) -> dict[str, Any]
                 continue
             for path in paths:
                 candidate_id = path.stem
-                if not candidate_id or candidate_id == launch_id:
-                    continue
-                candidate = read_active_launch(workspace_root, launch_id=candidate_id)
-                candidate_repo = str(
-                    candidate.get("project_root")
-                    or candidate.get("effective_repo_root")
-                    or candidate.get("launch_cwd")
-                    or ""
-                ).strip()
-                if not candidate or os.path.normcase(candidate_repo) != os.path.normcase(str(repo_root)):
-                    continue
-                candidate_cache = candidate.get("memory_cache") if isinstance(candidate.get("memory_cache"), dict) else {}
-                candidate_injection = candidate_cache.get("injection") if isinstance(candidate_cache.get("injection"), dict) else {}
-                candidate_delivered = {
-                    str(item).strip()
-                    for item in (candidate_injection.get("memory_ids") or [])
-                    if str(item).strip()
-                }
-                if (
-                    str(candidate_cache.get("receipt") or "").strip() == receipt
-                    and requested
-                    and requested <= candidate_delivered
-                    and candidate_id not in candidate_ids
-                ):
-                    candidate_ids.append(candidate_id)
+                if candidate_id and candidate_id != launch_id and candidate_id not in candidate_names:
+                    candidate_names.append(candidate_id)
+        for candidate_id in candidate_names:
+            if not candidate_id or candidate_id == launch_id:
+                continue
+            candidate = read_active_launch(workspace_root, launch_id=candidate_id)
+            candidate_repo = str(
+                candidate.get("project_root")
+                or candidate.get("effective_repo_root")
+                or candidate.get("launch_cwd")
+                or ""
+            ).strip()
+            if not candidate or os.path.normcase(candidate_repo) != os.path.normcase(str(repo_root)):
+                continue
+            candidate_cache = candidate.get("memory_cache") if isinstance(candidate.get("memory_cache"), dict) else {}
+            candidate_injection = candidate_cache.get("injection") if isinstance(candidate_cache.get("injection"), dict) else {}
+            candidate_delivered = {
+                str(item).strip()
+                for item in (candidate_injection.get("memory_ids") or [])
+                if str(item).strip()
+            }
+            if (
+                str(candidate_cache.get("receipt") or "").strip() == receipt
+                and requested
+                and requested <= candidate_delivered
+                and candidate_id not in candidate_ids
+            ):
+                candidate_ids.append(candidate_id)
         if len(candidate_ids) == 1:
             return get_pacer_memory_payload(
                 {
