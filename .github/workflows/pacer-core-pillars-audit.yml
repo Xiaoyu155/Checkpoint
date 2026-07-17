@@ -97,6 +97,45 @@ jobs:
           codex mcp list | tee "$RUNNER_TEMP/codex-mcp-list.txt"
           grep -E '^pacer[[:space:]].*[[:space:]]enabled[[:space:]]' "$RUNNER_TEMP/codex-mcp-list.txt"
 
+      - name: Seed trusted memory from an independent verified task
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$RUNNER_TEMP/venv-a/bin:$PATH"
+          seed_goal="Read-only audit of the memory Pacer core pillar in this isolated runner."
+          pacer \
+            --ask-for-approval never \
+            --sandbox danger-full-access \
+            exec \
+            --skip-git-repo-check \
+            --model "$PACER_PROVIDER_MODEL" \
+            -c "model_provider='$PACER_PROVIDER_ID'" \
+            -c "model_providers.$PACER_PROVIDER_ID.name='Pacer Memory Seed Provider'" \
+            -c "model_providers.$PACER_PROVIDER_ID.base_url='$PACER_PROVIDER_BASE_URL'" \
+            -c "model_providers.$PACER_PROVIDER_ID.env_key='PACER_PROVIDER_API_KEY'" \
+            -c "model_providers.$PACER_PROVIDER_ID.wire_api='responses'" \
+            "$seed_goal Run the existing focused memory tests with python -m pytest tests/test_pacer_pillars.py -q. Use exactly one Pacer completion call with one named targeted-tests step as an argv array. Do not retry." \
+            | tee "$RUNNER_TEMP/pacer-memory-seed-rollout.txt"
+
+      - name: Prepare runtime-owned routing evidence
+        shell: bash
+        env:
+          PILLAR: ${{ matrix.pillar }}
+        run: |
+          set -euo pipefail
+          launch_id="$(date -u +%Y%m%d-%H%M%S)-core-${PILLAR}"
+          model_pool="$RUNNER_TEMP/pacer-model-pool-${PILLAR}.json"
+          export PATH="$RUNNER_TEMP/venv-a/bin:$PATH"
+          python scripts/pacer_prepare_core_pillar_evidence.py \
+            --workspace .agent-workspace \
+            --repo "$PWD" \
+            --launch-id "$launch_id" \
+            --model-pool "$model_pool"
+          {
+            echo "PACER_LAUNCH_ID=$launch_id"
+            echo "CHECKPOINT_MODEL_POOL=$model_pool"
+          } >> "$GITHUB_ENV"
+
       - name: Run Codex with maximum isolated worker freedom
         shell: bash
         env:
@@ -106,7 +145,11 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$RUNNER_TEMP/venv-a/bin:$PATH"
-          export PACER_PILLAR_TASK="Read-only audit of the ${PILLAR} Pacer core pillar in this isolated runner. Do not modify tracked source files. Inspect the repository freely with the required Pacer MCP. Report actual evidence without inventing a product verdict. Run existing focused tests with command ${PILLAR_TEST_COMMAND}. Run read-only static analysis with command ${PILLAR_ANALYSIS_COMMAND}. The optional .visual-agent-status.md file is outside this audit scope. Its absence is not unfinished work and must not be listed in unresolved_items or known_risks. When both commands pass, unresolved_items must be empty. Audit protocol: use exactly one Pacer completion call with two steps named targeted-tests, targeted-analysis, each as argv arrays. Audit protocol: bind test evidence only to targeted-tests, bind analysis evidence only to targeted-analysis. Audit protocol: do not retry."
+          memory_instruction=""
+          if [[ "$PILLAR" == "memory" ]]; then
+            memory_instruction="Before running the tests, call the required Pacer get_pacer_memory tool with detail=full. Use the returned trusted relevant memory in the audit, then call get_pacer_memory again with the returned memory_receipt and the exact retrieved memory ID in memory_ids_used so the evidence records retrieval, injection, and trusted use."
+          fi
+          export PACER_PILLAR_TASK="Read-only audit of the ${PILLAR} Pacer core pillar in this isolated runner. Do not modify tracked source files. Inspect the repository freely with the required Pacer MCP. Report actual evidence without inventing a product verdict. ${memory_instruction} Run existing focused tests with command ${PILLAR_TEST_COMMAND}. Run read-only static analysis with command ${PILLAR_ANALYSIS_COMMAND}. The optional .visual-agent-status.md file is outside this audit scope. Its absence is not unfinished work and must not be listed in unresolved_items or known_risks. When both commands pass, unresolved_items must be empty. Audit protocol: use exactly one Pacer completion call with two steps named targeted-tests, targeted-analysis, each as argv arrays. Audit protocol: bind test evidence only to targeted-tests, bind analysis evidence only to targeted-analysis. Audit protocol: do not retry."
           pacer \
             --ask-for-approval never \
             --sandbox danger-full-access \
@@ -217,6 +260,7 @@ jobs:
             xiao/.agent-workspace/pacer_native/active_launch.json
             xiao/.agent-workspace/pacer_native/history.jsonl
             ${{ runner.temp }}/pacer-${{ matrix.pillar }}-rollout.txt
+            ${{ runner.temp }}/pacer-memory-seed-rollout.txt
             ${{ runner.temp }}/${{ matrix.pillar }}-git-status.txt
             ${{ runner.temp }}/${{ matrix.pillar }}-git-diff-files.txt
           if-no-files-found: error

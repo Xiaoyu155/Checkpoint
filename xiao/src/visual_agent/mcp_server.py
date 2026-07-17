@@ -46,6 +46,7 @@ from .mcp_common import (  # noqa: F401
 )
 from .models import to_jsonable as to_jsonable
 from .pacer_pillars import assess_five_pillars
+from .managed_state import new_managed_run, transition_managed_run
 from .preflight import run_preflight as run_preflight
 from .reports import compact_run_report
 from .run_profile import RUN_PROFILE_CHOICES as RUN_PROFILE_CHOICES
@@ -117,6 +118,7 @@ _PACER_DOCUMENTATION_COMPILE_SENTINEL = object()
 _PACER_PINNED_LAUNCH_SENTINEL = object()
 _PACER_COMPLETION_AUDIT_SENTINEL = object()
 _PACER_MCP_DISPATCH_SENTINEL = object()
+_PACER_MANAGED_RUNTIME_SENTINEL = object()
 
 
 def mcp_tools() -> list[Tool]:
@@ -3149,18 +3151,27 @@ def record_pacer_outcome_payload(args: dict[str, Any]) -> dict[str, Any]:
         launch_id=launch_id,
     )
     responsibility = active.get("source_responsibility") if isinstance(active.get("source_responsibility"), dict) else {}
+    managed_runtime = (
+        dict(args.get("_pacer_managed_runtime") or {})
+        if args.get("_pacer_managed_runtime_sentinel") is _PACER_MANAGED_RUNTIME_SENTINEL
+        and isinstance(args.get("_pacer_managed_runtime"), dict)
+        else {}
+    )
     managed_active = verified_acceptance and bool(active.get("launch_id"))
+    managed_fields = {
+        "active": managed_active,
+        "state": "completed_in_place" if managed_active else "not_completed",
+        "mode": "native_codex_in_place",
+        "project_root": str(active.get("project_root") or ""),
+        "outcome_recorded": True,
+        "run_id": batch_run_id,
+    }
+    if managed_runtime:
+        managed_fields.update(managed_runtime)
     active = update_pillar(
         workspace_root,
         "managed",
-        {
-            "active": managed_active,
-            "state": "completed_in_place" if managed_active else "not_completed",
-            "mode": "native_codex_in_place",
-            "project_root": str(active.get("project_root") or ""),
-            "outcome_recorded": True,
-            "run_id": batch_run_id,
-        },
+        managed_fields,
         launch_id=launch_id,
     )
     audit_valid = not completion_audit or bool(completion_audit.get("valid"))
@@ -3273,6 +3284,67 @@ def record_pacer_outcome_payload(args: dict[str, Any]) -> dict[str, Any]:
         "pillars": active.get("pillars", {}),
         "five_pillars_active": _all_pillars_active(active),
         "five_pillars_assessment": assess_five_pillars(active),
+    }
+
+
+def _completion_managed_runtime(
+    *,
+    launch_id: str,
+    run_id: str,
+    attempt: int,
+    max_attempts: int,
+    verification_status: str,
+) -> dict[str, Any]:
+    """Represent completion verification as a managed, terminal operation.
+
+    Completion already has a bounded attempt policy and a trusted verification
+    batch. Persisting that operation through the canonical managed-state
+    transition guard makes those controls auditable instead of leaving the
+    Managed pillar with only a model-authored success claim.
+    """
+    idempotency_key = f"pacer-completion:{launch_id}:{run_id}"
+    attempt_id = f"completion-attempt-{attempt}"
+    state = new_managed_run(run_id=run_id, idempotency_key=idempotency_key)
+    state = transition_managed_run(
+        state,
+        expected_revision=0,
+        next_state="RUNNING",
+        event="completion_started",
+        attempt_id=attempt_id,
+    )
+    state = transition_managed_run(
+        state,
+        expected_revision=1,
+        next_state="VERIFYING",
+        event="verification_started",
+    )
+    if verification_status == "passed":
+        state = transition_managed_run(
+            state,
+            expected_revision=2,
+            next_state="SUCCEEDED",
+            event="verification_passed",
+        )
+        budget_status = "within_budget" if attempt <= max_attempts else "budget_exhausted"
+    else:
+        state = transition_managed_run(
+            state,
+            expected_revision=2,
+            next_state="FAILED",
+            event="verification_failed",
+            reason_code="verification_failed",
+        )
+        budget_status = "within_budget" if attempt <= max_attempts else "budget_exhausted"
+    return {
+        "transition_valid": True,
+        "idempotency_key": idempotency_key,
+        "budget_status": budget_status,
+        "budget": {
+            "max_attempts": int(max_attempts),
+            "attempts_used": int(attempt),
+        },
+        "managed_state": state.to_dict(),
+        "managed_revision": state.revision,
     }
 
 
@@ -3714,6 +3786,13 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
     if final_source_baseline_digest != source_baseline_digest:
         raise ValueError("trusted task source baseline changed during completion")
     outcome_status = "completed" if verification_status == "passed" else "failed"
+    managed_runtime = _completion_managed_runtime(
+        launch_id=launch_id,
+        run_id=run_id,
+        attempt=completion_attempt,
+        max_attempts=max_attempts,
+        verification_status=verification_status,
+    )
     outcome = record_pacer_outcome_payload({
         **pinned_args,
         "goal": goal,
@@ -3723,6 +3802,8 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
         "status": outcome_status,
         "_pacer_completion_audit_sentinel": _PACER_COMPLETION_AUDIT_SENTINEL,
         "_pacer_completion_audit": task_review,
+        "_pacer_managed_runtime_sentinel": _PACER_MANAGED_RUNTIME_SENTINEL,
+        "_pacer_managed_runtime": managed_runtime,
     })
     if str(outcome.get("launch_id") or "") != launch_id or str(outcome.get("batch_run_id") or "") != run_id:
         raise ValueError("recorded outcome did not preserve the verification launch/run binding")

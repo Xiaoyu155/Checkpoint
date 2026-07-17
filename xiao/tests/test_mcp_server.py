@@ -2018,6 +2018,13 @@ def test_complete_documentation_task_accepts_requested_compileall(tmp_path, monk
     assert payload["task_review"]["trust"] == "yes"
     assert payload["five_pillars_active"] is False
     assert payload["five_pillars_assessment"]["pillars"]["acceptance"]["status"] == "passed"
+    assert payload["five_pillars_assessment"]["pillars"]["managed"]["status"] == "passed"
+    assert payload["pillars"]["managed"]["transition_valid"] is True
+    assert payload["pillars"]["managed"]["budget_status"] == "within_budget"
+    active_managed = json.loads(
+        (workspace / "pacer_native" / "active_launch.json").read_text(encoding="utf-8")
+    )["pillars"]["managed"]
+    assert active_managed["managed_state"]["state"] == "SUCCEEDED"
     assert payload["pillars"]["acceptance"]["digest_verified"] is True
 
 
@@ -3212,7 +3219,8 @@ def test_five_pillars_require_current_launch_verified_closed_loop(tmp_path, monk
     assert {
         item["status"]
         for item in outcome["five_pillars_assessment"]["pillars"].values()
-    } == {"partial"}
+    } == {"partial", "passed"}
+    assert outcome["five_pillars_assessment"]["pillars"]["managed"]["status"] == "passed"
 
 
 def test_empty_memory_marks_capability_active_but_mimo_route_blocks_closed_loop(tmp_path, monkeypatch) -> None:
