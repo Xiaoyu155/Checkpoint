@@ -21,6 +21,9 @@ from .mission_progress import save_mission_progress
 from .subprocess_window import hidden_subprocess_kwargs
 
 
+BACKGROUND_TERMINAL_STATUSES = frozenset({"completed", "failed", "timeout", "orphaned", "aborted"})
+
+
 def start_background_chief_run(
     *,
     workspace_root: str | Path,
@@ -35,6 +38,8 @@ def start_background_chief_run(
     test_command: str | None = None,
     allow_test_edits: bool = False,
     merge: bool = False,
+    skip_liveness_probe: bool = False,
+    execution_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     workspace_path = Path(workspace_root).expanduser().resolve()
     mission = load_mission(workspace_path, mission_id)
@@ -45,6 +50,19 @@ def start_background_chief_run(
             "stop_reason": "missing_mission",
             "message": f"No saved mission found: {mission_id}",
         }
+    # Fail closed when the coding assistant cannot spend tokens (quota/login).
+    if not skip_liveness_probe:
+        from .provider_liveness import liveness_block_payload, probe_worker_agent_liveness
+
+        agent_hint = ""
+        if agents:
+            agent_hint = str(agents[0] or "")
+        if not agent_hint:
+            agent_hint = str(mission.get("agent") or "codex")
+        probe = probe_worker_agent_liveness(agent_hint)
+        if not probe.get("ok"):
+            return liveness_block_payload(probe=probe, mission=mission)
+
     directory = mission_dir(workspace_path, mission_id)
     launch_lock = RunLock(directory, name="background-launch.lock", ttl_seconds=30.0)
     try:
@@ -53,8 +71,21 @@ def start_background_chief_run(
         return _background_already_running_payload(mission, load_background_record(workspace_path, mission_id))
     try:
         existing = load_background_record(workspace_path, mission_id)
-        if _background_record_is_alive(existing):
+        if _background_record_is_alive(existing, mission_id):
             return _background_already_running_payload(mission, existing)
+        # Dead or PID-reused record: mark stale so resume/start can continue.
+        if isinstance(existing, dict) and str(existing.get("status") or "") in {"starting", "running"}:
+            stale_pid = int(existing.get("worker_pid") or existing.get("pid") or 0)
+            if stale_pid and not _background_record_is_alive(existing, mission_id):
+                existing = {
+                    **existing,
+                    "status": "orphaned",
+                    "process_state": "stale_before_relaunch",
+                    "alive": False,
+                    "stale_reason": "dead_or_pid_reused",
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }
+                save_background_record(workspace_path, mission_id, existing)
         return _start_background_chief_run_locked(
             workspace_root=workspace_path,
             mission_id=mission_id,
@@ -68,6 +99,7 @@ def start_background_chief_run(
             test_command=test_command,
             allow_test_edits=allow_test_edits,
             merge=merge,
+            execution_policy=execution_policy,
         )
     finally:
         launch_lock.release()
@@ -87,6 +119,7 @@ def _start_background_chief_run_locked(
     test_command: str | None = None,
     allow_test_edits: bool = False,
     merge: bool = False,
+    execution_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     workspace_path = Path(workspace_root).expanduser().resolve()
     mission = load_mission(workspace_path, mission_id)
@@ -107,6 +140,7 @@ def _start_background_chief_run_locked(
     stdout_path = logs_dir / f"chief-run-background-{stamp}.out.log"
     stderr_path = logs_dir / f"chief-run-background-{stamp}.err.log"
     effective_test_command = str(test_command or mission.get("test_command") or "").strip()
+    effective_allow_dirty = bool(allow_dirty or mission.get("allow_dirty"))
     effective_allow_test_edits = bool(allow_test_edits or mission.get("allow_test_edits"))
     effective_merge = bool(merge or mission.get("merge"))
     argv = [
@@ -133,7 +167,7 @@ def _start_background_chief_run_locked(
         clean_agent = str(agent or "").strip()
         if clean_agent:
             argv.extend(["--agent", clean_agent])
-    if allow_dirty:
+    if effective_allow_dirty:
         argv.append("--allow-dirty")
     if allow_coverage_gap:
         argv.append("--allow-coverage-gap")
@@ -143,10 +177,16 @@ def _start_background_chief_run_locked(
         argv.append("--allow-test-edits")
     if effective_merge:
         argv.append("--merge")
+    if isinstance(execution_policy, dict) and execution_policy:
+        argv.extend(["--execution-policy-json", json.dumps(execution_policy, ensure_ascii=False)])
 
     env = os.environ.copy()
     src_dir = Path(__file__).resolve().parent.parent
     env["PYTHONPATH"] = _prepend_path(env.get("PYTHONPATH", ""), src_dir)
+    env["PYTHONUNBUFFERED"] = "1"
+    # Prefer the verification Python on PATH so nested workers inherit a
+    # pytest-capable interpreter (dogfood: wrong D:\\python.exe broke gates).
+    env = _prefer_test_command_python_env(env, effective_test_command)
     cwd = Path(str(mission.get("repo_root") or Path.cwd())).expanduser().resolve()
 
     stdout_handle = stdout_path.open("w", encoding="utf-8")
@@ -185,6 +225,7 @@ def _start_background_chief_run_locked(
         "budget_started_at": str(mission.get("budget_started_at") or launch_time.isoformat()),
         "agents": [str(agent) for agent in agents if str(agent or "").strip()],
         "test_command": effective_test_command,
+        "allow_dirty": effective_allow_dirty,
         "allow_test_edits": effective_allow_test_edits,
         "merge": effective_merge,
     }
@@ -217,6 +258,7 @@ def _start_background_chief_run_locked(
     mission.setdefault("budget_started_at", record["budget_started_at"])
     if effective_test_command:
         mission["test_command"] = effective_test_command
+    mission["allow_dirty"] = effective_allow_dirty
     mission["allow_test_edits"] = effective_allow_test_edits
     mission["merge"] = effective_merge
     save_mission(workspace_path, mission)
@@ -248,6 +290,7 @@ def run_background_worker(
     merge: bool = False,
     watchdog_interval_seconds: float = 60.0,
     watchdog_terminator: Any = None,
+    execution_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run a mission in a child process and write a completion receipt."""
     workspace_path = Path(workspace_root).expanduser().resolve()
@@ -294,6 +337,7 @@ def run_background_worker(
             test_command=test_command or str(background.get("test_command") or "") or None,
             allow_test_edits=allow_test_edits or bool(background.get("allow_test_edits")),
             merge=merge or bool(background.get("merge")),
+            execution_policy=execution_policy,
         )
         latest_background = load_background_record(workspace_path, mission_id) or background
         if str(latest_background.get("status") or "") == "timeout":
@@ -376,7 +420,7 @@ def inspect_background_state(
     background = load_background_record(workspace_path, mission_id)
     if background is None:
         return {"status": "none", "message": "No background record for this mission."}
-    if background.get("status") in {"completed", "failed", "timeout", "orphaned"}:
+    if background.get("status") in BACKGROUND_TERMINAL_STATUSES:
         return {
             **background,
             "process_state": str(background.get("status")),
@@ -385,9 +429,28 @@ def inspect_background_state(
         }
 
     pid = int(background.get("worker_pid") or background.get("pid") or 0)
+    using_default_probe = process_probe is None
     probe = process_probe or process_status
     process = probe(pid)
     budget_exceeded = bool(mission and mission_wall_budget_exceeded(mission, background))
+    # Ownership: a recycled PID owned by another process must not look "alive".
+    # Custom process_probe (tests / advanced callers) can set belongs_to_mission.
+    owned = True
+    if process.get("alive"):
+        if "belongs_to_mission" in process:
+            owned = bool(process.get("belongs_to_mission"))
+        elif using_default_probe and mission_id:
+            try:
+                owned = process_belongs_to_mission(pid, mission_id, record=background)
+            except Exception:
+                owned = True
+        if not owned:
+            process = {
+                "pid": pid,
+                "alive": False,
+                "exit_code": process.get("exit_code"),
+                "ownership": "pid_reused_or_foreign",
+            }
     if process.get("alive") and budget_exceeded:
         term = terminator or terminate_process
         terminated = term(pid)
@@ -446,14 +509,17 @@ def inspect_background_state(
             )
         return background
 
+    orphan_reason = _classify_orphan_stop_reason(workspace_path, mission_id, background)
+    process_state = "pid_reused_or_foreign" if not owned else "exited_unknown"
     background.update(
         {
             "status": "orphaned",
-            "process_state": "exited_unknown",
+            "process_state": process_state,
             "alive": False,
             "budget_exceeded": budget_exceeded,
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "exit_code": process.get("exit_code"),
+            "orphan_reason": orphan_reason,
         }
     )
     if update:
@@ -462,20 +528,259 @@ def inspect_background_state(
             workspace_path,
             mission_id,
             stage="blocked",
-            stage_label="Worker exited unexpectedly",
+            stage_label="Worker exited or lost ownership",
             status="orphaned",
-            blocker="worker_error",
+            blocker=orphan_reason,
             last_activity_at=background["completed_at"],
         )
         _mark_mission_from_background(
             workspace_path,
             mission_id,
             status="stopped",
-            stop_reason="worker_error",
-            round_status="exited_unknown",
+            stop_reason=orphan_reason,
+            round_status=process_state,
             background=background,
         )
     return background
+
+
+def _classify_orphan_stop_reason(
+    workspace_root: Path,
+    mission_id: str,
+    background: dict[str, Any],
+) -> str:
+    """Map orphan tails to a user-facing stop_reason (quota vs generic orphan)."""
+    from .agent_backends import looks_like_provider_5xx, looks_like_quota_exhaustion
+
+    chunks: list[str] = []
+    for key in ("stderr_log", "stdout_log"):
+        path_text = str(background.get(key) or "").strip()
+        if not path_text:
+            continue
+        path = Path(path_text)
+        if not path.is_file():
+            continue
+        try:
+            chunks.append(path.read_text(encoding="utf-8", errors="replace")[-4000:])
+        except OSError:
+            continue
+    # Also skim latest background logs in mission dir
+    log_dir = mission_dir(workspace_root, mission_id) / "logs"
+    if log_dir.is_dir():
+        for path in sorted(log_dir.glob("chief-run-background-*.err.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:2]:
+            try:
+                chunks.append(path.read_text(encoding="utf-8", errors="replace")[-4000:])
+            except OSError:
+                pass
+    if looks_like_quota_exhaustion(*chunks):
+        return "quota_exhausted"
+    if looks_like_provider_5xx(*chunks):
+        return "provider_5xx"
+    return "worker_orphaned"
+
+
+def reconcile_workspace_backgrounds(
+    workspace_root: str | Path,
+    *,
+    update: bool = True,
+    limit: int = 50,
+    auto_resume: bool = True,
+    max_auto_resumes: int = 3,
+    max_auto_resume_attempts: int | None = None,
+) -> list[dict[str, Any]]:
+    """Scan recent missions and reconcile dead/PID-reused background workers.
+
+    When *auto_resume* is true, missions marked ``worker_orphaned`` (not quota /
+    provider death) are background-resumed at most once per mission.
+    """
+    workspace_path = Path(workspace_root).expanduser().resolve()
+    root = workspace_path / "missions"
+    if not root.is_dir():
+        return []
+    results: list[dict[str, Any]] = []
+    auto_resume_budget = max(0, int(max_auto_resumes))
+    missions = sorted(
+        (path for path in root.iterdir() if path.is_dir()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for path in missions[: max(1, int(limit))]:
+        mid = path.name
+        record = load_background_record(workspace_path, mid)
+        mission = load_mission(workspace_path, mid) or {}
+        status = str(mission.get("status") or "")
+        stop = str(mission.get("stop_reason") or "")
+
+        # Path A: still claims running background → inspect/reconcile
+        if isinstance(record, dict) and str(record.get("status") or "") in {"starting", "running"}:
+            if status in {"verified", "merged", "stopped", "preview"}:
+                continue
+            state = inspect_background_state(
+                workspace_root=workspace_path,
+                mission_id=mid,
+                update=update,
+            )
+            entry: dict[str, Any] = {"mission_id": mid, "background": state}
+            if str(state.get("status") or "") in {"orphaned", "timeout", "completed", "failed"}:
+                if (
+                    auto_resume
+                    and auto_resume_budget > 0
+                    and str(state.get("status") or "") == "orphaned"
+                    and str(state.get("orphan_reason") or state.get("stop_reason") or "")
+                    in {"worker_orphaned", ""}
+                ):
+                    resumed = maybe_auto_resume_orphaned_mission(
+                        workspace_root=workspace_path,
+                        mission_id=mid,
+                        max_attempts=max_auto_resume_attempts,
+                    )
+                    if resumed is not None:
+                        entry["auto_resume"] = resumed
+                        if resumed.get("status") == "background_started":
+                            auto_resume_budget -= 1
+                results.append(entry)
+            continue
+
+        # Path B: already stopped as orphan → one-shot auto resume
+        if (
+            auto_resume
+            and auto_resume_budget > 0
+            and status == "stopped"
+            and stop == "worker_orphaned"
+        ):
+            resumed = maybe_auto_resume_orphaned_mission(
+                workspace_root=workspace_path,
+                mission_id=mid,
+                max_attempts=max_auto_resume_attempts,
+            )
+            if resumed is not None:
+                results.append({"mission_id": mid, "auto_resume": resumed})
+                if resumed.get("status") == "background_started":
+                    auto_resume_budget -= 1
+    return results
+
+
+def maybe_auto_resume_orphaned_mission(
+    *,
+    workspace_root: str | Path,
+    mission_id: str,
+    max_attempts: int | None = None,
+) -> dict[str, Any] | None:
+    """Background-resume an orphaned mission at most *max_attempts* times.
+
+    Skips quota/provider death and refuses when the agent liveness probe fails.
+    Returns the launch payload, or None when resume is not appropriate.
+
+    Default attempts: env ``PACER_AUTO_RESUME_MAX`` or 2.
+    """
+    workspace_path = Path(workspace_root).expanduser().resolve()
+    mission = load_mission(workspace_path, mission_id)
+    if mission is None:
+        return None
+    stop = str(mission.get("stop_reason") or "")
+    background = load_background_record(workspace_path, mission_id) or {}
+    bg_status = str(background.get("status") or "")
+    orphan_reason = str(background.get("orphan_reason") or "")
+    is_orphan = stop == "worker_orphaned" or (
+        bg_status == "orphaned" and orphan_reason in {"worker_orphaned", "", "exited_unknown"}
+    )
+    if not is_orphan:
+        return None
+    if stop in {
+        "quota_exhausted",
+        "provider_5xx",
+        "budget_exhausted",
+        "not_authenticated",
+        "agent_unavailable",
+    }:
+        return None
+    if orphan_reason in {"quota_exhausted", "provider_5xx"}:
+        return None
+
+    if max_attempts is None:
+        try:
+            max_attempts = max(1, int(os.environ.get("PACER_AUTO_RESUME_MAX") or "2"))
+        except ValueError:
+            max_attempts = 2
+
+    attempts = int(background.get("auto_resume_count") or mission.get("auto_resume_count") or 0)
+    if attempts >= max(1, int(max_attempts)):
+        return {
+            "schema_version": 1,
+            "status": "skipped",
+            "stop_reason": "auto_resume_exhausted",
+            "message": f"Auto-resume already used {attempts} time(s) for this mission.",
+            "mission_id": mission_id,
+        }
+
+    agent = str(mission.get("agent") or "")
+    if not agent:
+        agents = background.get("agents") if isinstance(background.get("agents"), list) else []
+        agent = str(agents[0]) if agents else "codex"
+    from .provider_liveness import probe_worker_agent_liveness
+
+    probe = probe_worker_agent_liveness(agent)
+    if not probe.get("ok"):
+        return {
+            "schema_version": 1,
+            "status": "skipped",
+            "stop_reason": str(probe.get("stop_reason") or "agent_unavailable"),
+            "message": str(probe.get("message") or "Agent not available for auto-resume."),
+            "mission_id": mission_id,
+            "provider_liveness": probe,
+        }
+
+    # Persist attempt counter before launch to survive crashes.
+    attempts += 1
+    background = dict(background)
+    background["auto_resume_count"] = attempts
+    background["auto_resume_at"] = datetime.now(timezone.utc).isoformat()
+    background["status"] = "orphaned"
+    save_background_record(workspace_path, mission_id, background)
+    mission["auto_resume_count"] = attempts
+    mission["status"] = "stopped"
+    mission["stop_reason"] = "worker_orphaned"
+    save_mission(workspace_path, mission)
+
+    agents_tuple: tuple[str, ...] = ()
+    raw_agents = background.get("agents")
+    if isinstance(raw_agents, list) and raw_agents:
+        agents_tuple = tuple(str(a) for a in raw_agents if str(a or "").strip())
+    elif agent:
+        agents_tuple = (agent,)
+
+    # Host/practice defaults often omit allow_dirty; prefer explicit False over
+    # `or True` which made the flag impossible to disable.
+    allow_dirty = mission.get("allow_dirty")
+    if allow_dirty is None:
+        allow_dirty = background.get("allow_dirty")
+    if allow_dirty is None:
+        allow_dirty = True
+    payload = start_background_chief_run(
+        workspace_root=workspace_path,
+        mission_id=mission_id,
+        agents=agents_tuple,
+        allow_dirty=bool(allow_dirty),
+        test_command=str(background.get("test_command") or mission.get("test_command") or "") or None,
+        allow_test_edits=bool(background.get("allow_test_edits") or mission.get("allow_test_edits")),
+        merge=bool(background.get("merge") or mission.get("merge")),
+        skip_liveness_probe=False,
+    )
+    payload = dict(payload)
+    payload["auto_resume"] = True
+    payload["auto_resume_count"] = attempts
+    append_round(
+        workspace_path,
+        mission_id,
+        {
+            "round": _next_round_number(workspace_path, mission_id),
+            "type": "auto_resume",
+            "status": str(payload.get("status") or ""),
+            "stop_reason": str(payload.get("stop_reason") or ""),
+            "attempt": attempts,
+        },
+    )
+    return payload
 
 
 def load_background_record(workspace_root: str | Path, mission_id: str) -> dict[str, Any] | None:
@@ -505,11 +810,97 @@ def save_background_record(workspace_root: str | Path, mission_id: str, record: 
     return {"path": str(path), "record": dict(record)}
 
 
-def _background_record_is_alive(record: dict[str, Any] | None) -> bool:
+def _background_record_is_alive(
+    record: dict[str, Any] | None,
+    mission_id: str = "",
+) -> bool:
+    """True only when the recorded PID is live *and* belongs to this mission.
+
+    PID-only checks are unsafe on Windows: OS reuses PIDs and a dead mission can
+    block resume forever while another process holds the recycled id.
+    """
     if not isinstance(record, dict) or str(record.get("status") or "") not in {"starting", "running"}:
         return False
     pid = int(record.get("worker_pid") or record.get("pid") or 0)
-    return bool(process_status(pid).get("alive"))
+    if not process_status(pid).get("alive"):
+        return False
+    if mission_id and not process_belongs_to_mission(pid, mission_id, record=record):
+        return False
+    return True
+
+
+def process_command_line(pid: int) -> str:
+    """Best-effort command line for a process (empty when unreadable)."""
+    if pid <= 0:
+        return ""
+    if os.name == "nt":
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    f"(Get-CimInstance Win32_Process -Filter \"ProcessId={int(pid)}\").CommandLine",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                check=False,
+            )
+        except Exception:
+            return ""
+        return (completed.stdout or "").strip()
+    try:
+        raw = Path(f"/proc/{int(pid)}/cmdline").read_bytes()
+    except OSError:
+        return ""
+    return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+
+
+def process_belongs_to_mission(
+    pid: int,
+    mission_id: str,
+    *,
+    record: dict[str, Any] | None = None,
+    allow_unreadable: bool = True,
+    require_worker_marker: bool = False,
+) -> bool:
+    """Return whether *pid* is this mission's background worker.
+
+    When the command line cannot be read, fall back to True if the process is
+    still alive (avoid false orphans under restricted permissions). When the
+    command line is readable, require the mission id (and prefer the worker
+    marker ``chief-background-worker``).
+    """
+    mid = str(mission_id or "").strip()
+    if pid <= 0 or not mid:
+        return False
+    if not process_status(pid).get("alive"):
+        return False
+    try:
+        cmd = process_command_line(pid)
+    except Exception:
+        cmd = ""
+    if not cmd:
+        # Unreadable cmdline: keep conservative "alive" for inspect heartbeats,
+        # but start_background still requires ownership when cmd is available.
+        return bool(allow_unreadable)
+    if mid not in cmd:
+        return False
+    lowered = cmd.lower()
+    if "chief-background-worker" in lowered or "visual_agent" in lowered:
+        return True
+    # Stored argv fingerprint as secondary signal
+    if isinstance(record, dict):
+        argv = record.get("argv")
+        if isinstance(argv, list) and mid in " ".join(str(part) for part in argv):
+            # Process cmdline has mission id but is not clearly our worker —
+            # still accept if argv was ours and pid matches recorded worker.
+            recorded = int(record.get("worker_pid") or record.get("pid") or 0)
+            return recorded == pid
+    return not require_worker_marker and mid in cmd
 
 
 def _background_already_running_payload(
@@ -542,7 +933,7 @@ def _background_watchdog_loop(
     while not stop_event.wait(interval):
         heartbeat_at = datetime.now(timezone.utc).isoformat()
         background = load_background_record(workspace_root, mission_id) or {}
-        if str(background.get("status") or "") in {"completed", "failed", "timeout", "orphaned"}:
+        if str(background.get("status") or "") in BACKGROUND_TERMINAL_STATUSES:
             return
         save_mission_progress(
             workspace_root,
@@ -761,6 +1152,27 @@ def _prepend_path(existing: str, path: Path) -> str:
     if value in parts:
         return existing
     return value + os.pathsep + existing
+
+
+def _prefer_test_command_python_env(env: dict[str, str], test_command: str | None) -> dict[str, str]:
+    """If test_command starts with an absolute python path, put its dir on PATH."""
+    import re
+
+    cmd = str(test_command or "").strip()
+    if not cmd or "pytest" not in cmd.lower():
+        return env
+    match = re.match(r'^["\']?([A-Za-z]:\\[^"\']+?python(?:\d+(?:\.\d+)*)?\.exe)', cmd, re.I)
+    if not match:
+        match = re.match(r'^["\']?(/[^"\']+?/python(?:\d+(?:\.\d+)*)?)(?:\s|$)', cmd)
+    if not match:
+        return env
+    python_path = Path(match.group(1))
+    if not python_path.is_file():
+        return env
+    out = dict(env)
+    out["PATH"] = _prepend_path(out.get("PATH", ""), python_path.parent)
+    out["PACER_VERIFICATION_PYTHON"] = str(python_path)
+    return out
 
 
 def _next_round_number(workspace_root: Path, mission_id: str) -> int:

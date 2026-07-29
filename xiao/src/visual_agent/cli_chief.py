@@ -34,6 +34,7 @@ CHIEF_COMMANDS = {
     "quota", "quota-statusline",
     "program", "autopilot",
     "mission",
+    "host",
     "chief-status", "chief-queue", "chief-worker", "chief-background-worker",
     "dashboard", "app", "agents",
 }
@@ -57,6 +58,7 @@ def handle_chief_command(args: Any) -> int:
         "program":                 _handle_program,
         "autopilot":               _handle_autopilot,
         "mission":                 _handle_mission,
+        "host":                    _handle_host,
         "chief-status":            _handle_chief_status,
         "chief-queue":             _handle_chief_queue,
         "chief-worker":            _handle_chief_worker,
@@ -480,6 +482,266 @@ def _handle_autopilot(args: Any) -> int:
 
 # ── mission ───────────────────────────────────────────────────────────────────
 
+def _handle_host(args: Any) -> int:
+    """Official long-host product path: status / doctor / run / stop."""
+    from .models import to_jsonable
+    from .pacer_host import (
+        build_host_dashboard,
+        host_dashboard_to_markdown,
+        host_run_to_markdown,
+        request_host_stop,
+        run_host_session,
+        save_host_policy,
+        load_host_policy,
+        start_hosted_goal,
+    )
+    from .provider_liveness import clear_worker_agent_quota_cache, normalize_agent_name
+
+    action = str(getattr(args, "host_action", None) or getattr(args, "action", "") or "status")
+    workspace = getattr(args, "workspace_root", ".agent-workspace")
+    repo = getattr(args, "repo_root", ".")
+    requested_mode = str(getattr(args, "mode", "") or "").strip().lower()
+    explicit_yolo = action == "yolo" or bool(getattr(args, "yolo", False)) or requested_mode == "yolo"
+    agent = normalize_agent_name(getattr(args, "agent", None) or ("claude-code" if explicit_yolo else "codex"))
+    fmt = str(getattr(args, "format", "markdown") or "markdown")
+    quota_cache_clear = None
+    if bool(getattr(args, "clear_quota_cache", False)):
+        quota_cache_clear = clear_worker_agent_quota_cache(agent)
+
+    if action in {"status", "dashboard"}:
+        dash = build_host_dashboard(
+            workspace_root=workspace,
+            repo_root=repo,
+            agent=agent,
+            run_pytest=bool(getattr(args, "pytest", False)),
+            auto_resume=False,
+        )
+        if quota_cache_clear is not None:
+            dash["quota_cache_clear"] = quota_cache_clear
+        if fmt == "json":
+            print(json.dumps(to_jsonable(dash), ensure_ascii=False, indent=2))
+        else:
+            print(host_dashboard_to_markdown(dash))
+        return 0 if dash.get("ready_for_host") else 1
+
+    if action == "doctor":
+        run_pytest = bool(getattr(args, "pytest", False))
+        dash = build_host_dashboard(
+            workspace_root=workspace,
+            repo_root=repo,
+            agent=agent,
+            run_pytest=run_pytest,
+            auto_resume=False,
+        )
+        if quota_cache_clear is not None:
+            dash["quota_cache_clear"] = quota_cache_clear
+        if fmt == "json":
+            print(json.dumps(to_jsonable(dash), ensure_ascii=False, indent=2))
+        else:
+            print(host_dashboard_to_markdown(dash))
+            print("\n## Doctor 结论")
+            if dash.get("ready_for_host"):
+                print("- 可以开始托管：`pacer host run --goal \"...\" --hours 2 --execute`")
+            else:
+                print("- 先处理阻塞项（登录/额度/STOP），再托管。")
+            if not run_pytest:
+                print("- 未运行全仓测试；需要时加 `--pytest`。")
+            if quota_cache_clear is not None:
+                print(f"- 已清除额度失败缓存：{', '.join(quota_cache_clear['cleared_keys'])}")
+        return 0 if dash.get("ready_for_host") else 1
+
+    if action == "stop":
+        path = request_host_stop(workspace)
+        msg = {"status": "stop_requested", "path": str(path)}
+        print(json.dumps(msg, ensure_ascii=False, indent=2) if fmt == "json" else f"已请求停止托管：`{path}`")
+        return 0
+
+    if action == "policy":
+        policy = load_host_policy(workspace)
+        if getattr(args, "max_auto_resumes", None) is not None:
+            policy["max_auto_resumes_per_mission"] = int(args.max_auto_resumes)
+        if getattr(args, "poll_seconds", None) is not None:
+            policy["poll_seconds"] = float(args.poll_seconds)
+        if getattr(args, "agent", None):
+            policy["agent"] = agent
+        path = save_host_policy(workspace, policy)
+        if fmt == "json":
+            print(json.dumps({"path": str(path), "policy": policy}, ensure_ascii=False, indent=2))
+        else:
+            print(f"已写入托管策略：`{path}`\n```json\n{json.dumps(policy, ensure_ascii=False, indent=2)}\n```")
+        return 0
+
+    if action in {"run", "start", "unleash", "yolo"}:
+        from .pacer_host import HOST_MODE_PROFILES, normalize_host_mode
+
+        if explicit_yolo:
+            mode = "yolo"
+        else:
+            mode = normalize_host_mode(
+                getattr(args, "mode", None),
+                unleash_flag=bool(getattr(args, "unleash", False) or action == "unleash"),
+                race_flag=bool(getattr(args, "race", False)),
+            )
+        profile = HOST_MODE_PROFILES[mode]
+        race = bool(getattr(args, "race", False) or mode == "race")
+        execution_policy = (
+            dict(profile.get("execution_policy"))
+            if isinstance(profile.get("execution_policy"), dict)
+            else None
+        )
+        # Only force expensive options when mode asks for them — not by default.
+        wake = getattr(args, "wake_on_quota", False)
+        heal = getattr(args, "self_heal", False)
+        if wake is False and profile.get("wake_on_quota"):
+            wake = True
+        if heal is False and profile.get("self_heal_pytest"):
+            heal = True
+        # Explicit CLI False flags not available; use mode as source of truth.
+        wake = bool(profile.get("wake_on_quota") or getattr(args, "wake_on_quota", False))
+        heal = bool(profile.get("self_heal_pytest") or getattr(args, "self_heal", False))
+
+        if not bool(getattr(args, "execute", False)):
+            goals = _host_collect_goals(args)
+            dash = build_host_dashboard(
+                workspace_root=workspace,
+                repo_root=repo,
+                agent=agent,
+                run_pytest=False,
+                mode=mode,
+                auto_resume=False,
+            )
+            payload = {
+                "status": "preview",
+                "message": "Add --execute to actually host. Showing dashboard + planned goals.",
+                "goals": goals,
+                "mode": mode,
+                "token_cost": profile.get("token_cost"),
+                "token_cost_label": profile.get("token_cost_label"),
+                "wild": {"race": race, "wake_on_quota": wake, "self_heal": heal},
+                "execution_policy": execution_policy or {},
+                "dashboard": dash,
+            }
+            if fmt == "json":
+                print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+            else:
+                print(host_dashboard_to_markdown(dash))
+                print(f"\n## 计划目标（未执行 · 模式 `{mode}` · {profile.get('token_cost_label')}）\n")
+                for i, g in enumerate(goals, 1):
+                    print(f"{i}. {g}")
+                print(
+                    f"\n额度：`{profile.get('token_cost')}` · 并发={profile.get('max_active')} · "
+                    f"resume={profile.get('max_auto_resumes_per_mission')} · race={race}"
+                )
+                if mode == "economy":
+                    print("默认 **economy 省额度**：单路执行、少重试。要更快用 `--mode standard` 或 `unleash`。")
+                elif mode == "unleash":
+                    print("Unleash：**吃额度换效率**（回血续跑 / 多 resume / 自愈插队 / 可 merge）。")
+                elif mode == "race":
+                    print("Race：**很吃额度**（双助手竞速，败者杀掉）。")
+                elif mode == "yolo":
+                    print("YOLO：Claude Code 使用 `--permission-mode bypassPermissions`，不再等待权限确认。")
+                print("\n加上 `--execute` 才会真正后台托管。")
+            return 0 if dash.get("ready_for_host") else 1
+
+        goals = _host_collect_goals(args)
+        if not goals:
+            print("host run/unleash/yolo 需要 --goal 和/或 --goals-file。")
+            return 1
+        hours = float(getattr(args, "hours", 0) or 0)
+        expensive = mode in {"unleash", "race", "yolo"}
+        # Single-shot only for economy/standard, non-race, non-watch
+        if (
+            hours <= 0
+            and len(goals) == 1
+            and not getattr(args, "watch", False)
+            and not expensive
+            and not race
+        ):
+            result = start_hosted_goal(
+                workspace_root=workspace,
+                repo_root=repo,
+                goal=goals[0],
+                agent=agent,
+                test_command=getattr(args, "test_command", None),
+                allow_dirty=bool(getattr(args, "allow_dirty", True)),
+                allow_test_edits=bool(getattr(args, "allow_test_edits", False) or profile.get("allow_test_edits")),
+                merge=bool(getattr(args, "merge", False) or profile.get("merge")),
+                max_rounds=int(profile.get("max_rounds") or 2),
+                max_repair_rounds=int(profile.get("max_repair_rounds") or 1),
+                max_wall_minutes=int(profile.get("max_wall_minutes") or 40),
+                max_worker_minutes=int(profile.get("max_worker_minutes") or 30),
+                reasoning_effort=str(profile.get("reasoning_effort") or "inherit"),
+                model_policy=profile.get("model_policy") if isinstance(profile.get("model_policy"), dict) else None,
+                execution_policy=execution_policy,
+            )
+            if fmt == "json":
+                print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
+            else:
+                print(
+                    f"## 托管启动（`{mode}` · {profile.get('token_cost_label')}）\n\n"
+                    f"- status: **{result.get('status')}**\n"
+                    f"- stop: `{result.get('stop_reason') or '-'}`\n"
+                    f"- mission: `{result.get('mission_id') or '-'}`\n"
+                    f"- goal: {result.get('goal')}\n\n"
+                    f"{result.get('message') or ''}\n"
+                )
+            return 0 if str(result.get("status") or "") in {"background_started", "running"} else 1
+
+        max_active = getattr(args, "max_active", None)
+        if max_active is None:
+            max_active = int(profile.get("max_active") or 1)
+        result = run_host_session(
+            workspace_root=workspace,
+            repo_root=repo,
+            goals=goals,
+            hours=max(0.25, hours or (3.0 if expensive else 2.0)),
+            agent=agent,
+            test_command=getattr(args, "test_command", None),
+            poll_seconds=getattr(args, "poll_seconds", None),
+            allow_dirty=bool(getattr(args, "allow_dirty", True)),
+            allow_test_edits=bool(getattr(args, "allow_test_edits", False) or profile.get("allow_test_edits")),
+            merge=bool(getattr(args, "merge", False) or profile.get("merge")),
+            max_active=int(max_active),
+            mode=mode,
+            unleash=expensive,
+            race=race,
+            wake_on_quota=wake,
+            self_heal_pytest=heal,
+            reasoning_effort=str(profile.get("reasoning_effort") or "inherit"),
+            model_policy=profile.get("model_policy") if isinstance(profile.get("model_policy"), dict) else None,
+            execution_policy=execution_policy,
+        )
+        if fmt == "json":
+            print(json.dumps(to_jsonable(result), ensure_ascii=False, indent=2))
+        else:
+            print(host_run_to_markdown(result))
+        return 0 if str(result.get("status") or "") in {"completed", "stopped"} else 1
+
+    print(f"Unknown host action: {action}. Use status|doctor|run|unleash|yolo|stop|policy.")
+    return 2
+
+
+def _host_collect_goals(args: Any) -> list[str]:
+    goals: list[str] = []
+    goal = str(getattr(args, "goal", None) or "").strip()
+    if goal:
+        goals.append(goal)
+    for extra in getattr(args, "goals", None) or []:
+        text = str(extra or "").strip()
+        if text:
+            goals.append(text)
+    goals_file = getattr(args, "goals_file", None)
+    if goals_file:
+        path = Path(str(goals_file)).expanduser()
+        if path.is_file():
+            for line in path.read_text(encoding="utf-8-sig").splitlines():
+                text = line.strip()
+                if not text or text.startswith("#"):
+                    continue
+                goals.append(text)
+    return goals
+
+
 def _handle_mission(args: Any) -> int:
     action = str(args.action)
     if action in {"start", "resume"}:
@@ -561,8 +823,8 @@ def _mission_status(args: Any) -> int:
 
 
 def _mission_list_or_show(args: Any, action: str) -> int:
-    from .chief_run import chief_run_to_markdown
-    from .missions import list_missions, list_missions_to_markdown, load_mission, load_rounds
+    from .chief_run import chief_run_to_markdown, mission_status_payload
+    from .missions import list_missions, list_missions_to_markdown, load_mission
     from .models import to_jsonable
 
     if action == "list":
@@ -576,17 +838,7 @@ def _mission_list_or_show(args: Any, action: str) -> int:
     if mission is None:
         print(f"No saved mission found with id: {args.mission}")
         return 1
-    payload: dict[str, Any] = {
-        "schema_version": 1,
-        "product": mission.get("product", "DevPacer"),
-        "verification_engine": mission.get("verification_engine", "Checkpoint"),
-        "status": mission.get("status", ""),
-        "stop_reason": mission.get("stop_reason", ""),
-        "message": "",
-        "mission": mission,
-        "plan": {},
-        "rounds": load_rounds(args.workspace_root, args.mission),
-    }
+    payload = mission_status_payload(workspace_root=args.workspace_root, mission_id=args.mission)
     print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2) if args.format == "json" else chief_run_to_markdown(payload))
     return 0
 
@@ -775,8 +1027,19 @@ def _handle_chief_worker(args: Any) -> int:
 
 
 def _handle_chief_background_worker(args: Any) -> int:
+    import json as _json
     from .chief_background import run_background_worker
     from .chief_run import chief_run_to_markdown, payload_to_json
+
+    raw_policy = getattr(args, "execution_policy_json", None)
+    execution_policy: dict | None = None
+    if raw_policy:
+        try:
+            parsed = _json.loads(raw_policy)
+            if isinstance(parsed, dict):
+                execution_policy = parsed
+        except (ValueError, TypeError):
+            pass
 
     payload = run_background_worker(
         workspace_root=args.workspace_root,
@@ -791,6 +1054,7 @@ def _handle_chief_background_worker(args: Any) -> int:
         test_command=getattr(args, "test_command", None),
         allow_test_edits=getattr(args, "allow_test_edits", False),
         merge=getattr(args, "merge", False),
+        execution_policy=execution_policy,
     )
     print(payload_to_json(payload) if args.format == "json" else chief_run_to_markdown(payload))
     return 0 if str(payload.get("status") or "") == "verified" else 1

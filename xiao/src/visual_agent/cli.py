@@ -4,6 +4,8 @@ import argparse
 import platform
 import json
 import os
+import shutil
+import subprocess
 import sys
 import webbrowser
 from pathlib import Path
@@ -78,6 +80,7 @@ from .workspace import (
 
 DEFAULT_CLI_NAME = "visual-agent"
 CLI_ALIASES = {"visual-agent", "checkpoint", "pacer"}
+PACER_CODEX_COMPAT_COMMANDS = {"resume"}
 
 if TYPE_CHECKING:
     from .workflow import WorkflowRuntime
@@ -86,6 +89,57 @@ if TYPE_CHECKING:
 def current_cli_name() -> str:
     stem = Path(sys.argv[0]).stem.lower()
     return stem if stem in CLI_ALIASES else DEFAULT_CLI_NAME
+
+
+def launch_claude_code(argv: list[str]) -> int:
+    executable = shutil.which("claude") or shutil.which("claude.cmd")
+    if not executable:
+        print("Pacer requires Claude Code CLI on PATH. Install it with: npm install -g @anthropic-ai/claude-code")
+        return 127
+    from .subprocess_window import prepare_subprocess_command
+
+    argv = normalize_claude_passthrough_argv(argv)
+    completed = subprocess.run(prepare_subprocess_command([executable, *argv]))
+    return int(completed.returncode)
+
+
+def normalize_claude_passthrough_argv(argv: list[str]) -> list[str]:
+    if "--dangerously-skip-permissions" in argv:
+        return claude_yolo_argv(argv)
+    return list(argv)
+
+
+def claude_yolo_argv(argv: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    skip_next = False
+    for token in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "--permission-mode":
+            skip_next = True
+            continue
+        if token.startswith("--permission-mode="):
+            continue
+        if token in {"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions"}:
+            continue
+        cleaned.append(token)
+    return ["--permission-mode", "bypassPermissions", *cleaned]
+
+
+def launch_claude_code_yolo(argv: list[str]) -> int:
+    return launch_claude_code(claude_yolo_argv(argv))
+
+
+def launch_gemini(argv: list[str]) -> int:
+    executable = shutil.which("gemini") or shutil.which("gemini.cmd")
+    if not executable:
+        print("Pacer requires Gemini CLI on PATH. Install it with: npm install -g @google/gemini-cli")
+        return 127
+    from .subprocess_window import prepare_subprocess_command
+
+    completed = subprocess.run(prepare_subprocess_command([executable, *argv]))
+    return int(completed.returncode)
 
 
 def build_version_message(cli_name: str = DEFAULT_CLI_NAME) -> str:
@@ -97,10 +151,10 @@ def build_version_message(cli_name: str = DEFAULT_CLI_NAME) -> str:
         playwright_version = "unavailable"
     lines = [
         f"{cli_name} {__version__}",
-        "Product: Checkpoint",
+        "Product: Pacer",
+        "Package: visual-agent",
+        "Verification engine: Checkpoint",
     ]
-    if cli_name != DEFAULT_CLI_NAME:
-        lines.append(f"Package: {DEFAULT_CLI_NAME}")
     lines.extend(
         [
             f"Python: {platform.python_version()}",
@@ -113,37 +167,39 @@ def build_version_message(cli_name: str = DEFAULT_CLI_NAME) -> str:
 
 
 def build_welcome_message(cli_name: str = "checkpoint") -> str:
+    """User-facing golden path — for people who do not live in Codex/Code CLIs."""
+    brand = "Pacer"
     return "\n".join(
         [
-            "DevPacer / Checkpoint — AI coding assistant orchestrator.",
+            f"{brand} — 帮你跟编程助手一起把事做完的朋友。",
+            "你不用先学会 Codex / Claude Code；用白话说目标就行。",
             "",
-            "直接开发：",
-            f"  {cli_name}",
-            "  Pacer> 修复登录错误并运行测试",
-            "  Pacer> 继续补边界测试",
+            "怎么开始：",
+            "  1) 安装（在 xiao 源码目录）：",
+            "       powershell -ExecutionPolicy Bypass -File scripts\\install_pacer.ps1",
+            "  2) 打开你的项目文件夹（最好是 git 项目）",
+            "  3) 用人话交代一件事，例如：",
+            f"       {cli_name} host doctor",
+            f"       {cli_name} host run --goal \"修报错并过测试\" --execute          # 默认 economy 省额度",
+            f"       {cli_name} host run --mode standard --goal \"...\" --hours 2 --execute",
+            f"       {cli_name} host unleash --goal \"...\" --hours 3 --execute     # 吃额度换效率",
+            f"       {cli_name} host status",
+            f"       {cli_name} mission start --goal \"给登录页修一下报错，并跑通测试\" \\",
+            "         --test-command \"python -m pytest -q\" --agent codex --execute",
             "",
-            "Start here (one-time per project):",
-            f"  {cli_name} init --root .agent-workspace",
-            f"  {cli_name} agents doctor",
+            "我会：",
+            "  · 用你听得懂的话告诉你：做到哪了、卡在哪、要不要合并",
+            "  · 让 Codex/Code 自己施展；收工时我会跟它们较真要证据，不替你假说「做完了」",
             "",
-            "Run a task (safe preview — no code changed):",
-            f'  {cli_name} mission start --goal "Add a slugify function and tests" \\',
-            "    --test-command \"pytest -q\" --agent codex",
-            "",
-            "Add --execute to actually run, --merge to auto-merge when verified:",
-            f'  {cli_name} mission start --goal "..." --test-command "pytest -q" \\',
-            "    --agent codex --execute --merge",
-            "",
-            "Queue & watch multiple tasks:",
-            f"  {cli_name} mission worker --watch",
-            f"  {cli_name} dashboard",
-            "",
-            "Inspect previous missions:",
+            "常用（都在 CMD 里，不用面板）：",
+            "  pacer                 # 进入对话；/菜单 看命令",
+            "  pacer codex           # 高级：把终端交给 Codex 本尊",
+            "  pacer yolo            # 高级：Claude Code 全权限交互模式",
+            "  pacer host yolo --goal \"...\" --execute  # 高级：Claude Code 全权限托管",
+            f"  {cli_name} --help",
             f"  {cli_name} mission list",
-            f"  {cli_name} quota",
             "",
-            "  See docs/五分钟上手.md for a 5-minute walkthrough.",
-            f"  Run {cli_name} --help for the full command list.",
+            "文档：docs/五分钟上手.md · 设定：docs/pacer_constitution_user_and_agent_2026-07-17.md",
         ]
     )
 
@@ -882,6 +938,78 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
         help="Claude Code statusLine command: reads session JSON on stdin, records rate_limits, prints a status line.",
     )
 
+    host_cmd = subparsers.add_parser(
+        "host",
+        help="Long-host managed development (status/doctor/run/stop). Product path for multi-hour Codex hosting.",
+    )
+    host_cmd.add_argument(
+        "host_action",
+        nargs="?",
+        default="status",
+        choices=["status", "dashboard", "doctor", "run", "start", "stop", "policy", "unleash", "yolo"],
+        help="status|doctor|run|unleash|yolo|stop|policy. Default: status.",
+    )
+    host_cmd.add_argument("--goal", default=None, help="One natural-language goal to host.")
+    host_cmd.add_argument("--goals", action="append", default=[], help="Extra goals. Repeatable.")
+    host_cmd.add_argument("--goals-file", default=None, help="Text file with one goal per line (# comments ok).")
+    host_cmd.add_argument("--hours", type=float, default=0.0, help="Host loop duration in hours. 0 = single launch then return.")
+    host_cmd.add_argument("--agent", default=None, help="Primary coding agent. Default: codex, or claude-code for host yolo.")
+    host_cmd.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root. Default: .agent-workspace.")
+    host_cmd.add_argument("--repo-root", default=".", help="Git repository root. Default: current directory.")
+    host_cmd.add_argument("--test-command", default=None, help="Acceptance command, e.g. absolute python -m pytest -q.")
+    host_cmd.add_argument("--execute", action="store_true", help="Actually host (required for run). Without it, preview only.")
+    host_cmd.add_argument("--allow-dirty", action="store_true", default=True, help="Allow dirty tree (default on for host).")
+    host_cmd.add_argument("--no-allow-dirty", action="store_false", dest="allow_dirty", help="Disallow dirty tree.")
+    host_cmd.add_argument("--allow-test-edits", action="store_true", help="Allow workers to edit tests.")
+    host_cmd.add_argument("--merge", action="store_true", help="Auto-merge only when fully verified (default off).")
+    host_cmd.add_argument(
+        "--mode",
+        choices=["economy", "standard", "unleash", "race", "yolo"],
+        default=None,
+        help="Host mode. Default: economy (save tokens). standard=balanced; unleash/race/yolo burn more for speed.",
+    )
+    host_cmd.add_argument(
+        "--max-active",
+        type=int,
+        default=None,
+        help="Max concurrent missions. Default depends on --mode (economy=1, standard=2, unleash=4).",
+    )
+    host_cmd.add_argument("--poll-seconds", type=float, default=None, help="Host loop poll interval seconds.")
+    host_cmd.add_argument("--max-auto-resumes", type=int, default=None, help="Policy: auto-resumes per orphaned mission.")
+    host_cmd.add_argument("--watch", action="store_true", help="Force host loop even for a single goal.")
+    host_cmd.add_argument("--pytest", action="store_true", help="status/doctor: also run main-repo pytest.")
+    host_cmd.add_argument(
+        "--clear-quota-cache",
+        action="store_true",
+        help="Clear the selected agent's recent quota-failure cache before probing.",
+    )
+    host_cmd.add_argument(
+        "--unleash",
+        action="store_true",
+        help="Alias for --mode unleash (expensive: more resumes, wake-on-quota, self-heal, merge).",
+    )
+    host_cmd.add_argument(
+        "--race",
+        action="store_true",
+        help="Alias for --mode race (very expensive: dual-agent race, loser killed).",
+    )
+    host_cmd.add_argument(
+        "--yolo",
+        action="store_true",
+        help="Alias for --mode yolo with Claude Code bypassPermissions.",
+    )
+    host_cmd.add_argument(
+        "--wake-on-quota",
+        action="store_true",
+        help="When quota/login dies, poll until agent is back instead of exiting.",
+    )
+    host_cmd.add_argument(
+        "--self-heal",
+        action="store_true",
+        help="If main pytest goes red, auto-spawn a fix mission.",
+    )
+    host_cmd.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format.")
+
     mission = subparsers.add_parser("mission", help="High-level DevPacer mission workflow.")
     mission.add_argument(
         "action",
@@ -1036,6 +1164,7 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     chief_background_worker.add_argument("--test-command", default=None, help=argparse.SUPPRESS)
     chief_background_worker.add_argument("--allow-test-edits", action="store_true", help=argparse.SUPPRESS)
     chief_background_worker.add_argument("--merge", action="store_true", help=argparse.SUPPRESS)
+    chief_background_worker.add_argument("--execution-policy-json", default=None, help=argparse.SUPPRESS)
     chief_background_worker.add_argument("--format", choices=["json", "markdown"], default="markdown", help=argparse.SUPPRESS)
 
     agents = subparsers.add_parser("agents", help="Inspect coding-agent capability profiles (Codex, Claude Code).")
@@ -1551,20 +1680,63 @@ def main(argv: list[str] | None = None) -> int:
     welcome_cli = "pacer" if prog == "pacer" else "checkpoint"
     if argv is None:
         argv = sys.argv[1:]
+    # Meta flags must work for every entry name (pacer/checkpoint/visual-agent)
+    # before any Codex handoff. Otherwise `pacer --version` becomes Codex's help.
+    if argv and argv[0] in {"help", "-h", "--help"}:
+        print(build_welcome_message(welcome_cli))
+        print("")
+        build_parser(prog=prog).print_help()
+        return 0
+    if argv and (argv[0] in {"--version", "-V"} or "--version" in argv):
+        print(build_version_message(prog))
+        return 0
     if system_invocation and prog == "pacer":
         from .pacer_management import handle_pacer_management
 
+        # Primary product path for non-expert users: CMD chat + / menu.
+        if not argv:
+            from .interactive_agent import run_interactive_agent
+
+            return run_interactive_agent(repo_root=Path.cwd())
+        # Escape hatch: pacer codex/code ... hands the terminal to Codex unchanged.
+        if argv[0] in {"codex", "code", "--codex"}:
+            from .codex_launcher import launch_codex
+
+            return launch_codex(argv[1:])
+        # Claude Code passthrough for users who want the native interactive CLI.
+        if argv[0] in {"claude", "cc", "--claude"}:
+            return launch_claude_code(argv[1:])
+        # Explicit Claude Code YOLO shortcut: remove conflicting permission flags
+        # and force Claude's native bypassPermissions mode.
+        if argv[0] in {"yolo", "claude-yolo", "cc-yolo", "--claude-yolo"}:
+            return launch_claude_code_yolo(argv[1:])
+        # Gemini passthrough for users who want the native interactive CLI.
+        if argv[0] in {"gemini", "gm", "--gemini"}:
+            return launch_gemini(argv[1:])
         managed = handle_pacer_management(argv)
         if managed is not None:
             return managed
+        if argv[0] in PACER_CODEX_COMPAT_COMMANDS:
+            from .codex_launcher import launch_codex
+
+            return launch_codex(argv)
+        # Natural-language one-shot outside the REPL.
+        if not argv[0].startswith("-") and argv[0] not in _subcommand_names(build_parser(prog="pacer")):
+            from .interactive_agent import run_interactive_agent
+            from .simple_task import run_simple_managed_task
+
+            # Single line task without entering REPL.
+            goal = " ".join(argv)
+            payload = run_simple_managed_task(goal, repo_root=Path.cwd())
+            from .interactive_agent import _friend_result_text
+
+            print(_friend_result_text(payload, goal=goal))
+            return 0 if str(payload.get("status") or "") in {"verified", "done"} else 1
         from .codex_launcher import launch_codex
 
         return launch_codex(argv)
     if not argv:
         print(build_welcome_message(welcome_cli))
-        return 0
-    if "--version" in argv:
-        print(build_version_message(prog))
         return 0
     parser = build_parser(prog=prog)
     argv, simple_task = expand_natural_language_task_argv(argv, _subcommand_names(parser))
