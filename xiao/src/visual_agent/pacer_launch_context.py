@@ -77,6 +77,8 @@ MAX_TRUSTED_TASK_CONTRACTS = 256
 PRELAUNCH_TASK_REQUIRED_ENV = "PACER_PRELAUNCH_TASK_REQUIRED"
 PRELAUNCH_TASK_CONTRACT_DIGEST_ENV = "PACER_PRELAUNCH_TASK_CONTRACT_DIGEST"
 PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV = "PACER_PRELAUNCH_SOURCE_BASELINE_DIGEST"
+TASK_TRIGGER_SCHEMA_VERSION = 1
+TASK_TRIGGER_EVENT = "begin_pacer_task"
 LAUNCH_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _LAUNCH_STATE_THREAD_LOCKS_GUARD = threading.Lock()
 _LAUNCH_STATE_THREAD_LOCKS: dict[str, threading.RLock] = {}
@@ -92,6 +94,8 @@ _TASK_CONTRACT_TRUST_LOCK = threading.Lock()
 _TRUSTED_TASK_CONTRACTS: OrderedDict[
     tuple[str, str, str], tuple[str, str, str]
 ] = OrderedDict()
+_MANAGED_TASK_ROLLOVER_TRUST_LOCK = threading.Lock()
+_TRUSTED_MANAGED_TASK_ROLLOVER_SESSIONS: set[tuple[str, str, str]] = set()
 _PYTHON_PROBE_CODE = (
     "import importlib.util,json,sys;"
     "print(json.dumps({'executable':sys.executable,'version':"
@@ -440,6 +444,7 @@ def initialize_active_launch(
         "launch_goal": launch_goal,
         "current_goal": launch_goal,
         "query_goal": "",
+        "memory_required": True,
         "manifest_path": str(expected_manifest),
         "auto_compact_token_limit": int(launch.get("auto_compact_token_limit") or 0),
         "known_project_roots": [str(path) for path in known_project_roots],
@@ -464,7 +469,41 @@ def initialize_active_launch(
             "acceptance": {"active": False, "state": "not_verified"},
             "dogfood": {"active": False, "state": "project_not_bound"},
         },
+        "task_trigger": {
+            "schema_version": TASK_TRIGGER_SCHEMA_VERSION,
+            "required": bool(launch_goal),
+            "status": "armed" if launch_goal else "not_required",
+            "expected_event": TASK_TRIGGER_EVENT,
+            "task_generation": 1,
+        },
     }
+    # A Pacer launch is not valid until its local task journal exists.  This is
+    # intentionally outside the launch-state write transaction so startup
+    # fails before an apparently runnable launch can be published.
+    from .task_memory import append_task_memory_event, initialize_task_memory
+
+    task_memory_summary = initialize_task_memory(
+        workspace,
+        memory_id=launch_id,
+        goal=launch_goal,
+        repo_root=effective_repo_root,
+        launch_id=launch_id,
+    )
+    payload["task_memory"] = {
+        "required": True,
+        "memory_id": launch_id,
+        "summary_path": str(task_memory_summary.get("summary_path") or ""),
+        "log_path": str(task_memory_summary.get("log_path") or ""),
+    }
+    append_task_memory_event(
+        workspace,
+        memory_id=launch_id,
+        launch_id=launch_id,
+        event_type="launch_started",
+        data={"goal": launch_goal, "repo_root": str(effective_repo_root)},
+        goal=launch_goal,
+        repo_root=effective_repo_root,
+    )
     with _launch_state_transaction(workspace):
         _write_json(launch_liveness_path(workspace, launch_id), dict(payload["liveness"]) | {"launch_id": launch_id})
         current = _read_json(active_launch_path(workspace))
@@ -860,9 +899,214 @@ def update_active_launch(
         for immutable_key in ("task_contract", "task_contract_digest", "task_contract_receipt"):
             if immutable_key in proposed_updates and active.get(immutable_key):
                 proposed_updates.pop(immutable_key, None)
+        if proposed_updates and bool(active.get("memory_required")):
+            from .task_memory import append_task_memory_event
+
+            append_task_memory_event(
+                workspace,
+                memory_id=str(active.get("launch_id") or selected_launch_id),
+                launch_id=str(active.get("launch_id") or selected_launch_id),
+                event_type="launch_state_updated",
+                data={"keys": sorted(str(key) for key in proposed_updates)},
+                goal=str(active.get("launch_goal") or ""),
+                repo_root=str(active.get("effective_repo_root") or active.get("launch_cwd") or ""),
+            )
         active.update(proposed_updates)
         _write_active_launch_unlocked(workspace, active)
         return active
+
+
+def rebind_completed_active_task(
+    workspace_root: str | Path,
+    *,
+    launch_id: str,
+    goal: str,
+    reason: str = "task_rollover",
+) -> dict[str, Any]:
+    """Start a new task slot inside a still-running native launch.
+
+    The task contract and source baseline are per-task evidence.  A new user
+    task may supersede an unfinished task in the same interactive window; the
+    old evidence is archived and remains explicitly non-completed.
+    """
+
+    workspace = Path(workspace_root).expanduser().resolve()
+    selected_launch_id = _validated_launch_id(launch_id)
+    next_goal = str(goal or "").strip()[:2000]
+    if not next_goal:
+        raise ValueError("new task goal is required")
+    with _launch_state_transaction(workspace):
+        active = read_active_launch(workspace, launch_id=selected_launch_id)
+        if not active or str(active.get("launch_id") or "") != selected_launch_id:
+            raise ValueError("task rollover requires the active Pacer launch")
+        lifecycle = active.get("task_lifecycle") if isinstance(active.get("task_lifecycle"), dict) else {}
+        pillars = active.get("pillars") if isinstance(active.get("pillars"), dict) else {}
+        acceptance = pillars.get("acceptance") if isinstance(pillars.get("acceptance"), dict) else {}
+        managed = pillars.get("managed") if isinstance(pillars.get("managed"), dict) else {}
+        completed = (
+            str(lifecycle.get("status") or "") == "completed"
+            or (
+                str(acceptance.get("outcome_status") or "") == "completed"
+                and bool(managed.get("outcome_recorded"))
+            )
+        )
+        previous_generation = max(1, int(active.get("task_generation") or 1))
+        previous_lifecycle = dict(lifecycle)
+        previous_lifecycle["status"] = "completed" if completed else "superseded"
+        previous_lifecycle["superseded_at"] = datetime.now(timezone.utc).isoformat()
+        previous_task = {
+            "goal": str(active.get("launch_goal") or active.get("current_goal") or "")[:2000],
+            "goal_digest": _task_goal_digest(
+                str(active.get("launch_goal") or active.get("current_goal") or "")
+            ),
+            "task_generation": previous_generation,
+            "task_contract_digest": str(active.get("task_contract_digest") or ""),
+            "source_baseline_digest": str(active.get("source_baseline_digest") or ""),
+            "completion_control": active.get("completion_control")
+            if isinstance(active.get("completion_control"), dict)
+            else {},
+            "task_lifecycle": previous_lifecycle,
+            "completion_status": "completed" if completed else "interrupted",
+            "rolled_over_at": datetime.now(timezone.utc).isoformat(),
+            "rollover_reason": str(reason or "task_rollover")[:120],
+        }
+        history = [item for item in active.get("task_history") or [] if isinstance(item, dict)]
+        if previous_task["goal"] or previous_task["task_contract_digest"] or previous_task["source_baseline_digest"]:
+            history.append(previous_task)
+
+        baseline_path = task_source_baseline_path(workspace, selected_launch_id)
+        if baseline_path.exists():
+            archive_path = (
+                baseline_path.parent
+                / f"{selected_launch_id}.task-{previous_generation}.source.json"
+            )
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            if not archive_path.exists():
+                shutil.copy2(baseline_path, archive_path)
+            baseline_path.unlink()
+
+        cleared = dict(active)
+        for key in (
+            "task_contract",
+            "task_contract_digest",
+            "task_contract_receipt",
+            "task_contract_trust_policy",
+            "source_baseline_path",
+            "source_baseline_kind",
+            "source_baseline_complete",
+            "source_baseline_digest",
+            "source_baseline_receipt",
+            "source_baseline_trust_policy",
+            "prelaunch_task_registration",
+            "completion_control",
+            "recovery_source_launch_id",
+            "task_trigger",
+        ):
+            cleared.pop(key, None)
+        cleared.update(
+            {
+                "launch_goal": next_goal,
+                "current_goal": next_goal,
+                "query_goal": next_goal,
+                "task_generation": previous_generation + 1,
+                "task_history": history[-20:],
+                "task_lifecycle": {
+                    "schema_version": 1,
+                    "status": "binding",
+                    "goal_digest": _task_goal_digest(next_goal),
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "rollover_from_generation": previous_generation,
+                },
+                "task_trigger": {
+                    "schema_version": TASK_TRIGGER_SCHEMA_VERSION,
+                    "required": True,
+                    "status": "armed",
+                    "expected_event": TASK_TRIGGER_EVENT,
+                    "task_generation": previous_generation + 1,
+                    "armed_at": datetime.now(timezone.utc).isoformat(),
+                    "goal_digest": _task_goal_digest(next_goal),
+                },
+            }
+        )
+        _write_active_launch_unlocked(workspace, cleared)
+        return cleared
+
+
+def assess_task_trigger(active: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return a conservative diagnosis of whether the current task was triggered.
+
+    A launcher pre-registration is deliberately not treated as a trigger.  The
+    trigger is the MCP ``begin_pacer_task`` call, because that is the point at
+    which the model has actually adopted the immutable task contract.  Missing
+    or unreadable trigger evidence is therefore visible instead of being
+    upgraded to a successful launch.
+    """
+
+    payload = active if isinstance(active, Mapping) else {}
+    raw = payload.get("task_trigger") if isinstance(payload.get("task_trigger"), Mapping) else {}
+    goal = str(
+        payload.get("launch_goal")
+        or payload.get("current_goal")
+        or payload.get("query_goal")
+        or ""
+    ).strip()
+    registration = payload.get("prelaunch_task_registration")
+    required = bool(goal or isinstance(registration, Mapping) or raw.get("required") is True)
+    generation = payload.get("task_generation")
+    if generation is None:
+        lifecycle = payload.get("task_lifecycle") if isinstance(payload.get("task_lifecycle"), Mapping) else {}
+        generation = lifecycle.get("task_generation") or raw.get("task_generation") or 0
+    try:
+        task_generation = max(0, int(generation or 0))
+    except (TypeError, ValueError, OverflowError):
+        task_generation = 0
+    if not required:
+        return {
+            "schema_version": TASK_TRIGGER_SCHEMA_VERSION,
+            "required": False,
+            "passed": True,
+            "status": "not_required",
+            "reason_code": "no_task_supplied",
+            "expected_event": TASK_TRIGGER_EVENT,
+            "observed_event": "",
+            "task_generation": task_generation,
+        }
+
+    status = str(raw.get("status") or "missing").strip().lower()
+    observed_event = str(raw.get("observed_event") or "").strip()
+    if status in {"triggered", "completed"} and observed_event == TASK_TRIGGER_EVENT:
+        return {
+            "schema_version": TASK_TRIGGER_SCHEMA_VERSION,
+            "required": True,
+            "passed": True,
+            "status": status,
+            "reason_code": "",
+            "expected_event": TASK_TRIGGER_EVENT,
+            "observed_event": observed_event,
+            "task_generation": task_generation,
+            "triggered_at": str(raw.get("triggered_at") or ""),
+            "completed_at": str(raw.get("completed_at") or ""),
+        }
+    if status == "triggered":
+        status = "trigger_evidence_incomplete"
+        reason = "task_trigger_evidence_incomplete"
+    elif status == "armed":
+        status = "missing"
+        reason = "task_trigger_not_observed"
+    else:
+        status = "missing"
+        reason = "task_trigger_not_observed"
+    return {
+        "schema_version": TASK_TRIGGER_SCHEMA_VERSION,
+        "required": True,
+        "passed": False,
+        "status": status,
+        "reason_code": reason,
+        "expected_event": TASK_TRIGGER_EVENT,
+        "observed_event": observed_event,
+        "task_generation": task_generation,
+        "armed_at": str(raw.get("armed_at") or ""),
+    }
 
 
 def register_completion_attempt(
@@ -954,6 +1198,23 @@ def update_pillar(
 
         normalized["assessment"] = assess_pillar(str(pillar), normalized)
         pillars[str(pillar)] = normalized
+        if bool(active.get("memory_required")):
+            from .task_memory import append_task_memory_event
+
+            append_task_memory_event(
+                workspace,
+                memory_id=str(active.get("launch_id") or selected_launch_id),
+                launch_id=str(active.get("launch_id") or selected_launch_id),
+                event_type="pillar_updated",
+                data={
+                    "pillar": str(pillar),
+                    "state": str(normalized.get("state") or ""),
+                    "active": bool(normalized.get("active")),
+                    "assessment": normalized.get("assessment") if isinstance(normalized.get("assessment"), dict) else {},
+                },
+                goal=str(active.get("launch_goal") or ""),
+                repo_root=str(active.get("effective_repo_root") or active.get("launch_cwd") or ""),
+            )
         active["pillars"] = pillars
         _write_active_launch_unlocked(workspace, active)
         return active
@@ -1399,6 +1660,46 @@ def _task_source_baseline_trust_key(
     return workspace_identity, launch, repo_identity
 
 
+def register_managed_task_rollover_session(
+    *,
+    workspace_root: str | Path,
+    launch_id: str,
+    repo_root: str | Path,
+) -> None:
+    """Arm same-process task rollover after the initial prelaunch handshake.
+
+    The marker is deliberately process-local.  A restarted MCP process must
+    complete a fresh launcher-backed prelaunch handshake instead of trusting a
+    persisted launch state to authorize a new task contract and source
+    baseline.
+    """
+
+    key = _task_source_baseline_trust_key(
+        workspace_root=workspace_root,
+        launch_id=launch_id,
+        repo_root=repo_root,
+    )
+    with _MANAGED_TASK_ROLLOVER_TRUST_LOCK:
+        _TRUSTED_MANAGED_TASK_ROLLOVER_SESSIONS.add(key)
+
+
+def managed_task_rollover_session_is_trusted(
+    *,
+    workspace_root: str | Path,
+    launch_id: str,
+    repo_root: str | Path,
+) -> bool:
+    """Return whether this MCP process completed the initial trusted handshake."""
+
+    key = _task_source_baseline_trust_key(
+        workspace_root=workspace_root,
+        launch_id=launch_id,
+        repo_root=repo_root,
+    )
+    with _MANAGED_TASK_ROLLOVER_TRUST_LOCK:
+        return key in _TRUSTED_MANAGED_TASK_ROLLOVER_SESSIONS
+
+
 def _validate_task_source_baseline_repo(payload: dict[str, Any], repo_identity: str) -> None:
     if not isinstance(payload, dict):
         raise ValueError("task source baseline must be an object")
@@ -1569,22 +1870,24 @@ def _reconcile_launch_payload(
         return launch
 
     ended_at = datetime.now(timezone.utc).isoformat()
+    terminal_status = _missing_launcher_terminal_status(launch)
     try:
         committed, capsule = _commit_orphaned_launch(
             workspace,
             launch,
             ended_at=ended_at,
             orphaned_pid=launcher_pid,
+            status=terminal_status,
         )
     except Exception:
-        return _orphaned_projection(launch, ended_at=ended_at, orphaned_pid=launcher_pid)
+        return _orphaned_projection(launch, ended_at=ended_at, orphaned_pid=launcher_pid, status=terminal_status)
     if not committed or not capsule:
         return read_active_launch(workspace, launch_id=launch_id)
     from .pacer_events import append_pacer_event
 
     append_pacer_event(
         workspace,
-        "launch_orphaned",
+        "launch_orphaned" if terminal_status == "orphaned" else "launch_closed_without_task",
         launch_id=launch_id,
         data={"launcher_pid": launcher_pid, "recovery_capsule": True},
     )
@@ -1617,20 +1920,34 @@ def _orphaned_projection(
     *,
     ended_at: str,
     orphaned_pid: int,
+    status: str = "orphaned",
 ) -> dict[str, Any]:
     liveness = launch.get("liveness") if isinstance(launch.get("liveness"), dict) else {}
+    terminal_status = status if status in {"orphaned", "closed_without_task"} else "orphaned"
     return {
         **launch,
-        "status": "orphaned",
+        "status": terminal_status,
         "completed_at": ended_at,
         "orphaned_pid": int(orphaned_pid),
         "liveness": {
             **liveness,
             "monitoring": False,
-            "lifecycle_status": "orphaned",
+            "lifecycle_status": terminal_status,
             "stopped_at": ended_at,
         },
     }
+
+
+def _missing_launcher_terminal_status(launch: dict[str, Any]) -> str:
+    if str(launch.get("mode") or "") != "interactive":
+        return "orphaned"
+    if bool(launch.get("prompt_recorded")):
+        return "orphaned"
+    if str(launch.get("launch_goal") or launch.get("current_goal") or launch.get("query_goal") or "").strip():
+        return "orphaned"
+    if isinstance(launch.get("prelaunch_task_registration"), dict):
+        return "orphaned"
+    return "closed_without_task"
 
 
 def recover_orphaned_launches(
@@ -1659,17 +1976,19 @@ def recover_orphaned_launches(
         if pid <= 0 or probe(pid):
             continue
         ended_at = datetime.now(timezone.utc).isoformat()
+        terminal_status = _missing_launcher_terminal_status(launch)
         launch, capsule = _commit_orphaned_launch(
             workspace,
             launch,
             ended_at=ended_at,
             orphaned_pid=pid,
+            status=terminal_status,
         )
         if not launch or not capsule:
             continue
         append_pacer_event(
             workspace,
-            "launch_orphaned",
+            "launch_orphaned" if terminal_status == "orphaned" else "launch_closed_without_task",
             launch_id=str(launch.get("launch_id") or ""),
             data={"launcher_pid": pid, "recovery_capsule": True},
         )
@@ -1683,9 +2002,11 @@ def _commit_orphaned_launch(
     *,
     ended_at: str,
     orphaned_pid: int,
+    status: str = "orphaned",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     workspace = Path(workspace_root).expanduser().resolve()
     launch_id = _validated_launch_id(launch.get("launch_id"))
+    terminal_status = status if status in {"orphaned", "closed_without_task"} else "orphaned"
     with _launch_state_transaction(workspace):
         current = _read_json(launch_context_path(workspace, launch_id))
         try:
@@ -1694,13 +2015,13 @@ def _commit_orphaned_launch(
             return {}, {}
         if str(current.get("status") or "") != "running" or latest_pid != int(orphaned_pid):
             return {}, {}
-        current.update({"status": "orphaned", "completed_at": ended_at, "orphaned_pid": int(orphaned_pid)})
+        current.update({"status": terminal_status, "completed_at": ended_at, "orphaned_pid": int(orphaned_pid)})
         liveness = _read_json(launch_liveness_path(workspace, launch_id))
         liveness.update(
             {
                 "launch_id": launch_id,
                 "monitoring": False,
-                "lifecycle_status": "orphaned",
+                "lifecycle_status": terminal_status,
                 "stopped_at": ended_at,
             }
         )
@@ -1709,10 +2030,10 @@ def _commit_orphaned_launch(
         _write_active_launch_unlocked(workspace, current)
         capsule = {
             "schema_version": 1,
-            "status": "pending",
+            "status": "pending" if terminal_status == "orphaned" else "not_required",
             "source_launch_id": launch_id,
             "created_at": ended_at,
-            "reason": "launcher_process_disappeared",
+            "reason": "launcher_process_disappeared" if terminal_status == "orphaned" else "interactive_session_closed_without_task",
             "project_root": str(current.get("project_root") or current.get("launch_cwd") or ""),
             "goal": str(current.get("launch_goal") or current.get("current_goal") or "")[:2000],
             "auto_compact_token_limit": int(current.get("auto_compact_token_limit") or 0),

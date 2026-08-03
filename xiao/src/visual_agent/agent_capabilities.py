@@ -120,11 +120,13 @@ def _select_model(models: list[Any], *, task_kind: str) -> str:
         if str(entry.get("role") or "") == wanted_role:
             return str(entry["id"])
     # No exact role (e.g. an agent without a "balanced" model): fall back to the
-    # default/first model rather than failing.
+    # default model rather than failing.  If a profile only defines non-default
+    # roles, keep implementation tasks on the user's CLI default instead of
+    # accidentally downgrading strong work to a cheaper role.
     for entry in entries:
         if str(entry.get("role") or "") == "default":
             return str(entry["id"])
-    return str(entries[0]["id"]) if entries else ""
+    return ""
 
 
 def _select_mode(modes: Any, *, task_kind: str, prefer_first: bool = False) -> dict[str, str]:
@@ -155,6 +157,25 @@ def _fill_model_flag(model_flag: Any, model: str) -> str:
     if 0 <= start < end:
         return template[:start] + model + template[end + 1 :]
     return f"{template} {model}"
+
+
+def _probe_bypass_permissions(found: str, *, timeout: float = 6.0) -> bool:
+    """Return True if the executable's --help output mentions bypassPermissions."""
+    argv = [found, "--help"]
+    if found.lower().endswith((".cmd", ".bat")):
+        argv = ["cmd", "/c", found, "--help"]
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        output = (completed.stdout or completed.stderr or "")
+        return "bypassPermissions" in output
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def probe_agent(profile: dict[str, Any], *, timeout: float = 6.0) -> dict[str, Any]:
@@ -194,6 +215,14 @@ def probe_agent(profile: dict[str, Any], *, timeout: float = 6.0) -> dict[str, A
         result["version"] = output.splitlines()[0].strip() if output else ""
     except (OSError, subprocess.SubprocessError):
         result["version"] = ""
+    # Check bypassPermissions support if the profile lists it as a sandbox mode.
+    sandbox_modes = profile.get("sandbox_modes") or []
+    if isinstance(sandbox_modes, list) and any(
+        "bypassPermissions" in str(m.get("name") or "") or "bypassPermissions" in str(m.get("flag") or "")
+        for m in sandbox_modes
+        if isinstance(m, dict)
+    ):
+        result["bypass_permissions_supported"] = _probe_bypass_permissions(found, timeout=timeout)
     return result
 
 

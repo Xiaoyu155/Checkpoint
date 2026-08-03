@@ -7,13 +7,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .agent_capabilities import canonical_agent_name, load_agent_profile
 from .hourly_budget import quota_used_percentage
 from .model_credentials import inspect_model_credentials
 from .model_router import route_task
 
 
 DEFAULT_SELECTOR_CONFIG = "model_pool.json"
-ROUTING_POLICY_VERSION = 2
+ROUTING_POLICY_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class ModelSelection:
     quota_used_percentage: float
     route_signals: dict[str, Any]
     decision_id: str
+    agent_backend: str
 
 
 def model_pool_path(workspace_root: str | Path | None = None) -> Path:
@@ -61,12 +63,20 @@ def load_model_candidates(
     workspace_root: str | Path | None = None,
     config_path: str | Path | None = None,
     credential_source: str | Path | None = None,
+    agent_backend: str = "codex",
 ) -> list[ModelCandidate]:
     path = Path(config_path).expanduser() if config_path else model_pool_path(workspace_root)
     configured = _read_configured_candidates(path)
     if configured:
         return configured
-    return _candidates_from_credentials(credential_source=credential_source)
+    backend = canonical_agent_name(agent_backend)
+    profile_candidates = _candidates_from_agent_profiles(agent_backend=backend)
+    credential_candidates = (
+        _candidates_from_credentials(credential_source=credential_source)
+        if backend == "codex"
+        else []
+    )
+    return [*profile_candidates, *credential_candidates]
 
 
 def select_model_for_task(
@@ -79,6 +89,7 @@ def select_model_for_task(
     workspace_root: str | Path | None = None,
     config_path: str | Path | None = None,
     credential_source: str | Path | None = None,
+    agent_backend: str = "codex",
 ) -> ModelSelection:
     route = route_task(
         objective=objective,
@@ -86,19 +97,29 @@ def select_model_for_task(
         acceptance_criteria=acceptance_criteria,
         repeated_failure=repeated_failure,
     )
+    backend = canonical_agent_name(agent_backend)
     candidates = load_model_candidates(
         workspace_root=workspace_root,
         config_path=config_path,
         credential_source=credential_source,
+        agent_backend=backend,
     )
     used = quota_used_percentage(quota_snapshot)
-    scored = [_score_candidate(item, required_tier=route.tier, quota_used=used) for item in candidates]
+    scored = [
+        _score_candidate(
+            item,
+            required_tier=route.tier,
+            quota_used=used,
+            agent_backend=backend,
+        )
+        for item in candidates
+    ]
     scored.sort(key=lambda item: (-item["score"], item["cost"], -item["capability"], item["id"]))
     viable = [item for item in scored if item["viable"]]
     selected_payload = viable[0] if viable else None
     selected = next((item for item in candidates if item.id == selected_payload["id"]), None) if selected_payload else None
     if selected is None:
-        decision_id = _routing_decision_id(objective, route.tier, None, scored)
+        decision_id = _routing_decision_id(objective, route.tier, backend, None, scored)
         return ModelSelection(
             status="blocked",
             objective=str(objective or ""),
@@ -109,8 +130,9 @@ def select_model_for_task(
             quota_used_percentage=used,
             route_signals=route.signals,
             decision_id=decision_id,
+            agent_backend=backend,
         )
-    decision_id = _routing_decision_id(objective, route.tier, selected, scored)
+    decision_id = _routing_decision_id(objective, route.tier, backend, selected, scored)
     return ModelSelection(
         status="selected",
         objective=str(objective or ""),
@@ -121,6 +143,7 @@ def select_model_for_task(
         quota_used_percentage=used,
         route_signals=route.signals,
         decision_id=decision_id,
+        agent_backend=backend,
     )
 
 
@@ -129,6 +152,7 @@ def selection_to_dict(selection: ModelSelection) -> dict[str, Any]:
         "schema_version": 2,
         "policy_version": ROUTING_POLICY_VERSION,
         "decision_id": selection.decision_id,
+        "agent_backend": selection.agent_backend,
         "status": selection.status,
         "objective": selection.objective,
         "required_tier": selection.required_tier,
@@ -144,6 +168,7 @@ def selection_to_markdown(selection: ModelSelection) -> str:
     lines = ["## Dynamic Model Selection", ""]
     lines.append(f"Objective: {selection.objective}")
     lines.append(f"Required tier: `{selection.required_tier}`")
+    lines.append(f"Agent backend: `{selection.agent_backend}`")
     lines.append(f"Quota used: `{selection.quota_used_percentage:.1f}%`")
     if selection.selected:
         lines.append(f"Selected: `{selection.selected.id}` ({selection.selected.provider}:{selection.selected.model})")
@@ -185,9 +210,9 @@ def routing_request_evidence(
         }
     expected_provider = str(selected.get("provider") or "")
     expected_model = str(selected.get("model") or "")
-    matched = (
-        expected_model.casefold() == str(requested_model or "").casefold()
-        and expected_provider.casefold() == str(requested_provider or "").casefold()
+    matched = expected_model.casefold() == str(requested_model or "").casefold() and (
+        not expected_provider
+        or expected_provider.casefold() == str(requested_provider or "").casefold()
     )
     return {
         "schema_version": 1,
@@ -245,6 +270,65 @@ def _candidates_from_credentials(*, credential_source: str | Path | None = None)
     return candidates
 
 
+def _candidates_from_agent_profiles(*, agent_backend: str) -> list[ModelCandidate]:
+    candidates: list[ModelCandidate] = []
+    for agent in (canonical_agent_name(agent_backend),):
+        profile = load_agent_profile(agent) or {}
+        models = profile.get("models") if isinstance(profile.get("models"), list) else []
+        for entry in models:
+            if not isinstance(entry, dict) or not entry.get("id"):
+                continue
+            role = str(entry.get("role") or "").strip().lower()
+            defaults = _profile_role_defaults(role)
+            if not defaults:
+                continue
+            model = str(entry["id"])
+            candidates.append(
+                ModelCandidate(
+                    id=f"{agent}:{model}",
+                    provider="",
+                    model=model,
+                    capability=float(defaults["capability"]),
+                    cost=float(defaults["cost"]),
+                    latency=float(defaults["latency"]),
+                    reliability=float(defaults["reliability"]),
+                    modes=tuple(defaults["modes"]),
+                    notes=f"Built in from {agent} agent profile role `{role}`.",
+                    agent_backend=agent,
+                    raw=dict(entry),
+                )
+            )
+    return candidates
+
+
+def _profile_role_defaults(role: str) -> dict[str, Any]:
+    if role == "fast":
+        return {
+            "capability": 0.50,
+            "cost": 0.20,
+            "latency": 0.35,
+            "reliability": 0.80,
+            "modes": ("cheap",),
+        }
+    if role == "balanced":
+        return {
+            "capability": 0.72,
+            "cost": 0.35,
+            "latency": 0.45,
+            "reliability": 0.82,
+            "modes": ("standard",),
+        }
+    if role == "default":
+        return {
+            "capability": 0.86,
+            "cost": 0.70,
+            "latency": 0.55,
+            "reliability": 0.86,
+            "modes": ("standard", "strong"),
+        }
+    return {}
+
+
 def _provider_defaults(provider: str) -> dict[str, Any]:
     low = provider.lower()
     if low in {"deepseek", "xiaomimimo", "gemini"}:
@@ -276,10 +360,16 @@ def _candidate_from_dict(item: dict[str, Any]) -> ModelCandidate:
     )
 
 
-def _score_candidate(candidate: ModelCandidate, *, required_tier: str, quota_used: float) -> dict[str, Any]:
+def _score_candidate(
+    candidate: ModelCandidate,
+    *,
+    required_tier: str,
+    quota_used: float,
+    agent_backend: str,
+) -> dict[str, Any]:
     required_capability = {"cheap": 0.2, "standard": 0.45, "strong": 0.7}.get(required_tier, 0.45)
     allowed_by_mode = not candidate.modes or required_tier in candidate.modes
-    backend_compatible = candidate.agent_backend == "codex"
+    backend_compatible = canonical_agent_name(candidate.agent_backend) == canonical_agent_name(agent_backend)
     viable = (
         candidate.capability_known
         and candidate.cost_known
@@ -342,6 +432,7 @@ def _candidate_to_dict(candidate: ModelCandidate | None) -> dict[str, Any] | Non
 def _routing_decision_id(
     objective: str,
     required_tier: str,
+    agent_backend: str,
     selected: ModelCandidate | None,
     candidates: list[dict[str, Any]],
 ) -> str:
@@ -349,6 +440,7 @@ def _routing_decision_id(
         "policy_version": ROUTING_POLICY_VERSION,
         "objective": str(objective or ""),
         "required_tier": required_tier,
+        "agent_backend": agent_backend,
         "selected": selected.id if selected else "",
         "candidates": [str(item.get("id") or "") for item in candidates],
     }

@@ -17,6 +17,7 @@ from visual_agent.chief_dispatch import (
     _managed_budget_policy,
     _managed_retry_decision,
     _run_worker_attempt,
+    _refresh_resume_project_memory,
     _verification_is_repairable,
     _write_worktree_gitignore,
     build_verification_command,
@@ -29,9 +30,10 @@ from visual_agent.chief_dispatch import (
     workspace_record_dirty_prefixes,
 )
 from visual_agent.chief_engineer import build_chief_plan, chief_plan_to_dict
-from visual_agent.chief_plans_store import load_verification, load_worker_records, save_plan
+from visual_agent.chief_plans_store import load_plan, load_verification, load_worker_records, save_plan
 from visual_agent.codex_check import CodexCheckResult, CodexWorkflowCheck
 from visual_agent.managed_state import ManagedBudgetPolicy
+from visual_agent.missions import append_round, create_mission, default_budget_policy, save_mission
 from visual_agent.workspace import init_workspace
 
 
@@ -64,6 +66,61 @@ def saved_ready_plan(tmp_path, monkeypatch, *, agents=("codex",)):
     )
     saved = save_plan(chief_plan_to_dict(plan), workspace_root=workspace.root, plan_id="20260702-120000-dispatch")
     return workspace, saved["plan_id"]
+
+
+def test_resume_refreshes_failure_memory_before_next_worker(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    plan_id = "20260720-120000-memory-refresh"
+    plan = {
+        "plan_id": plan_id,
+        "objective": "Fix payment checkout amount mismatch",
+        "repo_root": str(tmp_path),
+        "project_memory": {
+            "usage": {"memory_mode": "enabled"},
+            "entries": [],
+        },
+    }
+    save_plan(plan, workspace_root=workspace.root, plan_id=plan_id)
+    mission = create_mission(
+        workspace_root=workspace.root,
+        objective=plan["objective"],
+        repo_root=tmp_path,
+        plan_id=plan_id,
+        budget_policy=default_budget_policy(),
+        mission_id="mission-memory-refresh",
+        status="stopped",
+    )
+    mission["current_round"] = 1
+    mission["stop_reason"] = "worker_error"
+    save_mission(workspace.root, mission)
+    append_round(
+        workspace.root,
+        mission["mission_id"],
+        {
+            "round": 1,
+            "type": "verification",
+            "status": "fail",
+            "failed_signature": "checkout|assert_amount|payment amount mismatch",
+        },
+    )
+
+    refreshed = _refresh_resume_project_memory(
+        workspace_root=workspace.root,
+        plan=plan,
+        plan_id=plan_id,
+        mission_id=mission["mission_id"],
+        repo_root=tmp_path,
+        memory_mode="enabled",
+    )
+
+    assert refreshed is not None
+    entry = next(item for item in refreshed["entries"] if item["mission_id"] == mission["mission_id"])
+    assert entry["evidence"]["failed_signatures"] == [
+        "checkout|assert_amount|payment amount mismatch"
+    ]
+    assert refreshed["usage"]["refreshed_for_resume"] is True
+    persisted = load_plan(workspace.root, plan_id)
+    assert persisted["project_memory"]["usage"]["refreshed_for_resume"] is True
 
 
 def passing_codex_result(*_args, **_kwargs):
@@ -614,7 +671,12 @@ def test_build_worker_command_claude_code_is_headless(tmp_path) -> None:
     plan = {"objective": "fix", "acceptance_criteria": [], "selected_workflows": [], "changed_files": []}
     track = {"id": "track_1_claude_code", "agent": "claude-code", "model": "opus"}
 
-    cmd = build_worker_command(plan=plan, track=track, worktree=Path(tmp_path), verification_command="checkpoint codex-check")
+    cmd = build_worker_command(
+        plan=plan,
+        track=track,
+        worktree=Path(tmp_path),
+        verification_command="python -m pytest -q",
+    )
     argv = cmd["argv"]
 
     assert argv[0] == "claude"
@@ -622,6 +684,41 @@ def test_build_worker_command_claude_code_is_headless(tmp_path) -> None:
     assert "--model" in argv and "opus" in argv
     # Headless-safe permission mode so the worker does not hang on prompts.
     assert "--permission-mode" in argv and "acceptEdits" in argv
+    assert "--strict-mcp-config" in argv
+    assert "--disable-slash-commands" in argv
+    assert "--tools" in argv
+    assert "--allowedTools" in argv
+    assert "Bash(python -m pytest -q)" in argv
+    assert argv.index("--allowedTools") < argv.index("--output-format") < len(argv) - 1
+    assert "with no cd prefix or shell wrapper: python -m pytest -q" in argv[-1]
+    assert "If a shell or tool action is denied, do not retry" in argv[-1]
+    assert cmd["resolved_sandbox"] == "acceptEdits"
+    assert cmd["sandbox_source"] == "agent_profile.headless"
+    assert cmd["resolved_approval"] == "acceptEdits"
+    assert cmd["approval_source"] == "agent_profile.headless"
+
+
+def test_build_worker_command_claude_code_yolo_uses_bypass_permissions(tmp_path) -> None:
+    plan = {"objective": "fix", "acceptance_criteria": [], "selected_workflows": [], "changed_files": []}
+    track = {"id": "track_1_claude_code", "agent": "claude-code", "model": "opus"}
+
+    cmd = build_worker_command(
+        plan=plan,
+        track=track,
+        worktree=Path(tmp_path),
+        verification_command="python -m pytest -q",
+        execution_policy={"permission_mode": "yolo", "tool_permissions": "default"},
+    )
+    argv = cmd["argv"]
+
+    assert "--permission-mode" in argv
+    assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
+    assert "acceptEdits" not in argv
+    assert "--allowedTools" not in argv
+    assert "--tools" in argv
+    assert argv[argv.index("--tools") + 1] == "default"
+    assert cmd["resolved_sandbox"] == "bypassPermissions"
+    assert cmd["resolved_approval"] == "bypassPermissions"
 
 
 def test_build_worker_command_appends_prompt_suffix_to_codex_stdin(tmp_path) -> None:
@@ -648,7 +745,6 @@ def test_chief_dispatch_claude_code_worker_executes(tmp_path, monkeypatch) -> No
     monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: "claude" if name == "claude" else None)
-    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
 
     calls = []
 
@@ -674,7 +770,6 @@ def test_chief_dispatch_marks_approval_waiting_worker_as_blocked(tmp_path, monke
     monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: "claude" if name == "claude" else None)
-    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
 
     def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
         text = "I need your approval to run `npm test`. Waiting for permission."
@@ -1025,7 +1120,6 @@ def test_chief_dispatch_claude_quota_exhaustion_is_reported(tmp_path, monkeypatc
     monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: "claude" if name == "claude" else None)
-    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
     monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_by_name", lambda _name: None)
 
     calls = []
@@ -1051,7 +1145,6 @@ def test_chief_dispatch_codex_quota_does_not_fall_over_to_claude(tmp_path, monke
     monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: name if name in {"codex", "claude"} else None)
-    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
     monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_by_name", lambda _name: None)
 
     calls = []
@@ -1129,7 +1222,6 @@ def test_chief_dispatch_codex_quota_does_not_auto_fall_over_to_mimo_patch_worker
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "reused", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
     monkeypatch.setattr("visual_agent.chief_dispatch.default_worktree_path", lambda **_kwargs: tmp_path)
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: name if name in {"codex", "claude"} else None)
-    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
     monkeypatch.setattr(
         "visual_agent.chief_dispatch.resolve_backend_by_name",
         lambda _name: {
@@ -1174,10 +1266,12 @@ def test_chief_dispatch_quota_exhausted_is_honest_when_no_failover(tmp_path, mon
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
     # Claude is NOT installed: no failover hop is possible.
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: name if name == "codex" else None)
-    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
     monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_by_name", lambda _name: None)
 
-    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None):
+    calls = []
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path, env=None, **_kwargs):
+        calls.append(list(argv))
         log_path.write_text("ERROR: You've hit your usage limit.", encoding="utf-8")
         return {"exit_code": 1, "stdout_tail": "", "stderr_tail": "ERROR: You've hit your usage limit."}
 
@@ -1187,6 +1281,8 @@ def test_chief_dispatch_quota_exhausted_is_honest_when_no_failover(tmp_path, mon
     )
 
     assert payload["quota_exhausted"] is True
+    assert len(calls) == 1
+    assert payload["repair_worker_records"] == []
     assert any("quota" in w.lower() for w in payload.get("warnings") or [])
 
     from visual_agent.chief_run import _stop_reason_from_dispatch
@@ -1202,7 +1298,6 @@ def test_chief_dispatch_claude_normal_failure_reports_worker_failure(tmp_path, m
     monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: "claude" if name == "claude" else None)
-    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
     monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_by_name", lambda _name: None)
     calls = []
 
@@ -1226,7 +1321,6 @@ def test_chief_dispatch_claude_code_worker_writes_records(tmp_path, monkeypatch)
     monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
     monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
     monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda name: "claude" if name == "claude" else None)
-    monkeypatch.setattr("visual_agent.chief_dispatch.resolve_backend_for_tier", lambda tier: None)
 
     executed = []
 
@@ -1467,9 +1561,8 @@ def test_build_worker_command_warns_to_reuse_absolute_verification_toolchain(tmp
         ),
     )
 
-    assert "reuse that exact toolchain" in cmd["stdin"]
-    assert "do not call bare `dart` or `flutter`" in cmd["stdin"]
-    assert r"not `...\bin\dart.exe`, `...\bin\dart.bat`" in cmd["stdin"]
+    assert "prefer that same toolchain" in cmd["stdin"]
+    assert "completion evidence matches" in cmd["stdin"]
     assert r"D:\Projects\flutter_stable\bin\cache\dart-sdk\bin\dart.exe" in cmd["stdin"]
 
 
@@ -1663,6 +1756,7 @@ def test_merge_drops_pacer_only_gitignore_block(tmp_path) -> None:
 
 
 def test_merge_refused_for_worker_failed_tests_pass(tmp_path, monkeypatch) -> None:
+    """Unclean worker exit + green tests + product changes → verified, merge still skipped."""
     workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
     monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
     monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
@@ -1690,10 +1784,11 @@ def test_merge_refused_for_worker_failed_tests_pass(tmp_path, monkeypatch) -> No
         merge=True,
     )
 
-    assert payload["status"] == "worker_failed_tests_pass"
+    assert payload["status"] == "verified"
     assert payload["merge"]["status"] == "skipped"
-    assert "worker_failed_tests_pass" in payload["merge"]["reason"]
+    assert "did not complete normally" in payload["merge"]["reason"]
     assert merge_calls == []
+    assert any("did not report a clean completion" in item for item in payload.get("warnings") or [])
 
 
 def test_post_merge_failure_report_contains_revert_hint() -> None:
@@ -2117,11 +2212,11 @@ def test_worker_failed_with_passing_tests_is_not_verified(tmp_path, monkeypatch)
         merge=True,
     )
 
-    assert payload["status"] == "worker_failed_tests_pass"
+    assert payload["status"] == "verified"
     assert payload["latest_verification"]["verdict"] == "pass"
     assert payload["merge"]["status"] == "skipped"
     assert merge_calls == []
-    assert any("Worker did not complete normally" in item for item in payload["warnings"])
+    assert any("did not report a clean completion" in item for item in payload["warnings"])
 
 
 def test_prior_verified_evidence_does_not_verify_new_work(tmp_path, monkeypatch) -> None:
@@ -2634,6 +2729,34 @@ def test_codex_worker_command_explicit_effort_and_resume_argv(tmp_path) -> None:
     assert command["session_mode"] == "resume"
 
 
+def test_codex_repair_resume_preserves_the_routed_model(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch._codex_user_defaults",
+        lambda: {"model": "gpt-5.6-sol", "reasoning_effort": "medium"},
+    )
+    command = build_worker_command(
+        plan={"objective": "Fix totals"},
+        track={
+            "agent": "codex",
+            "model_selection": {
+                "decision_id": "route-balanced",
+                "required_tier": "standard",
+                "selected": {"provider": "", "model": "gpt-5.5"},
+            },
+        },
+        worktree=tmp_path,
+        verification_command="python -m pytest -q",
+        phase="repair",
+        model_policy={"repair": "strong"},
+        resume_session_id="019f4a34-2fc9-7622-8e24-21c7200fcf8d",
+    )
+
+    assert ("--model", "gpt-5.5") in zip(command["argv"], command["argv"][1:])
+    assert command["resolved_model"] == "gpt-5.5"
+    assert command["model_source"] == "command"
+    assert command["routing_evidence"]["policy_match"] is True
+
+
 def test_worker_prompt_allows_exploration_and_delegated_omits_file_guidance(tmp_path) -> None:
     from visual_agent.chief_dispatch import build_worker_prompt
 
@@ -2657,15 +2780,33 @@ def test_worker_prompt_allows_exploration_and_delegated_omits_file_guidance(tmp_
         dispatch_mode="delegated",
     )
 
-    assert "Explore the codebase as much as needed" in tracked
-    assert "Likely-relevant files" in tracked
+    assert "Explore and implement with full senior-engineer autonomy" in tracked
+    assert "likely-relevant files" in tracked
     assert tracked.count("- src/module_") == 30
-    assert "Likely-relevant files" not in delegated
+    assert "likely-relevant files" not in delegated
     assert "Worker track:" not in delegated
     for prompt in (tracked, delegated):
         lowered = prompt.lower()
         assert "do not scan" not in lowered
         assert "conserve model budget" not in lowered
+
+
+def test_worker_prompt_explains_host_side_docker_acceptance(tmp_path) -> None:
+    from visual_agent.chief_dispatch import build_worker_prompt
+
+    prompt = build_worker_prompt(
+        plan={"objective": "Fix the containerized API", "acceptance_criteria": []},
+        track={"id": "track_1_codex", "agent": "codex"},
+        worktree=tmp_path,
+        verification_command=(
+            "docker compose --project-name acceptance up --abort-on-container-exit "
+            "--exit-code-from test --build"
+        ),
+    )
+
+    assert "Docker acceptance note" in prompt
+    assert "host Docker daemon" in prompt
+    assert "Pacer runs the exact acceptance command from the host verifier" in prompt
 
 
 def test_concrete_model_policy_overrides_codex_config_for_implementation(tmp_path, monkeypatch) -> None:
@@ -2686,6 +2827,33 @@ def test_concrete_model_policy_overrides_codex_config_for_implementation(tmp_pat
     assert command["argv"][-3:] == ["--model", "gpt-5.5", "-"]
     assert command["resolved_model"] == "gpt-5.5"
     assert command["model_source"] == "command"
+
+
+def test_standard_model_policy_uses_balanced_profile_role(tmp_path, monkeypatch) -> None:
+    from visual_agent.chief_dispatch import build_worker_command
+
+    seen = {}
+
+    def fake_recommend(_profile, *, task_kind):
+        seen["task_kind"] = task_kind
+        return {
+            "model": "balanced-model",
+            "reasoning_effort": "inherit",
+            "sandbox": {},
+            "approval": {},
+        }
+
+    monkeypatch.setattr("visual_agent.chief_dispatch.recommend_worker_config", fake_recommend)
+    command = build_worker_command(
+        plan={"objective": "Update docs", "plan_id": "plan-model"},
+        track={"id": "track_1_codex", "agent": "codex", "track_kind": "implementation"},
+        worktree=tmp_path,
+        verification_command="python -m pytest",
+        model_policy={"implementation": "standard"},
+    )
+
+    assert seen["task_kind"] == "balanced"
+    assert command["resolved_model"] == "balanced-model"
 
 
 def test_codex_provider_override_is_explicit_and_audited(tmp_path, monkeypatch) -> None:

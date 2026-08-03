@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .agent_capabilities import load_agent_profile, recommend_worker_config
+from .agent_capabilities import canonical_agent_name, load_agent_profile, recommend_worker_config
 from .dynamic_model_selector import select_model_for_task, selection_to_dict
 from .model_router import route_task, tier_task_kind
 from .codex_check import codex_coverage_summary, is_runtime_changed_file
@@ -407,7 +407,8 @@ def _plan_status(
 # what "done" means for the product area instead of only asserting "tests pass".
 DOMAIN_CRITERIA: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (
-        ("checkout", "cart", "order", "payment", "purchase", "结算", "下单", "购物车", "支付"),
+        # Avoid bare "order"/"下单" — they match trading risk language like "order placement".
+        ("checkout", "cart", "payment", "purchase", "结算", "购物车", "支付", "下单页", "结账"),
         (
             "Order total, currency, and line items display correctly.",
             "A successful order shows an explicit confirmation state (not a silent success).",
@@ -422,21 +423,21 @@ DOMAIN_CRITERIA: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
         ),
     ),
     (
-        ("dashboard", "chart", "report", "table", "list", "metric", "仪表盘", "图表", "报表", "列表"),
+        ("dashboard", "chart", "report", "metric", "仪表盘", "图表", "报表"),
         (
             "Data renders with no undefined, NaN, or stray placeholder where real data exists.",
             "The empty state is intentional and readable when there is no data.",
         ),
     ),
     (
-        ("form", "input", "validation", "submit", "field", "表单", "校验", "提交", "输入"),
+        ("form", "validation", "submit", "表单", "校验", "提交"),
         (
             "Valid input submits and persists; the success state is visible.",
             "Invalid input is rejected with a specific, visible validation message.",
         ),
     ),
     (
-        ("total", "price", "amount", "discount", "currency", "金额", "价格", "折扣", "总价"),
+        ("price", "amount", "discount", "currency", "金额", "价格", "折扣", "总价"),
         (
             "Computed totals are numerically correct, including edge cases (zero, discount, rounding).",
             "Currency and formatting are consistent across the flow.",
@@ -448,7 +449,27 @@ DOMAIN_CRITERIA: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
 def _domain_criteria(objective: str) -> list[str]:
     lower = objective.lower()
     seen: list[str] = []
+    # Trading/quant language often says "order" without meaning ecommerce checkout.
+    trading_context = any(
+        token in lower
+        for token in (
+            "risk",
+            "trading",
+            "quant",
+            "binance",
+            "signal",
+            "position",
+            "风控",
+            "下单前",
+            "量化",
+            "回测",
+        )
+    )
     for keywords, criteria in DOMAIN_CRITERIA:
+        if trading_context and any(
+            word in keywords for word in ("checkout", "cart", "payment", "purchase", "结算", "购物车", "支付", "下单页", "结账")
+        ):
+            continue
         if any(keyword in lower for keyword in keywords):
             for item in criteria:
                 if item not in seen:
@@ -607,6 +628,7 @@ def _worker_tracks(
                     changed_files=changed_files or [],
                     acceptance_criteria=acceptance_criteria or [],
                     workspace_root=workspace_path,
+                    agent_backend=agent,
                 )
             )
             task_kind = tier_task_kind(route.tier)
@@ -625,9 +647,9 @@ def _worker_tracks(
                 else {}
             )
             if (
-                agent == "codex"
-                and str(model_selection.get("status") or "") == "selected"
-                and str(selected.get("agent_backend") or "") == "codex"
+                str((model_selection or {}).get("status") or "") == "selected"
+                and canonical_agent_name(str(selected.get("agent_backend") or ""))
+                == canonical_agent_name(agent)
                 and str(selected.get("model") or "")
             ):
                 config["model"] = str(selected["model"])

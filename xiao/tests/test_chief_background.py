@@ -8,6 +8,8 @@ import time
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from visual_agent.chief_background import (
     inspect_background_state,
     run_background_worker,
@@ -17,6 +19,21 @@ from visual_agent.chief_background import (
 from visual_agent.chief_run import mission_status_payload, run_chief_mission
 from visual_agent.missions import append_round, load_mission, load_rounds, save_mission
 from visual_agent.workspace import init_workspace
+
+
+@pytest.fixture(autouse=True)
+def _liveness_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Background start now probes agent liveness; keep unit tests offline-friendly."""
+    monkeypatch.setattr(
+        "visual_agent.provider_liveness.probe_worker_agent_liveness",
+        lambda *_a, **_k: {
+            "ok": True,
+            "agent": "codex",
+            "stop_reason": "",
+            "message": "",
+            "details": {},
+        },
+    )
 
 
 def write_verification_workflow(workspace, name: str, *, affects: str = "src/payment/") -> None:
@@ -103,6 +120,43 @@ def test_start_background_chief_run_records_process(tmp_path, monkeypatch) -> No
     assert saved["merge"] is True
 
 
+def test_start_background_chief_run_inherits_saved_allow_dirty(tmp_path, monkeypatch) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    write_verification_workflow(workspace, "checkout", affects="src/payment/")
+    monkeypatch.setattr("visual_agent.chief_engineer.changed_files", lambda **_kwargs: ["src/payment/checkout.py"])
+    preview = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        allow_dirty=True,
+        dispatch_runner=preview_payload,
+    )
+    mission_id = preview["mission"]["mission_id"]
+
+    captured = {}
+
+    class FakeProcess:
+        pid = 43211
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr("visual_agent.chief_background.subprocess.Popen", fake_popen)
+
+    payload = start_background_chief_run(
+        workspace_root=workspace.root,
+        mission_id=mission_id,
+        agents=("codex",),
+    )
+
+    assert payload["status"] == "background_started"
+    assert "--allow-dirty" in captured["argv"]
+    assert payload["background"]["allow_dirty"] is True
+    assert payload["mission"]["allow_dirty"] is True
+
+
 def test_start_background_chief_run_blocks_duplicate_live_process(tmp_path, monkeypatch) -> None:
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     write_verification_workflow(workspace, "checkout", affects="src/payment/")
@@ -128,15 +182,24 @@ def test_start_background_chief_run_blocks_duplicate_live_process(tmp_path, monk
         "visual_agent.chief_background.process_status",
         lambda pid: {"pid": pid, "alive": pid == 43210, "exit_code": None},
     )
+    monkeypatch.setattr(
+        "visual_agent.chief_background.process_command_line",
+        lambda pid: f"python -m visual_agent.cli chief-background-worker --mission {mission_id}"
+        if pid == 43210
+        else "",
+    )
 
     first = start_background_chief_run(workspace_root=workspace.root, mission_id=mission_id)
     saved_before = (workspace.root / "missions" / mission_id / "background.json").read_text(encoding="utf-8")
     second = start_background_chief_run(workspace_root=workspace.root, mission_id=mission_id)
 
     assert first["status"] == "background_started"
+    assert first["background"]["allow_dirty"] is False
+    assert first["mission"]["allow_dirty"] is False
     assert second["status"] == "blocked"
     assert second["stop_reason"] == "background_already_running"
-    assert len(launches) == 1
+    worker_launches = [item for item in launches if "chief-background-worker" in " ".join(str(x) for x in item[0])]
+    assert len(worker_launches) == 1
     assert (workspace.root / "missions" / mission_id / "background.json").read_text(encoding="utf-8") == saved_before
 
 
@@ -300,9 +363,71 @@ def test_inspect_background_state_marks_orphaned_process_as_worker_error(tmp_pat
     assert state["status"] == "orphaned"
     mission = load_mission(workspace.root, mission_id)
     assert mission is not None
-    assert mission["stop_reason"] == "worker_error"
+    assert mission["stop_reason"] == "worker_orphaned"
     rounds = load_rounds(workspace.root, mission_id)
     assert rounds[-1]["type"] == "background_health"
+
+
+def test_inspect_background_state_treats_aborted_as_terminal(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    mission_id = "aborted-terminal"
+    save_background_record(workspace.root, mission_id, {"status": "aborted", "worker_pid": 999})
+
+    state = inspect_background_state(
+        workspace_root=workspace.root,
+        mission_id=mission_id,
+        process_probe=lambda _pid: (_ for _ in ()).throw(AssertionError("terminal state must not probe PID")),
+    )
+
+    assert state["status"] == "aborted"
+    assert state["alive"] is False
+    assert state["process_state"] == "aborted"
+
+
+def test_background_alive_rejects_pid_owned_by_other_mission(tmp_path, monkeypatch) -> None:
+    from visual_agent.chief_background import (
+        _background_record_is_alive,
+        process_belongs_to_mission,
+        start_background_chief_run,
+    )
+
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    write_verification_workflow(workspace, "checkout", affects="src/payment/")
+    monkeypatch.setattr("visual_agent.chief_engineer.changed_files", lambda **_kwargs: ["src/payment/checkout.py"])
+    preview = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        dispatch_runner=preview_payload,
+    )
+    mission_id = preview["mission"]["mission_id"]
+    foreign_cmd = "python -m visual_agent.cli chief-background-worker --mission OTHER-MISSION-ID"
+    monkeypatch.setattr(
+        "visual_agent.chief_background.process_status",
+        lambda _pid: {"alive": True, "exit_code": None},
+    )
+    monkeypatch.setattr(
+        "visual_agent.chief_background.process_command_line",
+        lambda _pid: foreign_cmd,
+    )
+    record = {"status": "running", "pid": 4242, "worker_pid": 4242}
+    assert process_belongs_to_mission(4242, mission_id, record=record) is False
+    assert _background_record_is_alive(record, mission_id) is False
+
+    save_background_record(workspace.root, mission_id, {**record, "started_at": datetime.now(timezone.utc).isoformat()})
+    # Should not block as already_running; relaunch path marks stale and starts (or attempts)
+    monkeypatch.setattr(
+        "visual_agent.chief_background.subprocess.Popen",
+        lambda *a, **k: type("P", (), {"pid": 7777})(),
+    )
+    payload = start_background_chief_run(
+        workspace_root=workspace.root,
+        mission_id=mission_id,
+        agents=("codex",),
+        allow_dirty=True,
+    )
+    assert payload["stop_reason"] != "background_already_running"
+    assert payload["status"] in {"background_started", "blocked"}
 
 
 def test_inspect_background_state_preserves_verified_mission_when_launcher_exits(tmp_path, monkeypatch) -> None:
@@ -388,6 +513,6 @@ def test_mission_status_reconciles_missing_background_process(tmp_path, monkeypa
     payload = mission_status_payload(workspace_root=workspace.root, mission_id=mission_id)
 
     assert payload["background"]["status"] == "orphaned"
-    assert payload["stop_reason"] == "worker_error"
+    assert payload["stop_reason"] == "worker_orphaned"
     assert "final_report_path" in payload
     assert (workspace.root / "missions" / mission_id / "final_report.md").exists()

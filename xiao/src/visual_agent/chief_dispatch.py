@@ -8,6 +8,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,7 +21,6 @@ from .agent_backends import (
     redact_backend,
     resolve_backend_by_name,
     resolve_failover_backend,
-    resolve_backend_for_tier,
 )
 from .agent_capabilities import canonical_agent_name, load_agent_profile, recommend_worker_config
 from .command_verification import (
@@ -34,13 +34,14 @@ from .command_verification import (
     run_command_verification,
     tamper_repair_brief,
 )
-from .chief_plans_store import append_dispatch_record, append_worker_record, load_plan, plan_dir, save_verification
+from .chief_plans_store import append_dispatch_record, append_worker_record, load_plan, plan_dir, save_plan, save_verification
 from .change_set import collect_repository_change_set
 from .codex_check import codex_check_to_markdown, is_runtime_changed_file, run_codex_check
 from .diff_summary import build_diff_summary
 from .dynamic_model_selector import routing_request_evidence
 from .execution_alignment import build_worker_prompt_alignment_check
 from .mission_progress import record_worker_output, save_mission_progress
+from .missions import load_mission, load_rounds
 from .managed_state import (
     ManagedBudgetPolicy,
     ManagedBudgetUsage,
@@ -58,7 +59,7 @@ from .subprocess_window import (
 from .git_diff import changed_files
 from .llm_providers import LLMBackend, run_llm_completion
 from .models import to_jsonable
-from .project_memory import project_memory_handoff_notes
+from .project_memory import build_project_memory, project_memory_handoff_notes
 from .repo_map import build_repo_map, render_repo_map, repo_map_cache_path
 from .security import redact_secret_text, scrub_secrets
 from .verification_profiles import (
@@ -105,6 +106,14 @@ EXECUTABLE_CODING_AGENTS = {"codex", "claude-code", "mimo"}
 DISPATCH_MODES = {"tracked", "delegated"}
 PROMPT_STYLES = {"expanded", "legacy"}
 REPAIR_STRATEGIES = {"resume", "fresh"}
+NON_REPAIRABLE_WORKER_FAILURE_KINDS = frozenset(
+    {
+        "provider_rate_limit",
+        "provider_5xx",
+        "network_timeout",
+        "not_authenticated",
+    }
+)
 
 
 def _normalized_choice(value: str, choices: set[str], *, field: str) -> str:
@@ -224,6 +233,65 @@ def _is_restricted_worker_path(path: str) -> bool:
 CommandRunner = Callable[..., dict[str, Any]]
 
 
+def _refresh_resume_project_memory(
+    *,
+    workspace_root: Path,
+    plan: dict[str, Any],
+    plan_id: str,
+    mission_id: str | None,
+    repo_root: Path,
+    memory_mode: str,
+) -> dict[str, Any] | None:
+    """Refresh evidence memory only when resuming an already-running mission.
+
+    A first dispatch receives the plan snapshot created by ``chief-plan``. Once
+    a worker has failed, however, its new round/failure evidence must be visible
+    to the next worker in the same long-host mission. Refreshing here keeps the
+    resume path local and deterministic while preserving synthetic memory
+    fixtures and caller-provided plan context on the first attempt.
+    """
+    if memory_mode == "disabled" or not mission_id:
+        return None
+    mission = load_mission(workspace_root, str(mission_id))
+    if not isinstance(mission, dict) or int(mission.get("current_round") or 0) <= 0:
+        return None
+    rounds = load_rounds(workspace_root, str(mission_id))
+    if not any(
+        str(item.get("type") or "") in {"dispatch", "verification", "auto_resume"}
+        for item in rounds
+        if isinstance(item, dict)
+    ):
+        return None
+    try:
+        refreshed = build_project_memory(
+            workspace_root=workspace_root,
+            repo_root=repo_root,
+            goal=str(plan.get("objective") or mission.get("objective") or ""),
+            limit=5,
+        )
+    except Exception:
+        return None
+    previous = plan.get("project_memory") if isinstance(plan.get("project_memory"), dict) else {}
+    previous_usage = previous.get("usage") if isinstance(previous.get("usage"), dict) else {}
+    refreshed["usage"] = {
+        **previous_usage,
+        "memory_mode": "enabled",
+        "dispatch_injected": False,
+        "dispatch_note_count": 0,
+        "dispatch_chars": 0,
+        "dispatch_memory_ids": [],
+        "refreshed_for_resume": True,
+    }
+    plan["project_memory"] = refreshed
+    try:
+        save_plan(plan, workspace_root=workspace_root, plan_id=plan_id)
+    except OSError:
+        # A read-only/locked plan must not prevent the worker from using the
+        # in-memory refreshed snapshot for this attempt.
+        pass
+    return refreshed
+
+
 def dispatch_chief_plan(
     *,
     workspace_root: str | Path,
@@ -274,6 +342,42 @@ def dispatch_chief_plan(
     plan = load_plan(workspace_path, plan_id)
     if plan is None:
         return _blocked(plan_id=plan_id, reason=f"No saved plan found: {plan_id}")
+    from .task_memory import (
+        TaskMemoryError,
+        append_task_memory_event,
+        initialize_task_memory,
+        read_task_memory,
+        task_memory_id,
+    )
+
+    dispatch_memory_id = task_memory_id(scope=f"dispatch:{plan_id}:{mission_id or plan_id}")
+    try:
+        initialize_task_memory(
+            workspace_path,
+            memory_id=dispatch_memory_id,
+            goal=str(plan.get("objective") or ""),
+            repo_root=str(plan.get("repo_root") or "."),
+            source="pacer_dispatch",
+        )
+        append_task_memory_event(
+            workspace_path,
+            memory_id=dispatch_memory_id,
+            event_type="dispatch_started",
+            data={
+                "plan_id": plan_id,
+                "mission_id": mission_id or plan_id,
+                "execute": bool(execute and not dry_run),
+            },
+            goal=str(plan.get("objective") or ""),
+            repo_root=str(plan.get("repo_root") or "."),
+        )
+    except TaskMemoryError as exc:
+        return {
+            "status": "blocked",
+            "reason": "task_memory_unavailable",
+            "message": f"Pacer task memory is mandatory and could not be persisted: {exc}",
+            "plan_id": plan_id,
+        }
     closed_loop = dict(execution_policy) if isinstance(execution_policy, dict) else {}
     managed_budget_policy: ManagedBudgetPolicy | None = None
     managed_budget_error = ""
@@ -313,6 +417,14 @@ def dispatch_chief_plan(
         return _blocked(plan_id=plan_id, reason="No matching worker track found in the saved plan.", plan=plan)
 
     repo_root = Path(str(plan.get("repo_root") or ".")).expanduser().resolve()
+    _refresh_resume_project_memory(
+        workspace_root=workspace_path,
+        plan=plan,
+        plan_id=plan_id,
+        mission_id=mission_id,
+        repo_root=repo_root,
+        memory_mode=memory_mode,
+    )
     managed_key = str(closed_loop.get("idempotency_key") or "").strip() or managed_idempotency_key(
         {
             "objective": str(plan.get("objective") or ""),
@@ -467,6 +579,7 @@ def dispatch_chief_plan(
         dispatch_mode=dispatch_mode,
         prompt_style=prompt_style,
         codex_provider=codex_provider,
+        execution_policy=closed_loop,
     )
     toolchain_policy = _toolchain_policy_for_command(effective_verification_command)
     toolchain_preflight = _toolchain_preflight_for_command(effective_verification_command, policy=toolchain_policy)
@@ -581,6 +694,14 @@ def dispatch_chief_plan(
             status="preflight_blocked",
             blocker=str(preflight_block.get("reason") or "preflight_blocked"),
         )
+        append_task_memory_event(
+            workspace_path,
+            memory_id=dispatch_memory_id,
+            event_type="dispatch_blocked",
+            data={"reason": str(preflight_block.get("reason") or "preflight_blocked")},
+            goal=str(plan.get("objective") or ""),
+            repo_root=repo_root,
+        )
         return {
             **preview,
             "status": "preflight_blocked",
@@ -596,6 +717,14 @@ def dispatch_chief_plan(
             status="blocked",
             blocker=blocked_reason,
         )
+        append_task_memory_event(
+            workspace_path,
+            memory_id=dispatch_memory_id,
+            event_type="dispatch_blocked",
+            data={"reason": blocked_reason},
+            goal=str(plan.get("objective") or ""),
+            repo_root=repo_root,
+        )
         return {**preview, "status": "blocked", "reason": blocked_reason}
     if toolchain_preflight.get("status") == "blocked":
         save_mission_progress(
@@ -606,6 +735,14 @@ def dispatch_chief_plan(
             status="blocked",
             blocker=str(toolchain_preflight.get("message") or "toolchain_preflight"),
         )
+        append_task_memory_event(
+            workspace_path,
+            memory_id=dispatch_memory_id,
+            event_type="dispatch_blocked",
+            data={"reason": "toolchain_preflight", "message": str(toolchain_preflight.get("message") or "")},
+            goal=str(plan.get("objective") or ""),
+            repo_root=repo_root,
+        )
         return {
             **preview,
             "status": "blocked",
@@ -613,6 +750,14 @@ def dispatch_chief_plan(
             "toolchain_preflight": toolchain_preflight,
         }
     if dry_run or not execute:
+        append_task_memory_event(
+            workspace_path,
+            memory_id=dispatch_memory_id,
+            event_type="dispatch_previewed",
+            data={"status": str(preview.get("status") or "preview"), "verification_command": effective_verification_command},
+            goal=str(plan.get("objective") or ""),
+            repo_root=repo_root,
+        )
         return preview
 
     repo_check = _check_repo(repo_root)
@@ -689,7 +834,9 @@ def dispatch_chief_plan(
     worker_agent_norm = canonical_agent_name(str(selected_track.get("agent") or ""))
 
     # Proactive quota check: if this agent recently failed due to quota exhaustion,
-    # warn the user and suggest alternatives.
+    # warn the user and suggest alternatives. Hard-block lives on background launch
+    # / overnight waves (provider_liveness) so unit tests can still simulate live
+    # quota failures mid-worker without being short-circuited here.
     from .agent_backends import has_recent_quota_failure, get_available_agents
     if has_recent_quota_failure(worker_agent_norm):
         available = get_available_agents()
@@ -698,6 +845,22 @@ def dispatch_chief_plan(
                 f"Agent '{worker_agent}' recently failed due to quota exhaustion. "
                 f"Consider switching to: {', '.join(available[:3])}"
             )
+        else:
+            preview["worker"]["quota_warning"] = (
+                f"Agent '{worker_agent}' recently failed due to quota exhaustion."
+            )
+
+    try:
+        from .provider_liveness import probe_worker_agent_liveness
+
+        liveness = probe_worker_agent_liveness(worker_agent_norm)
+        preview["provider_liveness"] = liveness
+        if not liveness.get("ok"):
+            preview.setdefault("warnings", []).append(
+                str(liveness.get("message") or "Agent liveness probe failed.")
+            )
+    except Exception:
+        pass
 
     force_backend_name = canonical_backend_name(requested_agent_norm) if requested_agent_norm in {"bugteam", "bug-team", "gpt-bug-team", "mimo", "xiaomimimo"} else ""
     worker_backend = None
@@ -718,7 +881,10 @@ def dispatch_chief_plan(
                 },
             }
     elif worker_agent_norm == "claude-code":
-        worker_backend = resolve_backend_for_tier(str(selected_track.get("tier") or ""))
+        # Claude Code is an explicit production tool. Do not silently route it
+        # onto cheap OpenAI-compatible backends (bugteam/mimo) — that rewrites
+        # --model to ids like gpt-4o-mini and breaks headless runs.
+        worker_backend = None
     initial_argv = list(worker_command["argv"])
     initial_env: dict[str, str] | None = None
     if worker_backend:
@@ -728,6 +894,7 @@ def dispatch_chief_plan(
         if force_backend_name:
             preview["worker"]["forced_backend"] = force_backend_name
     initial_env = _apply_toolchain_policy_env(initial_env, toolchain_policy)
+    initial_env = _prefer_verification_python_env(initial_env, effective_verification_command)
     if initial_env and initial_env.get("DEVPACER_TOOLCHAIN_POLICY"):
         preview["worker"]["toolchain_policy_env"] = "enabled"
 
@@ -808,6 +975,7 @@ def dispatch_chief_plan(
             dispatch_mode=dispatch_mode,
             prompt_style=prompt_style,
             codex_provider=codex_failover_provider,
+            execution_policy=closed_loop,
         )
         failover_record = _run_worker_attempt(
             workspace_root=workspace_path,
@@ -929,6 +1097,11 @@ def dispatch_chief_plan(
     for repair_round in range(1, repair_limit + 1):
         if verification.get("verdict") != "fail" or not _verification_is_repairable(verification):
             break
+        if (
+            _managed_retry_failure_kind(repair_context_record, verification=verification)
+            in NON_REPAIRABLE_WORKER_FAILURE_KINDS
+        ):
+            break
         repair_budget = _dispatch_budget_assessment(
             managed_budget_policy,
             dispatch_started=dispatch_started,
@@ -984,6 +1157,7 @@ def dispatch_chief_plan(
                 prompt_style=prompt_style,
                 codex_provider=active_codex_provider,
                 resume_session_id=current_session_id if use_resume else None,
+                execution_policy=closed_loop,
             )
             repair_argv = list(repair_command["argv"])
             if repair_executable:
@@ -1032,6 +1206,7 @@ def dispatch_chief_plan(
                     dispatch_mode=dispatch_mode,
                     prompt_style=prompt_style,
                     codex_provider=active_codex_provider,
+                    execution_policy=closed_loop,
                 )
                 fallback_argv = list(fallback_command["argv"])
                 if repair_executable:
@@ -1148,7 +1323,11 @@ def dispatch_chief_plan(
     elif latest_verdict == "pass" and has_prior_verified:
         status = "verified"
     elif latest_verdict == "pass" and not worker_completed and has_product_changes:
-        status = "worker_failed_tests_pass"
+        # Tests green + product changes present: treat as verified with a warning.
+        # Long-host dogfood showed worker CLI often exits uncleanly after good edits;
+        # leaving this as stopped/worker_failed_tests_pass blocks merge and confuses
+        # users even when acceptance already passed.
+        status = "verified"
     elif latest_verdict == "pass":
         status = "worker_failed"
     elif latest_verdict in {"coverage_gap", "no_workflows", "no_changed_files"}:
@@ -1159,10 +1338,20 @@ def dispatch_chief_plan(
         # real acceptance).
         status = "inspection_only"
     if budget_blocked is not None and latest_verdict == "fail":
-        status = "managed_budget_exhausted"
+        status = (
+            "managed_budget_exhausted"
+            if str(budget_blocked.get("status") or "") == "exhausted"
+            else "managed_usage_unknown"
+        )
+    # Never demote a successful verification to budget_exhausted. Token/time
+    # budgets gate retries; they must not rewrite "tests passed + worker done"
+    # into a failure that confuses users (completion-feel bug).
     if str(final_budget.get("status") or "") == "exhausted" and status in {
-        "verified",
-        "no_product_changes",
+        "verification_failed",
+        "worker_failed",
+        "worker_failed_tests_pass",
+        "coverage_gap",
+        "inspection_only",
     }:
         status = "managed_budget_exhausted"
 
@@ -1261,6 +1450,16 @@ def dispatch_chief_plan(
         )
     if merge_result is not None:
         payload["merge"] = merge_result
+    if (
+        status == "verified"
+        and not worker_completed
+        and has_product_changes
+        and latest_verdict == "pass"
+    ):
+        payload.setdefault("warnings", []).append(
+            "Worker process did not report a clean completion, but product changes exist "
+            "and the test command passed. Treated as verified; review the worktree before merge."
+        )
     if status == "worker_failed_tests_pass":
         payload.setdefault("warnings", []).append(
             "Worker did not complete normally, but the current worktree changes passed the "
@@ -1290,6 +1489,9 @@ def dispatch_chief_plan(
         "verification_attempts": len(verification_attempts),
         "usage": payload.get("usage_summary"),
         "project_memory_usage": dict(((plan.get("project_memory") or {}).get("usage") or {})),
+        "managed_runtime": dict(payload.get("managed_runtime") or {}),
+        "merge": dict(merge_result or {}),
+        "worktree": dict(preview.get("worktree") or {}),
         "verdict": latest_verification.get("verdict"),
         "status": status,
         "elapsed_seconds": round(monotonic() - dispatch_started, 6),
@@ -1300,6 +1502,25 @@ def dispatch_chief_plan(
         payload["dispatch_record_path"] = dispatch_saved["path"]
     except OSError as exc:
         payload.setdefault("warnings", []).append(f"Dispatch ledger could not be written: {type(exc).__name__}: {exc}")
+    append_task_memory_event(
+        workspace_path,
+        memory_id=dispatch_memory_id,
+        event_type="dispatch_completed",
+        data={
+            "status": status,
+            "verdict": str(latest_verification.get("verdict") or ""),
+            "worker_attempts": len(all_worker_records),
+            "verification_attempts": len(verification_attempts),
+            "dispatch_id": str(dispatch_record.get("dispatch_id") or ""),
+        },
+        goal=str(plan.get("objective") or ""),
+        repo_root=repo_root,
+    )
+    payload["task_memory"] = {
+        "required": True,
+        "memory_id": dispatch_memory_id,
+        "event_count": int(read_task_memory(workspace_path, memory_id=dispatch_memory_id).get("event_count") or 0),
+    }
     return payload
 
 
@@ -1397,7 +1618,12 @@ def _dispatch_preflight_payload(
 ) -> dict[str, Any]:
     dependency_warnings = dependency_check.get("warnings") if isinstance(dependency_check.get("warnings"), list) else []
     command_safety_blocked = str(command_safety.get("status") or "") == "blocked"
-    status = "blocked" if test_command_unresolved or missing_env or command_safety_blocked else ("warning" if dependency_warnings else "ok")
+    pytest_blocked = "pytest_not_importable" in [str(item) for item in dependency_warnings]
+    status = (
+        "blocked"
+        if test_command_unresolved or missing_env or command_safety_blocked or pytest_blocked
+        else ("warning" if dependency_warnings else "ok")
+    )
     return {
         "schema_version": 1,
         "status": status,
@@ -1457,11 +1683,33 @@ def _dispatch_preflight_block(preflight: dict[str, Any]) -> dict[str, str] | Non
     test_command = preflight.get("test_command") if isinstance(preflight.get("test_command"), dict) else {}
     if str(test_command.get("status") or "") == "unresolved":
         requested = str(test_command.get("requested") or "auto")
+        profile = test_command.get("profile") if isinstance(test_command.get("profile"), dict) else {}
+        if str(profile.get("status") or "") == "pytest_unavailable":
+            return {
+                "reason": "pytest_not_importable",
+                "message": (
+                    f"验收命令 `{requested}` 需要 pytest，但本机没有可用的 Python 能 `import pytest`。"
+                    "修复：在项目 venv 执行 `python -m pip install pytest`，"
+                    "或把 --test-command 写成绝对路径，例如 "
+                    f"`\"{Path(sys.executable)} -m pytest -q\"`。"
+                ),
+            }
         return {
             "reason": "test_command_unresolved",
             "message": (
                 f"Test command `{requested}` could not be resolved. "
                 "Pass an explicit --test-command or add a package/test config that Pacer can detect."
+            ),
+        }
+    dependency = preflight.get("dependency") if isinstance(preflight.get("dependency"), dict) else {}
+    dep_warnings = dependency.get("warnings") if isinstance(dependency.get("warnings"), list) else []
+    if "pytest_not_importable" in [str(item) for item in dep_warnings]:
+        resolved = str(test_command.get("resolved") or test_command.get("requested") or "python -m pytest -q")
+        return {
+            "reason": "pytest_not_importable",
+            "message": (
+                f"验收命令 `{resolved}` 绑定的 Python 无法 import pytest。"
+                "这不是产品代码失败。修复：安装 pytest，或换用带 pytest 的解释器绝对路径后 resume。"
             ),
         }
     verification_env = preflight.get("verification_env") if isinstance(preflight.get("verification_env"), dict) else {}
@@ -1642,6 +1890,18 @@ def _managed_retry_failure_kind(
     text = "\n".join([stdout, stderr]).lower()
     if looks_like_quota_exhaustion(stdout, stderr):
         return "provider_rate_limit"
+    if any(
+        marker in text
+        for marker in (
+            "not logged in",
+            "not authenticated",
+            "authentication required",
+            "please run /login",
+            "please run `codex login`",
+            "please run codex login",
+        )
+    ):
+        return "not_authenticated"
     if any(
         marker in text
         for marker in (
@@ -2093,7 +2353,14 @@ def _dispatch_warnings(plan: dict[str, Any], track: dict[str, Any]) -> list[str]
 
 # Map a model_policy tier to a capability-profile task_kind (which resolves to a
 # concrete model id via the agent profile's model roles).
-_POLICY_TIER_TASK_KIND = {"strong": "implementation", "fast": "fast", "multimodal": "implementation"}
+_POLICY_TIER_TASK_KIND = {
+    "cheap": "fast",
+    "fast": "fast",
+    "standard": "balanced",
+    "balanced": "balanced",
+    "strong": "implementation",
+    "multimodal": "implementation",
+}
 
 
 def _task_kind_for_phase(phase: str, model_policy: dict[str, Any] | None) -> str:
@@ -2126,6 +2393,7 @@ def build_worker_command(
     prompt_style: str = "expanded",
     resume_session_id: str | None = None,
     codex_provider: str = "inherit",
+    execution_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     agent = canonical_agent_name(str(track.get("agent") or "codex"))
     profile = load_agent_profile(agent) or {}
@@ -2151,17 +2419,52 @@ def build_worker_command(
             " a starting point, then inspect the real repository wherever needed):\n"
             + repo_map_text
         )
+    selection = track.get("model_selection") if isinstance(track.get("model_selection"), dict) else {}
+    selected = selection.get("selected") if isinstance(selection.get("selected"), dict) else {}
     if agent != "codex":
         # Profile-driven headless command (e.g. Claude Code: `claude -p ...`).
         # Any agent with a headless profile becomes an executable worker.
         headless = profile.get("headless") if isinstance(profile.get("headless"), dict) else {}
         if headless.get("command"):
-            argv = _build_headless_argv(headless=headless, config=config, track=track, phase=phase, prompt=prompt)
+            headless = _headless_with_execution_policy(headless, execution_policy)
+            argv = _build_headless_argv(
+                headless=headless,
+                config=config,
+                track=track,
+                phase=phase,
+                prompt=prompt,
+                verification_command=verification_command,
+            )
+            headless_permission = _headless_permission_mode(argv)
+            resolved_model = _resolved_or_inherited(
+                str(
+                    track.get("model")
+                    or selected.get("model")
+                    or config.get("model")
+                    or ""
+                ),
+                "model",
+            )
+            sandbox = track.get("sandbox") if isinstance(track.get("sandbox"), dict) else {}
+            approval = track.get("approval") if isinstance(track.get("approval"), dict) else {}
             return {
                 "argv": argv,
                 "display": format_argv(argv),
-                "resolved_model": _resolved_or_inherited(str(track.get("model") or config.get("model") or ""), "model"),
+                "resolved_model": resolved_model,
                 "resolved_reasoning_effort": str(reasoning_effort or track.get("reasoning_effort") or config.get("reasoning_effort") or "inherit"),
+                "model_source": "command" if resolved_model != "inherited(model)" else "profile",
+                "resolved_provider": agent,
+                "provider_source": "agent_profile",
+                "resolved_sandbox": headless_permission or str(sandbox.get("name") or ""),
+                "sandbox_source": "agent_profile.headless" if headless_permission else "track",
+                "resolved_approval": headless_permission or str(approval.get("name") or ""),
+                "approval_source": "agent_profile.headless" if headless_permission else "track",
+                "session_mode": "new",
+                "routing_evidence": routing_request_evidence(
+                    selection,
+                    requested_provider=agent,
+                    requested_model=resolved_model,
+                ),
             }
         return {
             "argv": [agent, prompt],
@@ -2181,8 +2484,6 @@ def build_worker_command(
     if resume_session_id:
         argv.append("resume")
     argv.append("--json")
-    selection = track.get("model_selection") if isinstance(track.get("model_selection"), dict) else {}
-    selected = selection.get("selected") if isinstance(selection.get("selected"), dict) else {}
     selected_provider = str(selected.get("provider") or "").strip()
     provider = str(codex_provider or "inherit").strip()
     if provider.lower() == "inherit" and selected_provider:
@@ -2198,6 +2499,10 @@ def build_worker_command(
     # used when the policy asks for it.
     if explicit_model:
         model = explicit_model
+    elif resume_session_id:
+        # Keep a resumed thread on the routed implementation model unless the
+        # repair policy names a concrete replacement.
+        model = str(track.get("model") or selected.get("model") or config.get("model") or "")
     elif phase == "implementation":
         model = str(track.get("model") or config.get("model") or "")
     else:
@@ -2294,7 +2599,93 @@ def _override_model_flag(argv: list[str], model: str) -> list[str]:
     return argv
 
 
-def _build_headless_argv(*, headless: dict[str, Any], config: dict[str, Any], track: dict[str, Any], phase: str, prompt: str) -> list[str]:
+def _headless_permission_mode(argv: list[str]) -> str:
+    for index, token in enumerate(argv):
+        if token == "--permission-mode" and index + 1 < len(argv):
+            return str(argv[index + 1]).strip()
+        if token == "--dangerously-skip-permissions":
+            return "bypassPermissions"
+    return ""
+
+
+def _headless_with_execution_policy(
+    headless: dict[str, Any],
+    execution_policy: dict[str, Any] | None,
+) -> dict[str, Any]:
+    policy = execution_policy if isinstance(execution_policy, dict) else {}
+    raw_mode = str(
+        policy.get("permission_mode")
+        or policy.get("claude_permission_mode")
+        or ""
+    ).strip()
+    mode = _normalize_claude_permission_mode(raw_mode)
+    if not mode:
+        return dict(headless)
+    effective = dict(headless)
+    effective["permission_flag"] = f"--permission-mode {mode}"
+    if mode == "bypassPermissions":
+        # In full-permission mode, do not re-add a narrow Bash allow-list that
+        # turns normal development commands into denials or manual prompts.
+        effective["allow_verification_command"] = False
+    if str(policy.get("tool_permissions") or "").strip().lower() == "default":
+        effective["extra_flags"] = _replace_headless_tools_with_default(
+            str(effective.get("extra_flags") or "")
+        )
+    return effective
+
+
+def _normalize_claude_permission_mode(value: str) -> str:
+    normalized = value.strip().replace("-", "_").replace(" ", "_").lower()
+    aliases = {
+        "yolo": "bypassPermissions",
+        "bypass": "bypassPermissions",
+        "bypasspermissions": "bypassPermissions",
+        "bypass_permissions": "bypassPermissions",
+        "danger": "bypassPermissions",
+        "danger_full_access": "bypassPermissions",
+        "dangerously_skip_permissions": "bypassPermissions",
+        "accept_edits": "acceptEdits",
+        "acceptedits": "acceptEdits",
+        "auto": "auto",
+        "manual": "manual",
+        "dontask": "dontAsk",
+        "dont_ask": "dontAsk",
+        "plan": "plan",
+    }
+    return aliases.get(normalized, "")
+
+
+def _replace_headless_tools_with_default(flags: str) -> str:
+    tokens = shlex.split(str(flags or ""), posix=False)
+    result: list[str] = []
+    index = 0
+    replaced = False
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {"--tools", "--allowedTools", "--allowed-tools"}:
+            if token == "--tools":
+                result.extend(["--tools", "default"])
+                replaced = True
+            index += 1
+            while index < len(tokens) and not str(tokens[index]).startswith("-"):
+                index += 1
+            continue
+        result.append(token)
+        index += 1
+    if not replaced:
+        result.extend(["--tools", "default"])
+    return " ".join(result)
+
+
+def _build_headless_argv(
+    *,
+    headless: dict[str, Any],
+    config: dict[str, Any],
+    track: dict[str, Any],
+    phase: str,
+    prompt: str,
+    verification_command: str = "",
+) -> list[str]:
     base_template = str(headless.get("command") or "").strip()
     base = base_template.replace('"<prompt>"', "").replace("<prompt>", "").strip()
     argv = shlex.split(base, posix=False) if base else []
@@ -2306,10 +2697,23 @@ def _build_headless_argv(*, headless: dict[str, Any], config: dict[str, Any], tr
         argv.extend(["--model", model])
     # Headless-safe execution flags (permission mode, output format) come from the
     # profile so a worker runs unattended without hanging on interactive prompts.
-    for key in ("permission_flag", "extra_flags"):
-        flag = str(headless.get(key) or "").strip()
-        if flag:
-            argv.extend(shlex.split(flag, posix=False))
+    permission_flag = str(headless.get("permission_flag") or "").strip()
+    if permission_flag:
+        argv.extend(shlex.split(permission_flag, posix=False))
+    exact_verification = str(verification_command or "").strip()
+    if (
+        bool(headless.get("allow_verification_command"))
+        and exact_verification
+        and "\n" not in exact_verification
+        and "\r" not in exact_verification
+    ):
+        argv.extend(["--allowedTools", f"Bash({exact_verification})"])
+    # Claude's --allowedTools accepts multiple values and consumes positional
+    # arguments until the next option. Keep another option after it so the
+    # final positional prompt cannot be swallowed as an allowed-tool pattern.
+    extra_flags = str(headless.get("extra_flags") or "").strip()
+    if extra_flags:
+        argv.extend(shlex.split(extra_flags, posix=False))
     argv.append(prompt)
     return argv
 
@@ -2327,28 +2731,49 @@ def build_worker_prompt(
     prompt_style = _normalized_choice(prompt_style, PROMPT_STYLES, field="prompt_style")
     criteria = plan.get("acceptance_criteria") if isinstance(plan.get("acceptance_criteria"), list) else []
     selected = plan.get("selected_workflows") if isinstance(plan.get("selected_workflows"), list) else []
+    from .pacer_voice import agent_completion_debate_block, agent_safety_context_lines
+
+    exact_verification = str(verification_command or "").strip()
+    self_verification_instruction = (
+        "The worker process already starts in the worktree. To self-verify, run exactly this command once "
+        f"with no cd prefix or shell wrapper: {exact_verification}"
+        if exact_verification
+        else "Pacer independently runs acceptance after your edits."
+    )
     lines = [
         f"Objective: {plan.get('objective') or ''}",
         f"Plan id: {plan.get('plan_id') or ''}",
         f"Worker mode: {dispatch_mode}",
         f"Worktree: {worktree}",
-        "Keep changes relevant to the objective. Do not edit Checkpoint plan records or Pacer runtime records.",
-        "Explore the codebase as much as needed to be confident in your change.",
+        "Explore and implement with full senior-engineer autonomy. Pacer does not micromanage your intermediate steps.",
+        self_verification_instruction,
+        "If a shell or tool action is denied, do not retry equivalent command variants; Pacer will run acceptance.",
     ]
+    if re.search(
+        r"(?:^|\s)(?:docker(?:\.exe)?|docker-compose(?:\.exe)?)(?:\s|$)",
+        exact_verification,
+        flags=re.IGNORECASE,
+    ):
+        lines.append(
+            "Docker acceptance note: the worker sandbox may not have access to the host Docker daemon. "
+            "If Docker reports a daemon/socket permission error, do not treat it as a product failure or "
+            "retry command variants; Pacer runs the exact acceptance command from the host verifier after "
+            "your turn."
+        )
     if dispatch_mode == "tracked":
         lines.insert(3, f"Worker track: {track.get('id') or ''} ({track.get('agent') or ''})")
     if selected:
-        lines.append("Selected Checkpoint workflows: " + ", ".join(str(item) for item in selected))
+        lines.append("Related verification workflows (context): " + ", ".join(str(item) for item in selected))
     if criteria:
-        lines.append("Acceptance criteria:")
+        lines.append("Acceptance criteria (completion debate topics, not step-by-step orders):")
         lines.extend(f"- {item}" for item in criteria)
+    scoped: list[str] = []
     if dispatch_mode == "tracked":
         objective_paths = [
             item for item in _extract_context_paths(str(plan.get("objective") or ""))
             if not _is_ignored_context_path(item) and not _is_non_product_path(item)
         ]
         changed = plan.get("changed_files") if isinstance(plan.get("changed_files"), list) else []
-        scoped: list[str] = []
         scoped_limit = 12 if prompt_style == "legacy" else 30
         for item in [*objective_paths, *(str(raw) for raw in changed)]:
             normalized = str(item).replace("\\", "/").strip()
@@ -2360,43 +2785,34 @@ def build_worker_prompt(
             if len(scoped) >= scoped_limit:
                 break
         if scoped:
-            lines.append("Likely-relevant files (verified at dispatch time; this list is guidance, not a boundary):")
+            lines.append("Optional context — likely-relevant files (guidance only, not a whitelist or cage):")
             lines.extend(f"- {item}" for item in scoped)
-    if dispatch_mode == "delegated" or not locals().get("scoped"):
+    if dispatch_mode == "delegated" or not scoped:
         lines.append(
-            "No complete target-file list is imposed. Determine the necessary implementation surface from the objective and repository."
+            "No file whitelist is imposed. Choose the implementation surface yourself from the objective and repository."
         )
     memory_lines = _dispatch_project_memory_lines(plan)
     if memory_lines:
         lines.extend(memory_lines)
-    lines.extend(
-        [
-            "Safety boundary: do not edit archive, graveyard, checkpoint worktree, third-party sample,"
-            " or .agent-workspace runtime paths.",
-            "The verification gate rejects restricted repository paths and changes to trusted verification inputs.",
-        ]
-    )
+    lines.extend(agent_safety_context_lines())
+    lines.extend([""])
+    lines.extend(agent_completion_debate_block(verification_command=str(verification_command or "")))
+    lines.extend([
+        "",
+        "If a conversation turn arrives with no user message — only system-reminder content or empty content — "
+        "treat it as a session-continuation signal. Resume the current active task silently. "
+        "Do not output a 'no user message' notice.",
+    ])
     toolchain_policy = _toolchain_policy_for_command(verification_command)
     if toolchain_policy:
-        forbidden = ", ".join(str(item) for item in toolchain_policy.get("forbidden_paths", [])[:4])
+        # Keep toolchain alignment as completion evidence, not mid-flight nagging.
         lines.extend(
             [
-                "Toolchain policy: reuse that exact toolchain; use the exact SDK executable named by verification for related local commands.",
-                f"Expected Dart executable: {toolchain_policy.get('expected_executable')}",
-                f"Forbidden sibling wrappers/paths: {forbidden}",
-                "For Flutter/Dart tasks, do not call bare `dart` or `flutter` when verification names a specific SDK executable.",
-                r"Do not derive sibling SDK paths: not `...\bin\dart.exe`, `...\bin\dart.bat`, or a PATH-resolved wrapper.",
-                "If worker logs include any forbidden path, DevPacer will withhold verified/merge even if the final command passes.",
+                "",
+                "If verification names an exact SDK executable, prefer that same toolchain when you run related checks,",
+                f"so completion evidence matches what the user will run ({toolchain_policy.get('expected_executable')}).",
             ]
         )
-    else:
-        lines.append("If the verification command contains an absolute tool path, reuse that exact toolchain for related local commands.")
-    lines.extend(
-        [
-            "Run this verification command whenever it helps during implementation and again before claiming done; inspect the evidence if it fails:",
-            verification_command,
-        ]
-    )
     return "\n".join(lines)
 
 
@@ -3213,6 +3629,35 @@ def _toolchain_preflight_for_command(command: str | None, *, policy: dict[str, A
     }
 
 
+def _prefer_verification_python_env(
+    env: dict[str, str] | None,
+    verification_command: str | None,
+) -> dict[str, str] | None:
+    """Put the verification Python early on PATH for worker subprocesses.
+
+    Prevents workers from discovering a broken bare ``python`` (e.g. D:\\python.exe
+    without pytest) while Pacer's gate itself uses a resolved absolute interpreter.
+    """
+    command = str(verification_command or "").strip()
+    if not command or "pytest" not in command.lower():
+        return env
+    match = re.match(r'^("?)(?P<path>(?:[A-Za-z]:)?[^"\n]+?python(?:\d+(?:\.\d+)*)?(?:\.exe)?)\1(?:\s|$)', command, re.I)
+    if not match:
+        return env
+    python_path = Path(match.group("path"))
+    if not python_path.exists():
+        return env
+    python_dir = str(python_path.parent)
+    merged = dict(env or {})
+    current = str(merged.get("PATH") or os.environ.get("PATH") or "")
+    parts = [item for item in current.split(os.pathsep) if item]
+    if python_dir not in parts:
+        merged["PATH"] = os.pathsep.join([python_dir, *parts])
+    # Help some tools that honor VIRTUAL_ENV/PYTHON only loosely.
+    merged.setdefault("PACER_VERIFICATION_PYTHON", str(python_path))
+    return merged
+
+
 def _apply_toolchain_policy_env(env: dict[str, str] | None, policy: dict[str, Any] | None) -> dict[str, str] | None:
     if not isinstance(policy, dict) or not policy.get("expected_executable"):
         return env
@@ -3878,9 +4323,16 @@ def run_process_capture(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_log_path = _worker_stream_sidecar_path(log_path, "stdout")
     stderr_log_path = _worker_stream_sidecar_path(log_path, "stderr")
-    run_env = None
-    if env:
-        run_env = {**os.environ, **{str(k): str(v) for k, v in env.items()}}
+
+    # Isolate Pacer control variables from child process environment
+    run_env = {}
+    source_env = {**os.environ, **{str(k): str(v) for k, v in env.items()}} if env else os.environ
+    for k, v in source_env.items():
+        k_str = str(k)
+        if k_str == "PACER_LAUNCH_ID" or k_str.startswith("PACER_PRELAUNCH_"):
+            continue
+        run_env[k_str] = str(v)
+
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
     lock = threading.Lock()
@@ -4028,7 +4480,7 @@ def merge_worktree_branch(*, repo_root: Path, worktree: Path, branch: str, messa
         return {"status": "blocked", "reason": "target branch has uncommitted changes; not merging.", "dirty": dirty_lines[:10]}
 
     # 3) Merge (no fast-forward). On conflict, abort — never leave a mess.
-    merge = g(repo_root, "merge", "--no-ff", "-m", f"Pacer merge {branch}: {message}", branch)
+    merge = g(repo_root, "-c", "user.email=pacer@local", "-c", "user.name=Pacer", "merge", "--no-ff", "-m", f"Pacer merge {branch}: {message}", branch)
     if merge.returncode != 0:
         g(repo_root, "merge", "--abort")
         return {"status": "conflict", "branch": branch, "target": target, "reason": (merge.stderr or merge.stdout).strip()[:400]}
@@ -4231,11 +4683,13 @@ def _dispatch_project_memory_lines(plan: dict[str, Any]) -> list[str]:
     usage = memory.get("usage") if isinstance(memory.get("usage"), dict) else {}
     joined = " ".join(notes)
     entries = memory.get("entries") if isinstance(memory.get("entries"), list) else []
-    memory_ids = [
-        str(item.get("memory_id"))
-        for item in entries
-        if isinstance(item, dict) and str(item.get("memory_id") or "") in joined
-    ]
+    memory_ids = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        mid = str(item.get("memory_id") or item.get("mission_id") or "")
+        if mid and mid in joined:
+            memory_ids.append(mid)
     usage.update(
         {
             "dispatch_injected": bool(notes),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import time
 from pathlib import Path
 
 from visual_agent import agent_backends
@@ -34,3 +35,15 @@ def test_clear_quota_failure_missing_store_is_a_noop(tmp_path: Path) -> None:
     agent_backends.clear_quota_failure("codex", store_path=path)
 
     assert not path.exists()
+
+
+def test_recent_quota_failure_ignores_invalid_or_future_timestamps(tmp_path: Path) -> None:
+    path = tmp_path / "quota_failures.json"
+    path.write_text('{"codex": "invalid"}\n', encoding="utf-8")
+    assert agent_backends.has_recent_quota_failure("codex", store_path=path) is False
+
+    path.write_text(f'{{"codex": {time.time() + 7200}}}\n', encoding="utf-8")
+    assert agent_backends.has_recent_quota_failure("codex", store_path=path) is False
+
+    path.write_text(f'{{"codex": {time.time()}}}\n', encoding="utf-8")
+    assert agent_backends.has_recent_quota_failure("codex", store_path=path) is True

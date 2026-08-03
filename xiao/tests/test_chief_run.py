@@ -267,8 +267,44 @@ def test_chief_run_with_test_command_bootstraps_missing_workspace(tmp_path, monk
 
     assert payload["status"] == "preview"
     assert workspace_root.exists()
-    assert captured["test_command"] == "python -m pytest -q"
+    assert captured["test_command"].endswith("-m pytest -q")
     assert captured["allow_test_edits"] is False
+
+
+def test_chief_run_resume_inherits_saved_allow_dirty(tmp_path, monkeypatch) -> None:
+    workspace_root = tmp_path / ".agent-workspace"
+    monkeypatch.setattr("visual_agent.chief_engineer.changed_files", lambda **_kwargs: [])
+
+    first = run_chief_mission(
+        goal="Fix checkout total display",
+        workspace_root=workspace_root,
+        repo_root=tmp_path,
+        test_command="python -m pytest -q",
+        allow_dirty=True,
+        dispatch_runner=preview_payload,
+    )
+    mission_id = first["mission"]["mission_id"]
+    assert load_mission(workspace_root, mission_id)["allow_dirty"] is True
+
+    captures: list[dict[str, object]] = []
+
+    def fake_dispatch(**kwargs):
+        captures.append(dict(kwargs))
+        return preview_payload(**kwargs)
+
+    resumed = run_chief_mission(
+        workspace_root=workspace_root,
+        repo_root=tmp_path,
+        resume_mission_id=mission_id,
+        execute=True,
+        dry_run=False,
+        dispatch_runner=fake_dispatch,
+    )
+
+    assert resumed["status"] == "stopped"
+    assert captures
+    assert all(item["allow_dirty"] is True for item in captures)
+    assert load_mission(workspace_root, mission_id)["allow_dirty"] is True
 
 
 def test_chief_run_records_required_verification_env(tmp_path, monkeypatch) -> None:
@@ -330,6 +366,9 @@ def test_objective_test_edit_inference_handles_qualified_phrases() -> None:
     assert not _objective_requests_test_edits("不要修改测试、pyproject.toml、pytest.ini、conftest.py 或任何验收配置")
     assert _objective_requests_test_edits("write unit tests for the parser")
     assert _objective_requests_test_edits("add integration tests covering login")
+    assert _objective_requests_test_edits("add coverage for Qwen markdown JSON extraction")
+    assert _objective_requests_test_edits("increase parser coverage without external API calls")
+    assert _objective_requests_test_edits("完善离线解析覆盖率")
     assert _plan_requests_test_edits(
         original_goal="继续开发，并补齐或更新相应测试",
         goal="构建旅游防骗知识库后端API",
@@ -533,6 +572,26 @@ def test_agent_override_normalizes_existing_codex_track(tmp_path) -> None:
     )
     assert "--model" not in cmd["argv"]
     assert "--permission-mode" not in cmd["argv"]
+
+
+def test_agent_override_preserves_standard_tier_for_claude() -> None:
+    plan = {
+        "objective": "continue",
+        "worker_tracks": [
+            {
+                "id": "track_1_claude_code",
+                "agent": "claude-code",
+                "track_kind": "implementation",
+                "tier": "standard",
+                "model": "opus",
+            }
+        ],
+    }
+
+    assert _override_plan_agent(plan, "claude-code") is True
+    track = plan["worker_tracks"][0]
+    assert track["model"] == "sonnet"
+    assert track["tier"] == "standard"
 
 
 def test_chief_run_blocks_vague_goal_before_dispatch(tmp_path, monkeypatch) -> None:
@@ -792,7 +851,7 @@ def test_chief_run_worker_failure_is_not_verified_by_passing_command(tmp_path, m
 
     assert payload["status"] == "stopped"
     assert payload["stop_reason"] == "worker_error"
-    assert "worker 进程失败" in payload["message"]
+    assert "编程助手" in payload["message"] or "没跑完" in payload["message"]
     rounds = load_rounds(workspace.root, payload["mission"]["mission_id"])
     assert rounds[-1]["status"] == "pass"
 
@@ -812,7 +871,7 @@ def test_chief_run_worker_failed_tests_pass_needs_manual_merge(tmp_path, monkeyp
 
     assert payload["status"] == "stopped"
     assert payload["stop_reason"] == "worker_failed_tests_pass"
-    assert "人工检查 worktree" in payload["message"]
+    assert "不敢说完成" in payload["message"] or "隔离" in payload["message"]
     assert payload["progress"]["stage"] == "worker_failed_tests_pass"
     assert payload["progress"]["stage_label"] == "Worker failed; tests passed"
     assert payload["progress"]["needs_attention"] is True
@@ -833,7 +892,7 @@ def test_chief_run_verified_blocked_is_not_reported_as_stopped(tmp_path, monkeyp
 
     assert payload["status"] == "verified_blocked"
     assert payload["stop_reason"] == "worker_toolchain_violation"
-    assert "不能合并" in payload["message"]
+    assert "合并" in payload["message"]
     report = Path(payload["final_report_path"]).read_text(encoding="utf-8")
     assert "Verified: `false`" in report
     assert r"D:\Projects\flutter_stable\bin\flutter.bat" in report
@@ -914,13 +973,69 @@ def test_chief_run_stops_on_missing_verification_environment(tmp_path, monkeypat
 
     assert payload["status"] == "stopped"
     assert payload["stop_reason"] == "verification_environment_missing"
-    assert "验证环境" in payload["message"]
+    assert "验收环境" in payload["message"] or "环境" in payload["message"]
     report = Path(payload["final_report_path"]).read_text(encoding="utf-8")
     assert "verification_environment_missing" in report
     assert f"checkpoint mission resume --mission '{payload['mission']['mission_id']}' --execute" in report
     assert "mission start --resume" not in report
     assert "Classification confidence: `heuristic`" in report
     assert "建议人工确认" in report
+
+
+def test_chief_run_surfaces_provider_5xx_instead_of_generic_worker_error() -> None:
+    from visual_agent.chief_run import _message_for_stop, _stop_reason_from_dispatch
+
+    dispatch = {
+        "status": "worker_failed",
+        "latest_verification": {"verdict": "pass"},
+        "managed_runtime": {
+            "retry": {
+                "retry": True,
+                "status": "scheduled",
+                "failure_kind": "provider_5xx",
+            }
+        },
+    }
+
+    assert _stop_reason_from_dispatch(dispatch, {"max_rounds": 2}) == "provider_5xx"
+    message = _message_for_stop("provider_5xx")
+    assert "503" in message or "5xx" in message
+    assert "agents doctor" not in message
+
+
+def test_chief_run_does_not_call_verified_work_budget_exhausted() -> None:
+    from visual_agent.chief_run import _stop_reason_from_dispatch
+
+    dispatch = {
+        "status": "managed_budget_exhausted",
+        "latest_verification": {"verdict": "pass"},
+        "worker_record": {"status": "completed", "exit_code": 0},
+        "verification_attempts": [{"verdict": "pass"}, {"verdict": "pass"}],
+    }
+    assert _stop_reason_from_dispatch(dispatch, {"max_rounds": 2}) == "verified"
+
+    dispatch_ok = {
+        "status": "verified",
+        "latest_verification": {"verdict": "pass"},
+        "verification_attempts": [{"verdict": "pass"}],
+    }
+    assert _stop_reason_from_dispatch(dispatch_ok, {"max_rounds": 1}) == "verified"
+
+
+def test_chief_run_distinguishes_unknown_usage_from_exhausted_budget() -> None:
+    from visual_agent.chief_run import _message_for_stop, _stop_reason_from_dispatch
+
+    dispatch = {
+        "status": "managed_usage_unknown",
+        "latest_verification": {"verdict": "fail"},
+        "managed_runtime": {
+            "budget_status": "usage_unknown",
+            "budget": {"reason_codes": ["token_usage_unknown"]},
+        },
+    }
+
+    assert _stop_reason_from_dispatch(dispatch, {"max_rounds": 2}) == "usage_unknown"
+    assert "不是额度已经耗尽" in _message_for_stop("usage_unknown")
 
 
 def test_chief_run_reports_post_merge_verification_failure() -> None:

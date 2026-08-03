@@ -28,6 +28,17 @@ def test_broad_change_escalates_to_strong() -> None:
     assert d.tier == "strong"  # many files beats the cheap keyword
 
 
+def test_dirty_tree_small_offline_coverage_task_stays_standard() -> None:
+    d = route_task(
+        objective="Small offline-testable change: add coverage for JSON extraction.",
+        changed_files=[f"src/stale_{index}.py" for index in range(35)],
+    )
+
+    assert d.tier == "standard"
+    assert d.signals["product_file_count"] == 35
+    assert "coverage" in d.signals["small_scope_terms"]
+
+
 def test_repeated_failure_escalates_to_strong() -> None:
     d = route_task(objective="fix typo", changed_files=["a.py"], repeated_failure=True)
     assert d.tier == "strong"
@@ -36,6 +47,20 @@ def test_repeated_failure_escalates_to_strong() -> None:
 def test_default_is_standard() -> None:
     d = route_task(objective="Add a discount field to the checkout total", changed_files=["src/checkout.py"])
     assert d.tier == "standard"
+
+
+def test_exact_one_file_function_contract_routes_cheap() -> None:
+    d = route_task(
+        objective=(
+            "Implement personalized_greeting(prefix, name) in greetings.py so it returns exactly "
+            "Hello, <prefix> <name>!, preserves existing functions, and makes all tests pass."
+        ),
+        acceptance_criteria=["pytest passes"],
+    )
+
+    assert d.tier == "cheap"
+    assert d.signals["objective_files"] == ["greetings.py"]
+    assert d.signals["narrow_testable_contract"] is True
 
 
 def test_workspace_artifacts_do_not_count_as_files() -> None:

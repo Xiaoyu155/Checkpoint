@@ -1112,6 +1112,23 @@ def test_missing_launcher_process_marks_launch_orphaned_and_creates_capsule(tmp_
     assert capsule["goal"] == "resume this task"
 
 
+def test_taskless_interactive_missing_launcher_is_closed_without_task(tmp_path: Path) -> None:
+    workspace, project = _launch(tmp_path)
+    active = read_active_launch(workspace)
+    active["launcher_pid"] = 424242
+    active["mode"] = "interactive"
+    active["prompt_recorded"] = False
+    write_active_launch(workspace, active)
+
+    recovered = recover_orphaned_launches(workspace, process_probe=lambda _pid: False)
+
+    assert [item["launch_id"] for item in recovered] == ["launch-1"]
+    closed = read_active_launch(workspace)
+    assert closed["status"] == "closed_without_task"
+    assert closed["liveness"]["lifecycle_status"] == "closed_without_task"
+    assert latest_pending_recovery_capsule(workspace, repo_root=project) == {}
+
+
 def test_live_launcher_process_is_not_marked_orphaned(tmp_path: Path) -> None:
     workspace, _ = _launch(tmp_path)
     assert recover_orphaned_launches(workspace, process_probe=lambda _pid: True) == []

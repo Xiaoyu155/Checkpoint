@@ -39,6 +39,7 @@ from .mission_pipeline import mission_result_to_pipeline_state, write_mission_st
 from .mission_contract import normalize_requirement_contract, requirement_contract_planning_answers
 from .mission_progress import build_mission_progress, save_mission_progress
 from .managed_state import managed_task_idempotency_key
+from .model_router import tier_task_kind
 from .notifications import build_event_notification, load_notification_config, send_email_notification
 from .verification_profiles import resolve_test_command
 from .workspace import init_workspace
@@ -328,6 +329,7 @@ def run_chief_mission(
         plan_payload["verification_profile"] = verification_profile
         if plan_id:
             save_plan(plan_payload, workspace_root=workspace_path, plan_id=str(plan_id))
+    effective_allow_dirty = bool(allow_dirty or (mission or {}).get("allow_dirty"))
     effective_allow_test_edits = bool((mission or {}).get("allow_test_edits")) or allow_test_edits or _plan_requests_test_edits(
         original_goal=original_goal,
         goal=str(goal or ""),
@@ -377,6 +379,7 @@ def run_chief_mission(
             requirement_contract=contract_payload,
             verification_env=requested_verification_env,
             test_command=test_command,
+            allow_dirty=effective_allow_dirty,
             allow_test_edits=effective_allow_test_edits,
             merge=effective_merge,
             reasoning_effort=effective_reasoning_effort,
@@ -437,6 +440,7 @@ def run_chief_mission(
             mission["verification_env"] = requested_verification_env
         if test_command:
             mission["test_command"] = str(test_command)
+        mission["allow_dirty"] = bool(effective_allow_dirty)
         mission["allow_test_edits"] = bool(effective_allow_test_edits)
         mission["merge"] = effective_merge
         mission["reasoning_effort"] = effective_reasoning_effort
@@ -608,7 +612,7 @@ def run_chief_mission(
         max_workflows=max_workflows,
         timeout_seconds=min(float(timeout_seconds), float(budget["max_worker_minutes"]) * 60.0),
         delegated_timeout_seconds=min(float(timeout_seconds) * 2.0, float(budget["max_worker_minutes"]) * 60.0),
-        allow_dirty=allow_dirty,
+        allow_dirty=effective_allow_dirty,
         allow_coverage_gap=allow_coverage_gap,
         auto_repair_once=False,
         max_repair_rounds=0,
@@ -707,7 +711,7 @@ def run_chief_mission(
         max_workflows=max_workflows,
         timeout_seconds=worker_timeout_seconds,
         delegated_timeout_seconds=delegated_timeout_seconds,
-        allow_dirty=allow_dirty,
+        allow_dirty=effective_allow_dirty,
         allow_coverage_gap=allow_coverage_gap,
         auto_repair_once=auto_repair_once,
         max_repair_rounds=repair_rounds,
@@ -760,6 +764,8 @@ _TEST_EDIT_REQUEST_PATTERNS = (
     re.compile(r"(验收|评测|回归)(样本|用例)"),
     re.compile(r"\b(add|write|update|create)\b[^.!?\n]{0,40}\btests?\b"),
     re.compile(r"\b(add|write|update|create)\b[^.!?\n]{0,40}\b(eval|acceptance|regression)\b"),
+    re.compile(r"\b(add|write|update|create|extend|improve|increase)\b[^.!?\n]{0,80}\b(?:test\s+)?coverage\b"),
+    re.compile(r"(补|增加|新增|提高|完善)[^。！？!?；;\n]{0,24}(覆盖|覆盖率)"),
     re.compile(r"\btest cases?\b"),
 )
 _NEGATED_TEST_EDIT_PATTERNS = (
@@ -906,7 +912,8 @@ def _override_plan_agent(plan: dict[str, Any], agent: str) -> bool:
 
 def _apply_agent_override_to_track(track: dict[str, Any], agent: str) -> None:
     profile = load_agent_profile(agent) or {}
-    config = recommend_worker_config(profile, task_kind="implementation") if profile else {}
+    task_kind = tier_task_kind(str(track.get("tier") or "strong"))
+    config = recommend_worker_config(profile, task_kind=task_kind) if profile else {}
     track["agent"] = agent
     track["id"] = f"track_1_{agent.replace('-', '_')}"
     # Model and permission flags are agent-specific. When switching a saved
@@ -947,9 +954,34 @@ def _next_round_number(workspace_root: Path, mission_id: str) -> int:
     return max((int(item.get("round") or 0) for item in rounds), default=-1) + 1
 
 
+def _managed_retry_failure_kind(dispatch: dict[str, Any]) -> str:
+    """Surface the managed retry classifier when dispatch already computed one.
+
+    Dispatch records provider 5xx / rate-limit / network timeouts under
+    managed_runtime.retry.failure_kind. Without this bridge, those precise
+    kinds collapse to a generic worker_error stop reason and the user is told
+    to re-run agents doctor even when the local CLI is healthy.
+    """
+    runtime = dispatch.get("managed_runtime") if isinstance(dispatch.get("managed_runtime"), dict) else {}
+    retry = runtime.get("retry") if isinstance(runtime.get("retry"), dict) else {}
+    kind = str(retry.get("failure_kind") or "").strip().lower()
+    if kind in {
+        "provider_5xx",
+        "provider_rate_limit",
+        "network_timeout",
+        "process_crash",
+        "evidence_rejected",
+    }:
+        return kind
+    return ""
+
+
 def _stop_reason_from_dispatch(dispatch: dict[str, Any], budget: dict[str, Any]) -> str:
     status = str(dispatch.get("status") or "")
     if status in {"blocked", "preflight_blocked"}:
+        reason = str(dispatch.get("reason") or "")
+        if reason == "pytest_not_importable":
+            return "pytest_not_importable"
         return _dispatch_stop_reason(dispatch)
     if dispatch.get("quota_exhausted"):
         # The worker never got to do the task; a gate failure here is noise.
@@ -958,6 +990,9 @@ def _stop_reason_from_dispatch(dispatch: dict[str, Any], budget: dict[str, Any])
     verdict = str(latest.get("verdict") or "")
     if status in {"verified", "merged"} and verdict == "pass":
         return "verified"
+    # Defensive: if verification passed with a completed worker, never call it budget_exhausted.
+    if verdict == "pass" and status in {"verified", "merged", "no_product_changes"}:
+        return "verified" if status != "no_product_changes" else "no_product_changes"
     if status == "verified_blocked":
         return "worker_toolchain_violation"
     if status == "no_product_changes":
@@ -967,10 +1002,18 @@ def _stop_reason_from_dispatch(dispatch: dict[str, Any], budget: dict[str, Any])
     if status == "worker_failed_tests_pass":
         return "worker_failed_tests_pass"
     if status == "worker_failed":
-        return "worker_error"
+        classified = _managed_retry_failure_kind(dispatch)
+        return classified or "worker_error"
     if status == "merged_verification_failed":
         return "merged_verification_failed"
+    if status == "managed_usage_unknown":
+        return "usage_unknown"
     if status == "managed_budget_exhausted":
+        # Only when work did not already succeed.
+        if verdict == "pass":
+            worker = dispatch.get("worker_record") if isinstance(dispatch.get("worker_record"), dict) else {}
+            if str(worker.get("status") or "") == "completed":
+                return "verified"
         return "budget_exhausted"
     if verdict == "coverage_gap":
         return "coverage_gap"
@@ -983,8 +1026,10 @@ def _stop_reason_from_dispatch(dispatch: dict[str, Any], budget: dict[str, Any])
     attempts = dispatch.get("verification_attempts") if isinstance(dispatch.get("verification_attempts"), list) else []
     failed = [_failed_signature(item) for item in attempts if _failed_signature(item)]
     if len(failed) >= 2 and failed[-1] == failed[-2]:
+        dispatch["same_failure_signature"] = failed[-1]
         return "same_failure_repeated"
-    if len(attempts) >= int(budget.get("max_rounds") or 1):
+    # Attempt count only exhausts budget when the last verification did not pass.
+    if verdict != "pass" and len(attempts) >= int(budget.get("max_rounds") or 1):
         return "budget_exhausted"
     if verdict == "fail" or status == "verification_failed":
         return "verification_failed"
@@ -1082,85 +1127,30 @@ def _compact_verification(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _message_for_stop(stop_reason: str) -> str:
-    return {
-        "verified": "任务已通过验收。",
-        "coverage_gap": (
-            "任务停止：未找到测试命令或工作流覆盖。"
-            "修复：添加 --test-command \"pytest -q\"（或你项目的测试命令），"
-            "或添加 --allow-coverage-gap 跳过此检查。"
-        ),
-        "manual_verification_required": "任务需要人工/现场验收方案；请在工作台主对话框确认设备、场景、指标和结论模板。",
-        "review_plan_required": "任务需要审查/开发计划输出；请在工作台主对话框确认审查范围和交付格式。",
-        "inspection_only": "任务仅产生了检查性证据；如需真实交互，请重新运行。",
-        "test_command_invalid": (
-            "任务停止：验证命令在运行测试前就出错了。"
-            "修复：手动运行测试命令确认可用，然后重试。"
-        ),
-        "command_launch_error": (
-            "任务停止：无法启动验证命令。"
-            "修复：检查命令是否在 PATH 中，以及测试依赖是否已安装。"
-        ),
-        "command_timeout": (
-            "任务停止：验证命令超时。"
-            "修复：增加 --timeout-seconds 或加快测试速度。"
-        ),
-        "verification_environment_missing": (
-            "任务停止：验证环境缺少必需的外部服务或密钥。"
-            "修复：配置验收所需环境变量/API key 后重试；不要让 worker 修改产品代码、测试或 eval 脚本来绕过。"
-        ),
-        "test_command_unresolved": (
-            "任务停止：无法解析验收命令。"
-            "修复：传入明确的 --test-command，或添加 package.json/pytest/go/cargo 等可检测的测试配置后重试。"
-        ),
-        "merged_verification_failed": (
-            "任务停止：worktree 验收通过并已合并，但目标分支合并后复验失败。"
-            "修复：打开 final_report.md 查看 post-merge 输出，先修复或回滚目标分支，再继续托管。"
-        ),
-        "same_failure_repeated": (
-            "任务停止：自动修复后同样的测试失败仍然出现。"
-            "修复：打开 final_report.md 查看失败输出，然后用更具体的目标重新开始。"
-        ),
-        "budget_exhausted": (
-            "任务停止：已用完配置的轮次预算。"
-            "修复：用 --max-rounds 增加轮次后恢复任务，或用更窄的目标重新开始。"
-        ),
-        "worker_error": (
-            "任务停止：AI worker 进程失败或被终止。"
-            "修复：运行 `checkpoint agents doctor` 确认可用，然后恢复。"
-            "如果你明确接受其他后端，可以手动重试：--agent claude-code 或 --agent mimo。"
-        ),
-        "worker_failed_tests_pass": (
-            "任务停止：worker 未正常完成，但现有改动通过了测试命令。"
-            "请人工检查 worktree 后再用 chief-merge 手动合并。"
-        ),
-        "worker_toolchain_violation": (
-            "任务验收命令通过，但 AI worker 使用了任务禁止的工具链路径。"
-            "当前状态为 verified_blocked，不能合并。"
-            "修复：打开 final_report.md 查看 forbidden_path，要求 worker 只使用验收命令中的精确 SDK 可执行文件后重试。"
-        ),
-        "no_product_changes": (
-            "任务停止：验证命令通过，但 worker 没有产生真实产品代码改动。"
-            "修复：缩小目标或更换 agent 后重试；不要把缓存、报告或 .gitignore 当作产品改动。"
-        ),
-        "verification_failed": (
-            "任务停止：所有修复轮次后验证仍然失败。"
-            "修复：打开 final_report.md 查看 worker 的尝试，然后细化目标。"
-        ),
-        "permission_required": (
-            "任务停止：仓库有未提交的更改（工作树不干净）。"
-            "修复：先提交或暂存更改，然后重试。"
-            "或添加 --allow-dirty 跳过此安全检查。"
-        ),
-        "quota_exhausted": (
-            "任务停止：当前指定的 AI agent 达到了配额限制。"
-            "修复：等待配额重置；如果你明确接受其他后端，"
-            "可以手动重试：--agent claude-code 或 --agent mimo。"
-        ),
-        "needs_clarification": (
-            "任务停止：目标太模糊，无法安全规划。"
-            "修复：细化 --goal，包含具体的验收标准，例如 '添加 X 使测试 Y 通过'。"
-        ),
-    }.get(stop_reason, "Mission stopped.")
+    """User-facing stop text: friend/family voice first (pacer_voice)."""
+    from .pacer_voice import user_message_for_stop
+
+    legacy = {
+        "manual_verification_required": "这件事更适合你现场看一眼再定，我不会假装已经做完。",
+        "review_plan_required": "你更像是要一份审查/计划，而不是直接改代码。我们先把范围说清楚。",
+        "inspection_only": "这轮只做了检查性观察，还不能当成产品已经验收通过。",
+        "test_command_invalid": "测试命令本身没跑起来（写错或找不到）。先在本机把命令跑通再试。",
+        "command_launch_error": "测试命令启动失败，多半是环境或路径问题。",
+        "command_timeout": "测试跑太久超时了。我们可以加长时间，或先缩小范围。",
+        "merged_verification_failed": "隔离区里曾经过了，合并回主项目后又挂了。需要你看一眼主项目。",
+        "same_failure_repeated": "修了几轮还是同一个失败（见下方「反复失败的步骤」）。建议把目标说得更窄一点，或者告诉我你希望先跳过哪个验证步骤。",
+        "worker_toolchain_violation": "测试过了，但用的工具链和约定不一致，我不敢自动合并。",
+        "process_crash": "编程助手进程自己崩了。可以再试，或换一个助手。",
+        "usage_unknown": "编程助手没有返回可审计的用量，托管预算无法判断；这不是额度已经耗尽。",
+    }
+    try:
+        text = user_message_for_stop(stop_reason)
+        # user_story unknown reasons still return a generic; prefer specific legacy when present.
+        if stop_reason in legacy and str(text).startswith("这轮先告一段落"):
+            return legacy[stop_reason]
+        return text
+    except Exception:
+        return legacy.get(stop_reason, "这轮先告一段落。有问题我们再用白话对一下。")
 
 
 def _finish(
@@ -1228,6 +1218,22 @@ def _finish(
         progress_fields = {key: value for key, value in progress.items() if key != "mission_id"}
         progress = save_mission_progress(workspace_root, str(mission["mission_id"]), **progress_fields)
         payload["progress"] = progress
+        try:
+            from .mission_journey import build_mission_journey, save_mission_journey
+
+            journey = build_mission_journey(
+                workspace_root=workspace_root,
+                mission_id=str(mission["mission_id"]),
+                mission=mission,
+                plan=plan,
+                dispatch=dispatch_payload,
+                progress=progress,
+            )
+            saved_journey = save_mission_journey(workspace_root, str(mission["mission_id"]), journey)
+            payload["journey"] = journey
+            payload["journey_path"] = saved_journey["path"]
+        except Exception as exc:  # noqa: BLE001 - observability must not overturn a mission result.
+            payload["journey_error"] = f"{type(exc).__name__}: {exc}"
         report_text = chief_run_to_markdown(payload)
         saved_report = write_final_report(workspace_root, str(mission["mission_id"]), report_text)
         payload["final_report_path"] = saved_report["path"]
@@ -1438,12 +1444,43 @@ def _chief_run_three_section_markdown(
     verified = status in {"verified", "merged"} and stop_reason == "verified"
     merged = str(merge.get("status") or "") in {"merged", "nothing_to_merge"} or str(dispatch_payload.get("status") or "") == "merged"
 
-    lines = ["## 结论", ""]
-    lines.append(f"- 结论：{payload.get('message') or _message_for_stop(stop_reason)}")
-    lines.append(f"- status / stop_reason：`{status}` / `{stop_reason}`")
-    lines.append(f"- Verified: `{str(verified).lower()}`")
-    lines.append(f"- Merged: `{str(merged).lower()}`")
-    lines.append(f"- 产品改动文件数：`{product_count}`")
+    from .pacer_voice import user_markdown_section, user_story
+
+    goal = str(mission.get("objective") or plan.get("objective") or "")
+    cmd = str(command_verification.get("command") or mission.get("test_command") or "")
+    wt = str(worktree.get("path") or "")
+    story = user_story(
+        stop_reason=stop_reason,
+        status=status,
+        goal=goal,
+        product_change_count=product_count,
+        verification_command=cmd,
+        worktree=wt,
+        message_fallback=str(payload.get("message") or ""),
+    )
+    lines = list(user_markdown_section(story))
+    lines.extend(
+        [
+            "",
+            "## 结论（简表）",
+            "",
+            f"- 一句话：{story.get('headline') or payload.get('message') or _message_for_stop(stop_reason)}",
+            f"- status / stop_reason：`{status}` / `{stop_reason}`",
+            f"- Verified: `{str(verified).lower()}`",
+            f"- Merged: `{str(merged).lower()}`",
+            f"- 产品改动文件数：`{product_count}`",
+        ]
+    )
+    if stop_reason == "same_failure_repeated":
+        sig = str(dispatch_payload.get("same_failure_signature") or "")
+        if sig:
+            lines.extend(["", "### 反复失败的步骤", "", f"```\n{sig}\n```"])
+
+    journey = payload.get("journey") if isinstance(payload.get("journey"), dict) else {}
+    if journey:
+        from .mission_journey import mission_journey_to_markdown
+
+        lines.extend(["", "## 闭环", "", mission_journey_to_markdown(journey)])
 
     lines.extend(["", "## 证据", ""])
     _append_plan_evidence(lines, plan=plan, command_verification=command_verification)
@@ -1646,6 +1683,18 @@ def _next_step_commands(
         suggested = command_verification.get("suggested_timeout_seconds") or 1800
         if mission_id:
             commands.append(("增加超时后重试", f"checkpoint mission resume --mission {_ps_quote(mission_id)} --execute --timeout-seconds {suggested:g}"))
+    elif stop_reason == "same_failure_repeated":
+        if mission_id:
+            commands.append(("查看任务状态", f"checkpoint mission status --mission {_ps_quote(mission_id)}"))
+            commands.append(("拆小目标后重试", f"checkpoint mission resume --mission {_ps_quote(mission_id)} --execute --max-repair-rounds 0"))
+    elif stop_reason == "quota_exhausted":
+        commands.append(("下次启动自动等额度恢复", "pacer host run --wake-on-quota --goal \"<goal>\" --execute"))
+        if mission_id:
+            commands.append(("额度恢复后 resume", f"checkpoint mission resume --mission {_ps_quote(mission_id)} --execute"))
+    elif stop_reason == "budget_exhausted":
+        if mission_id:
+            commands.append(("加大轮数后重试", f"checkpoint mission resume --mission {_ps_quote(mission_id)} --execute --max-rounds 5"))
+            commands.append(("拆小目标后重试", f"checkpoint mission resume --mission {_ps_quote(mission_id)} --execute --max-repair-rounds 0"))
     elif stop_reason == "verified":
         branch = str(merge.get("branch") or worktree.get("branch") or "")
         if str(merge.get("status") or "") in {"merged", "nothing_to_merge"}:
@@ -1736,6 +1785,17 @@ def mission_status_payload(*, workspace_root: str | Path, mission_id: str) -> di
     progress_message = _progress_next_action(payload["progress"])
     if progress_message:
         payload["message"] = progress_message
+    try:
+        from .mission_journey import build_mission_journey
+
+        payload["journey"] = build_mission_journey(
+            workspace_root=workspace_path,
+            mission_id=mission_id,
+            mission=payload["mission"] if isinstance(payload.get("mission"), dict) else mission,
+            progress=payload["progress"],
+        )
+    except Exception as exc:  # noqa: BLE001 - status still returns durable mission facts.
+        payload["journey_error"] = f"{type(exc).__name__}: {exc}"
     return payload
 
 

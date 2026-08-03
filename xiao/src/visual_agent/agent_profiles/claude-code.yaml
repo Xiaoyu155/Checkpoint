@@ -14,12 +14,15 @@ headless:
   command: claude -p "<prompt>"
   # Flags that make an unattended worker run safely without hanging on prompts.
   permission_flag: "--permission-mode acceptEdits"
-  extra_flags: "--output-format json"
+  extra_flags: "--strict-mcp-config --disable-slash-commands --tools Read,Edit,Write,Glob,Grep,Bash --output-format json"
+  allow_verification_command: true
   why: >-
     Print mode runs one task non-interactively and can emit JSON
     (`--output-format json`) so an orchestrator can capture the result and
-    detect completion. acceptEdits auto-applies file edits (still gating other
-    actions) so the worker does not block waiting for permission.
+    detect completion. acceptEdits auto-applies file edits, while Pacer grants
+    only the exact acceptance command to the Bash tool. Strict MCP isolation
+    and disabled slash commands keep an unattended worker deterministic and
+    avoid loading unrelated user plugins or MCP tool schemas.
 
 model_flag: "--model <sonnet|opus|haiku|id>"
 models:
@@ -50,7 +53,7 @@ sandbox_modes:
     when: auto-accept file edits, still gate other actions
     risk: low
   - name: bypassPermissions
-    flag: "--dangerously-skip-permissions"
+    flag: "--permission-mode bypassPermissions"
     when: fully unattended trusted runs only; skips all prompts
     risk: high
 
@@ -62,7 +65,7 @@ approval_modes:
     flag: "--permission-mode acceptEdits"
     when: trusted implementation; auto-accept edits
   - name: bypass
-    flag: "--dangerously-skip-permissions"
+    flag: "--permission-mode bypassPermissions"
     when: unattended trusted batch only
     risk: high
 

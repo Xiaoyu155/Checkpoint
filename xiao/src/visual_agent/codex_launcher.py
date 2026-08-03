@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import hmac
 import os
 import json
@@ -30,6 +31,7 @@ from .pacer_launch_context import (
     PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV,
     PRELAUNCH_TASK_CONTRACT_DIGEST_ENV,
     PRELAUNCH_TASK_REQUIRED_ENV,
+    assess_task_trigger,
     initialize_active_launch,
     latest_pending_recovery_capsule,
     load_task_source_baseline,
@@ -466,6 +468,13 @@ def launch_codex(argv: Sequence[str] = (), *, cwd: str | Path = ".") -> int:
                 goal=task_text,
                 recovery=recovery,
             )
+            launch["task_trigger"] = {
+                "schema_version": 1,
+                "required": True,
+                "status": str(prelaunch_trust.get("task_trigger_status") or "armed"),
+                "expected_event": "begin_pacer_task",
+                "task_generation": int(prelaunch_trust.get("task_generation") or 1),
+            }
         except Exception as exc:
             failure = {
                 "schema_version": 1,
@@ -504,6 +513,15 @@ def launch_codex(argv: Sequence[str] = (), *, cwd: str | Path = ".") -> int:
                 launch_id=str(launch["launch_id"]),
                 snapshot=rollout_snapshot,
             )
+            try:
+                _write_session_handoff(
+                    effective_repo_root / ".agent-workspace",
+                    launch,
+                    status="running",
+                    reason="launch_started",
+                )
+            except Exception as exc:
+                _warn_telemetry_degraded("session handoff start", exc)
             watchdog = _start_launch_watchdog(
                 workspace_root=effective_repo_root / ".agent-workspace",
                 launch=launch,
@@ -591,7 +609,7 @@ def launch_codex(argv: Sequence[str] = (), *, cwd: str | Path = ".") -> int:
         )
         print(f"Could not start Codex CLI: {exc}")
         return 1
-    _finish_launch_record(
+    final_exit_code = _finish_launch_record(
         launch_path,
         launch,
         exit_code=int(completed.returncode),
@@ -599,7 +617,7 @@ def launch_codex(argv: Sequence[str] = (), *, cwd: str | Path = ".") -> int:
         rollout_snapshot=rollout_snapshot,
         watchdog=watchdog,
     )
-    return int(completed.returncode)
+    return int(final_exit_code)
 
 
 def _apply_native_routing(
@@ -837,21 +855,40 @@ def _finish_launch_record(
     status: str,
     rollout_snapshot: RolloutSnapshot | None = None,
     watchdog: LaunchLivenessWatchdog | None = None,
-) -> None:
+) -> int:
     if path is None or payload is None:
-        return
+        return int(exit_code)
+    workspace_root = path.parents[2]
+    launch_id = str(payload.get("launch_id") or "")
+    trigger_diagnosis = _diagnose_launch_trigger(
+        workspace_root=workspace_root,
+        launch_id=launch_id,
+        payload=payload,
+    )
+    effective_status = str(status)
+    effective_exit_code = int(exit_code)
+    if bool(trigger_diagnosis.get("required")) and not bool(trigger_diagnosis.get("passed")):
+        if effective_status == "completed":
+            effective_status = "failed"
+            effective_exit_code = 78
+        _report_trigger_failure(
+            launch_id=launch_id,
+            diagnosis=trigger_diagnosis,
+            original_status=str(status),
+            original_exit_code=int(exit_code),
+            effective_status=effective_status,
+            effective_exit_code=effective_exit_code,
+        )
     stopped_liveness: dict[str, Any] = {}
     if watchdog is not None:
         try:
-            stopped = watchdog.stop(lifecycle_status=status)
+            stopped = watchdog.stop(lifecycle_status=effective_status)
             if isinstance(stopped, dict):
                 stopped_liveness = stopped
         except Exception:
             pass
     started = float(payload.pop("started_monotonic", time.monotonic()))
     completed_at = datetime.now(timezone.utc).isoformat()
-    workspace_root = path.parents[2]
-    launch_id = str(payload.get("launch_id") or "")
     existing = payload.get("liveness") if isinstance(payload.get("liveness"), dict) else {}
     try:
         persisted_liveness = read_launch_liveness(workspace_root, launch_id)
@@ -867,7 +904,7 @@ def _finish_launch_record(
         {
             "state": str(liveness.get("state") or "idle"),
             "monitoring": False,
-            "lifecycle_status": status,
+            "lifecycle_status": effective_status,
             "stopped_at": completed_at,
         }
     )
@@ -876,10 +913,19 @@ def _finish_launch_record(
     except Exception as exc:
         _warn_telemetry_degraded("terminal liveness write", exc)
     payload["liveness"] = liveness
+    trigger_diagnosis = {
+        **trigger_diagnosis,
+        "checked_at": completed_at,
+        "original_status": str(status),
+        "original_exit_code": int(exit_code),
+        "effective_status": effective_status,
+        "effective_exit_code": effective_exit_code,
+    }
+    payload["trigger_diagnosis"] = trigger_diagnosis
     payload.update(
         {
-            "status": status,
-            "exit_code": exit_code,
+            "status": effective_status,
+            "exit_code": effective_exit_code,
             "completed_at": completed_at,
             "elapsed_seconds": round(time.monotonic() - started, 3),
         }
@@ -902,6 +948,15 @@ def _finish_launch_record(
                 "warnings": [f"rollout telemetry unavailable: {type(exc).__name__}"],
             }
     try:
+        _write_session_handoff(
+            workspace_root,
+            payload,
+            status=effective_status,
+            reason="launch_finished",
+        )
+    except Exception as exc:
+        _warn_telemetry_degraded("session handoff", exc)
+    try:
         _write_launch_record(path, payload)
     except Exception as exc:
         _warn_telemetry_degraded("launch manifest completion", exc)
@@ -919,12 +974,18 @@ def _finish_launch_record(
         update_active_launch(
             workspace_root,
             expected_launch_id=launch_id,
-            status=status,
-            exit_code=exit_code,
+            status=effective_status,
+            exit_code=effective_exit_code,
             completed_at=completed_at,
             elapsed_seconds=payload["elapsed_seconds"],
             rollout_telemetry=payload.get("rollout_telemetry", {}),
             liveness=liveness,
+            trigger_diagnosis=trigger_diagnosis,
+            **(
+                {"stop_reason": str(trigger_diagnosis.get("reason_code") or "")}
+                if bool(trigger_diagnosis.get("required")) and not bool(trigger_diagnosis.get("passed"))
+                else {}
+            ),
         )
     except Exception as exc:
         _warn_telemetry_degraded("active launch completion", exc)
@@ -935,14 +996,116 @@ def _finish_launch_record(
             "launch_finished",
             launch_id=launch_id,
             data={
-                "status": status,
-                "exit_code": exit_code,
+                "status": effective_status,
+                "exit_code": effective_exit_code,
                 "elapsed_seconds": payload["elapsed_seconds"],
                 "liveness_state": str(liveness.get("state") or "idle"),
+                "trigger_status": str(trigger_diagnosis.get("status") or "unknown"),
+                "trigger_reason_code": str(trigger_diagnosis.get("reason_code") or ""),
             },
         )
     except Exception as exc:
         _warn_telemetry_degraded("launch completion event", exc)
+    if bool(trigger_diagnosis.get("required")) and not bool(trigger_diagnosis.get("passed")):
+        try:
+            from .pacer_events import append_pacer_event
+
+            append_pacer_event(
+                workspace_root,
+                "task_trigger_missing",
+                launch_id=launch_id,
+                data={
+                    "status": str(trigger_diagnosis.get("status") or "unknown"),
+                    "reason_code": str(trigger_diagnosis.get("reason_code") or ""),
+                    "expected_event": str(trigger_diagnosis.get("expected_event") or ""),
+                    "observed_event": str(trigger_diagnosis.get("observed_event") or ""),
+                    "effective_status": effective_status,
+                    "effective_exit_code": effective_exit_code,
+                },
+            )
+        except Exception as exc:
+            _warn_telemetry_degraded("task trigger failure event", exc)
+    return effective_exit_code
+
+
+def _diagnose_launch_trigger(
+    *,
+    workspace_root: Path,
+    launch_id: str,
+    payload: dict[str, object],
+) -> dict[str, Any]:
+    try:
+        active = read_active_launch(workspace_root, launch_id=launch_id)
+    except Exception as exc:
+        active = None
+        error_type = type(exc).__name__
+    else:
+        error_type = ""
+    if active is None:
+        fallback = dict(payload)
+        fallback["launch_goal"] = str(payload.get("launch_goal") or "")
+        diagnosis = assess_task_trigger(fallback)
+        if bool(diagnosis.get("required")):
+            diagnosis.update(
+                {
+                    "passed": False,
+                    "status": "unknown",
+                    "reason_code": "task_trigger_state_unavailable",
+                    "observation_error": error_type or "active_launch_missing",
+                }
+            )
+        return diagnosis
+    diagnosis = assess_task_trigger(active)
+    lifecycle = active.get("task_lifecycle") if isinstance(active.get("task_lifecycle"), dict) else {}
+    lifecycle_status = str(lifecycle.get("status") or "")
+    if bool(diagnosis.get("passed")) and lifecycle_status not in {"completed", "failed", "blocked"}:
+        diagnosis.update(
+            {
+                "passed": False,
+                "status": "incomplete",
+                "reason_code": "task_completion_not_observed",
+            }
+        )
+    diagnosis.update(
+        {
+            "lifecycle_status": lifecycle_status,
+            "active_launch_status": str(active.get("status") or ""),
+        }
+    )
+    return diagnosis
+
+
+def _report_trigger_failure(
+    *,
+    launch_id: str,
+    diagnosis: dict[str, Any],
+    original_status: str,
+    original_exit_code: int,
+    effective_status: str,
+    effective_exit_code: int,
+) -> None:
+    try:
+        reason_code = str(diagnosis.get("reason_code") or "unknown")
+        handoff_issue = (
+            "Pacer observed task adoption but no complete_pacer_task outcome."
+            if reason_code == "task_completion_not_observed"
+            else "Pacer did not observe task adoption."
+        )
+        print(
+            "Pacer task handoff failed: "
+            f"launch={launch_id or 'unknown'}; "
+            f"reason={reason_code}; "
+            f"expected={diagnosis.get('expected_event') or 'begin_pacer_task'}; "
+            f"observed={diagnosis.get('observed_event') or 'none'}; "
+            f"original={original_status}/{original_exit_code}; "
+            f"recorded={effective_status}/{effective_exit_code}. "
+            f"The Codex process ended. {handoff_issue} "
+            "Check MCP startup, PACER_LAUNCH_ID, and the begin_pacer_task call before retrying.",
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception:
+        pass
 
 
 def _warn_telemetry_degraded(stage: str, error: BaseException) -> None:
@@ -986,6 +1149,59 @@ def _write_launch_record(path: Path, payload: dict[str, object]) -> None:
             if descriptor >= 0:
                 os.close(descriptor)
             temporary.unlink(missing_ok=True)
+
+
+def _write_session_handoff(
+    workspace_root: Path,
+    payload: dict[str, object],
+    *,
+    status: str,
+    reason: str,
+) -> Path:
+    from .security import scrub_secrets
+
+    launch_id = str(payload.get("launch_id") or "").strip()
+    if not launch_id:
+        raise ValueError("launch_id required for session handoff")
+    telemetry = payload.get("rollout_telemetry") if isinstance(payload.get("rollout_telemetry"), dict) else {}
+    sessions = telemetry.get("sessions") if isinstance(telemetry.get("sessions"), list) else []
+    session_ids = [str(item.get("session_id") or "") for item in sessions if isinstance(item, dict) and item.get("session_id")]
+    handoff = {
+        "schema_version": 1,
+        "kind": "pacer_interactive_session_handoff",
+        "launch_id": launch_id,
+        "status": status,
+        "reason": reason,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "repo_root": str(payload.get("repo_root") or ""),
+        "process_cwd": str(payload.get("process_cwd") or ""),
+        "mode": str(payload.get("mode") or ""),
+        "launch_goal": str(payload.get("launch_goal") or ""),
+        "prompt_recorded": bool(payload.get("prompt_recorded")),
+        "completed_at": str(payload.get("completed_at") or ""),
+        "exit_code": payload.get("exit_code"),
+        "rollout": {
+            "status": str(telemetry.get("status") or ""),
+            "attribution_confidence": str(telemetry.get("attribution_confidence") or ""),
+            "source_files": int(telemetry.get("source_files") or 0),
+            "usage": telemetry.get("usage") if isinstance(telemetry.get("usage"), dict) else {},
+            "current_context_usage": telemetry.get("current_context_usage")
+            if isinstance(telemetry.get("current_context_usage"), dict)
+            else {},
+            "compactions": telemetry.get("compactions") if isinstance(telemetry.get("compactions"), dict) else {},
+            "runtime": telemetry.get("runtime") if isinstance(telemetry.get("runtime"), dict) else {},
+            "sessions": sessions,
+        },
+        "resume_hints": [f"pacer code resume {session_id}" for session_id in session_ids[:3]],
+        "notes": [
+            "This handoff intentionally stores session metadata, not transcript text.",
+            "Use the session path/id to resume or inspect the native Codex session if context is lost.",
+        ],
+    }
+    path = workspace_root / "pacer_native" / "session_handoffs" / f"{launch_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_launch_record(path, scrub_secrets(handoff))
+    return path
 
 
 def _initial_liveness(
@@ -1409,6 +1625,15 @@ def _pre_register_pacer_task(
         expected_launch_id=launch_id,
         source_baseline_digest=baseline_digest,
         source_baseline_trust_policy=2,
+        task_trigger={
+            "schema_version": 1,
+            "required": True,
+            "status": "armed",
+            "expected_event": "begin_pacer_task",
+            "task_generation": max(1, int(active.get("task_generation") or 1)),
+            "armed_at": datetime.now(timezone.utc).isoformat(),
+            "goal_digest": hashlib.sha256(goal.encode("utf-8")).hexdigest(),
+        },
         prelaunch_task_registration={
             "schema_version": 1,
             "status": "recovered" if recovered else "ready",
@@ -1437,6 +1662,8 @@ def _pre_register_pacer_task(
     return {
         "task_contract_digest": contract_digest,
         "source_baseline_digest": baseline_digest,
+        "task_trigger_status": "armed",
+        "task_generation": str(max(1, int(active.get("task_generation") or 1))),
     }
 
 
@@ -1605,17 +1832,20 @@ def _pacer_control_prompt(
         "Codex is the coding agent; Pacer only supplies local control and evidence.",
         "Do not read or load any Pacer SKILL.md or plugin skill. Do not enumerate ALL_TOOLS, MCP resources, "
         "resource templates, servers, or tool schemas, and do not run `codex mcp list`.",
-            "After a real task is known, before reading, scanning, or modifying the repository, call "
-            "`mcp__pacer__begin_pacer_task` exactly once with the exact user task using this payload (the field is "
-            f"goal, never task): {PACER_BEGIN_TASK_TEMPLATE}. Use its immutable task_contract and requirement IDs "
-            "for all later completion claims. Without a successful begin call, do not work.",
+            "After a real user task is known, before reading, scanning, or modifying the repository for that task, call "
+            "`mcp__pacer__begin_pacer_task` exactly once for this task (not once for the window) with the exact user task "
+            "using this payload (the field is "
+            f"goal, never task): {PACER_BEGIN_TASK_TEMPLATE}. Use this task's immutable task_contract and requirement IDs "
+            "for its completion claims. Without a successful begin call, do not work.",
             f"If {PACER_BOOTSTRAP_MEMORY_MARKER} is present, use it and do not fetch Memory again. Otherwise, after "
             "begin_pacer_task succeeds, call `mcp__pacer__get_pacer_memory` exactly once with detail=compact.",
             "Keep tool rounds compact: batch independent reads, do not repeat unchanged file/status/diff reads, "
             "and run each final acceptance command only through the atomic completion call.",
             "At the end call only `mcp__pacer__complete_pacer_task` for Pacer completion, using argv string arrays:",
         PACER_COMPLETE_TASK_TEMPLATE,
-        "Copy the original task text exactly into goal. Map every locked task_contract requirement ID to at least "
+            "In steps, name is only a display label; argv must start the real allowlisted command. Do not use "
+            "argv=['tests'] or argv=['build'], and do not substitute a registered workflow name for argv.",
+            "Copy the original task text exactly into goal. Map every locked task_contract requirement ID to at least "
         "one completion_evidence claim using requirement_ids, state the concrete result, bind each claim to a named "
         "verification step, and list unfinished work in unresolved_items; never hide it in prose.",
         "Do not send result_kind, kind, requirement, or files in completion_evidence. Pacer loads immutable requirement "
@@ -1628,6 +1858,13 @@ def _pacer_control_prompt(
         "report block; never upgrade or omit its limitations.",
         "Do not separately call Pacer verification, telemetry, or outcome tools. After completion succeeds, "
         "reply directly to the user and call no more Pacer tools.",
+        "If the user later supplies a different real task in the same conversation, treat it as a new Pacer task even "
+        "when the previous task was not formally completed: call begin_pacer_task again with the new exact task before "
+        "doing work. Pacer will archive the previous task as interrupted/superseded; never reuse its contract for the "
+        "new task.",
+        "If a conversation turn arrives with no user message — only system-reminder content or empty content — "
+        "treat it as a session-continuation signal. Resume the current active task silently. "
+        "Do not output a 'no user message' notice and do not call begin_pacer_task again.",
         "PACER_NATIVE_CONTROL_END",
     ]
     control = "\n".join(control_lines)

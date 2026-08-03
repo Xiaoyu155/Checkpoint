@@ -67,6 +67,91 @@ def test_codex_account_probe_does_not_treat_not_logged_in_as_authenticated() -> 
     assert payload["status"] == "not_authenticated"
 
 
+def test_support_snapshot_includes_session_handoffs(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    handoff_root = workspace / "pacer_native" / "session_handoffs"
+    handoff_root.mkdir(parents=True)
+    handoff_path = handoff_root / "launch-handoff.json"
+    handoff_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pacer_interactive_session_handoff",
+                "launch_id": "launch-handoff",
+                "status": "running",
+                "reason": "launch_started",
+                "recorded_at": "2026-07-28T13:20:00+00:00",
+                "repo_root": str(tmp_path.resolve()),
+                "rollout": {
+                    "status": "attributed",
+                    "source_files": 1,
+                    "sessions": [{"session_id": "session-123"}],
+                },
+                "resume_hints": ["pacer code resume session-123"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "visual_agent.pacer_support.inspect_codex_account",
+        lambda: {"installed": True, "authenticated": True, "auth_method": "api_key", "status": "authenticated"},
+    )
+    monkeypatch.setattr("visual_agent.pacer_support.load_codex_user_defaults", lambda: {})
+
+    payload = build_pacer_support_snapshot(workspace)
+
+    handoffs = payload["session_handoffs"]
+    assert handoffs["total"] == 1
+    assert handoffs["latest"]["launch_id"] == "launch-handoff"
+    assert handoffs["latest"]["session_count"] == 1
+    assert handoffs["latest"]["resume_hints"] == ["pacer code resume session-123"]
+    assert handoffs["latest"]["path"] == str(handoff_path)
+
+
+def test_support_snapshot_includes_managed_task_checkpoints(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    task_root = workspace / "pacer_native" / "managed_tasks"
+    task_root.mkdir(parents=True)
+    checkpoint_path = task_root / "attempt-1.json"
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pacer_managed_task_checkpoint",
+                "attempt_id": "attempt-1",
+                "status": "running",
+                "reason": "",
+                "objective": "修复 demo 项目并跑测试",
+                "repo_root": str(tmp_path.resolve()),
+                "program_id": "program-1",
+                "plan_path": str(workspace / "intake" / "task.md"),
+                "test_command": "python -m pytest -q",
+                "created_at": "2026-07-28T13:30:00+00:00",
+                "updated_at": "2026-07-28T13:31:00+00:00",
+                "tasks": [{"task_id": "task-001", "mission_id": "mission-1", "status": "running"}],
+                "worker_runs": [{"ran": True}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "visual_agent.pacer_support.inspect_codex_account",
+        lambda: {"installed": True, "authenticated": True, "auth_method": "api_key", "status": "authenticated"},
+    )
+    monkeypatch.setattr("visual_agent.pacer_support.load_codex_user_defaults", lambda: {})
+
+    payload = build_pacer_support_snapshot(workspace)
+    markdown = support_snapshot_to_markdown(payload)
+
+    managed = payload["managed_tasks"]
+    assert managed["total"] == 1
+    assert managed["latest"]["attempt_id"] == "attempt-1"
+    assert managed["latest"]["task_count"] == 1
+    assert managed["latest"]["worker_run_count"] == 1
+    assert managed["latest"]["path"] == str(checkpoint_path)
+    assert "Latest managed task: running - 修复 demo 项目并跑测试" in markdown
+
+
 def test_support_snapshot_aggregates_native_outcomes_and_commands(tmp_path, monkeypatch) -> None:
     from visual_agent.pacer_launch_context import initialize_active_launch, write_launch_liveness
 

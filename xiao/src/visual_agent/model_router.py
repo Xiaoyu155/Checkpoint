@@ -32,6 +32,16 @@ _CHEAP_TERMS = {
     "文案", "重命名", "改名", "注释", "格式", "错别字", "措辞", "改字", "标点",
     "空格", "缩进", "字符串", "提示语", "文字",
 }
+_SMALL_SCOPE_TERMS = {
+    "small", "small-scope", "small scope", "small change", "offline-testable",
+    "offline test", "unit test", "coverage", "single", "one file", "focused",
+    "小改", "小任务", "小范围", "离线", "单元测试", "覆盖", "覆盖率",
+}
+_OBJECTIVE_FILE_RE = re.compile(
+    r"(?<![\w.-])[\w./\\-]+\.(?:py|js|jsx|ts|tsx|go|rs|java|kt|cs|rb|php|html|css|md)\b",
+    re.IGNORECASE,
+)
+_FUNCTION_CONTRACT_RE = re.compile(r"\b[a-zA-Z_]\w*\s*\([^()\n]{0,120}\)")
 
 
 @dataclass(frozen=True)
@@ -57,14 +67,28 @@ def route_task(
 
     strong_hits = sorted({term for term in _STRONG_TERMS if term in text})
     cheap_hits = sorted({term for term in _CHEAP_TERMS if term in text})
+    small_scope_hits = sorted({term for term in _SMALL_SCOPE_TERMS if term in text})
     word_count = len([w for w in re.split(r"\s+", str(objective or "").strip()) if w])
+    objective_files = sorted(set(_OBJECTIVE_FILE_RE.findall(str(objective or ""))))
+    function_contract = bool(_FUNCTION_CONTRACT_RE.search(str(objective or "")))
+    exact_result_contract = "returns exactly" in text or ("返回" in text and "测试" in text)
+    narrow_testable_contract = (
+        len(objective_files) == 1
+        and function_contract
+        and exact_result_contract
+        and word_count <= 45
+    )
 
     signals = {
         "strong_terms": strong_hits,
         "cheap_terms": cheap_hits,
+        "small_scope_terms": small_scope_hits,
         "product_file_count": len(product_files),
         "criteria_count": criteria_count,
         "word_count": word_count,
+        "objective_files": objective_files,
+        "function_contract": function_contract,
+        "narrow_testable_contract": narrow_testable_contract,
         "repeated_failure": bool(repeated_failure),
     }
 
@@ -76,12 +100,18 @@ def route_task(
     # Strong wins over cheap: touching risky areas or many files needs reasoning.
     if strong_hits:
         return RouteDecision("strong", f"Reasoning-heavy signals: {', '.join(strong_hits)}.", signals)
-    if len(product_files) >= 6:
+    if len(product_files) >= 6 and not small_scope_hits:
         return RouteDecision("strong", f"Broad change across {len(product_files)} files.", signals)
 
     # Cheap only when the task looks mechanical AND small.
     if cheap_hits and len(product_files) <= 2 and not strong_hits:
         return RouteDecision("cheap", f"Mechanical, small-scope signals: {', '.join(cheap_hits)}.", signals)
+    if narrow_testable_contract and len(product_files) <= 2:
+        return RouteDecision(
+            "cheap",
+            "Explicit one-file function contract with an exact, offline-testable result.",
+            signals,
+        )
 
     return RouteDecision("standard", "No strong or clearly-mechanical signal; use the balanced tier.", signals)
 

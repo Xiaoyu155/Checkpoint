@@ -34,6 +34,20 @@ def test_recommend_worker_config_codex_picks_model_and_writable_sandbox() -> Non
     # Codex uses the user's Codex CLI default model for subscription compatibility.
     fast = recommend_worker_config(profile, task_kind="fast")
     assert fast["model"] == ""
+    balanced = recommend_worker_config(profile, task_kind="balanced")
+    assert balanced["model"] == "gpt-5.5"
+
+
+def test_recommend_worker_config_keeps_default_empty_when_only_balanced_model_exists() -> None:
+    profile = {
+        "models": [{"id": "standard-model", "role": "balanced"}],
+        "sandbox_modes": [],
+        "approval_modes": [],
+    }
+
+    assert recommend_worker_config(profile, task_kind="implementation")["model"] == ""
+    assert recommend_worker_config(profile, task_kind="fast")["model"] == ""
+    assert recommend_worker_config(profile, task_kind="balanced")["model"] == "standard-model"
 
 
 def test_recommend_worker_config_inspection_prefers_no_write() -> None:

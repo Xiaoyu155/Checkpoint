@@ -16,6 +16,16 @@ def handle_pacer_management(argv: Sequence[str]) -> int | None:
     if not arguments:
         return None
     command = arguments[0]
+    from .cli_chief import CHIEF_COMMANDS
+
+    if command in {"doctor", "agents", "init", "quickstart", "app", "chat", "shell"} or command in CHIEF_COMMANDS:
+        if command in {"chat", "shell"}:
+            from .interactive_agent import run_interactive_agent
+
+            return run_interactive_agent(repo_root=Path.cwd())
+        from .cli import main
+
+        return main(arguments)
     if command == "dashboard" or command in QUALITY_COMMANDS:
         from .cli import main
 

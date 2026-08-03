@@ -84,6 +84,9 @@ def _assert_native_control(prompt: str, *, task: str | None = None) -> None:
     assert "mcp__pacer__record_pacer_outcome" not in prompt
     assert codex_launcher.PACER_COMPLETE_TASK_TEMPLATE in prompt
     assert '"argv":["python","-m","pytest","-q"]' in prompt
+    assert "name is only a display label" in prompt
+    assert "argv=['tests'] or argv=['build']" in prompt
+    assert "do not substitute a registered workflow name for argv" in prompt
     assert '"completion_evidence"' in prompt
     assert '"requirement_ids"' in prompt
     assert '"result_kind"' not in prompt
@@ -292,7 +295,7 @@ def test_launch_binds_relative_sibling_without_changing_process_cwd(
     assert codex_launcher.launch_codex(
         ["-C", relative_source, "exec", "检查项目"],
         cwd=process_cwd,
-    ) == 0
+    ) == 78
 
     command, options = calls[0]
     cd_index = command.index("-C")
@@ -340,7 +343,7 @@ def test_launch_binds_absolute_inline_cd_for_memory_and_manifest(tmp_path, monke
     assert codex_launcher.launch_codex(
         [cd_argument, "exec", "修复绝对路径项目"],
         cwd=process_cwd,
-    ) == 0
+    ) == 78
 
     command, options = calls[0]
     assert cd_argument in command
@@ -892,6 +895,66 @@ def test_failed_prelaunch_registration_blocks_codex_and_returns_nonzero(
     }
 
 
+def test_launch_rejects_exit_zero_when_begin_task_trigger_was_not_observed(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    calls = []
+    _stub_native_codex(monkeypatch, calls)
+
+    assert codex_launcher.launch_codex(["exec", "需要真正触发的任务"], cwd=tmp_path) == 78
+
+    active = read_active_launch(tmp_path / ".agent-workspace")
+    assert active["status"] == "failed"
+    assert active["exit_code"] == 78
+    assert active["stop_reason"] == "task_trigger_not_observed"
+    assert active["trigger_diagnosis"]["status"] == "missing"
+    assert active["trigger_diagnosis"]["expected_event"] == "begin_pacer_task"
+    assert active["trigger_diagnosis"]["observed_event"] == ""
+    stderr = capsys.readouterr().err
+    assert "Pacer task handoff failed" in stderr
+    assert "task_trigger_not_observed" in stderr
+    assert "begin_pacer_task" in stderr
+    event_types = [item["type"] for item in list_pacer_events(tmp_path / ".agent-workspace")]
+    assert "task_trigger_missing" in event_types
+    assert len(calls) == 1
+
+
+def test_launch_rejects_exit_zero_when_task_completion_was_not_observed(tmp_path, monkeypatch) -> None:
+    from visual_agent.pacer_launch_context import update_active_launch
+
+    monkeypatch.setattr(codex_launcher, "recover_orphaned_launches", lambda _workspace: [])
+    path, payload = codex_launcher._start_launch_record(tmp_path, ["exec"])
+    assert path is not None
+    assert payload is not None
+    workspace = tmp_path / ".agent-workspace"
+    launch_id = str(payload["launch_id"])
+    update_active_launch(
+        workspace,
+        expected_launch_id=launch_id,
+        launch_goal="已经触发但没有收口的任务",
+        current_goal="已经触发但没有收口的任务",
+        task_generation=1,
+        task_trigger={
+            "schema_version": 1,
+            "required": True,
+            "status": "triggered",
+            "expected_event": "begin_pacer_task",
+            "observed_event": "begin_pacer_task",
+            "task_generation": 1,
+        },
+        task_lifecycle={"schema_version": 1, "status": "active", "task_generation": 1},
+    )
+
+    assert codex_launcher._finish_launch_record(path, payload, exit_code=0, status="completed") == 78
+    active = read_active_launch(workspace, launch_id=launch_id)
+    assert active["status"] == "failed"
+    assert active["stop_reason"] == "task_completion_not_observed"
+    assert active["trigger_diagnosis"]["status"] == "incomplete"
+    assert active["trigger_diagnosis"]["observed_event"] == "begin_pacer_task"
+
+
 def test_effective_auto_compact_limit_reads_inline_long_config() -> None:
     arguments = ["--config=model_auto_compact_token_limit=123456", "resume", "--last"]
 
@@ -947,7 +1010,7 @@ def test_launch_pacer_exec_prefixes_stdin_without_moving_marker(tmp_path, monkey
         lambda command, **kwargs: calls.append((command, kwargs)) or subprocess.CompletedProcess(command, 0),
     )
 
-    assert codex_launcher.launch_codex(["exec", "-"], cwd=tmp_path) == 0
+    assert codex_launcher.launch_codex(["exec", "-"], cwd=tmp_path) == 78
 
     command, options = calls[0]
     assert command[-2:] == ["exec", "-"]
@@ -979,7 +1042,7 @@ def test_launch_preloads_memory_once_for_real_exec_task(tmp_path, monkeypatch) -
     assert codex_launcher.launch_codex(
         ["-m", "gpt-5.6-sol", "exec", "--json", "修复登录错误"],
         cwd=tmp_path,
-    ) == 0
+    ) == 78
 
     assert len(memory_calls) == 1
     assert memory_calls[0]["goal"] == "修复登录错误"
@@ -1023,7 +1086,7 @@ def test_launch_pre_registers_task_evidence_before_starting_codex(tmp_path, monk
 
     monkeypatch.setattr(codex_launcher.subprocess, "run", fake_run)
 
-    assert codex_launcher.launch_codex(["exec", "修复登录错误"], cwd=tmp_path) == 0
+    assert codex_launcher.launch_codex(["exec", "修复登录错误"], cwd=tmp_path) == 78
 
     active = observed["active"]
     baseline = observed["baseline"]
@@ -1087,7 +1150,7 @@ def test_resume_reuses_pending_recovery_contract_and_source_baseline(tmp_path, m
     assert codex_launcher.launch_codex(
         ["exec", "resume", "session-1", "continue previous work"],
         cwd=tmp_path,
-    ) == 0
+    ) == 78
 
     active = observed["active"]
     assert active["launch_goal"] == "repair recovery"
@@ -1162,7 +1225,7 @@ def test_launch_memory_preload_failure_warns_and_preserves_native_prompt(tmp_pat
 
     monkeypatch.setattr(codex_launcher, "_preload_pacer_memory", fail_preload)
 
-    assert codex_launcher.launch_codex(["exec", "修复登录错误"], cwd=tmp_path) == 0
+    assert codex_launcher.launch_codex(["exec", "修复登录错误"], cwd=tmp_path) == 78
 
     _assert_native_control(process_calls[0][0][-1], task="修复登录错误")
     assert process_calls[0][0][-1].splitlines().count(codex_launcher.PACER_BOOTSTRAP_MEMORY_MARKER) == 0
@@ -1181,7 +1244,7 @@ def test_launch_preloads_stdin_task_without_moving_dash_marker(tmp_path, monkeyp
         or {"memory_receipt": "receipt-stdin-1", "effective_memory": {"hit": False}},
     )
 
-    assert codex_launcher.launch_codex(["exec", "--json", "-"], cwd=tmp_path) == 0
+    assert codex_launcher.launch_codex(["exec", "--json", "-"], cwd=tmp_path) == 78
 
     command, options = process_calls[0]
     assert command[-3:] == ["exec", "--json", "-"]
@@ -1473,15 +1536,28 @@ def test_launch_codex_writes_redacted_launch_manifest(tmp_path, monkeypatch) -> 
             "status": "captured",
             "attribution_confidence": "high",
             "source_files": 1,
+            "usage": {"input_tokens": 10},
+            "current_context_usage": {"input_tokens": 10},
+            "sessions": [
+                {
+                    "path": str(tmp_path / ".codex" / "sessions" / "rollout.jsonl"),
+                    "session_id": "session-123",
+                    "parent_session_id": "",
+                    "cwd": str(tmp_path),
+                    "depth": 0,
+                    "started_at": "2026-07-28T00:00:00+00:00",
+                }
+            ],
         },
     )
 
-    assert codex_launcher.launch_codex(["sensitive prompt text"], cwd=tmp_path) == 0
+    assert codex_launcher.launch_codex(["sensitive prompt text"], cwd=tmp_path) == 78
 
     manifests = list((tmp_path / ".agent-workspace" / "pacer_native" / "launches").glob("*.json"))
     assert len(manifests) == 1
     payload = json.loads(manifests[0].read_text(encoding="utf-8"))
-    assert payload["status"] == "completed"
+    assert payload["status"] == "failed"
+    assert payload["trigger_diagnosis"]["reason_code"] == "task_trigger_not_observed"
     assert payload["prompt_recorded"] is False
     assert payload["rollout_telemetry"]["status"] == "captured"
     assert payload["rollout_telemetry"]["context_control"] == {
@@ -1491,6 +1567,15 @@ def test_launch_codex_writes_redacted_launch_manifest(tmp_path, monkeypatch) -> 
     }
     assert "sensitive prompt text" not in manifests[0].read_text(encoding="utf-8")
     assert calls[0][1]["env"]["PACER_LAUNCH_ID"] == payload["launch_id"]
+    handoffs = list((tmp_path / ".agent-workspace" / "pacer_native" / "session_handoffs").glob("*.json"))
+    assert len(handoffs) == 1
+    handoff_text = handoffs[0].read_text(encoding="utf-8")
+    handoff = json.loads(handoff_text)
+    assert handoff["kind"] == "pacer_interactive_session_handoff"
+    assert handoff["launch_id"] == payload["launch_id"]
+    assert handoff["rollout"]["sessions"][0]["session_id"] == "session-123"
+    assert handoff["resume_hints"] == ["pacer code resume session-123"]
+    assert "sensitive prompt text" not in handoff_text
 
 
 def test_rollout_snapshot_failure_does_not_block_codex(tmp_path, monkeypatch) -> None:

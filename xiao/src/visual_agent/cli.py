@@ -97,9 +97,12 @@ def launch_claude_code(argv: list[str]) -> int:
         print("Pacer requires Claude Code CLI on PATH. Install it with: npm install -g @anthropic-ai/claude-code")
         return 127
     from .subprocess_window import prepare_subprocess_command
+    from .process_guard import guarded_run
 
     argv = normalize_claude_passthrough_argv(argv)
-    completed = subprocess.run(prepare_subprocess_command([executable, *argv]))
+    # Guarded so a hard-killed Pacer cannot leave Claude's MCP stdio servers
+    # running as orphans; see .process_guard.
+    completed = guarded_run(prepare_subprocess_command([executable, *argv]))
     return int(completed.returncode)
 
 
@@ -604,6 +607,7 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     subparsers.add_parser("capabilities", help="List framework capabilities and dependency status.")
     subparsers.add_parser("atomic-capabilities", help="List planner-visible atomic capabilities.")
     doctor = subparsers.add_parser("doctor", help="Check missing capabilities.")
+    doctor.add_argument("target", nargs="?", default=None, choices=["claude-yolo"], help="Target component to check.")
     doctor.add_argument("--strict", action="store_true", help="Treat missing optional capabilities as failures.")
     real_readiness = subparsers.add_parser("real-acceptance-readiness", help="Check whether this machine can run live real-acceptance workflows.")
     real_readiness.add_argument("--workspace-root", default=".agent-workspace")
@@ -1827,6 +1831,22 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(to_jsonable(build_atomic_capability_manifest()), ensure_ascii=False, indent=2))
         return 0
     if args.command == "doctor":
+        if getattr(args, "target", None) == "claude-yolo":
+            from .agent_capabilities import load_agent_profile, probe_agent
+            profile = load_agent_profile("claude-code") or {}
+            probe = probe_agent(profile)
+            ok = bool(probe.get("installed") and probe.get("bypass_permissions_supported"))
+            payload = {
+                "ok": ok,
+                "agent": "claude-code",
+                "installed": probe.get("installed", False),
+                "version": probe.get("version", ""),
+                "bypass_permissions_supported": probe.get("bypass_permissions_supported", False),
+                "path": probe.get("path", ""),
+                "recommendation": "" if ok else ("Install or update Claude Code CLI to a version supporting --permission-mode bypassPermissions." if probe.get("installed") else "Install Claude Code with: npm install -g @anthropic-ai/claude-code"),
+            }
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0 if ok else 1
         manifest = build_capability_manifest()
         missing = [capability for capability in manifest.capabilities if not capability.available]
         blocking = missing if args.strict else [capability for capability in missing if capability.required]

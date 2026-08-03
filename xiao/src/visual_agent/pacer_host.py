@@ -485,7 +485,7 @@ def _run_pytest_probe(repo_root: Path, python: str | None = None) -> dict[str, A
     return {"ok": completed.returncode == 0, "exit_code": int(completed.returncode), "tail": tail.strip()}
 
 
-def _host_agent_capability(agent: str) -> dict[str, Any]:
+def _host_agent_capability(agent: str, *, mode: str | None = None) -> dict[str, Any]:
     agent_name = normalize_agent_name(agent)
     profile = load_agent_profile(agent_name)
     if not isinstance(profile, dict):
@@ -516,6 +516,20 @@ def _host_agent_capability(agent: str) -> dict[str, Any]:
             "message": f"'{agent_name}' has no headless worker command.",
             "primary_role": primary_role,
         }
+    if mode == "yolo":
+        from .agent_capabilities import probe_agent
+        probe = probe_agent(profile)
+        if probe.get("bypass_permissions_supported") is False:
+            return {
+                "ok": False,
+                "agent": agent_name,
+                "stop_reason": "bypass_permissions_unsupported",
+                "message": (
+                    f"'{agent_name}' is installed but --permission-mode bypassPermissions is not "
+                    "supported by this version. Run `claude --version` and update Claude Code."
+                ),
+                "primary_role": primary_role,
+            }
     return {
         "ok": True,
         "agent": agent_name,
@@ -540,7 +554,8 @@ def build_host_dashboard(
     repo = Path(repo_root or Path.cwd()).expanduser().resolve()
     policy = load_host_policy(ws, mode=mode)
     agent_name = normalize_agent_name(agent or policy.get("agent") or "codex")
-    agent_capability = _host_agent_capability(agent_name)
+    effective_mode = mode or str(policy.get("mode") or "")
+    agent_capability = _host_agent_capability(agent_name, mode=effective_mode)
     liveness = probe_worker_agent_liveness(agent_name)
     stop_requested = host_stop_requested(ws)
     resume_enabled = bool(
@@ -1781,6 +1796,23 @@ def run_host_session(
                     time.sleep(min(poll, 60))
                     continue
             append_host_log(ws, "HOST_DRAINED all goals finished")
+            # Scan launched missions to build an outcome summary for the caller.
+            _launched_ids = session.get("launched_mission_ids") or []
+            if _launched_ids:
+                _all_rows = {str(r.get("mission_id") or ""): r for r in list_missions(ws)}
+                _mission_outcomes: dict[str, list[str]] = {"verified": [], "stopped": [], "other": []}
+                for _mid in _launched_ids:
+                    _row = _all_rows.get(str(_mid) or "")
+                    if _row is None:
+                        continue
+                    _s = str(_row.get("status") or "")
+                    if _s in {"verified"}:
+                        _mission_outcomes["verified"].append(str(_mid))
+                    elif _s == "stopped":
+                        _mission_outcomes["stopped"].append(str(_mid))
+                    else:
+                        _mission_outcomes["other"].append(str(_mid))
+                session["mission_outcomes"] = _mission_outcomes
             break
         if not live.get("ok") and idx >= len(expanded) and not do_wake:
             append_host_log(ws, "HOST_IDLE supply down and no more goals")
@@ -1819,6 +1851,11 @@ def run_host_session(
     )
     session["status"] = "stopped" if host_stop_requested(ws) else "completed"
     session["ended_at"] = utc_now()
+    final_missions = final_dash.get("missions") or {}
+    verification_gap = max(0, int(final_missions.get("stopped", 0)) + int(final_missions.get("other", 0)))
+    session["verification_gap"] = verification_gap
+    if verification_gap > 0 and session.get("status") == "completed":
+        session["status"] = "completed_with_gaps"
     session["final_dashboard"] = {
         "missions": final_dash.get("missions"),
         "ready_for_host": final_dash.get("ready_for_host"),

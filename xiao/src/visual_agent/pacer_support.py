@@ -161,6 +161,14 @@ def build_pacer_support_snapshot(
     latest_outcome = outcomes[-1] if outcomes else {}
     latest_run = command_runs[0] if command_runs else {}
     latest_launch = launches[0] if launches else {}
+    handoffs = _read_session_handoffs(root, repo)
+    managed_tasks = _read_managed_tasks(root, repo)
+    try:
+        from .mission_journey import build_latest_mission_journey
+
+        latest_mission_journey = build_latest_mission_journey(root)
+    except Exception:  # noqa: BLE001 - preserve status when one mission artifact is corrupt.
+        latest_mission_journey = {}
     telemetry = _compact_rollout_telemetry(latest_launch)
     native_sources = _pacer_native_sources(root, repo)
     history_sources = [
@@ -230,12 +238,35 @@ def build_pacer_support_snapshot(
                     "pillars": active_launch.get("pillars")
                     if isinstance(active_launch.get("pillars"), dict)
                     else {},
+                    "task_trigger": active_launch.get("task_trigger")
+                    if isinstance(active_launch.get("task_trigger"), dict)
+                    else {},
+                    "trigger_diagnosis": active_launch.get("trigger_diagnosis")
+                    if isinstance(active_launch.get("trigger_diagnosis"), dict)
+                    else {},
+                    "task_lifecycle": active_launch.get("task_lifecycle")
+                    if isinstance(active_launch.get("task_lifecycle"), dict)
+                    else {},
+                    "task_generation": int(active_launch.get("task_generation") or 0),
                     "assessment": active_pillar_assessment,
                 },
                 "root": str(root / "pacer_native" / "launches"),
                 "source_roots": launch_sources,
             },
             "telemetry": telemetry,
+            "session_handoffs": {
+                "total": len(handoffs),
+                "latest": handoffs[0] if handoffs else {},
+                "recent": handoffs[:5],
+                "root": str(root / "pacer_native" / "session_handoffs"),
+            },
+            "managed_tasks": {
+                "total": len(managed_tasks),
+                "latest": managed_tasks[0] if managed_tasks else {},
+                "recent": managed_tasks[:5],
+                "root": str(root / "pacer_native" / "managed_tasks"),
+            },
+            "mission_journey": latest_mission_journey,
             "recent_outcomes": [_compact_outcome(item) for item in reversed(outcomes[-5:])],
             "recent_command_runs": [_compact_command_run(item) for item in command_runs[:5]],
         }
@@ -254,6 +285,13 @@ def support_snapshot_to_markdown(snapshot: dict[str, Any]) -> str:
     latest = memory.get("latest") if isinstance(memory.get("latest"), dict) else {}
     latest_run = commands.get("latest") if isinstance(commands.get("latest"), dict) else {}
     telemetry = snapshot.get("telemetry") if isinstance(snapshot.get("telemetry"), dict) else {}
+    managed_tasks = snapshot.get("managed_tasks") if isinstance(snapshot.get("managed_tasks"), dict) else {}
+    latest_managed_task = (
+        managed_tasks.get("latest") if isinstance(managed_tasks.get("latest"), dict) else {}
+    )
+    handoffs = snapshot.get("session_handoffs") if isinstance(snapshot.get("session_handoffs"), dict) else {}
+    latest_handoff = handoffs.get("latest") if isinstance(handoffs.get("latest"), dict) else {}
+    journey = snapshot.get("mission_journey") if isinstance(snapshot.get("mission_journey"), dict) else {}
     auth_label = {
         "chatgpt_subscription": "ChatGPT subscription",
         "api_key": "API key / relay token",
@@ -296,6 +334,20 @@ def support_snapshot_to_markdown(snapshot: dict[str, Any]) -> str:
             lines.extend(["", task_review_to_markdown(task_review)])
     if latest_run:
         lines.append(f"- Latest command run: {latest_run.get('status') or '-'} - {latest_run.get('run_id') or '-'}")
+    if latest_managed_task:
+        lines.append(
+            "- Latest managed task: "
+            f"{latest_managed_task.get('status') or '-'} - {latest_managed_task.get('objective') or '-'}"
+        )
+    if latest_handoff:
+        hints = latest_handoff.get("resume_hints") if isinstance(latest_handoff.get("resume_hints"), list) else []
+        suffix = f" · {hints[0]}" if hints else ""
+        lines.append(
+            "- Latest session handoff: "
+            f"{latest_handoff.get('status') or '-'} - {latest_handoff.get('launch_id') or '-'}{suffix}"
+        )
+    if journey:
+        lines.append(f"- Latest mission loop: {journey.get('status') or '-'} - {journey.get('summary') or '-'}")
     if telemetry:
         usage = telemetry.get("usage") if isinstance(telemetry.get("usage"), dict) else {}
         compactions = telemetry.get("compactions") if isinstance(telemetry.get("compactions"), dict) else {}
@@ -416,6 +468,101 @@ def _read_command_runs(root: Path, repo: Path) -> tuple[list[dict[str, Any]], li
     return rows[:100], sorted(run_id for run_id in conflicted_run_ids if run_id)
 
 
+def _read_session_handoffs(root: Path, repo: Path) -> list[dict[str, Any]]:
+    rows_by_id: dict[str, tuple[int, dict[str, Any]]] = {}
+    for native_root in _pacer_native_sources(root, repo):
+        handoff_root = native_root / "session_handoffs"
+        if not handoff_root.is_dir():
+            continue
+        try:
+            paths = list(handoff_root.glob("*.json"))
+        except OSError:
+            continue
+        for path in paths:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+                modified_ns = path.stat().st_mtime_ns
+            except (OSError, json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            rollout = payload.get("rollout") if isinstance(payload.get("rollout"), dict) else {}
+            sessions = rollout.get("sessions") if isinstance(rollout.get("sessions"), list) else []
+            launch_id = str(payload.get("launch_id") or path.stem)
+            compact = {
+                "launch_id": launch_id,
+                "status": str(payload.get("status") or ""),
+                "reason": str(payload.get("reason") or ""),
+                "recorded_at": str(payload.get("recorded_at") or ""),
+                "repo_root": str(payload.get("repo_root") or ""),
+                "rollout_status": str(rollout.get("status") or ""),
+                "source_files": int(rollout.get("source_files") or 0),
+                "session_count": len([item for item in sessions if isinstance(item, dict)]),
+                "resume_hints": [
+                    str(item)
+                    for item in (payload.get("resume_hints") if isinstance(payload.get("resume_hints"), list) else [])
+                    if str(item).strip()
+                ][:3],
+                "path": str(path),
+            }
+            previous = rows_by_id.get(launch_id)
+            if previous is None or modified_ns >= previous[0]:
+                rows_by_id[launch_id] = (modified_ns, compact)
+    rows = [item[1] for item in rows_by_id.values()]
+    rows.sort(
+        key=lambda item: (_timestamp_value(str(item.get("recorded_at") or "")), str(item.get("launch_id") or "")),
+        reverse=True,
+    )
+    return rows[:100]
+
+
+def _read_managed_tasks(root: Path, repo: Path) -> list[dict[str, Any]]:
+    rows_by_id: dict[str, tuple[int, dict[str, Any]]] = {}
+    for native_root in _pacer_native_sources(root, repo):
+        task_root = native_root / "managed_tasks"
+        if not task_root.is_dir():
+            continue
+        try:
+            paths = list(task_root.glob("*.json"))
+        except OSError:
+            continue
+        for path in paths:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+                modified_ns = path.stat().st_mtime_ns
+            except (OSError, json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            attempt_id = str(payload.get("attempt_id") or path.stem)
+            tasks = payload.get("tasks") if isinstance(payload.get("tasks"), list) else []
+            worker_runs = payload.get("worker_runs") if isinstance(payload.get("worker_runs"), list) else []
+            compact = {
+                "attempt_id": attempt_id,
+                "status": str(payload.get("status") or ""),
+                "reason": str(payload.get("reason") or ""),
+                "objective": str(payload.get("objective") or "")[:300],
+                "repo_root": str(payload.get("repo_root") or ""),
+                "program_id": str(payload.get("program_id") or ""),
+                "plan_path": str(payload.get("plan_path") or ""),
+                "test_command": str(payload.get("test_command") or ""),
+                "created_at": str(payload.get("created_at") or ""),
+                "updated_at": str(payload.get("updated_at") or ""),
+                "task_count": len([item for item in tasks if isinstance(item, dict)]),
+                "worker_run_count": len([item for item in worker_runs if isinstance(item, dict)]),
+                "path": str(path),
+            }
+            previous = rows_by_id.get(attempt_id)
+            if previous is None or modified_ns >= previous[0]:
+                rows_by_id[attempt_id] = (modified_ns, compact)
+    rows = [item[1] for item in rows_by_id.values()]
+    rows.sort(
+        key=lambda item: (_timestamp_value(str(item.get("updated_at") or item.get("created_at") or "")), str(item.get("attempt_id") or "")),
+        reverse=True,
+    )
+    return rows[:100]
+
+
 def _read_launches(root: Path, repo: Path) -> list[dict[str, Any]]:
     rows_by_id: dict[str, tuple[int, dict[str, Any]]] = {}
     allowed = {
@@ -475,7 +622,7 @@ def _pacer_native_sources(root: Path, repo: Path) -> list[Path]:
 def _native_root_has_data(native_root: Path) -> bool:
     if (native_root / "history.jsonl").is_file():
         return True
-    for pattern in ("commands/*/summary.json", "launches/*.json"):
+    for pattern in ("commands/*/summary.json", "launches/*.json", "managed_tasks/*.json", "session_handoffs/*.json"):
         try:
             if next(native_root.glob(pattern), None) is not None:
                 return True

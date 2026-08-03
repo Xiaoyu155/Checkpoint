@@ -89,6 +89,37 @@ def test_selects_low_cost_model_from_provider_quota_snapshot(tmp_path) -> None:
     assert selection.selected.id == "cheap"
 
 
+def test_selects_codex_profile_balanced_model_without_model_pool(tmp_path) -> None:
+    selection = select_model_for_task(
+        objective="Small offline-testable change: add coverage for JSON extraction.",
+        changed_files=[f"src/stale_{index}.py" for index in range(35)],
+        workspace_root=tmp_path / "workspace-without-pool",
+    )
+
+    assert selection.status == "selected"
+    assert selection.required_tier == "standard"
+    assert selection.selected is not None
+    assert selection.selected.id == "codex:gpt-5.5"
+    assert selection.selected.model == "gpt-5.5"
+
+
+def test_selects_claude_profile_balanced_model_for_claude_worker(tmp_path) -> None:
+    selection = select_model_for_task(
+        objective="Add a focused greeting implementation and keep tests passing.",
+        changed_files=["greetings.py"],
+        workspace_root=tmp_path / "workspace-without-pool",
+        agent_backend="claude-code",
+    )
+
+    assert selection.status == "selected"
+    assert selection.required_tier == "standard"
+    assert selection.agent_backend == "claude-code"
+    assert selection.selected is not None
+    assert selection.selected.id == "claude-code:sonnet"
+    assert selection.selected.model == "sonnet"
+    assert all(item["agent_backend"] == "claude-code" for item in selection.candidates)
+
+
 def test_strong_task_requires_capability_even_when_quota_is_hot(tmp_path) -> None:
     cfg = tmp_path / "model_pool.json"
     cfg.write_text(
@@ -201,8 +232,26 @@ def test_routing_decision_matches_actual_request(tmp_path) -> None:
         requested_model="other",
     )
 
-    assert selection["policy_version"] == 2
+    assert selection["policy_version"] == 3
     assert selection["decision_id"]
     assert matched["policy_match"] is True
     assert matched["verdict"] == "matched"
     assert mismatched["policy_match"] is False
+
+
+def test_routing_request_evidence_allows_profile_model_without_provider_override() -> None:
+    selection = {
+        "policy_version": 3,
+        "decision_id": "decision",
+        "required_tier": "standard",
+        "selected": {"provider": "", "model": "gpt-5.5"},
+    }
+
+    matched = routing_request_evidence(
+        selection,
+        requested_provider="inherited(config.toml)",
+        requested_model="gpt-5.5",
+    )
+
+    assert matched["policy_match"] is True
+    assert matched["verdict"] == "matched"

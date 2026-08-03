@@ -227,6 +227,40 @@ _QUOTA_SIGNATURES = (
     "overloaded_error",
     "resets at",
     "upgrade to increase your usage",
+    # Education / shared seat "space killed" style outages (Codex/ChatGPT Edu etc.)
+    "you've used all your",
+    "out of credits",
+    "out of free messages",
+    "monthly limit",
+    "weekly limit",
+    "limit reached",
+    "organization has been disabled",
+    "workspace has been disabled",
+    "account has been deactivated",
+    "access revoked",
+    "kill space",
+    "k12",
+    "edu account",
+    "subscription ended",
+    "plan expired",
+)
+
+_PROVIDER_5XX_SIGNATURES = (
+    " 500 ",
+    " 502 ",
+    " 503 ",
+    " 504 ",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "internal server error",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "server error",
+    "upstream connect error",
+    "temporarily unavailable",
 )
 
 
@@ -238,6 +272,14 @@ def looks_like_quota_exhaustion(*texts: str) -> bool:
     keep going."""
     blob = " ".join(str(t or "") for t in texts).lower()
     return any(sig in blob for sig in _QUOTA_SIGNATURES)
+
+
+def looks_like_provider_5xx(*texts: str) -> bool:
+    """True when worker output looks like an upstream 5xx / capacity outage."""
+    blob = f" {' '.join(str(t or '') for t in texts).lower()} "
+    if looks_like_quota_exhaustion(*texts):
+        return False
+    return any(sig in blob for sig in _PROVIDER_5XX_SIGNATURES)
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +313,11 @@ def has_recent_quota_failure(agent: str, *, store_path: Path | None = None) -> b
     failure_time = data.get(agent.lower())
     if not failure_time:
         return False
-    return (time.time() - failure_time) < _QUOTA_FAILURE_TTL_SECONDS
+    try:
+        age_seconds = time.time() - float(failure_time)
+    except (TypeError, ValueError):
+        return False
+    return 0.0 <= age_seconds < _QUOTA_FAILURE_TTL_SECONDS
 
 
 def clear_quota_failure(agent: str, *, store_path: Path | None = None) -> None:

@@ -252,6 +252,11 @@ def test_chief_plan_worker_tracks_use_capability_profiles(tmp_path, monkeypatch)
     assert "codex exec" in codex_track["command"]
     assert "--sandbox" in codex_track["command"]
     claude_track = plan.worker_tracks[1]
+    assert claude_track["model"] == "sonnet"
+    # This fixture's explicit pool only declares a Codex backend, so Claude
+    # falls back to its own profile while the cross-backend pool is rejected.
+    assert claude_track["model_selection"]["status"] == "blocked"
+    assert "--model sonnet" in claude_track["command"]
     # Claude expresses sandbox + approval through one --permission-mode; not duplicated.
     assert claude_track["command"].count("--permission-mode") == 1
 

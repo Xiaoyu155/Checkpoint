@@ -418,6 +418,17 @@ def aggregate_rollout_telemetry(
             "matched": bool(ownership_marker),
         },
         "source_files": len(selected),
+        "sessions": [
+            {
+                "path": str(item.path.resolve()),
+                "session_id": item.thread_id,
+                "parent_session_id": item.parent_thread_id,
+                "cwd": item.cwd,
+                "depth": item.depth,
+                "started_at": item.session_started_at,
+            }
+            for item in selected
+        ],
         "usage": usage,
         "current_context_usage": dict(root.current_usage),
         "compactions": {

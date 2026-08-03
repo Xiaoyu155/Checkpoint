@@ -181,7 +181,8 @@ def test_version_flag_prints_runtime_info(capsys) -> None:
 
     assert code == 0
     assert "visual-agent 0.1.2" in output
-    assert "Product: Checkpoint" in output
+    assert "Product: Pacer" in output
+    assert "Verification engine: Checkpoint" in output
     assert "Python:" in output
     assert "Playwright:" in output
     assert "System:" in output
@@ -195,7 +196,8 @@ def test_checkpoint_entrypoint_prints_brand_aligned_version(capsys, monkeypatch)
 
     assert code == 0
     assert "checkpoint 0.1.2" in output
-    assert "Product: Checkpoint" in output
+    assert "Product: Pacer" in output
+    assert "Verification engine: Checkpoint" in output
     assert "Package: visual-agent" in output
 
 
@@ -204,9 +206,10 @@ def test_empty_cli_prints_concise_getting_started(capsys) -> None:
     output = capsys.readouterr().out
 
     assert code == 0
-    assert "DevPacer" in output
-    assert "checkpoint init --root .agent-workspace" in output
-    assert "Run checkpoint --help for the full command list." in output
+    assert "Pacer" in output
+    assert "checkpoint host doctor" in output
+    assert "checkpoint host run" in output
+    assert "checkpoint --help" in output
 
 
 def test_pacer_entrypoint_delegates_all_arguments_to_codex(monkeypatch) -> None:
@@ -220,6 +223,100 @@ def test_pacer_entrypoint_delegates_all_arguments_to_codex(monkeypatch) -> None:
     assert calls == [["resume", "--last"]]
 
 
+def test_pacer_code_alias_delegates_to_codex(monkeypatch) -> None:
+    from visual_agent import codex_launcher
+
+    calls = []
+    monkeypatch.setattr(sys, "argv", [r"C:\Python\Scripts\pacer.exe", "code", "--sandbox", "danger-full-access"])
+    monkeypatch.setattr(codex_launcher, "launch_codex", lambda argv: calls.append(argv) or 37)
+
+    assert main() == 37
+    assert calls == [["--sandbox", "danger-full-access"]]
+
+
+def test_pacer_cc_alias_delegates_to_claude(monkeypatch) -> None:
+    import visual_agent.cli as cli
+    import visual_agent.process_guard as _pg
+
+    calls = []
+    monkeypatch.setattr(sys, "argv", [r"C:\Python\Scripts\pacer.exe", "cc", "--dangerously-skip-permissions"])
+    monkeypatch.setattr(cli.shutil, "which", lambda name: r"C:\Tools\claude.exe" if name == "claude" else None)
+
+    # guarded_run uses Popen when the Job Object guard is available (Windows).
+    # Patch at the process_guard level so the mock intercepts both paths.
+    class _FakePopen:
+        def __init__(self, argv, **kw):
+            calls.append(list(argv))
+            self.pid = 12345
+            self.args = argv
+            self.returncode = 41
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def communicate(self, input=None, timeout=None): return None, None
+        def kill(self): pass
+        def wait(self): pass
+
+    monkeypatch.setattr(_pg.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(_pg.subprocess, "run", lambda argv, **kw: calls.append(list(argv)) or subprocess.CompletedProcess(argv, 41))
+
+    assert main() == 41
+    assert calls == [[r"C:\Tools\claude.exe", "--permission-mode", "bypassPermissions"]]
+
+
+def test_pacer_yolo_alias_forces_claude_bypass_permissions(monkeypatch) -> None:
+    import visual_agent.cli as cli
+    import visual_agent.process_guard as _pg
+
+    calls = []
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            r"C:\Python\Scripts\pacer.exe",
+            "claude-yolo",
+            "--permission-mode",
+            "manual",
+            "--dangerously-skip-permissions",
+            "fix bug",
+        ],
+    )
+    monkeypatch.setattr(cli.shutil, "which", lambda name: r"C:\Tools\claude.exe" if name == "claude" else None)
+
+    class _FakePopen:
+        def __init__(self, argv, **kw):
+            calls.append(list(argv))
+            self.pid = 12345
+            self.args = argv
+            self.returncode = 43
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def communicate(self, input=None, timeout=None): return None, None
+        def kill(self): pass
+        def wait(self): pass
+
+    monkeypatch.setattr(_pg.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(_pg.subprocess, "run", lambda argv, **kw: calls.append(list(argv)) or subprocess.CompletedProcess(argv, 43))
+
+    assert main() == 43
+    assert calls == [[r"C:\Tools\claude.exe", "--permission-mode", "bypassPermissions", "fix bug"]]
+
+
+def test_pacer_gm_alias_delegates_to_gemini(monkeypatch) -> None:
+    import visual_agent.cli as cli
+
+    calls = []
+    monkeypatch.setattr(sys, "argv", [r"C:\Python\Scripts\pacer.exe", "gm", "--yolo"])
+    monkeypatch.setattr(cli.shutil, "which", lambda name: r"C:\Tools\gemini.exe" if name == "gemini" else None)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda argv: calls.append(argv) or subprocess.CompletedProcess(argv, 42),
+    )
+
+    assert main() == 42
+    assert calls == [[r"C:\Tools\gemini.exe", "--yolo"]]
+
+
 def test_pacer_entrypoint_intercepts_management_commands(monkeypatch) -> None:
     from visual_agent import pacer_management
 
@@ -229,6 +326,26 @@ def test_pacer_entrypoint_intercepts_management_commands(monkeypatch) -> None:
 
     assert main() == 19
     assert calls == [["status", "--json"]]
+
+
+def test_pacer_management_routes_host_to_pacer_cli(monkeypatch) -> None:
+    from visual_agent import cli, pacer_management
+
+    calls = []
+    monkeypatch.setattr(cli, "main", lambda argv: calls.append(argv) or 23)
+
+    assert pacer_management.handle_pacer_management(["host", "status"]) == 23
+    assert calls == [["host", "status"]]
+
+
+def test_pacer_management_routes_chief_commands_to_pacer_cli(monkeypatch) -> None:
+    from visual_agent import cli, pacer_management
+
+    calls = []
+    monkeypatch.setattr(cli, "main", lambda argv: calls.append(argv) or 23)
+
+    assert pacer_management.handle_pacer_management(["chief-status", "--mission", "m1"]) == 23
+    assert calls == [["chief-status", "--mission", "m1"]]
 
 
 def test_natural_language_task_expands_to_managed_golden_path() -> None:
@@ -258,7 +375,8 @@ def test_quickstart_cli_prints_same_getting_started(capsys) -> None:
     output = capsys.readouterr().out
 
     assert code == 0
-    assert "checkpoint init --root .agent-workspace" in output
+    assert "checkpoint host doctor" in output
+    assert "checkpoint host run" in output
     assert "mission start" in output
 
 
@@ -458,9 +576,10 @@ def test_list_and_search_workflows_cli_use_index(tmp_path, capsys) -> None:
 def test_generate_from_diff_cli_dry_run_outputs_context_workflow(tmp_path: Path, capsys) -> None:
     init_git_repo(tmp_path)
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
-    page = workspace.fixtures_dir / "login.html"
+    page = tmp_path / "src" / "login.html"
+    page.parent.mkdir()
     page.write_text("<form><input name='email'></form>\n", encoding="utf-8")
-    git(tmp_path, "add", "--force", ".agent-workspace/fixtures/login.html")
+    git(tmp_path, "add", "src/login.html")
     git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
     page.write_text(
         "<form action='/dashboard'><label for='email'>Email</label><input id='email' name='email' type='email' required>"
@@ -487,7 +606,7 @@ def test_generate_from_diff_cli_dry_run_outputs_context_workflow(tmp_path: Path,
 
     assert code == 0
     assert payload["status"] == "success"
-    assert payload["changed_files"] == [".agent-workspace/fixtures/login.html"]
+    assert payload["changed_files"] == ["src/login.html"]
     assert payload["quality"]["score"] >= 0.6
     assert payload["quality"]["data_display_assertions"] == 0
     assert payload["quality"]["forbidden_error_assertions"] == 0
@@ -515,9 +634,10 @@ def test_generate_from_diff_cli_dry_run_outputs_context_workflow(tmp_path: Path,
 def test_generate_from_diff_cli_appends_audit_log(tmp_path: Path, capsys) -> None:
     init_git_repo(tmp_path)
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
-    page = workspace.fixtures_dir / "login.html"
+    page = tmp_path / "src" / "login.html"
+    page.parent.mkdir()
     page.write_text("<form><input name='email'></form>\n", encoding="utf-8")
-    git(tmp_path, "add", "--force", ".agent-workspace/fixtures/login.html")
+    git(tmp_path, "add", "src/login.html")
     git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
     page.write_text(
         "<form action='/dashboard'><label for='email'>Email</label><input id='email' name='email' type='email' required>"
@@ -976,15 +1096,20 @@ def test_context_snapshot_json_has_stable_entry_fields(tmp_path: Path, capsys) -
 def test_verify_impl_cli_dry_run_writes_status(tmp_path: Path, capsys) -> None:
     init_git_repo(tmp_path)
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
-    page = workspace.fixtures_dir / "simple_form.html"
-    page.write_text("<form><input name='email'></form>\n", encoding="utf-8")
-    git(tmp_path, "add", "--force", ".agent-workspace/fixtures/simple_form.html")
+    page = tmp_path / "src" / "simple_form.html"
+    page.parent.mkdir()
+    fixture = workspace.fixtures_dir / "simple_form.html"
+    initial_html = "<form><input name='email'></form>\n"
+    page.write_text(initial_html, encoding="utf-8")
+    fixture.write_text(initial_html, encoding="utf-8")
+    git(tmp_path, "add", "src/simple_form.html")
     git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
-    page.write_text(
+    final_html = (
         "<form><label for='email'>Email</label><input id='email' name='email'>"
-        "<button type='submit'>Save</button></form><p>Saved successfully</p>\n",
-        encoding="utf-8",
+        "<button type='submit'>Save</button></form><p>Saved successfully</p>\n"
     )
+    page.write_text(final_html, encoding="utf-8")
+    fixture.write_text(final_html, encoding="utf-8")
     code = main(
         [
             "verify-impl",
@@ -1017,15 +1142,20 @@ def test_verify_impl_cli_dry_run_writes_status(tmp_path: Path, capsys) -> None:
 def test_verify_impl_cli_infers_fixture_base_url(tmp_path: Path, capsys) -> None:
     init_git_repo(tmp_path)
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
-    page = workspace.fixtures_dir / "simple_form.html"
-    page.write_text("<form><input name='email'></form>\n", encoding="utf-8")
-    git(tmp_path, "add", "--force", ".agent-workspace/fixtures/simple_form.html")
+    page = tmp_path / "src" / "simple_form.html"
+    page.parent.mkdir()
+    fixture = workspace.fixtures_dir / "simple_form.html"
+    initial_html = "<form><input name='email'></form>\n"
+    page.write_text(initial_html, encoding="utf-8")
+    fixture.write_text(initial_html, encoding="utf-8")
+    git(tmp_path, "add", "src/simple_form.html")
     git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
-    page.write_text(
+    final_html = (
         "<form><label for='email'>Email</label><input id='email' name='email'>"
-        "<button type='submit'>Save</button></form><p>Saved successfully</p>\n",
-        encoding="utf-8",
+        "<button type='submit'>Save</button></form><p>Saved successfully</p>\n"
     )
+    page.write_text(final_html, encoding="utf-8")
+    fixture.write_text(final_html, encoding="utf-8")
 
     code = main(
         [
@@ -1053,15 +1183,20 @@ def test_verify_impl_cli_infers_fixture_base_url(tmp_path: Path, capsys) -> None
 def test_verify_impl_cli_can_run_negative_workflow_when_requested(tmp_path: Path, capsys) -> None:
     init_git_repo(tmp_path)
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
-    page = workspace.fixtures_dir / "simple_form.html"
-    page.write_text("<form><input name='email'></form>\n", encoding="utf-8")
-    git(tmp_path, "add", "--force", ".agent-workspace/fixtures/simple_form.html")
+    page = tmp_path / "src" / "simple_form.html"
+    page.parent.mkdir()
+    fixture = workspace.fixtures_dir / "simple_form.html"
+    initial_html = "<form><input name='email'></form>\n"
+    page.write_text(initial_html, encoding="utf-8")
+    fixture.write_text(initial_html, encoding="utf-8")
+    git(tmp_path, "add", "src/simple_form.html")
     git(tmp_path, "-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-m", "initial")
-    page.write_text(
+    final_html = (
         "<form><label for='email'>Email</label><input id='email' name='email' type='email' required>"
-        "<button type='submit'>Save</button></form><p>Saved successfully</p>\n",
-        encoding="utf-8",
+        "<button type='submit'>Save</button></form><p>Saved successfully</p>\n"
     )
+    page.write_text(final_html, encoding="utf-8")
+    fixture.write_text(final_html, encoding="utf-8")
 
     code = main(
         [
@@ -1789,7 +1924,8 @@ def test_test_plan_cli_outputs_focused_pytest_command(tmp_path: Path, capsys, mo
     payload = json.loads(capsys.readouterr().out)
 
     assert code == 0
-    assert payload["command"] == "python -m pytest -q tests/test_security.py"
+    assert str(Path(sys.executable)) in payload["command"]
+    assert payload["command"].endswith(" -m pytest -q tests/test_security.py")
     assert payload["profiles"][0]["name"] == "pytest-focused"
 
 
@@ -1826,7 +1962,8 @@ def test_slash_test_dispatches_to_test_plan(tmp_path: Path, capsys, monkeypatch)
     payload = json.loads(capsys.readouterr().out)
 
     assert code == 0
-    assert payload["command"] == "python -m pytest -q tests/test_security.py"
+    assert str(Path(sys.executable)) in payload["command"]
+    assert payload["command"].endswith(" -m pytest -q tests/test_security.py")
 
 
 def test_generate_fixture_cli_writes_template(tmp_path: Path, capsys) -> None:
