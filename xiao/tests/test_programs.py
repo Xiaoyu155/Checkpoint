@@ -34,6 +34,28 @@ def test_ready_program_tasks_respects_dependencies(tmp_path) -> None:
     assert [item["task_id"] for item in ready] == ["task-001"]
 
 
+def test_create_program_from_plan_falls_back_to_single_objective_task(tmp_path) -> None:
+    workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
+    plan = tmp_path / "plan.md"
+    plan.write_text("- [ ] todo\n", encoding="utf-8")
+
+    program = create_program_from_plan(
+        source_file=plan,
+        workspace_root=workspace.root,
+        repo_root=tmp_path,
+        objective="Keep demo_math.add documented and tested",
+        autonomous=True,
+    )
+
+    assert len(program["tasks"]) == 1
+    assert program["tasks"][0]["task_id"] == "task-001"
+    assert program["tasks"][0]["source_type"] == "objective_fallback"
+    assert program["tasks"][0]["objective"] == "Keep demo_math.add documented and tested"
+    assert program["warnings"] == [
+        "No actionable plan items were parsed; used the top-level objective as task-001."
+    ]
+
+
 def test_program_cli_create_and_plan(tmp_path, capsys) -> None:
     workspace = init_workspace(tmp_path / ".agent-workspace", with_demo=False)
     plan = tmp_path / "plan.md"

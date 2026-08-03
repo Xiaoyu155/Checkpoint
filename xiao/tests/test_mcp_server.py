@@ -300,8 +300,117 @@ def test_begin_pacer_task_captures_one_process_trusted_baseline(tmp_path) -> Non
     assert active["source_baseline_receipt"] == first["source_baseline"]["receipt"]
     assert first["task_contract"]["requirements"]
     assert active["task_contract"] == first["task_contract"]
+    assert active["task_generation"] == 1
     assert active["task_contract_digest"]
     assert active["task_contract_receipt"]
+    assert active["task_trigger"]["status"] == "triggered"
+    assert active["task_trigger"]["observed_event"] == "begin_pacer_task"
+    assert active["task_trigger"]["task_generation"] == 1
+
+
+def test_begin_pacer_task_accepts_empty_or_system_resume_goal(tmp_path) -> None:
+    from visual_agent.mcp_server import begin_pacer_task_payload
+    from visual_agent.pacer_launch_context import initialize_active_launch
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text("[project]\nname='begin-test'\n", encoding="utf-8")
+    workspace = repo / ".agent-workspace"
+    manifest = workspace / "pacer_native" / "launches" / "launch-begin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    initialize_active_launch(
+        workspace_root=workspace,
+        manifest_path=manifest,
+        launch={"launch_id": "launch-begin", "repo_root": str(repo), "goal": "begin safely"},
+    )
+
+    from visual_agent.mcp_server import _pacer_goal_digest
+    for sys_goal in ["", "resume", "(没有用户消息，忽略系统提醒。)", "pacer_wait_for_task_v1"]:
+        res = begin_pacer_task_payload(
+            {"workspace_root": str(workspace), "repo_root": str(repo), "goal": sys_goal}
+        )
+        assert res["goal_digest"] == _pacer_goal_digest("begin safely")
+
+
+def test_begin_pacer_task_switches_to_new_goal_before_completion(tmp_path) -> None:
+    from visual_agent.mcp_server import begin_pacer_task_payload
+    from visual_agent.pacer_launch_context import initialize_active_launch, read_active_launch
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text("[project]\nname='begin-test'\n", encoding="utf-8")
+    workspace = repo / ".agent-workspace"
+    manifest = workspace / "pacer_native" / "launches" / "launch-switch.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    initialize_active_launch(
+        workspace_root=workspace,
+        manifest_path=manifest,
+        launch={"launch_id": "launch-switch", "repo_root": str(repo), "goal": "first task"},
+    )
+    begin_pacer_task_payload(
+        {"workspace_root": str(workspace), "repo_root": str(repo), "goal": "first task"}
+    )
+
+    started = begin_pacer_task_payload(
+        {"workspace_root": str(workspace), "repo_root": str(repo), "goal": "second task"}
+    )
+    active = read_active_launch(workspace, launch_id="launch-switch")
+
+    assert started["task_rollover"]["status"] == "rebound"
+    assert active["launch_goal"] == "second task"
+    assert active["task_history"][-1]["completion_status"] == "interrupted"
+    assert active["task_history"][-1]["task_lifecycle"]["status"] == "superseded"
+    assert active["task_trigger"]["status"] == "triggered"
+    assert active["task_trigger"]["task_generation"] == 2
+
+
+def test_begin_pacer_task_rolls_completed_launch_to_new_goal(tmp_path, monkeypatch) -> None:
+    from visual_agent.mcp_server import begin_pacer_task_payload, complete_pacer_task_payload
+    from visual_agent.pacer_launch_context import load_task_source_baseline, read_active_launch
+
+    first_goal = "test the project"
+    workspace, repo = active_completion_context(
+        tmp_path,
+        monkeypatch,
+        launch_id="launch-rollover",
+        goal=first_goal,
+        initial_files={"app.py": "value = 1\n"},
+    )
+    first_baseline = load_task_source_baseline(
+        read_active_launch(workspace, launch_id="launch-rollover"),
+        workspace_root=workspace,
+    )
+    first_app_fingerprint = first_baseline["entries"]["app.py"]
+    complete_pacer_task_payload(
+        {
+            "workspace_root": str(workspace),
+            "repo_root": str(repo),
+            "goal": first_goal,
+            "summary": "existing tests passed",
+            "completion_evidence": completion_evidence(first_goal),
+            "steps": [passing_unittest_step(repo)],
+        }
+    )
+    (repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+
+    second_goal = "add the second feature"
+    started = begin_pacer_task_payload(
+        {"workspace_root": str(workspace), "repo_root": str(repo), "goal": second_goal}
+    )
+    active = read_active_launch(workspace, launch_id="launch-rollover")
+    second_baseline = load_task_source_baseline(active, workspace_root=workspace)
+    archived = workspace / "pacer_native" / "baselines" / "launch-rollover.task-1.source.json"
+
+    assert started["task_rollover"]["status"] == "rebound"
+    assert active["launch_goal"] == second_goal
+    assert active["task_generation"] == 2
+    assert active["task_history"][-1]["goal"] == first_goal
+    assert archived.exists()
+    assert second_baseline["entries"]["app.py"] != first_app_fingerprint
+    assert active["source_baseline_digest"] == started["source_baseline"]["digest"]
+    assert active["task_contract"]["requirements"][0]["text"] == second_goal
 
 
 def test_begin_pacer_task_does_not_retrust_existing_baseline_after_process_restart(
@@ -410,6 +519,245 @@ def test_begin_pacer_task_adopts_launcher_pre_registered_evidence(tmp_path, monk
         trusted_digest=active["source_baseline_digest"],
         trusted_receipt=active["source_baseline_receipt"],
     ) == ()
+
+
+def _start_prelaunch_test_session(tmp_path, monkeypatch, *, launch_id: str, goal: str):
+    from visual_agent import pacer_launch_context
+    from visual_agent.codex_launcher import _pre_register_pacer_task
+    from visual_agent.mcp_server import begin_pacer_task_payload
+    from visual_agent.pacer_launch_context import initialize_active_launch
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text("[project]\nname='prelaunch-rollover-test'\n", encoding="utf-8")
+    (repo / "app.py").write_text("value = 1\n", encoding="utf-8")
+    workspace = repo / ".agent-workspace"
+    manifest = workspace / "pacer_native" / "launches" / f"{launch_id}.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}", encoding="utf-8")
+    initialize_active_launch(
+        workspace_root=workspace,
+        manifest_path=manifest,
+        launch={"launch_id": launch_id, "repo_root": str(repo)},
+    )
+    evidence = _pre_register_pacer_task(
+        workspace_root=workspace,
+        repo_root=repo,
+        launch_id=launch_id,
+        goal=goal,
+    )
+    # Simulate the MCP child adopting launcher evidence after it starts.  The
+    # rollover marker must be created by the first successful begin call, not
+    # by persisted launch state alone.
+    monkeypatch.setattr(
+        pacer_launch_context,
+        "_TRUSTED_TASK_SOURCE_BASELINES",
+        type(pacer_launch_context._TRUSTED_TASK_SOURCE_BASELINES)(),
+    )
+    monkeypatch.setattr(
+        pacer_launch_context,
+        "_TRUSTED_TASK_CONTRACTS",
+        type(pacer_launch_context._TRUSTED_TASK_CONTRACTS)(),
+    )
+    monkeypatch.setattr(pacer_launch_context, "_TRUSTED_MANAGED_TASK_ROLLOVER_SESSIONS", set())
+    monkeypatch.setenv("PACER_LAUNCH_ID", launch_id)
+    monkeypatch.setenv(pacer_launch_context.PRELAUNCH_TASK_REQUIRED_ENV, "1")
+    monkeypatch.setenv(
+        pacer_launch_context.PRELAUNCH_TASK_CONTRACT_DIGEST_ENV,
+        evidence["task_contract_digest"],
+    )
+    monkeypatch.setenv(
+        pacer_launch_context.PRELAUNCH_SOURCE_BASELINE_DIGEST_ENV,
+        evidence["source_baseline_digest"],
+    )
+    started = begin_pacer_task_payload(
+        {"workspace_root": str(workspace), "repo_root": str(repo), "goal": goal}
+    )
+    assert started["source_baseline"]["status"] == "verified"
+    return workspace, repo
+
+
+def test_prelaunch_rollover_validates_new_contract_before_mutating_task(
+    tmp_path, monkeypatch
+) -> None:
+    from visual_agent.mcp_server import begin_pacer_task_payload
+    from visual_agent.pacer_launch_context import (
+        read_active_launch,
+        task_source_baseline_path,
+    )
+
+    first_goal = "保留当前托管任务"
+    workspace, repo = _start_prelaunch_test_session(
+        tmp_path,
+        monkeypatch,
+        launch_id="launch-managed-rollover-invalid-target",
+        goal=first_goal,
+    )
+    active_before = read_active_launch(
+        workspace,
+        launch_id="launch-managed-rollover-invalid-target",
+    )
+    baseline_path = task_source_baseline_path(
+        workspace,
+        "launch-managed-rollover-invalid-target",
+    )
+    (repo / ".pacer").mkdir()
+    (repo / ".pacer" / "acceptance.json").write_text("{invalid", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="invalid acceptance manifest"):
+        begin_pacer_task_payload(
+            {
+                "workspace_root": str(workspace),
+                "repo_root": str(repo),
+                "goal": "切换到非法验收配置",
+            }
+        )
+
+    active_after = read_active_launch(
+        workspace,
+        launch_id="launch-managed-rollover-invalid-target",
+    )
+    assert active_after["launch_goal"] == active_before["launch_goal"] == first_goal
+    assert active_after["task_generation"] == 1
+    assert active_after["task_lifecycle"]["status"] == "active"
+    assert active_after["task_contract"] == active_before["task_contract"]
+    assert baseline_path.exists()
+    assert not (
+        workspace
+        / "pacer_native"
+        / "baselines"
+        / "launch-managed-rollover-invalid-target.task-1.source.json"
+    ).exists()
+
+
+def test_begin_pacer_task_rejects_oversized_goal_before_rollover(tmp_path, monkeypatch) -> None:
+    from visual_agent.mcp_server import begin_pacer_task_payload
+    from visual_agent.pacer_launch_context import read_active_launch
+
+    workspace, repo = _start_prelaunch_test_session(
+        tmp_path,
+        monkeypatch,
+        launch_id="launch-managed-rollover-long-goal",
+        goal="当前任务",
+    )
+    with pytest.raises(ValueError, match="2000 character contract limit"):
+        begin_pacer_task_payload(
+            {
+                "workspace_root": str(workspace),
+                "repo_root": str(repo),
+                "goal": "x" * 2001,
+            }
+        )
+
+    active = read_active_launch(workspace, launch_id="launch-managed-rollover-long-goal")
+    assert active["launch_goal"] == "当前任务"
+    assert active["task_generation"] == 1
+    assert active["task_lifecycle"]["status"] == "active"
+
+
+def test_prelaunch_task_rolls_completed_task_in_same_mcp_session(tmp_path, monkeypatch) -> None:
+    from visual_agent.mcp_server import begin_pacer_task_payload, complete_pacer_task_payload
+    from visual_agent.pacer_launch_context import load_task_source_baseline, read_active_launch
+
+    first_goal = "完成第一个托管任务"
+    workspace, repo = _start_prelaunch_test_session(
+        tmp_path,
+        monkeypatch,
+        launch_id="launch-managed-rollover-complete",
+        goal=first_goal,
+    )
+    first = read_active_launch(workspace, launch_id="launch-managed-rollover-complete")
+    first_baseline = load_task_source_baseline(first, workspace_root=workspace)
+
+    (repo / "app.py").write_text("value = 2\n", encoding="utf-8")
+    complete_pacer_task_payload(
+        {
+            "workspace_root": str(workspace),
+            "repo_root": str(repo),
+            "goal": first_goal,
+            "summary": "第一个任务已验证",
+            "completion_evidence": completion_evidence(
+                first_goal,
+                path="app.py",
+                kind="implementation",
+                state="modified",
+            ),
+            "steps": [passing_unittest_step(repo)],
+        }
+    )
+    (repo / "app.py").write_text("value = 3\n", encoding="utf-8")
+
+    second_goal = "完成第二个托管任务"
+    started = begin_pacer_task_payload(
+        {"workspace_root": str(workspace), "repo_root": str(repo), "goal": second_goal}
+    )
+    active = read_active_launch(workspace, launch_id="launch-managed-rollover-complete")
+    second_baseline = load_task_source_baseline(active, workspace_root=workspace)
+    archived = (
+        workspace
+        / "pacer_native"
+        / "baselines"
+        / "launch-managed-rollover-complete.task-1.source.json"
+    )
+
+    assert started["task_rollover"]["status"] == "rebound"
+    assert active["task_generation"] == 2
+    assert active["launch_goal"] == second_goal
+    assert active["task_history"][-1]["completion_status"] == "completed"
+    assert archived.exists()
+    assert second_baseline["entries"]["app.py"] != first_baseline["entries"]["app.py"]
+    assert active["task_contract"]["requirements"][0]["text"] == second_goal
+    assert active["task_rollover_trust"]["mode"] == "managed_session_after_prelaunch_v1"
+
+
+def test_prelaunch_task_rolls_unfinished_task_to_new_generation(tmp_path, monkeypatch) -> None:
+    from visual_agent.mcp_server import begin_pacer_task_payload
+    from visual_agent.pacer_launch_context import read_active_launch
+
+    workspace, repo = _start_prelaunch_test_session(
+        tmp_path,
+        monkeypatch,
+        launch_id="launch-managed-rollover-interrupted",
+        goal="先做一个未完成任务",
+    )
+    started = begin_pacer_task_payload(
+        {
+            "workspace_root": str(workspace),
+            "repo_root": str(repo),
+            "goal": "改做另一个任务",
+        }
+    )
+    active = read_active_launch(workspace, launch_id="launch-managed-rollover-interrupted")
+
+    assert started["task_rollover"]["status"] == "rebound"
+    assert active["task_generation"] == 2
+    assert active["task_history"][-1]["completion_status"] == "interrupted"
+    assert active["task_history"][-1]["task_lifecycle"]["status"] == "superseded"
+
+
+def test_prelaunch_rollover_requires_session_trust_after_mcp_restart(tmp_path, monkeypatch) -> None:
+    from visual_agent import pacer_launch_context
+    from visual_agent.mcp_server import begin_pacer_task_payload
+
+    workspace, repo = _start_prelaunch_test_session(
+        tmp_path,
+        monkeypatch,
+        launch_id="launch-managed-rollover-restart",
+        goal="重启前的任务",
+    )
+    # The persisted task contract is not enough to authorize a new generation
+    # after the MCP process loses its in-memory session trust.
+    monkeypatch.setattr(pacer_launch_context, "_TRUSTED_MANAGED_TASK_ROLLOVER_SESSIONS", set())
+
+    with pytest.raises(ValueError, match="Complete the current task before switching goals") as exc_info:
+        begin_pacer_task_payload(
+            {
+                "workspace_root": str(workspace),
+                "repo_root": str(repo),
+                "goal": "重启后的新任务",
+            }
+        )
+    assert "launcher-backed handshake" in str(exc_info.value)
 
 
 def test_begin_pacer_task_rejects_tampered_pre_registered_baseline(tmp_path, monkeypatch) -> None:
@@ -575,6 +923,8 @@ def test_pacer_completion_tool_schema_teaches_atomic_argv_contract() -> None:
     outcome_schema = tools["record_pacer_outcome"].inputSchema
 
     assert "argv" in completion.description
+    assert "name as a label only" in completion.description
+    assert "argv=['tests']" in completion.description
     assert "automatically binds" in completion.description
     assert "derives file paths" in completion.description
     assert "never accepts a run_pacer_commands batch" in completion.description
@@ -589,7 +939,9 @@ def test_pacer_completion_tool_schema_teaches_atomic_argv_contract() -> None:
     assert completion_argv["type"] == "array"
     assert completion_argv["items"] == {"type": "string"}
     assert "do not use a command field" in completion_argv["description"]
+    assert "name is a display label only" in completion_argv["description"]
     assert "do not pass a command field" in verification_argv["description"]
+    assert "name is a display label only" in verification_argv["description"]
     assert outcome_verification["examples"] == ["run_id=20260714-120000-abcd1234"]
     assert outcome_schema["properties"]["status"]["enum"] == ["failed", "blocked"]
     assert outcome_schema["dependentRequired"] == {"verification": ["verification_receipt"]}
@@ -2221,6 +2573,38 @@ def test_complete_pacer_task_accepts_minimal_semantic_claim(tmp_path, monkeypatc
     assert payload["task_review"]["legacy_fields_ignored"] == []
 
 
+def test_complete_pacer_task_rejects_symbolic_argv_before_running_commands(tmp_path, monkeypatch) -> None:
+    from visual_agent import mcp_server
+
+    workspace, repo = active_completion_context(tmp_path, monkeypatch, goal="test the project")
+    monkeypatch.setattr(
+        mcp_server,
+        "run_pacer_verification_payload",
+        lambda _args: (_ for _ in ()).throw(AssertionError("verification must not run")),
+    )
+
+    with pytest.raises(ValueError) as raised:
+        mcp_server.complete_pacer_task_payload(
+            {
+                "workspace_root": str(workspace),
+                "repo_root": str(repo),
+                "goal": "test the project",
+                "summary": "project tests verified",
+                "completion_evidence": completion_evidence(
+                    "test the project", step_name="tests"
+                ),
+                "steps": [{"name": "tests", "argv": ["tests"]}],
+            }
+        )
+
+    message = str(raised.value)
+    assert "completion audit rejected" in message
+    correction = json.loads(message.removeprefix("completion audit rejected: "))
+    codes = {str(item["code"]) for item in correction["errors"]}
+    assert {"verification_step_unclassified", "claim_without_acceptance"}.issubset(codes)
+    assert "argv=['tests']" in message
+
+
 @pytest.mark.parametrize(
     ("failure_mode", "expected_error"),
     [
@@ -3218,6 +3602,7 @@ def test_five_pillars_require_current_launch_verified_closed_loop(tmp_path, monk
     )
     from visual_agent.pacer_launch_context import (
         initialize_active_launch,
+        read_active_launch,
         save_rollout_baseline,
     )
 
@@ -3304,6 +3689,9 @@ def test_five_pillars_require_current_launch_verified_closed_loop(tmp_path, monk
         for item in outcome["five_pillars_assessment"]["pillars"].values()
     } == {"partial", "passed"}
     assert outcome["five_pillars_assessment"]["pillars"]["managed"]["status"] == "passed"
+    active = read_active_launch(workspace, launch_id="launch-1")
+    assert active["task_trigger"]["status"] == "completed"
+    assert active["task_trigger"]["observed_event"] == "begin_pacer_task"
 
 
 def test_empty_memory_marks_capability_active_but_mimo_route_blocks_closed_loop(tmp_path, monkeypatch) -> None:
@@ -5288,6 +5676,47 @@ def test_mcp_run_browser_smoke_returns_diagnostics(tmp_path, monkeypatch) -> Non
     assert payload["status"] == "success"
     assert payload["workspace"] == str(workspace.root)
     assert payload["url"] == "https://example.test/login"
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "handler_name", "arguments"),
+    [
+        (
+            "run_browser_smoke",
+            "run_browser_smoke_payload",
+            {"url": "https://example.test/login"},
+        ),
+        (
+            "run_browser_smoke_suite",
+            "run_browser_smoke_suite_payload",
+            {"suite_file": "suite.json"},
+        ),
+    ],
+)
+def test_mcp_browser_handlers_run_outside_asyncio_loop(
+    tmp_path, monkeypatch, tool_name, handler_name, arguments
+) -> None:
+    workspace = init_workspace(tmp_path / "workspace", with_demo=False)
+
+    def fake_handler(_args):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return {"status": "success", "threaded": True}
+        return {"status": "failed", "threaded": False}
+
+    monkeypatch.setattr(f"visual_agent.mcp_server.{handler_name}", fake_handler)
+    payload = content_payload(
+        asyncio.run(
+            call_tool(
+                tool_name,
+                {"workspace_root": str(workspace.root), **arguments},
+            )
+        )
+    )
+
+    assert payload["status"] == "success"
+    assert payload["threaded"] is True
 
 
 def test_mcp_run_browser_smoke_suite_returns_summary(tmp_path, monkeypatch) -> None:

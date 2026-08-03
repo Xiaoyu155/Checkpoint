@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from visual_agent.milestone_checkpoint import (
     generate_milestone_checkpoint,
     format_milestone_checkpoint,

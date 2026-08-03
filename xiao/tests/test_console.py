@@ -24,7 +24,7 @@ def test_workspace_dashboard_summarizes_empty_workspace(tmp_path) -> None:
     assert dashboard["auto_repair_policy"]["min_confidence"] == 0.75
     assert dashboard["auto_repair_policy"]["max_risk_level"] == "medium"
     assert dashboard["auto_repair_policy"]["source"] == "defaults"
-    assert dashboard["workspace"]["workflow_count"] == 3
+    assert dashboard["workspace"]["workflow_count"] == 5
     assert dashboard["reports"]["total"] == 0
     assert dashboard["quality_gates"]["total"] == 0
     assert dashboard["queue"]["total"] == 0
@@ -70,6 +70,47 @@ def test_doctor_recommendations_are_prioritized(monkeypatch, capsys) -> None:
     assert output["recommendations"]
     assert output["recommendations"][0]["priority"] == "P0"
     assert output["recommendations"][0]["name"] in {"observe_browser", "observe_dom", "playwright"}
+
+
+def test_doctor_claude_yolo(monkeypatch, capsys) -> None:
+    from visual_agent import agent_capabilities
+    from visual_agent.cli import main
+
+    # Case A: Success (Installed and supported)
+    monkeypatch.setattr(
+        agent_capabilities,
+        "probe_agent",
+        lambda profile: {
+            "installed": True,
+            "version": "2.1.220",
+            "bypass_permissions_supported": True,
+            "path": "/mock/path/claude",
+        },
+    )
+    exit_code = main(["doctor", "claude-yolo"])
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert output["ok"] is True
+    assert output["installed"] is True
+    assert output["bypass_permissions_supported"] is True
+
+    # Case B: Failure (Not installed or not supported)
+    monkeypatch.setattr(
+        agent_capabilities,
+        "probe_agent",
+        lambda profile: {
+            "installed": True,
+            "version": "1.0.0",
+            "bypass_permissions_supported": False,
+            "path": "/mock/path/claude",
+        },
+    )
+    exit_code = main(["doctor", "claude-yolo"])
+    output = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert output["ok"] is False
+    assert output["bypass_permissions_supported"] is False
+    assert "Install or update" in output["recommendation"]
 
 
 def test_release_check_cli_outputs_markdown(capsys) -> None:

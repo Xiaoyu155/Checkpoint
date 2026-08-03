@@ -34,25 +34,40 @@ def run_simple_managed_task(
         return {"status": "blocked", "reason": "Task is empty."}
     repo = Path(repo_root).expanduser().resolve()
     workspace = Path(workspace_root).expanduser().resolve()
+    if not workspace.exists():
+        init_workspace(workspace, with_demo=False)
+    attempt = _new_managed_task_checkpoint(objective, repo=repo, workspace=workspace)
+    _write_managed_task_checkpoint(workspace, attempt)
     review_task = is_review_plan_goal(objective)
     if not review_task:
         from .verification_profiles import choose_verification_command
 
         verification_command = choose_verification_command(repo)
         if not verification_command:
+            _write_managed_task_checkpoint(
+                workspace,
+                {
+                    **attempt,
+                    "status": "needs_input",
+                    "reason": "project_verification_unresolved",
+                    "message": _project_selection_message(repo),
+                },
+            )
             return {
                 "schema_version": 1,
                 "product": "Pacer",
                 "status": "needs_input",
                 "reason": "project_verification_unresolved",
                 "message": _project_selection_message(repo),
+                "managed_task": {
+                    "attempt_id": attempt["attempt_id"],
+                    "path": str(_managed_task_checkpoint_path(workspace, str(attempt["attempt_id"]))),
+                },
                 "program_id": "",
                 "tasks": [],
             }
     else:
         verification_command = ""
-    if not workspace.exists():
-        init_workspace(workspace, with_demo=False)
     intake = workspace / "intake"
     intake.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -79,8 +94,27 @@ def run_simple_managed_task(
     autonomy["merge_policy"] = "auto"
     program["autonomy_policy"] = autonomy
     save_program(workspace, program)
+    attempt = {
+        **attempt,
+        "status": "program_created",
+        "program_id": str(program.get("program_id") or ""),
+        "plan_path": str(plan_path),
+        "test_command": "" if review_task else str(verification_command or ""),
+        "review_task": bool(review_task),
+        "tasks": _checkpoint_tasks(program),
+    }
+    _write_managed_task_checkpoint(workspace, attempt)
     start = start_program(workspace_root=workspace, program_id=str(program["program_id"]), hours=8, autonomous=True)
     if start.get("blocked_tasks"):
+        _write_managed_task_checkpoint(
+            workspace,
+            {
+                **attempt,
+                "status": "blocked",
+                "reason": "program_start_blocked",
+                "blocked_tasks": start["blocked_tasks"],
+            },
+        )
         return {"status": "blocked", "program": start.get("program"), "blocked_tasks": start["blocked_tasks"]}
 
     started_message = f"Pacer Program {program['program_id']} 已启动，正在托管开发与验收..."
@@ -91,6 +125,7 @@ def run_simple_managed_task(
     runner = worker_runner or run_mission_queue_worker
     deadline = time.monotonic() + max(1.0, float(max_wait_seconds))
     worker_runs: list[dict[str, Any]] = []
+    _write_managed_task_checkpoint(workspace, {**attempt, "status": "running"})
     while time.monotonic() < deadline:
         current = load_program(workspace, str(program["program_id"])) or program
         tasks = [item for item in current.get("tasks") or [] if isinstance(item, dict)]
@@ -98,9 +133,13 @@ def run_simple_managed_task(
         if tasks and statuses <= {"verified", "done"}:
             sync_program_tasks(workspace_root=workspace, program_id=str(program["program_id"]))
             current = load_program(workspace, str(program["program_id"])) or current
-            return _simple_result(current, worker_runs, plan_path)
+            result = _simple_result(current, worker_runs, plan_path, attempt=attempt, workspace=workspace)
+            _write_managed_task_checkpoint(workspace, _checkpoint_from_result(attempt, result))
+            return result
         if statuses & {"failed", "blocked"}:
-            return _simple_result(current, worker_runs, plan_path)
+            result = _simple_result(current, worker_runs, plan_path, attempt=attempt, workspace=workspace)
+            _write_managed_task_checkpoint(workspace, _checkpoint_from_result(attempt, result))
+            return result
         worker_payload = _run_worker_with_progress(
             runner,
             workspace=workspace,
@@ -113,7 +152,9 @@ def run_simple_managed_task(
         if not worker_payload.get("ran") and str(worker_payload.get("status") or "") == "idle":
             time.sleep(max(0.1, float(poll_seconds)))
     current = load_program(workspace, str(program["program_id"])) or program
-    return {**_simple_result(current, worker_runs, plan_path), "status": "timeout"}
+    result = {**_simple_result(current, worker_runs, plan_path, attempt=attempt, workspace=workspace), "status": "timeout"}
+    _write_managed_task_checkpoint(workspace, _checkpoint_from_result(attempt, result))
+    return result
 
 
 def _run_worker_with_progress(
@@ -230,7 +271,92 @@ def _project_selection_message(repo: Path) -> str:
     return "\n".join(lines)
 
 
-def _simple_result(program: dict[str, Any], worker_runs: list[dict[str, Any]], plan_path: Path) -> dict[str, Any]:
+def _new_managed_task_checkpoint(objective: str, *, repo: Path, workspace: Path) -> dict[str, Any]:
+    from .pacer_launch_context import task_contract_digest
+    from .task_review import build_task_contract
+
+    now = datetime.now(timezone.utc)
+    digest = hashlib.sha256(objective.encode("utf-8")).hexdigest()[:8]
+    contract = build_task_contract(objective, repo_root=repo)
+    return {
+        "schema_version": 1,
+        "kind": "pacer_managed_task_checkpoint",
+        "attempt_id": f"{now.strftime('%Y%m%d-%H%M%S')}-{digest}",
+        "status": "intake",
+        "reason": "",
+        "objective": objective,
+        "repo_root": str(repo),
+        "workspace_root": str(workspace),
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+        "task_contract": contract,
+        "task_contract_digest": task_contract_digest(contract),
+        "program_id": "",
+        "plan_path": "",
+        "test_command": "",
+        "review_task": False,
+        "tasks": [],
+        "worker_runs": [],
+    }
+
+
+def _managed_task_checkpoint_path(workspace: Path, attempt_id: str) -> Path:
+    return workspace / "pacer_native" / "managed_tasks" / f"{attempt_id}.json"
+
+
+def _write_managed_task_checkpoint(workspace: Path, payload: dict[str, Any]) -> Path:
+    from .models import to_jsonable
+    from .security import scrub_secrets
+
+    attempt_id = str(payload.get("attempt_id") or "").strip()
+    if not attempt_id:
+        raise ValueError("attempt_id required for managed task checkpoint")
+    record = dict(payload)
+    record["updated_at"] = datetime.now(timezone.utc).isoformat()
+    path = _managed_task_checkpoint_path(workspace, attempt_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(to_jsonable(scrub_secrets(record)), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return path
+
+
+def _checkpoint_tasks(program: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "task_id": str(item.get("task_id") or ""),
+            "mission_id": str(item.get("mission_id") or ""),
+            "status": str(item.get("status") or ""),
+            "reason": str(item.get("block_reason") or ""),
+        }
+        for item in (program.get("tasks") or [])
+        if isinstance(item, dict)
+    ]
+
+
+def _checkpoint_from_result(attempt: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **attempt,
+        "status": str(result.get("status") or ""),
+        "reason": str(result.get("reason") or ""),
+        "program_id": str(result.get("program_id") or attempt.get("program_id") or ""),
+        "plan_path": str(result.get("plan_path") or attempt.get("plan_path") or ""),
+        "tasks": [item for item in (result.get("tasks") or []) if isinstance(item, dict)],
+        "worker_runs": [item for item in (result.get("worker_runs") or []) if isinstance(item, dict)],
+    }
+
+
+def _simple_result(
+    program: dict[str, Any],
+    worker_runs: list[dict[str, Any]],
+    plan_path: Path,
+    *,
+    attempt: dict[str, Any] | None = None,
+    workspace: Path | None = None,
+) -> dict[str, Any]:
     tasks = [item for item in program.get("tasks") or [] if isinstance(item, dict)]
     statuses = [str(item.get("status") or "") for item in tasks]
     if tasks and all(status in {"verified", "done"} for status in statuses):
@@ -256,6 +382,30 @@ def _simple_result(program: dict[str, Any], worker_runs: list[dict[str, Any]], p
         ],
         "worker_runs": worker_runs,
     }
+    if attempt and workspace:
+        payload["managed_task"] = {
+            "attempt_id": str(attempt.get("attempt_id") or ""),
+            "path": str(_managed_task_checkpoint_path(workspace, str(attempt.get("attempt_id") or ""))),
+        }
+    journeys: list[dict[str, Any]] = []
+    workspace_root = Path(str(program.get("workspace_root") or plan_path.parents[1]))
+    try:
+        from .mission_journey import build_mission_journey
+
+        for task in tasks:
+            mission_id = str(task.get("mission_id") or "")
+            if mission_id:
+                journeys.append(
+                    build_mission_journey(
+                        workspace_root=workspace_root,
+                        mission_id=mission_id,
+                    )
+                )
+    except Exception:  # noqa: BLE001 - journey projection is supplemental.
+        journeys = []
+    if journeys:
+        payload["journeys"] = journeys
+        payload["journey"] = journeys[-1]
     from .mission_intake import is_review_plan_goal
 
     if is_review_plan_goal(str(program.get("objective") or "")) and tasks:
@@ -277,6 +427,11 @@ def simple_result_to_markdown(payload: dict[str, Any]) -> str:
     for task in payload.get("tasks") or []:
         suffix = f" - {task.get('reason')}" if task.get("reason") else ""
         lines.append(f"- {task.get('task_id')}: {task.get('status')} ({task.get('mission_id')}){suffix}")
+    journey = payload.get("journey") if isinstance(payload.get("journey"), dict) else {}
+    if journey:
+        lines.append(f"- 闭环：{journey.get('summary') or journey.get('status')}")
+        if journey.get("next_action"):
+            lines.append(f"- 下一步：{journey.get('next_action')}")
     if payload.get("review_report_path"):
         lines.append(f"审查报告：{payload['review_report_path']}")
     if payload.get("review_report"):

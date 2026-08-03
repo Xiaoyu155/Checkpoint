@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .goal_intake import intake_dialogue_lines, intake_to_markdown, refine_goal, resolve_cheap_backend
+from .goal_intake import intake_to_markdown, refine_goal, resolve_cheap_backend
 from .workbench_app import validate_launch
 
 

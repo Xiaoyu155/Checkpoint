@@ -36,6 +36,7 @@ NON_REPAIRABLE_COMMAND_FAILURE_KINDS = frozenset(
         "command_launch_error",
         "command_timeout",
         "verification_environment_missing",
+        "pytest_not_importable",
         "conditional_test_command_short_circuit",
     }
 )
@@ -454,6 +455,12 @@ def classify_command_failure_detail(
             "failure_kind": "verification_environment_missing",
             "classification_confidence": "definitive",
             "matched_marker": declared_marker,
+        }
+    if "no module named pytest" in text or "modulenotfounderror: no module named 'pytest'" in text:
+        return {
+            "failure_kind": "pytest_not_importable",
+            "classification_confidence": "definitive",
+            "matched_marker": "no module named pytest",
         }
     for marker in _ENVIRONMENT_MISSING_MARKERS:
         if marker in text:

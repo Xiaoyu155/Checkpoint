@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 
 from visual_agent.chief_queue import list_mission_queue_items
@@ -48,6 +49,14 @@ def test_simple_task_runs_through_locked_autonomous_program(tmp_path) -> None:
     assert program["autonomy_policy"]["closed_loop"]["codex_failover_provider"] == ""
     assert program["tasks"][0]["agent"] == "codex"
     assert program["source_plan_sha256"]
+    checkpoint = json.loads(
+        (workspace / "pacer_native" / "managed_tasks" / f"{payload['managed_task']['attempt_id']}.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert checkpoint["status"] == "completed"
+    assert checkpoint["program_id"] == payload["program_id"]
+    assert checkpoint["task_contract"]["requirements"]
 
 
 def test_review_task_uses_report_acceptance_without_test_command(tmp_path) -> None:
@@ -131,4 +140,8 @@ def test_simple_task_stops_before_program_when_project_has_no_verification(tmp_p
     assert payload["reason"] == "project_verification_unresolved"
     assert payload["program_id"] == ""
     assert "没有创建 Program" in simple_result_to_markdown(payload)
-    assert not (repo / ".agent-workspace").exists()
+    checkpoint_path = repo / ".agent-workspace" / "pacer_native" / "managed_tasks" / f"{payload['managed_task']['attempt_id']}.json"
+    assert checkpoint_path.is_file()
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert checkpoint["status"] == "needs_input"
+    assert checkpoint["task_contract"]["requirements"]

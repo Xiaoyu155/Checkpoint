@@ -194,7 +194,9 @@ def wait_for_browser_smoke_text(
     timeout_ms = max(1, int(timeout_seconds * 1000))
     for text in texts:
         try:
-            page.get_by_text(text, exact=False).wait_for(state="visible", timeout=timeout_ms)
+            matches = page.get_by_text(text, exact=False)
+            target = getattr(matches, "first", matches)
+            target.wait_for(state="visible", timeout=timeout_ms)
             results.append({"status": "found", "type": "wait_for_text_after", "text": text, "timeout_seconds": timeout_seconds})
         except Exception as exc:
             results.append(

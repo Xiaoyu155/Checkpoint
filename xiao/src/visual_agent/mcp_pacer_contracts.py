@@ -46,7 +46,8 @@ class VerificationStep(_StrictInput):
         min_length=1,
         max_length=100,
         description=(
-            "Verification argv as a string array; do not use a command field and do not pass a command field "
+            "Verification argv as a string array; name is a display label only and argv must start a real "
+            "allowlisted test/build/analyze command; do not pass a command field and do not use a command field "
             "or shell command string."
         ),
         examples=[["python", "-m", "pytest", "-q"]],
@@ -95,7 +96,8 @@ class CompletionClaim(_StrictInput):
         max_length=20,
         description=(
             "Names must exactly match steps[].name and must pass. Reuse the task's substantive "
-            "test/build/analyze step; Pacer derives file facts, so do not add Git inspection steps."
+            "test/build/analyze step; the name is only a label and steps[].argv must be the real command. "
+            "Pacer derives file facts, so do not add Git inspection steps."
         ),
     )
 

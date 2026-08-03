@@ -5,7 +5,7 @@ so that existing imports (``from .dashboard import serve_dashboard``) continue
 to work without changes.
 """
 
-from .dashboard import DASHBOARD_HTML, _bind_dashboard_server, build_dashboard_data, serve_dashboard
+from .dashboard import DASHBOARD_HTML, _bind_dashboard_server, serve_dashboard
 from .dashboard.api import (
     build_mission_detail,
     start_workbench_mission,

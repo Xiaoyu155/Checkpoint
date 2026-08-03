@@ -78,7 +78,16 @@ def test_layered_workflow_index_points_to_valid_workflows() -> None:
 
     assert index["schema_version"] == 1
     group_ids = {group["id"] for group in index["groups"]}
-    assert group_ids == {"readonly", "form-fill", "download", "auth", "applications", "checkout", "miniprogram"}
+    assert group_ids == {
+        "readonly",
+        "form-fill",
+        "download",
+        "auth",
+        "applications",
+        "checkout",
+        "pacer",
+        "miniprogram",
+    }
 
     workflow_paths = []
     for group in index["groups"]:

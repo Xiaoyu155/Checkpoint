@@ -163,6 +163,37 @@ def test_task_review_rejects_generic_summary_unresolved_work_and_unknown_step(tm
     assert review["user_report"]["not_completed"] == ["登录超时仍未处理"]
 
 
+def test_task_review_explains_symbolic_step_names_are_not_commands(tmp_path) -> None:
+    repo, baseline = _repo(tmp_path)
+    evidence = _evidence()
+    evidence["claims"][0]["verification_steps"] = ["tests"]
+    review = audit_task_completion(
+        launch_goal="修复登录错误",
+        submitted_goal="修复登录错误",
+        summary="登录错误已修复",
+        completion_evidence=evidence,
+        requested_steps=[{"name": "tests", "argv": ["tests"]}],
+        repo_root=repo,
+        source_baseline=baseline,
+    )
+
+    assert review["valid"] is False
+    assert {"verification_step_unclassified", "claim_without_acceptance"}.issubset(_codes(review))
+    correction = json.loads(
+        task_review_error(review).removeprefix("completion audit rejected: ")
+    )
+    corrections = {
+        str(item["code"]): str(item["correction"])
+        for item in correction["errors"]
+    }
+    assert "argv=['tests']" in corrections["verification_step_unclassified"]
+    assert "name" in corrections["claim_without_acceptance"]
+    unclassified = next(
+        item for item in correction["errors"] if item["code"] == "verification_step_unclassified"
+    )
+    assert unclassified["argv"] == ["tests"]
+
+
 def test_task_review_rejects_outside_or_missing_file_evidence(tmp_path) -> None:
     repo, baseline = _repo(tmp_path)
     outside = audit_task_completion(

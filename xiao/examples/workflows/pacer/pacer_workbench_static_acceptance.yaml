@@ -1,14 +1,17 @@
 schema_version: 1
 min_runtime_version: "0.1.0"
 name: pacer_workbench_static_acceptance
-version: 2
-description: Validate the Pacer workbench shell and install metadata expose a usable, dependency-complete release.
+version: 4
+description: Validate the Pacer workbench shell, install metadata, and connected mission journey expose a usable release.
 tags: [verification, fast, pacer, dashboard, workbench]
 affects:
   - .pacer/
   - .github/
   - .gitignore
   - README.md
+  - backend_source.py
+  - docs/PACER_HOST.md
+  - "docs/pacer_*.md"
   - docs/mcp.md
   - docs/Pacer_GitHub对标与重构审计_2026-07-15.md
   - docs/Pacer_Dogfood_专项重构_2026-07-15.md
@@ -17,6 +20,7 @@ affects:
   - docs/验收进度_2026-07-10.md
   - examples/workflows/
   - pyproject.toml
+  - pacer_app.py
   - scripts/
   - src/visual_agent/
   - tests/
@@ -24,6 +28,9 @@ affects:
   - xiao/.pacer/
   - xiao/.github/
   - xiao/README.md
+  - xiao/backend_source.py
+  - xiao/docs/PACER_HOST.md
+  - "xiao/docs/pacer_*.md"
   - xiao/docs/mcp.md
   - xiao/docs/Pacer_GitHub对标与重构审计_2026-07-15.md
   - xiao/docs/Pacer_Dogfood_专项重构_2026-07-15.md
@@ -32,6 +39,7 @@ affects:
   - xiao/docs/验收进度_2026-07-10.md
   - xiao/examples/workflows/
   - xiao/pyproject.toml
+  - xiao/pacer_app.py
   - xiao/scripts/
   - xiao/src/visual_agent/
   - xiao/tests/
@@ -53,3 +61,10 @@ steps:
     expect_text: '1 passed'
     timeout_seconds: 30
     description: Verify the release version and core MCP dependency contract.
+  - id: product_journey_acceptance
+    action: run_command
+    command: python -m pytest tests/test_mission_journey.py tests/e2e/test_e2e_pacer_product_journey.py -q
+    dry_run: false
+    expect_text: 'passed'
+    timeout_seconds: 90
+    description: Verify routing, local memory handoff, managed execution, acceptance, delivery, and cross-entry status continuity.

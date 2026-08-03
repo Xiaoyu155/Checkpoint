@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +16,12 @@ SCRIPT_PREFERENCE = (
     "verify",
     "lint",
     "build",
+)
+
+_PYTEST_TOKEN = re.compile(r"\bpytest\b", re.IGNORECASE)
+_PYTHON_EXE_TOKEN = re.compile(
+    r"^(?:py(?:thon(?:\d+(?:\.\d+)*)?)?|pythonw(?:\d+(?:\.\d+)*)?)$",
+    re.IGNORECASE,
 )
 
 
@@ -53,13 +62,224 @@ def resolve_test_command(command: str | None, *, repo_root: str | Path) -> tuple
     text = str(command or "").strip()
     if not text:
         return None, None
-    if text and text.lower() != "auto":
+    root = Path(repo_root).expanduser().resolve()
+    if text.lower() == "auto":
+        plan = build_test_plan(root)
+        detected = str(plan.get("command") or "")
+        if not detected:
+            return "", {"source": "auto", "status": "not_found", "profiles": []}
+        rewritten, rewrite_meta = rewrite_python_pytest_command(detected, repo_root=root)
+        meta = {"source": "auto", **plan, **(rewrite_meta or {})}
+        if rewrite_meta and rewrite_meta.get("status") == "pytest_unavailable":
+            return "", meta
+        return rewritten, meta
+    rewritten, rewrite_meta = rewrite_python_pytest_command(text, repo_root=root)
+    if rewrite_meta and rewrite_meta.get("status") == "pytest_unavailable":
+        return "", rewrite_meta
+    if rewrite_meta:
+        return rewritten, rewrite_meta
+    return rewritten, None
+
+
+def prefer_pytest_python(repo_root: str | Path) -> str | None:
+    """Return a Python executable that can `import pytest`, preferring project venv."""
+    root = Path(repo_root).expanduser().resolve()
+    candidates: list[list[str]] = []
+    if os.name == "nt":
+        candidates.append([str(root / ".venv" / "Scripts" / "python.exe")])
+    else:
+        candidates.append([str(root / ".venv" / "bin" / "python")])
+    candidates.append([sys.executable])
+    if os.name == "nt":
+        py_launcher = shutil.which("py")
+        if py_launcher:
+            candidates.append([py_launcher, "-3"])
+            candidates.append([py_launcher])
+    for name in ("python3", "python"):
+        found = shutil.which(name)
+        if found:
+            candidates.append([found])
+    seen: set[tuple[str, ...]] = set()
+    for argv in candidates:
+        key = tuple(argv)
+        if key in seen:
+            continue
+        seen.add(key)
+        if len(argv) == 1 and not Path(argv[0]).exists() and shutil.which(argv[0]) is None:
+            continue
+        if len(argv) == 1 and Path(argv[0]).exists() is False and os.path.sep in argv[0]:
+            continue
+        if _python_has_module(argv, "pytest"):
+            return _format_python_command(argv)
+    return None
+
+
+def rewrite_python_pytest_command(
+    command: str,
+    *,
+    repo_root: str | Path,
+) -> tuple[str, dict[str, Any] | None]:
+    """Bind bare `python`/`pytest` invocations to a pytest-capable interpreter.
+
+    Avoids the common Windows trap where PATH's `python` is a stub without
+    pytest, while the Pacer install interpreter (or project .venv) works.
+    """
+    text = str(command or "").strip()
+    if not text or not _PYTEST_TOKEN.search(text):
         return text, None
-    plan = build_test_plan(repo_root)
-    detected = str(plan.get("command") or "")
-    if not detected:
-        return (None if not text else ""), {"source": "auto", "status": "not_found", "profiles": []}
-    return detected, {"source": "auto", **plan}
+    preferred = prefer_pytest_python(repo_root)
+    if not preferred:
+        return text, {
+            "status": "pytest_unavailable",
+            "python_rewrite": False,
+            "message": (
+                "No Python interpreter could import pytest. "
+                "Install pytest into your project venv or system Python, "
+                "or pass an absolute --test-command."
+            ),
+        }
+    rewritten = _apply_preferred_python(text, preferred)
+    if rewritten == text and _python_has_module(_python_argv_from_command(text), "pytest"):
+        return text, {
+            "status": "ok",
+            "python_rewrite": False,
+            "python": preferred,
+            "reason": "requested_interpreter_has_pytest",
+        }
+    if rewritten == text:
+        # Command mentions pytest but we could not rewrite; still probe.
+        if not _python_has_module(_python_argv_from_command(text) or [sys.executable], "pytest"):
+            return text, {
+                "status": "pytest_unavailable",
+                "python_rewrite": False,
+                "python": preferred,
+                "message": (
+                    f"Preferred Python is {preferred}, but could not rewrite `{text}`. "
+                    "Use an explicit absolute command."
+                ),
+            }
+        return text, {"status": "ok", "python_rewrite": False, "python": preferred}
+    return rewritten, {
+        "status": "ok",
+        "python_rewrite": True,
+        "python": preferred,
+        "requested": text,
+        "resolved": rewritten,
+    }
+
+
+def _apply_preferred_python(command: str, preferred: str) -> str:
+    text = str(command or "").strip()
+    # bare pytest / pytest ...
+    if re.match(r"^pytest(\s|$)", text, re.IGNORECASE):
+        rest = text[len("pytest") :].lstrip()
+        return f"{preferred} -m pytest" + (f" {rest}" if rest else "")
+    # python -m pytest / py -3 -m pytest / "C:\...\python.exe" -m pytest
+    match = re.match(
+        r'^(?P<exe>"[^"]+"|\'[^\']+\'|[^\s]+)'
+        r'(?P<pyargs>(?:\s+-\d+(?:\.\d+)*)*)'
+        r"\s+-m\s+pytest(?P<rest>\b.*)?$",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        exe = match.group("exe").strip().strip("\"'")
+        name = Path(exe).name.lower()
+        if _PYTHON_EXE_TOKEN.match(Path(exe).stem if "." in Path(exe).name else name) or name.startswith(
+            "python"
+        ) or name in {"py", "py.exe", "python.exe", "pythonw.exe"} or Path(exe).stem.lower().startswith(
+            "python"
+        ):
+            rest = (match.group("rest") or "").strip()
+            return f"{preferred} -m pytest" + (f" {rest}" if rest else "")
+    # python -m pytest nested after && / ;
+    parts = re.split(r"(\s*(?:&&|\|\||;)\s*)", text)
+    changed = False
+    out: list[str] = []
+    for part in parts:
+        if re.search(r"(?:&&|\|\||;)", part):
+            out.append(part)
+            continue
+        stripped = part.strip()
+        if not stripped:
+            out.append(part)
+            continue
+        rewritten = _apply_preferred_python(stripped, preferred)
+        if rewritten != stripped:
+            changed = True
+            # preserve leading whitespace of segment
+            lead = part[: len(part) - len(part.lstrip())]
+            out.append(lead + rewritten)
+        else:
+            out.append(part)
+    if changed:
+        return "".join(out)
+    return text
+
+
+def _format_python_command(argv: list[str]) -> str:
+    if len(argv) == 1:
+        path = Path(argv[0])
+        text = str(path)
+        if os.name == "nt" and (" " in text or "\t" in text):
+            return f'"{text}"'
+        return text
+    return " ".join(argv)
+
+
+def _python_argv_from_command(command: str) -> list[str]:
+    text = str(command or "").strip()
+    if not text:
+        return [sys.executable]
+    try:
+        import shlex
+
+        tokens = shlex.split(text, posix=os.name != "nt")
+    except ValueError:
+        tokens = text.split()
+    if not tokens:
+        return [sys.executable]
+    first = tokens[0].strip("\"'")
+    name = Path(first).name.lower()
+    if name in {"py", "py.exe"}:
+        argv = [first]
+        for token in tokens[1:]:
+            if token.startswith("-") and len(token) > 1 and token[1].isdigit():
+                argv.append(token)
+                continue
+            break
+        return argv
+    if name.startswith("python") or Path(first).stem.lower().startswith("python"):
+        return [first]
+    return [sys.executable]
+
+
+def _python_has_module(argv: list[str], module: str) -> bool:
+    if not argv:
+        return False
+    try:
+        completed = subprocess.run(
+            [*argv, "-c", f"import {module}"],
+            capture_output=True,
+            text=True,
+            timeout=12.0,
+            check=False,
+            **_hidden_subprocess_kwargs(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def _hidden_subprocess_kwargs() -> dict[str, Any]:
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    return {
+        "startupinfo": startupinfo,
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    }
 
 
 def estimate_verification_timeout(repo_root: str | Path, command: str, base_timeout: float) -> float:
@@ -172,13 +392,20 @@ def _python_profiles(root: Path, *, base: str) -> list[dict[str, Any]]:
     has_tests = any((root / name).exists() for name in markers) or any((root / name).is_dir() for name in ("tests", "test"))
     if not has_tests:
         return []
-    focused = _focused_pytest_profile(root, base=base)
+    python_cmd = prefer_pytest_python(root) or "python"
+    default_command = f"{python_cmd} -m pytest -q"
+    focused = _focused_pytest_profile(root, base=base, python_cmd=python_cmd)
     if focused is not None:
-        return [focused, {"kind": "python", "name": "pytest", "command": "python -m pytest -q", "reason": "python test markers"}]
-    return [{"kind": "python", "name": "pytest", "command": "python -m pytest -q", "reason": "python test markers"}]
+        return [focused, {"kind": "python", "name": "pytest", "command": default_command, "reason": "python test markers"}]
+    return [{"kind": "python", "name": "pytest", "command": default_command, "reason": "python test markers"}]
 
 
-def _focused_pytest_profile(root: Path, *, base: str) -> dict[str, Any] | None:
+def _focused_pytest_profile(
+    root: Path,
+    *,
+    base: str,
+    python_cmd: str = "python",
+) -> dict[str, Any] | None:
     changed = _git_changed_paths(root, base=base)
     if not changed:
         return None
@@ -205,7 +432,7 @@ def _focused_pytest_profile(root: Path, *, base: str) -> dict[str, Any] | None:
     return {
         "kind": "python",
         "name": "pytest-focused",
-        "command": "python -m pytest -q " + " ".join(_quote_arg(item) for item in selected),
+        "command": f"{python_cmd} -m pytest -q " + " ".join(_quote_arg(item) for item in selected),
         "reason": "git changed files mapped to pytest targets",
         "changed_paths": changed,
         "targets": selected,

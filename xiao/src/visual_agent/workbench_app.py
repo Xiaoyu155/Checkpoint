@@ -228,7 +228,6 @@ def launch_desktop_app(project_dir: str | Path | None = None) -> int:
     }
     events: "queue.Queue[tuple[str, Any]]" = queue.Queue()
 
-    pad = {"padx": 12, "pady": 8}
     shell = ttk.Frame(root, style="Shell.TFrame")
     shell.pack(fill="both", expand=True)
 

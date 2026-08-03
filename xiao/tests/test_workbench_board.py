@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 from visual_agent.chief_plans_store import save_plan, save_verification
 from visual_agent.missions import append_round, create_mission, default_budget_policy, load_mission
 from visual_agent.workbench_board import (

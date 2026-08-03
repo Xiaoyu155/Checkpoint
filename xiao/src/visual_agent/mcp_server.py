@@ -83,6 +83,7 @@ from .mcp_pacer_contracts import (
 
 APP_NAME = "visual-agent"
 APP_VERSION = "0.1.0"
+MAX_PACER_GOAL_CHARS = 2000
 MAX_PACER_COMPLETION_ATTEMPTS = 3
 try:
     from mcp.server import Server
@@ -128,7 +129,10 @@ def mcp_tools() -> list[Tool]:
             description=(
                 "Internal first-call handshake for a Pacer task. Call it before reading or modifying repository "
                 "files. The MCP process captures the source baseline and registers a process-local receipt that "
-                "complete_pacer_task requires. A normal MCP get_pacer_memory call performs the same handshake."
+                "complete_pacer_task requires. A normal MCP get_pacer_memory call performs the same handshake. "
+                "After the first managed prelaunch handshake, a later user task in the same MCP session starts "
+                "a new task generation without requiring a new window; a restarted MCP process requires fresh "
+                "launcher-backed evidence."
             ),
             annotations={
                 "readOnlyHint": False,
@@ -332,7 +336,8 @@ def mcp_tools() -> list[Tool]:
             description=(
                 "Run up to 20 long verification or setup commands locally in one MCP call. Full output is saved "
                 "under .agent-workspace; Codex receives compact tails to prevent context growth. Pass "
-                "steps=[{name, argv, cwd?, timeout_seconds?, env?}]. Use argv arrays, not command strings."
+                "steps=[{name, argv, cwd?, timeout_seconds?, env?}]. The name is only a display label; argv "
+                "must start with the real executable. Use argv arrays, not command strings."
             ),
             inputSchema={
                 "type": "object",
@@ -395,8 +400,9 @@ def mcp_tools() -> list[Tool]:
                                     "items": {"type": "string"},
                                     "minItems": 1,
                                     "description": (
-                                        "Verification argv as a string array, for example "
-                                        "['python', '-m', 'pytest', '-q']; do not pass a command field or shell string."
+                                        "Verification argv as a string array; name is a display label only and argv "
+                                        "must start a real allowlisted test/build/analyze command, for example "
+                                        "['python', '-m', 'pytest', '-q']; do not pass a command field and do not use a command field or shell string."
                                     ),
                                     "examples": [["python", "-m", "pytest", "-q"]],
                                 },
@@ -417,6 +423,7 @@ def mcp_tools() -> list[Tool]:
             description=(
                 "Atomically verify and finish one task in the current Pacer launch. Pass verification steps as argv "
                 "arrays, for example steps=[{name: 'tests', argv: ['python', '-m', 'pytest', '-q']}]. The tool "
+                "treats name as a label only; argv=['tests'] or argv=['build'] is not a runnable verification command. "
                 "runs the allowlisted verification path, captures compact runtime telemetry, and automatically binds "
                 "the verified run_id to the completed/failed outcome. Each claim only needs one immutable requirement "
                 "ID, a concrete result, and named verification steps. Pacer derives file paths and created/modified/"
@@ -539,9 +546,11 @@ def mcp_tools() -> list[Tool]:
                                     "items": {"type": "string"},
                                     "minItems": 1,
                                     "description": (
-                                        "Verification argv must be a string array; do not use a command field or "
-                                        "a shell command string. The resulting verification run_id is bound "
-                                        "automatically to the outcome."
+                                        "Verification argv must be a string array; name is a display label only and "
+                                        "argv must start a real allowlisted test/build/analyze command; do not pass a "
+                                        "command field and do not use a command field or shell command string. The resulting "
+                                        "verification run_id "
+                                        "is bound automatically to the outcome."
                                     ),
                                     "examples": [["python", "-m", "pytest", "-q"]],
                                 },
@@ -1357,7 +1366,14 @@ async def call_tool_payload(name: str, arguments: dict[str, Any] | None = None) 
                 **args,
                 "_pacer_mcp_dispatch_sentinel": _PACER_MCP_DISPATCH_SENTINEL,
             }
-        if name in {"run_workflow", "verify_workflow", "run_verification", "verify_implementation"}:
+        if name in {
+            "run_workflow",
+            "verify_workflow",
+            "run_verification",
+            "verify_implementation",
+            "run_browser_smoke",
+            "run_browser_smoke_suite",
+        }:
             payload = await asyncio.to_thread(handlers[name], handler_args)
         else:
             payload = handlers[name](handler_args)
@@ -1373,10 +1389,110 @@ async def call_tool_payload(name: str, arguments: dict[str, Any] | None = None) 
         return payload
 
 
+def is_empty_or_system_event(goal: str) -> bool:
+    g = goal.strip().lower()
+    if not g:
+        return True
+    if g in {
+        "resume",
+        "last",
+        "continue",
+        "no user message",
+        "no real task was supplied.",
+        "pacer_wait_for_task_v1",
+        "(没有用户消息，忽略系统提醒。)",
+        "没有用户消息，忽略系统提醒。",
+    }:
+        return True
+    if g.startswith("pacer_native_control") or g.startswith("[pacer:") or "pacer_wait_for_task" in g:
+        return True
+    return False
+
+
+def _active_task_completed(active: dict[str, Any]) -> bool:
+    lifecycle = active.get("task_lifecycle") if isinstance(active.get("task_lifecycle"), dict) else {}
+    if str(lifecycle.get("status") or "") == "completed":
+        return True
+    pillars = active.get("pillars") if isinstance(active.get("pillars"), dict) else {}
+    acceptance = pillars.get("acceptance") if isinstance(pillars.get("acceptance"), dict) else {}
+    managed = pillars.get("managed") if isinstance(pillars.get("managed"), dict) else {}
+    return str(acceptance.get("outcome_status") or "") == "completed" and bool(
+        managed.get("outcome_recorded")
+    )
+
+
+def _managed_task_rollover_session_trusted(
+    active: dict[str, Any],
+    *,
+    workspace_root: Path,
+    repo_root: Path,
+) -> bool:
+    from .pacer_launch_context import managed_task_rollover_session_is_trusted
+
+    launch_id = str(active.get("launch_id") or "").strip()
+    if not launch_id:
+        return False
+    return managed_task_rollover_session_is_trusted(
+        workspace_root=workspace_root,
+        launch_id=launch_id,
+        repo_root=repo_root,
+    )
+
+
+def _active_task_has_trusted_binding(active: dict[str, Any]) -> bool:
+    return bool(
+        isinstance(active.get("task_contract"), dict)
+        and str(active.get("task_contract_digest") or "")
+        and str(active.get("task_contract_receipt") or "")
+        and str(active.get("source_baseline_digest") or "")
+        and str(active.get("source_baseline_receipt") or "")
+    )
+
+
+def _begin_goal_can_rebind(
+    active: dict[str, Any],
+    *,
+    workspace_root: Path,
+    repo_root: Path,
+) -> bool:
+    if _prelaunch_task_required():
+        # The first task must still be launcher-pre-registered.  Once that
+        # task has been adopted by this MCP process, the same trusted session
+        # may roll to a new task generation without opening a new window.
+        return _active_task_has_trusted_binding(active) and _managed_task_rollover_session_trusted(
+            active,
+            workspace_root=workspace_root,
+            repo_root=repo_root,
+        )
+    # A single interactive window may receive a new user task before the
+    # previous task reached the atomic completion call.  Rebinding is safe as
+    # long as the old task is archived as interrupted/superseded; its evidence
+    # must never be upgraded to completed.
+    return True
+
+
+def _begin_goal_mismatch_error(*, expected: str, submitted: str, completed: bool) -> str:
+    state = "completed" if completed else "not completed"
+    rollover_hint = (
+        " Same-window rollover requires the launcher-backed handshake to remain trusted in this MCP session; "
+        "if the MCP process restarted, rerun the managed launcher handshake before switching goals."
+        if _prelaunch_task_required()
+        else ""
+    )
+    return (
+        "begin_pacer_task goal does not match the active launch task "
+        f"(active_task_status={state}; expected={expected[:160]!r}; submitted={submitted[:160]!r}). "
+        "Complete the current task before switching goals, or start a new Pacer launch for the new task."
+        + rollover_hint
+    )
+
+
 def begin_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
     goal = str(args.get("goal") or "").strip()
-    if not goal:
-        raise ValueError("goal is required")
+    if len(goal) > MAX_PACER_GOAL_CHARS:
+        raise ValueError(
+            f"task goal exceeds the {MAX_PACER_GOAL_CHARS} character contract limit"
+        )
     workspace_root, repo_root, resolved_launch_id = _resolve_pacer_roots(args)
     active = _activate_pacer_project(
         workspace_root,
@@ -1387,11 +1503,84 @@ def begin_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
     launch_id = str(active.get("launch_id") or resolved_launch_id)
     if not launch_id:
         raise ValueError("begin_pacer_task requires an active Pacer launch")
-    pinned_goal = " ".join(str(active.get("launch_goal") or "").split())
-    submitted_goal = " ".join(goal.split())
-    if pinned_goal and pinned_goal != submitted_goal:
-        raise ValueError("begin_pacer_task goal does not match the immutable launch goal")
-    from .pacer_launch_context import read_active_launch, update_active_launch
+
+    # The task journal is mandatory for every Pacer task.  It is independent
+    # of advisory project-memory retrieval and must be present before the task
+    # contract or source baseline can authorize work.
+    from .task_memory import append_task_memory_event, initialize_task_memory
+
+    initialize_task_memory(
+        workspace_root,
+        memory_id=launch_id,
+        goal=str(active.get("launch_goal") or ""),
+        repo_root=repo_root,
+        launch_id=launch_id,
+    )
+    if not bool(active.get("memory_required")):
+        from .pacer_launch_context import update_active_launch
+
+        active = update_active_launch(
+            workspace_root,
+            expected_launch_id=launch_id,
+            memory_required=True,
+        )
+
+    is_sys = is_empty_or_system_event(goal)
+    pinned_goal = str(active.get("launch_goal") or "").strip()
+    if is_sys and pinned_goal:
+        goal = pinned_goal
+
+    if not goal:
+        raise ValueError("goal is required")
+
+    pinned_goal_clean = " ".join(pinned_goal.split())
+    submitted_goal_clean = " ".join(goal.split())
+    task_rollover: dict[str, Any] = {}
+    if pinned_goal_clean and pinned_goal_clean != submitted_goal_clean:
+        if not is_sys:
+            if _begin_goal_can_rebind(
+                active,
+                workspace_root=workspace_root,
+                repo_root=repo_root,
+            ):
+                # Validate the replacement contract before archiving the
+                # current task.  A malformed acceptance manifest or another
+                # contract error must not leave the launch in a half-bound
+                # generation with its previous baseline already removed.
+                from .task_review import build_task_contract
+
+                build_task_contract(goal, repo_root=repo_root)
+                from .pacer_launch_context import rebind_completed_active_task
+
+                previous_goal = pinned_goal
+                active = rebind_completed_active_task(
+                    workspace_root,
+                    launch_id=launch_id,
+                    goal=goal,
+                    reason="begin_goal_mismatch",
+                )
+                pinned_goal = str(active.get("launch_goal") or goal).strip()
+                task_rollover = {
+                    "status": "rebound",
+                    "previous_goal_digest": _pacer_goal_digest(previous_goal),
+                    "goal_digest": _pacer_goal_digest(goal),
+                    "task_generation": int(active.get("task_generation") or 0),
+                }
+            else:
+                raise ValueError(
+                    _begin_goal_mismatch_error(
+                        expected=pinned_goal,
+                        submitted=goal,
+                        completed=_active_task_completed(active),
+                    )
+                )
+
+    from .pacer_launch_context import (
+        TASK_TRIGGER_EVENT,
+        TASK_TRIGGER_SCHEMA_VERSION,
+        read_active_launch,
+        update_active_launch,
+    )
 
     active = update_active_launch(
         workspace_root,
@@ -1412,6 +1601,95 @@ def begin_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
         repo_root=repo_root,
         active=active,
     )
+    lifecycle = active.get("task_lifecycle") if isinstance(active.get("task_lifecycle"), dict) else {}
+    task_generation = max(
+        1,
+        int(active.get("task_generation") or lifecycle.get("task_generation") or 1),
+    )
+    if str(lifecycle.get("status") or "") != "completed":
+        active = update_active_launch(
+            workspace_root,
+            expected_launch_id=launch_id,
+            task_generation=task_generation,
+            task_lifecycle={
+                "schema_version": 1,
+                "status": "active",
+                "goal_digest": _pacer_goal_digest(str(active.get("launch_goal") or goal)),
+                "task_generation": task_generation,
+                "started_at": str(lifecycle.get("started_at") or datetime.now(timezone.utc).isoformat()),
+            },
+        )
+    else:
+        # Keep the top-level generation in sync even when begin is called to
+        # resume an already-completed task.  Dashboards and the next rollover
+        # should not have to infer it only from task_lifecycle.
+        active = update_active_launch(
+            workspace_root,
+            expected_launch_id=launch_id,
+            task_generation=task_generation,
+        )
+    trigger = active.get("task_trigger") if isinstance(active.get("task_trigger"), dict) else {}
+    active = update_active_launch(
+        workspace_root,
+        expected_launch_id=launch_id,
+        task_trigger={
+            **trigger,
+            "schema_version": TASK_TRIGGER_SCHEMA_VERSION,
+            "required": True,
+            "status": "triggered",
+            "expected_event": TASK_TRIGGER_EVENT,
+            "observed_event": TASK_TRIGGER_EVENT,
+            "triggered_at": datetime.now(timezone.utc).isoformat(),
+            "task_generation": task_generation,
+            "goal_digest": _pacer_goal_digest(str(active.get("launch_goal") or goal)),
+        },
+    )
+    if _prelaunch_task_required() and task_generation <= 1:
+        from .pacer_launch_context import register_managed_task_rollover_session
+
+        register_managed_task_rollover_session(
+            workspace_root=workspace_root,
+            launch_id=launch_id,
+            repo_root=repo_root,
+        )
+        active = update_active_launch(
+            workspace_root,
+            expected_launch_id=launch_id,
+            task_rollover_trust={
+                "schema_version": 1,
+                "mode": "managed_session_after_prelaunch_v1",
+                "anchor_task_generation": task_generation,
+                "anchor_task_contract_digest": str(active.get("task_contract_digest") or ""),
+                "anchor_source_baseline_digest": str(active.get("source_baseline_digest") or ""),
+            },
+        )
+    append_task_memory_event(
+        workspace_root,
+        memory_id=launch_id,
+        launch_id=launch_id,
+        event_type="task_started",
+        data={
+            "goal_digest": _pacer_goal_digest(str(active.get("launch_goal") or goal)),
+            "task_generation": int(active.get("task_generation") or 1),
+            "task_rollover": task_rollover,
+            "contract_digest": str(active.get("task_contract_digest") or ""),
+            "source_baseline_digest": str(active.get("source_baseline_digest") or ""),
+        },
+        goal=str(active.get("launch_goal") or goal),
+        repo_root=repo_root,
+    )
+    from .pacer_events import append_pacer_event
+
+    append_pacer_event(
+        workspace_root,
+        "task_triggered",
+        launch_id=launch_id,
+        data={
+            "event": TASK_TRIGGER_EVENT,
+            "task_generation": task_generation,
+            "goal_digest": _pacer_goal_digest(str(active.get("launch_goal") or goal)),
+        },
+    )
     return {
         "schema_version": 1,
         "kind": "pacer_task_begin",
@@ -1420,6 +1698,11 @@ def begin_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
         "goal_digest": _pacer_goal_digest(str(active.get("launch_goal") or goal)),
         "task_contract": task_contract,
         "source_baseline": baseline_trust,
+        "task_memory": {
+            "required": True,
+            "memory_id": launch_id,
+        },
+        **({"task_rollover": task_rollover} if task_rollover else {}),
     }
 
 
@@ -1427,6 +1710,23 @@ def _prelaunch_task_required() -> bool:
     from .pacer_launch_context import PRELAUNCH_TASK_REQUIRED_ENV
 
     return str(os.environ.get(PRELAUNCH_TASK_REQUIRED_ENV) or "").strip() == "1"
+
+
+def _prelaunch_task_required_for(
+    active: dict[str, Any],
+    *,
+    workspace_root: Path,
+    repo_root: Path,
+) -> bool:
+    """Require launcher evidence until the current trusted MCP session is armed."""
+
+    if not _prelaunch_task_required():
+        return False
+    return not _managed_task_rollover_session_trusted(
+        active,
+        workspace_root=workspace_root,
+        repo_root=repo_root,
+    )
 
 
 def _required_prelaunch_digest(env_name: str, label: str) -> str:
@@ -1460,7 +1760,11 @@ def _bind_pacer_task_contract(
     if existing and existing != task_contract:
         raise ValueError("active Pacer task contract does not match the immutable launch goal")
     if existing:
-        if _prelaunch_task_required():
+        if _prelaunch_task_required_for(
+            active,
+            workspace_root=workspace_root,
+            repo_root=repo_root,
+        ):
             receipt = adopt_prelaunched_task_contract(
                 existing,
                 goal=pinned_goal,
@@ -1492,7 +1796,11 @@ def _bind_pacer_task_contract(
         if errors:
             raise ValueError("trusted task contract rejected: " + ", ".join(errors))
         return active, task_contract
-    if _prelaunch_task_required():
+    if _prelaunch_task_required_for(
+        active,
+        workspace_root=workspace_root,
+        repo_root=repo_root,
+    ):
         raise ValueError("prelaunch task contract is missing")
     receipt = register_trusted_task_contract(
         task_contract,
@@ -1565,7 +1873,11 @@ def _ensure_trusted_task_source_baseline(
         payload = load_task_source_baseline(current, workspace_root=workspace_root)
         if not payload:
             raise ValueError("trusted task source baseline file is unreadable")
-        if _prelaunch_task_required():
+        if _prelaunch_task_required_for(
+            current,
+            workspace_root=workspace_root,
+            repo_root=repo_root,
+        ):
             receipt = adopt_prelaunched_task_source_baseline(
                 payload,
                 workspace_root=workspace_root,
@@ -1600,7 +1912,11 @@ def _ensure_trusted_task_source_baseline(
             receipt=str(current.get("source_baseline_receipt") or ""),
             status="verified",
         )
-    if _prelaunch_task_required():
+    if _prelaunch_task_required_for(
+        current,
+        workspace_root=workspace_root,
+        repo_root=repo_root,
+    ):
         raise ValueError("prelaunch task source baseline is missing")
     if any(
         str(current.get(key) or "").strip()
@@ -1837,6 +2153,15 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
         from .pacer_launch_context import read_active_launch
 
         active = read_active_launch(workspace_root, launch_id=launch_id)
+    from .task_memory import append_task_memory_event, initialize_task_memory
+
+    initialize_task_memory(
+        workspace_root,
+        memory_id=launch_id or "pacer",
+        goal=str(active.get("launch_goal") or "") if active else "",
+        repo_root=repo_root,
+        launch_id=launch_id,
+    )
     query_goal = str(args.get("goal") or "").strip()
     if active and query_goal:
         from .pacer_launch_context import update_active_launch
@@ -2069,6 +2394,21 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
                 "query_goal_digest": query_goal_digest,
                 "duration_ms": round((monotonic() - started) * 1000, 3),
             },
+        )
+        append_task_memory_event(
+            workspace_root,
+            memory_id=launch_id or "pacer",
+            launch_id=launch_id,
+            event_type="memory_view_reused",
+            data={
+                "receipt": receipt,
+                "cache_status": "hit",
+                "used_hit": bool(used_ids),
+                "injected_hit": bool(injected_ids),
+                "goal_digest": memory_goal_digest,
+            },
+            goal=memory_goal,
+            repo_root=repo_root,
         )
         return response
 
@@ -2432,6 +2772,24 @@ def get_pacer_memory_payload(args: dict[str, Any]) -> dict[str, Any]:
             "query_goal_digest": query_goal_digest,
             "duration_ms": round((monotonic() - started) * 1000, 3),
         },
+    )
+    append_task_memory_event(
+        workspace_root,
+        memory_id=launch_id or "pacer",
+        launch_id=launch_id,
+        event_type="memory_view_loaded",
+        data={
+            "formal_entries": formal_entries,
+            "native_history_entries": len(native_history),
+            "cache_status": cache_status,
+            "lookup_hit": lookup_hit,
+            "relevant_hit": relevant_hit,
+            "injected_hit": bool(injected_ids),
+            "goal_digest": memory_goal_digest,
+            "payload_chars": payload_chars,
+        },
+        goal=memory_goal,
+        repo_root=repo_root,
     )
     return response
 
@@ -3356,8 +3714,9 @@ def record_pacer_outcome_payload(args: dict[str, Any]) -> dict[str, Any]:
     directory = workspace_root / "pacer_native"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "history.jsonl"
+    recorded_at = datetime.now(timezone.utc).isoformat()
     entry_payload: dict[str, Any] = {
-        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "recorded_at": recorded_at,
         "repo_root": str(repo_root),
         "goal": goal[:2000],
         "summary": summary[:6000],
@@ -3513,6 +3872,74 @@ def record_pacer_outcome_payload(args: dict[str, Any]) -> dict[str, Any]:
         },
         launch_id=launch_id,
     )
+    from .pacer_launch_context import update_active_launch
+
+    completion_control = (
+        dict(active.get("completion_control"))
+        if isinstance(active.get("completion_control"), dict)
+        else {}
+    )
+    completion_control.update(
+        {
+            "status": status,
+            "retryable": False if status == "completed" else bool(completion_control.get("retryable")),
+            "completed_at": recorded_at if status == "completed" else "",
+            "batch_run_id": batch_run_id,
+        }
+    )
+    user_report = (
+        completion_audit.get("user_report")
+        if isinstance(completion_audit.get("user_report"), dict)
+        else {}
+    )
+    current_lifecycle = active.get("task_lifecycle") if isinstance(active.get("task_lifecycle"), dict) else {}
+    task_generation = max(
+        1,
+        int(active.get("task_generation") or current_lifecycle.get("task_generation") or 1),
+    )
+    active = update_active_launch(
+        workspace_root,
+        expected_launch_id=launch_id,
+        completion_control=completion_control,
+        task_generation=task_generation,
+        task_lifecycle={
+            "schema_version": 1,
+            "status": status,
+            "goal_digest": _pacer_goal_digest(goal),
+            "task_generation": task_generation,
+            "completed_at": recorded_at if status == "completed" else "",
+            "batch_run_id": batch_run_id,
+            "task_review_verdict": str(completion_audit.get("verdict") or ""),
+            "can_trust": str(user_report.get("can_trust") or ""),
+        },
+    )
+    from .pacer_launch_context import TASK_TRIGGER_EVENT, TASK_TRIGGER_SCHEMA_VERSION
+
+    trigger = active.get("task_trigger") if isinstance(active.get("task_trigger"), dict) else {}
+    trigger_observed = str(trigger.get("observed_event") or "")
+    trigger_was_observed = str(trigger.get("status") or "") in {"triggered", "completed"} and bool(
+        trigger_observed == TASK_TRIGGER_EVENT
+    )
+    active = update_active_launch(
+        workspace_root,
+        expected_launch_id=launch_id,
+        task_trigger={
+            **trigger,
+            "schema_version": TASK_TRIGGER_SCHEMA_VERSION,
+            "required": True,
+            "status": "completed" if trigger_was_observed else "missing",
+            "expected_event": TASK_TRIGGER_EVENT,
+            "observed_event": trigger_observed,
+            "completed_at": recorded_at,
+            "task_generation": task_generation,
+            "goal_digest": _pacer_goal_digest(goal),
+            **(
+                {}
+                if trigger_was_observed
+                else {"reason_code": "task_trigger_not_observed"}
+            ),
+        },
+    )
     if acceptance_active and active.get("recovery_source_launch_id"):
         from .pacer_launch_context import resolve_recovery_capsule
         resolve_recovery_capsule(
@@ -3531,6 +3958,24 @@ def record_pacer_outcome_payload(args: dict[str, Any]) -> dict[str, Any]:
             "batch_run_id": batch_run_id,
             "task_review_verdict": str(completion_audit.get("verdict") or ""),
         },
+    )
+    from .task_memory import append_task_memory_event
+
+    append_task_memory_event(
+        workspace_root,
+        memory_id=launch_id,
+        launch_id=launch_id,
+        event_type="task_outcome_recorded",
+        data={
+            "status": status,
+            "evidence_level": evidence_level,
+            "batch_run_id": batch_run_id,
+            "task_review_verdict": str(completion_audit.get("verdict") or ""),
+            "can_trust": str(user_report.get("can_trust") or ""),
+            "unresolved_items": completion_audit.get("unresolved_items") if isinstance(completion_audit.get("unresolved_items"), list) else [],
+        },
+        goal=goal,
+        repo_root=repo_root,
     )
     return {
         "status": "recorded",
@@ -4065,6 +4510,14 @@ def complete_pacer_task_payload(args: dict[str, Any]) -> dict[str, Any]:
     })
     if str(outcome.get("launch_id") or "") != launch_id or str(outcome.get("batch_run_id") or "") != run_id:
         raise ValueError("recorded outcome did not preserve the verification launch/run binding")
+
+    # Best-effort: rebuild memory index entry for the just-completed task so the
+    # next get_pacer_memory call gets fresh context without waiting for lazy rebuild.
+    try:
+        from .project_memory import build_project_memory
+        build_project_memory(workspace_root=str(workspace_root), repo_root=str(repo_root), goal=goal, limit=1)
+    except Exception:  # noqa: BLE001
+        pass
 
     runtime_summary = dict(runtime)
     runtime_summary.pop("pillars", None)

@@ -1085,6 +1085,20 @@ def audit_task_completion(
             f"验收步骤名称重复，证据无法唯一绑定：{name}",
             step=name,
         )
+    for step in step_index.values():
+        if str(step.get("step_class") or "") == "unknown":
+            _issue(
+                errors,
+                "verification_step_unclassified",
+                (
+                    f"验收步骤 {step.get('name') or '<unnamed>'} 的 argv 没有被识别为 "
+                    "test/build/analyze 命令；步骤 name 只是标签，不能把 tests 或 build "
+                    "本身当作 argv。"
+                ),
+                step=str(step.get("name") or ""),
+                argv=[str(value) for value in step.get("argv") or []][:20],
+                step_class="unknown",
+            )
     if not step_index:
         _issue(errors, "verification_steps_missing", "没有可供交付声明绑定的验收步骤。")
 
@@ -1383,6 +1397,15 @@ def audit_task_completion(
                     f"耗时 {float(record.get('elapsed_seconds') or 0.0):.2f}s"
                 )
         if verification_refs and not relevant_acceptance_bound:
+            bound_step_classes = [
+                {
+                    "name": str(raw_name),
+                    "class": str(
+                        (step_index.get(_step_name(raw_name)) or {}).get("step_class") or "missing"
+                    ),
+                }
+                for raw_name in verification_refs[:20]
+            ]
             _issue(
                 errors,
                 "claim_without_relevant_acceptance" if acceptance_step_seen else "claim_without_acceptance",
@@ -1392,6 +1415,8 @@ def audit_task_completion(
                     else f"第 {claim_number} 条声明没有绑定 test/build/analyze 验收步骤。"
                 ),
                 claim=claim_number,
+                verification_steps=verification_refs[:20],
+                verification_step_classes=bound_step_classes,
             )
 
     uncovered_ids = [item for item in requirement_index if item not in covered_requirement_ids]
@@ -1631,12 +1656,39 @@ def task_review_error(
 
 def _completion_correction(code: str) -> str:
     return {
+        "summary_generic": "Replace a generic summary with the concrete observable result for this locked task.",
+        "unresolved_items_present": (
+            "Only submit unresolved_items=[] when every locked requirement is complete; otherwise keep the item "
+            "and do not claim completion."
+        ),
         "claim_requirement_ids_missing": "Use exactly one ID from requirements; do not rescan the repository.",
         "unknown_requirement_id": "Replace the ID with one returned in requirements.",
         "claim_requirement_id_count_invalid": "Split the claim so each claim has exactly one requirement ID.",
         "claim_result_generic": "Describe the concrete result for that requirement.",
         "claim_without_verification": "Reference one of the submitted verification step names.",
         "unknown_verification_step": "Use an exact name from the submitted verification steps.",
+        "verification_step_unclassified": (
+            "Keep the step name as a label, but set steps[].argv to a real allowlisted command: "
+            "for example name=tests with argv=['python','-m','pytest','-q'], or "
+            "name=build with argv=['npm','run','build']; do not use argv=['tests'] or argv=['build']."
+        ),
+        "claim_without_acceptance": (
+            "Bind the claim to a substantive step whose argv is an actual test/build/analyze command. "
+            "A step name such as tests or build is only a label; it is not the command."
+        ),
+        "claim_without_relevant_acceptance": (
+            "Bind the claim to a passed substantive step that covers the same requirement or changed files. "
+            "Split multi-goal claims so each claim has exactly one requirement ID and use a relevant focused command."
+        ),
+        "test_claim_without_test_step": (
+            "Bind the test claim to a real test command such as python -m pytest, unittest, npm test, or a supported test runner."
+        ),
+        "verification_step_not_passed": "Use a submitted verification step whose recorded status is passed, then retry the same goal.",
+        "verification_batch_not_passed": (
+            "Inspect the failed or timed-out verification record, fix the underlying issue, and submit the same "
+            "substantive step again only after it passes."
+        ),
+        "duplicate_verification_step": "Give every verification step a unique name and bind claims to the exact name.",
         "read_only_source_changes_detected": "Restore the listed source changes before retrying completion.",
         "source_change_out_of_scope": "Restore out-of-scope files or update only files allowed by the locked task contract.",
         "protected_path_changed": "Restore every listed protected path before retrying completion.",

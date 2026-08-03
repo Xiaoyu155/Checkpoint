@@ -66,6 +66,20 @@ def create_program_from_plan(
     workspace_path = Path(workspace_root).expanduser().resolve()
     repo_path = Path(repo_root).expanduser().resolve()
     resolved_test_command = choose_verification_command(repo_path) if str(test_command or "").strip().lower() == "auto" else str(test_command or "").strip()
+    drafts = [item for item in (parsed.get("drafts") or []) if isinstance(item, dict)]
+    fallback_warning = ""
+    if not drafts and title.strip():
+        drafts = [
+            {
+                "index": 1,
+                "objective": title.strip(),
+                "source_line": 1,
+                "source_type": "objective_fallback",
+                "section": "",
+                "raw": title.strip(),
+            }
+        ]
+        fallback_warning = "No actionable plan items were parsed; used the top-level objective as task-001."
     tasks = [
         _task_from_draft(
             draft,
@@ -73,7 +87,7 @@ def create_program_from_plan(
             agent=agent,
             test_command=resolved_test_command or str(test_command or ""),
         )
-        for index, draft in enumerate(parsed.get("drafts") or [])
+        for index, draft in enumerate(drafts)
     ]
     now = datetime.now(timezone.utc).isoformat()
     source_plan_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -137,6 +151,8 @@ def create_program_from_plan(
         "current_focus": tasks[0]["objective"] if tasks else "",
         "next_action": "Run program plan, then program start." if tasks else "No actionable tasks found.",
     }
+    if fallback_warning:
+        program["warnings"] = [fallback_warning]
     save_program(workspace_path, program)
     append_program_event(workspace_path, program["program_id"], {"event": "created", "task_count": len(tasks)})
     refresh_daily_plan(workspace_path, program["program_id"], hours=hours)

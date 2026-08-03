@@ -3,8 +3,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from visual_agent.models import ActionStatus, Observation, ProviderKind
 from visual_agent.providers import ProviderRegistry
 from visual_agent.workflow import WorkflowRuntime, workflow_from_dict

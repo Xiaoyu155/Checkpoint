@@ -1,7 +1,6 @@
 """EXE entry point — launches the desktop workbench directly, no CLI parsing."""
 import sys
 import os
-import traceback
 
 def main():
     """主入口，带错误处理"""
@@ -26,7 +25,7 @@ def _show_error(title, message):
         root.withdraw()
         messagebox.showerror(title, message)
         root.destroy()
-    except:
+    except Exception:
         print(f"\n{title}: {message}\n")
         input("按 Enter 键退出...")
 

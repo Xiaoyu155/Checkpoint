@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from visual_agent.diff_summary import (
     _build_checklist,

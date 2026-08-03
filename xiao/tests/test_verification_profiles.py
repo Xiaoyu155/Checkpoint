@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 from visual_agent.verification_profiles import (
     build_test_plan,
     choose_verification_command,
     conditional_test_command_short_circuit,
     detect_verification_profiles,
     estimate_verification_timeout,
+    prefer_pytest_python,
     resolve_test_command,
+    rewrite_python_pytest_command,
 )
 
 
@@ -22,7 +27,9 @@ def test_detects_node_test_script(tmp_path) -> None:
 def test_detects_python_pytest(tmp_path) -> None:
     (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
 
-    assert choose_verification_command(tmp_path) == "python -m pytest -q"
+    command = choose_verification_command(tmp_path)
+    assert "-m pytest" in command
+    assert command.endswith("-q") or " -q" in command
 
 
 def test_resolve_test_command_auto(tmp_path) -> None:
@@ -49,6 +56,44 @@ def test_resolve_test_command_keeps_explicit_command(tmp_path) -> None:
 
     assert command == "npm run check"
     assert profile is None
+
+
+def test_resolve_test_command_rewrites_bare_python_pytest(tmp_path) -> None:
+    preferred = prefer_pytest_python(tmp_path)
+    if not preferred:
+        return
+    command, profile = resolve_test_command("python -m pytest -q", repo_root=tmp_path)
+    assert command is not None
+    assert "-m pytest" in command
+    assert "python -m pytest" not in command or Path(sys.executable).name in command or preferred in command
+    assert profile is None or profile.get("status") in {None, "ok"} or profile.get("python_rewrite") in {True, False}
+
+
+def test_rewrite_python_pytest_prefers_project_venv(tmp_path, monkeypatch) -> None:
+    if __import__("os").name != "nt":
+        venv_python = tmp_path / ".venv" / "bin" / "python"
+    else:
+        venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    def fake_has(argv, module):
+        calls.append(list(argv))
+        return list(argv) == [str(venv_python)]
+
+    monkeypatch.setattr(
+        "visual_agent.verification_profiles._python_has_module",
+        fake_has,
+    )
+    preferred = prefer_pytest_python(tmp_path)
+    assert preferred is not None
+    assert str(venv_python) in preferred
+    rewritten, meta = rewrite_python_pytest_command("python -m pytest -q", repo_root=tmp_path)
+    assert meta is not None
+    assert meta.get("python_rewrite") is True
+    assert str(venv_python) in rewritten
 
 
 def test_timeout_extended_when_node_modules_missing(tmp_path) -> None:
@@ -149,7 +194,7 @@ def test_build_test_plan_focuses_pytest_for_changed_source(tmp_path, monkeypatch
 
     plan = build_test_plan(tmp_path)
 
-    assert plan["command"] == "python -m pytest -q tests/test_security.py"
+    assert plan["command"].endswith("-m pytest -q tests/test_security.py")
     assert plan["profiles"][0]["name"] == "pytest-focused"
     assert plan["profiles"][0]["targets"] == ["tests/test_security.py"]
 
@@ -163,7 +208,7 @@ def test_build_test_plan_runs_changed_test_file_directly(tmp_path, monkeypatch) 
 
     plan = build_test_plan(tmp_path)
 
-    assert plan["command"] == "python -m pytest -q tests/test_cli.py"
+    assert plan["command"].endswith("-m pytest -q tests/test_cli.py")
 
 
 def test_build_test_plan_falls_back_when_source_has_no_matching_test(tmp_path, monkeypatch) -> None:
@@ -175,5 +220,5 @@ def test_build_test_plan_falls_back_when_source_has_no_matching_test(tmp_path, m
 
     plan = build_test_plan(tmp_path)
 
-    assert plan["command"] == "python -m pytest -q"
+    assert plan["command"].endswith("-m pytest -q")
     assert plan["profiles"][0]["name"] == "pytest"

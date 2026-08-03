@@ -42,6 +42,19 @@ class FakeTextLocator:
             raise TimeoutError("text missing")
 
 
+class AmbiguousTextLocator:
+    def __init__(self, page, text):
+        self.page = page
+        self.text = text
+
+    @property
+    def first(self):
+        return FakeTextLocator(self.page, self.text)
+
+    def wait_for(self, **_kwargs):
+        raise RuntimeError("strict mode violation: text resolved to multiple elements")
+
+
 class FakePage:
     viewport_size = {"width": 1280, "height": 720}
 
@@ -396,6 +409,27 @@ def test_browser_smoke_wait_helpers_use_playwright_web_first_apis() -> None:
     assert page.web_first_calls == [
         ("text", "Dashboard Ready", "visible", 1250),
         ("url", "/dashboard", 1250),
+    ]
+
+
+def test_browser_smoke_text_wait_accepts_multiple_visible_matches() -> None:
+    page = FakePage()
+    page.text = "US$0.00 appears in the header and account balance"
+    page.get_by_text = lambda text, *, exact: AmbiguousTextLocator(page, text)
+
+    results = wait_for_browser_smoke_text(
+        {"playwright_page": page},
+        texts=["US$0.00"],
+        timeout_seconds=1.0,
+    )
+
+    assert results == [
+        {
+            "status": "found",
+            "type": "wait_for_text_after",
+            "text": "US$0.00",
+            "timeout_seconds": 1.0,
+        }
     ]
 
 

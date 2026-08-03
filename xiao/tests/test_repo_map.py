@@ -138,7 +138,7 @@ def test_worker_prompt_includes_repo_map_excerpt(tmp_path):
     prompt = command.get("stdin") or command["argv"][-1]
     assert "Repository map" in prompt
     assert "class Invoice(total, currency)" in prompt
-    assert "verify the real paths you need" in prompt
+    assert "inspect the real repository wherever needed" in prompt
     assert "trust it for orientation instead of scanning" not in prompt
 
 

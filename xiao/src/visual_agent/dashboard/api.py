@@ -1121,6 +1121,16 @@ def _native_five_pillars_data(root: Path, support: dict[str, Any]) -> dict[str, 
             "launch_id": str(active_launch.get("launch_id") or ""),
             "lifecycle_status": str(active_launch.get("status") or ""),
             "liveness": liveness,
+            "task_trigger": active_launch.get("task_trigger")
+            if isinstance(active_launch.get("task_trigger"), dict)
+            else {},
+            "trigger_diagnosis": active_launch.get("trigger_diagnosis")
+            if isinstance(active_launch.get("trigger_diagnosis"), dict)
+            else {},
+            "task_lifecycle": active_launch.get("task_lifecycle")
+            if isinstance(active_launch.get("task_lifecycle"), dict)
+            else {},
+            "task_generation": int(active_launch.get("task_generation") or 0),
         },
         "account_summary": {
             "codex_authenticated": authenticated,

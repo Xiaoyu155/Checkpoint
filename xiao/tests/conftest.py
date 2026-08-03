@@ -15,6 +15,18 @@ def _isolate_model_credentials(tmp_path_factory, monkeypatch):
     MiMo/DeepSeek. Tests that need credentials set the env var themselves.
     """
     missing = tmp_path_factory.mktemp("credentials") / "no-credentials.txt"
+    for name in (
+        "CHECKPOINT_DEEPSEEK_API_KEY",
+        "VISUAL_AGENT_DEEPSEEK_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "CHECKPOINT_MIMO_TOKEN",
+        "CHECKPOINT_MIMO_API_KEY",
+        "CHECKPOINT_XIAOMIMIMO_API_KEY",
+        "VISUAL_AGENT_XIAOMIMIMO_API_KEY",
+        "XIAOMIMIMO_API_KEY",
+        "MIMO_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("CHECKPOINT_MODEL_CREDENTIALS", str(missing))
 
 

@@ -118,13 +118,15 @@ def test_workbench_launch_persists_task_contract(tmp_path, monkeypatch):
 
     assert result["ok"] is True
     _wait_launch(result["launch_id"])
+    resolved_test_command = result["test_command"]
+    assert resolved_test_command.endswith(" -m pytest -q")
     mission = load_mission(ws.root, "contract-mission") or {}
-    assert mission["test_command"] == "pytest -q"
+    assert mission["test_command"] == resolved_test_command
     assert mission["agent"] == "codex"
     assert mission["merge_policy"] == "manual"
     data = build_dashboard_data(ws.root)
     summary = next(item for item in data["missions"] if item["mission_id"] == "contract-mission")
-    assert summary["test_command"] == "pytest -q"
+    assert summary["test_command"] == resolved_test_command
     assert summary["agent"] == "codex"
     assert summary["repo_root"] == str(tmp_path.resolve())
 

@@ -98,11 +98,10 @@ def build_dashboard_data_cached(root: Path) -> dict[str, Any]:
 def _build_dashboard_data_uncached(root: Path) -> dict[str, Any]:
     """原始 dashboard 数据组装"""
     from visual_agent.missions import list_missions
-    from visual_agent.chief_plans_store import list_plans, load_plan, load_worker_records
+    from visual_agent.chief_plans_store import list_plans
     from visual_agent.chief_queue import list_mission_queue_items
     from visual_agent.programs import list_programs
     from visual_agent.workbench_board import attach_board_fields
-    from visual_agent.mimo_efficiency import compute_mimo_efficiency
 
     missions = attach_board_fields(root, list_missions(root))
     plans = list_plans(root)
@@ -639,7 +638,6 @@ def log_error(source: str, message: str, detail: str = "") -> None:
 
 def build_mission_detail(workspace_root: str | Path, mission_id: str) -> dict[str, Any]:
     from visual_agent.missions import load_mission
-    from visual_agent.chief_plans_store import plan_dir
     from visual_agent.workbench_board import attach_board_fields, mission_review_payload
 
     root = Path(workspace_root).expanduser().resolve()
@@ -725,6 +723,7 @@ def start_workbench_mission(
     agent: str,
     execute: bool,
     merge_policy: str = "manual",
+    allow_dirty: bool = False,
     spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     goal = str(goal or "").strip()
