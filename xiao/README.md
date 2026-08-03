@@ -10,7 +10,16 @@ audit-oriented execution paths.
 python -m pip install visual-agent
 ```
 
+On Windows from this repo (`xiao/`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_pacer.ps1
+pacer --version
+```
+
 The core install includes the MCP runtime required by `pacer`.
+`pacer --version` / `pacer --help` stay on Pacer (they no longer fall through to Codex help).
+Bare `pacer` still opens the managed Codex session. Use `checkpoint mission start ...` for one-shot tasks.
 
 Install optional capabilities only where they are needed:
 
@@ -30,14 +39,14 @@ transport. Browser binaries are installed separately with
 
 The Cloud API now includes a single-node OpenAI-compatible paid gateway with
 tenant keys, balance reservations, token billing, upstream failover, request
-ledgers, and an operator workbench. Initialize it with
+ledgers, a WeChat Pay Native credit checkout, and an operator workbench. Initialize it with
 `python -m cloud_api.setup_gateway`, then use
 `docker compose -f docker-compose.gateway.yml up -d --build` and open
-`http://127.0.0.1:8000/gateway`.
+`http://127.0.0.1:8000/gateway`. Customers use `/billing` with their
+`pacer_sk_*` key after WeChat server credentials and credit packages are configured.
 
 See [Pacer 商业中转站](docs/中转站_商业网关.md) for the supported billing loop,
-security model, and the explicit boundary between manual paid pilots and an
-automated payment-provider integration.
+security model, Native callback setup, and remaining commercial boundaries.
 
 ## Quick Start
 
