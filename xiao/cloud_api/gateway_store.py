@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import re
@@ -21,6 +22,7 @@ from .auth import hash_api_key
 MICRO_USD = 1_000_000
 _KEY_PATTERN = re.compile(r"^pacer_sk_([a-f0-9]{16})_[A-Za-z0-9_-]{20,}$")
 _ENV_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
+_EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 class GatewayStoreError(ValueError):
@@ -256,6 +258,68 @@ class GatewayStore:
                         result_id TEXT NOT NULL,
                         created_at REAL NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS gateway_wechat_orders (
+                        id TEXT PRIMARY KEY,
+                        out_trade_no TEXT NOT NULL UNIQUE,
+                        tenant_id TEXT NOT NULL REFERENCES gateway_tenants(id),
+                        package_id TEXT NOT NULL,
+                        package_name TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        amount_fen INTEGER NOT NULL,
+                        credit_microusd INTEGER NOT NULL,
+                        currency TEXT NOT NULL DEFAULT 'CNY',
+                        status TEXT NOT NULL,
+                        code_url TEXT NOT NULL DEFAULT '',
+                        transaction_id TEXT UNIQUE,
+                        provider_payload_json TEXT NOT NULL DEFAULT '{}',
+                        error_code TEXT NOT NULL DEFAULT '',
+                        expires_at REAL NOT NULL,
+                        last_provider_check_at REAL NOT NULL DEFAULT 0,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        paid_at REAL,
+                        closed_at REAL
+                    );
+                    CREATE TABLE IF NOT EXISTS pacer_accounts (
+                        id TEXT PRIMARY KEY,
+                        email TEXT NOT NULL UNIQUE,
+                        display_name TEXT NOT NULL DEFAULT '',
+                        password_salt TEXT NOT NULL,
+                        password_hash TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'active',
+                        email_verified_at REAL,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS pacer_email_verification_codes (
+                        id TEXT PRIMARY KEY,
+                        email TEXT NOT NULL,
+                        purpose TEXT NOT NULL,
+                        code_hash TEXT NOT NULL,
+                        expires_at REAL NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        consumed_at REAL,
+                        created_at REAL NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_pacer_email_codes_lookup
+                        ON pacer_email_verification_codes(email, purpose, created_at DESC);
+                    CREATE TABLE IF NOT EXISTS pacer_login_sessions (
+                        id TEXT PRIMARY KEY,
+                        account_id TEXT NOT NULL REFERENCES pacer_accounts(id) ON DELETE CASCADE,
+                        token_hash TEXT NOT NULL UNIQUE,
+                        expires_at REAL NOT NULL,
+                        last_seen_at REAL NOT NULL,
+                        created_at REAL NOT NULL,
+                        revoked_at REAL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_pacer_sessions_token
+                        ON pacer_login_sessions(token_hash, expires_at);
+                    CREATE TABLE IF NOT EXISTS pacer_account_tenants (
+                        account_id TEXT NOT NULL REFERENCES pacer_accounts(id) ON DELETE CASCADE,
+                        tenant_id TEXT NOT NULL REFERENCES gateway_tenants(id) ON DELETE CASCADE,
+                        created_at REAL NOT NULL,
+                        PRIMARY KEY(account_id, tenant_id)
+                    );
                     CREATE TABLE IF NOT EXISTS gateway_attempts (
                         id TEXT PRIMARY KEY,
                         request_id TEXT NOT NULL REFERENCES gateway_requests(id) ON DELETE CASCADE,
@@ -283,6 +347,10 @@ class GatewayStore:
                         ON gateway_ledger(tenant_id, created_at DESC);
                     CREATE INDEX IF NOT EXISTS idx_gateway_subscription_tenant_period
                         ON gateway_subscription_events(tenant_id, period_end DESC);
+                    CREATE INDEX IF NOT EXISTS idx_gateway_wechat_orders_tenant_created
+                        ON gateway_wechat_orders(tenant_id, created_at DESC);
+                    CREATE INDEX IF NOT EXISTS idx_gateway_wechat_orders_status_expiry
+                        ON gateway_wechat_orders(status, expires_at);
                     CREATE INDEX IF NOT EXISTS idx_gateway_attempts_request
                         ON gateway_attempts(request_id, attempt_no);
                     """
@@ -354,6 +422,220 @@ class GatewayStore:
                     (now, now),
                 )
             self._schema_ready = True
+
+    # Account credentials are intentionally separate from gateway API keys.
+    @staticmethod
+    def normalize_account_email(email: str) -> str:
+        value = str(email or "").strip().lower()
+        if len(value) > 254 or not _EMAIL_PATTERN.fullmatch(value):
+            raise GatewayStoreError("invalid_email", "A valid email address is required.")
+        return value
+
+    @staticmethod
+    def hash_password(password: str, salt: str) -> str:
+        return hashlib.pbkdf2_hmac(
+            "sha256", password.encode("utf-8"), salt.encode("utf-8"), 240_000
+        ).hex()
+
+    @staticmethod
+    def hash_session_token(token: str) -> str:
+        return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+    def create_email_code(self, *, email: str, purpose: str, code: str, ttl_seconds: int = 600) -> dict[str, Any]:
+        normalized = self.normalize_account_email(email)
+        clean_purpose = str(purpose or "register").strip().lower()
+        if clean_purpose not in {"register", "password_reset"} or not re.fullmatch(r"\d{6}", str(code or "")):
+            raise GatewayStoreError("invalid_verification_code", "Verification code is invalid.")
+        self.ensure_schema()
+        now = time.time()
+        with self._transaction() as conn:
+            conn.execute(
+                "UPDATE pacer_email_verification_codes SET consumed_at = ? WHERE email = ? AND purpose = ? AND consumed_at IS NULL",
+                (now, normalized, clean_purpose),
+            )
+            row = {
+                "id": f"email_code_{uuid.uuid4().hex}",
+                "email": normalized,
+                "purpose": clean_purpose,
+                "code_hash": self.hash_session_token(str(code)),
+                "expires_at": now + max(60, min(int(ttl_seconds), 1800)),
+                "created_at": now,
+            }
+            conn.execute(
+                """INSERT INTO pacer_email_verification_codes
+                (id, email, purpose, code_hash, expires_at, created_at)
+                VALUES (:id, :email, :purpose, :code_hash, :expires_at, :created_at)""",
+                row,
+            )
+        return {"id": row["id"], "email": normalized, "purpose": clean_purpose, "expires_at": row["expires_at"]}
+
+    def consume_email_code(self, *, email: str, purpose: str, code: str) -> bool:
+        normalized = self.normalize_account_email(email)
+        clean_purpose = str(purpose or "register").strip().lower()
+        now = time.time()
+        with self._transaction() as conn:
+            row = conn.execute(
+                """SELECT * FROM pacer_email_verification_codes
+                WHERE email = ? AND purpose = ? AND consumed_at IS NULL
+                ORDER BY created_at DESC LIMIT 1""",
+                (normalized, clean_purpose),
+            ).fetchone()
+            if row is None or float(row["expires_at"]) <= now or int(row["attempts"]) >= 5:
+                return False
+            expected = str(row["code_hash"])
+            actual = self.hash_session_token(str(code or ""))
+            if not secrets.compare_digest(expected, actual):
+                conn.execute("UPDATE pacer_email_verification_codes SET attempts = attempts + 1 WHERE id = ?", (row["id"],))
+                return False
+            conn.execute("UPDATE pacer_email_verification_codes SET consumed_at = ? WHERE id = ?", (now, row["id"]))
+            return True
+
+    def register_account(
+        self, *, email: str, password: str, display_name: str = ""
+    ) -> dict[str, Any]:
+        normalized = self.normalize_account_email(email)
+        if len(str(password or "")) < 8 or len(str(password or "")) > 256:
+            raise GatewayStoreError("invalid_password", "Password must be 8 to 256 characters.")
+        self.ensure_schema()
+        now = time.time()
+        account_id = f"acct_{uuid.uuid4().hex[:20]}"
+        salt = secrets.token_hex(16)
+        name = str(display_name or "").strip()[:100] or normalized.split("@", 1)[0]
+        tenant_name = f"Pacer - {name}"[:120]
+        try:
+            with self._transaction() as conn:
+                existing = conn.execute("SELECT id FROM pacer_accounts WHERE email = ?", (normalized,)).fetchone()
+                if existing is not None:
+                    raise GatewayStoreError("account_exists", "An account with this email already exists.", status_code=409)
+                plan = conn.execute("SELECT id FROM gateway_plans WHERE id = 'plan_starter' AND enabled = 1").fetchone()
+                if plan is None:
+                    raise GatewayStoreError("plan_unavailable", "Starter plan is not available.", status_code=503)
+                tenant_id = f"tenant_{uuid.uuid4().hex[:20]}"
+                conn.execute(
+                    """INSERT INTO pacer_accounts
+                    (id, email, display_name, password_salt, password_hash, email_verified_at, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (account_id, normalized, name, salt, self.hash_password(password, salt), now, now, now),
+                )
+                conn.execute(
+                    """INSERT INTO gateway_tenants
+                    (id, name, status, plan_id, balance_microusd, created_at, updated_at)
+                    VALUES (?, ?, 'active', 'plan_starter', 0, ?, ?)""",
+                    (tenant_id, tenant_name, now, now),
+                )
+                conn.execute(
+                    "INSERT INTO pacer_account_tenants (account_id, tenant_id, created_at) VALUES (?, ?, ?)",
+                    (account_id, tenant_id, now),
+                )
+                key_id = f"key_{uuid.uuid4().hex[:16]}"
+                key_token = f"pacer_sk_{uuid.uuid4().hex[:16]}_{secrets.token_urlsafe(24)}"
+                key_salt = secrets.token_hex(16)
+                conn.execute(
+                    """INSERT INTO gateway_api_keys
+                    (id, tenant_id, name, key_prefix, key_salt, key_sha256, status,
+                     rpm_override, concurrency_override, allowed_models_json, created_at)
+                    VALUES (?, ?, '默认 API Key', ?, ?, ?, 'active', 0, 0, '[]', ?)""",
+                    (key_id, tenant_id, key_token[:24], key_salt, hash_api_key(key_token, key_salt), now),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise GatewayStoreError("account_exists", "An account with this email already exists.", status_code=409) from exc
+        return {"id": account_id, "email": normalized, "display_name": name, "tenant_id": tenant_id, "api_key": key_token}
+
+    def authenticate_account(self, *, email: str, password: str) -> dict[str, Any]:
+        normalized = self.normalize_account_email(email)
+        self.ensure_schema()
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM pacer_accounts WHERE email = ?", (normalized,)).fetchone()
+            if row is None or row["status"] != "active" or not secrets.compare_digest(
+                self.hash_password(str(password or ""), str(row["password_salt"])), str(row["password_hash"])
+            ):
+                raise GatewayStoreError("invalid_credentials", "Email or password is incorrect.", status_code=401)
+            tenant = conn.execute(
+                "SELECT tenant_id FROM pacer_account_tenants WHERE account_id = ? ORDER BY created_at LIMIT 1",
+                (row["id"],),
+            ).fetchone()
+        if tenant is None:
+            raise GatewayStoreError("tenant_not_found", "Account tenant is not configured.", status_code=503)
+        return {"id": str(row["id"]), "email": str(row["email"]), "display_name": str(row["display_name"]), "tenant_id": str(tenant["tenant_id"])}
+
+    def reset_account_password(self, *, email: str, password: str) -> None:
+        normalized = self.normalize_account_email(email)
+        if len(str(password or "")) < 8 or len(str(password or "")) > 256:
+            raise GatewayStoreError("invalid_password", "Password must be 8 to 256 characters.")
+        salt = secrets.token_hex(16)
+        now = time.time()
+        self.ensure_schema()
+        with self._transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE pacer_accounts SET password_salt = ?, password_hash = ?, updated_at = ? WHERE email = ? AND status = 'active'",
+                (salt, self.hash_password(password, salt), now, normalized),
+            )
+            if cursor.rowcount != 1:
+                raise GatewayStoreError("account_not_found", "Account was not found.", status_code=404)
+            conn.execute(
+                "UPDATE pacer_login_sessions SET revoked_at = ? WHERE account_id = (SELECT id FROM pacer_accounts WHERE email = ?)",
+                (now, normalized),
+            )
+
+    def create_login_session(self, account_id: str, *, ttl_seconds: int = 2_592_000) -> str:
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        self.ensure_schema()
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO pacer_login_sessions
+                (id, account_id, token_hash, expires_at, last_seen_at, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (f"sess_{uuid.uuid4().hex}", account_id, self.hash_session_token(token), now + max(300, min(int(ttl_seconds), 31_536_000)), now, now),
+            )
+        return token
+
+    def account_from_session(self, token: str) -> dict[str, Any]:
+        token_hash = self.hash_session_token(token)
+        now = time.time()
+        self.ensure_schema()
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT a.id, a.email, a.display_name, a.status, l.expires_at,
+                at.tenant_id FROM pacer_login_sessions l
+                JOIN pacer_accounts a ON a.id = l.account_id
+                JOIN pacer_account_tenants at ON at.account_id = a.id
+                WHERE l.token_hash = ? AND l.revoked_at IS NULL AND l.expires_at > ?
+                ORDER BY at.created_at LIMIT 1""",
+                (token_hash, now),
+            ).fetchone()
+            if row is None or row["status"] != "active":
+                raise GatewayStoreError("invalid_session", "Login session is invalid or expired.", status_code=401)
+            conn.execute("UPDATE pacer_login_sessions SET last_seen_at = ? WHERE token_hash = ?", (now, token_hash))
+        return {"id": str(row["id"]), "email": str(row["email"]), "display_name": str(row["display_name"]), "tenant_id": str(row["tenant_id"]), "expires_at": float(row["expires_at"])}
+
+    def revoke_login_session(self, token: str) -> None:
+        self.ensure_schema()
+        with self._connect() as conn:
+            conn.execute("UPDATE pacer_login_sessions SET revoked_at = ? WHERE token_hash = ?", (time.time(), self.hash_session_token(token)))
+
+    def account_principal(self, token: str) -> GatewayPrincipal:
+        account = self.account_from_session(token)
+        self.ensure_schema()
+        with self._connect() as conn:
+            row = conn.execute(
+                """SELECT k.*, t.name AS tenant_name, t.balance_microusd,
+                p.rpm AS plan_rpm, p.concurrency AS plan_concurrency
+                FROM gateway_api_keys k JOIN gateway_tenants t ON t.id = k.tenant_id
+                LEFT JOIN gateway_plans p ON p.id = t.plan_id
+                WHERE k.tenant_id = ? AND k.status = 'active' ORDER BY k.created_at LIMIT 1""",
+                (account["tenant_id"],),
+            ).fetchone()
+        if row is None:
+            raise GatewayStoreError("api_key_not_configured", "Account API key is not configured.", status_code=503)
+        return GatewayPrincipal(
+            key_id=str(row["id"]), tenant_id=str(row["tenant_id"]), tenant_name=str(row["tenant_name"]),
+            balance_microusd=int(row["balance_microusd"]),
+            rpm=min(int(row["rpm_override"] or row["plan_rpm"] or 60), int(row["plan_rpm"] or 60)),
+            concurrency=min(int(row["concurrency_override"] or row["plan_concurrency"] or 2), int(row["plan_concurrency"] or 2)),
+            tenant_rpm=int(row["plan_rpm"] or 60), tenant_concurrency=int(row["plan_concurrency"] or 2),
+            allowed_models=tuple(_json_list(row["allowed_models_json"])),
+        )
 
     def create_plan(
         self,
@@ -616,6 +898,290 @@ class GatewayStore:
                     ),
                 )
         return {**entry, "replayed": False}
+
+    def create_wechat_order(
+        self,
+        *,
+        tenant_id: str,
+        out_trade_no: str,
+        package_id: str,
+        package_name: str,
+        description: str,
+        amount_fen: int,
+        credit_microusd: int,
+        expires_at: float,
+    ) -> dict[str, Any]:
+        if (
+            not str(out_trade_no or "").strip()
+            or not str(package_id or "").strip()
+            or not str(package_name or "").strip()
+            or int(amount_fen) <= 0
+            or int(credit_microusd) <= 0
+            or float(expires_at) <= time.time()
+        ):
+            raise GatewayStoreError("invalid_payment_order", "WeChat payment order fields are invalid.")
+        order_id = f"wxorder_{uuid.uuid4().hex}"
+        now = time.time()
+        self.ensure_schema()
+        with self._transaction() as conn:
+            tenant = conn.execute(
+                "SELECT 1 FROM gateway_tenants WHERE id = ? AND status = 'active'",
+                (tenant_id,),
+            ).fetchone()
+            if tenant is None:
+                raise GatewayStoreError(
+                    "tenant_not_found", "Active tenant was not found.", status_code=404
+                )
+            existing = conn.execute(
+                """SELECT id FROM gateway_wechat_orders
+                WHERE tenant_id = ? AND expires_at > ?
+                  AND (status = 'pending' OR (status = 'creating' AND created_at >= ?))
+                ORDER BY created_at DESC LIMIT 1""",
+                (tenant_id, now, now - 60),
+            ).fetchone()
+            if existing is not None:
+                raise GatewayStoreError(
+                    "payment_order_pending",
+                    "A WeChat payment order is already in progress.",
+                    status_code=409,
+                    details={"order_id": existing["id"]},
+                )
+            conn.execute(
+                """INSERT INTO gateway_wechat_orders
+                (id, out_trade_no, tenant_id, package_id, package_name, description,
+                 amount_fen, credit_microusd, currency, status, expires_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CNY', 'creating', ?, ?, ?)""",
+                (
+                    order_id,
+                    str(out_trade_no).strip(),
+                    tenant_id,
+                    str(package_id).strip(),
+                    str(package_name).strip()[:80],
+                    str(description).strip()[:127],
+                    int(amount_fen),
+                    int(credit_microusd),
+                    float(expires_at),
+                    now,
+                    now,
+                ),
+            )
+        return self.get_wechat_order(order_id, tenant_id=tenant_id, include_code_url=True)
+
+    def activate_wechat_order(self, order_id: str, *, code_url: str) -> dict[str, Any]:
+        if not str(code_url or "").startswith("weixin://"):
+            raise GatewayStoreError("invalid_code_url", "WeChat Native code URL is invalid.")
+        self.ensure_schema()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """UPDATE gateway_wechat_orders SET status = 'pending', code_url = ?,
+                error_code = '', updated_at = ? WHERE id = ? AND status = 'creating'""",
+                (str(code_url), time.time(), order_id),
+            )
+        if cursor.rowcount != 1:
+            raise GatewayStoreError(
+                "payment_order_state_conflict", "WeChat payment order is not awaiting activation.", status_code=409
+            )
+        return self.get_wechat_order(order_id, include_code_url=True)
+
+    def fail_wechat_order(self, order_id: str, *, error_code: str) -> dict[str, Any]:
+        self.ensure_schema()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """UPDATE gateway_wechat_orders SET status = 'failed', error_code = ?, updated_at = ?
+                WHERE id = ? AND status NOT IN ('paid', 'closed')""",
+                (str(error_code or "wechat_order_failed")[:80], time.time(), order_id),
+            )
+        if cursor.rowcount != 1:
+            return self.get_wechat_order(order_id)
+        return self.get_wechat_order(order_id)
+
+    def close_wechat_order(
+        self, order_id: str, *, status: str = "closed", error_code: str = ""
+    ) -> dict[str, Any]:
+        normalized = str(status or "closed").strip().lower()
+        if normalized not in {"closed", "expired", "failed"}:
+            raise GatewayStoreError("invalid_payment_status", "Payment close status is invalid.")
+        now = time.time()
+        self.ensure_schema()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """UPDATE gateway_wechat_orders SET status = ?, error_code = ?, closed_at = ?, updated_at = ?
+                WHERE id = ? AND status NOT IN ('paid', 'closed', 'expired')""",
+                (normalized, str(error_code or "")[:80], now, now, order_id),
+            )
+        if cursor.rowcount != 1:
+            return self.get_wechat_order(order_id)
+        return self.get_wechat_order(order_id)
+
+    def claim_wechat_order_refresh(self, order_id: str, *, interval_seconds: float = 5) -> bool:
+        self.ensure_schema()
+        now = time.time()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """UPDATE gateway_wechat_orders SET last_provider_check_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'pending' AND last_provider_check_at <= ?""",
+                (now, now, order_id, now - max(1.0, float(interval_seconds))),
+            )
+        return cursor.rowcount == 1
+
+    def complete_wechat_order(
+        self,
+        *,
+        out_trade_no: str,
+        transaction_id: str,
+        amount_fen: int,
+        currency: str,
+        provider_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        reference = str(transaction_id or "").strip()
+        if not reference:
+            raise GatewayStoreError("invalid_payment", "WeChat transaction id is required.")
+        now = time.time()
+        self.ensure_schema()
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM gateway_wechat_orders WHERE out_trade_no = ?",
+                (str(out_trade_no or "").strip(),),
+            ).fetchone()
+            if row is None:
+                raise GatewayStoreError(
+                    "payment_order_not_found", "WeChat payment order was not found.", status_code=404
+                )
+            order = dict(row)
+            if int(order["amount_fen"]) != int(amount_fen) or str(order["currency"]) != str(currency):
+                raise GatewayStoreError(
+                    "payment_amount_mismatch",
+                    "WeChat payment amount or currency does not match the order.",
+                    status_code=409,
+                )
+            if order["status"] == "paid":
+                if str(order.get("transaction_id") or "") != reference:
+                    raise GatewayStoreError(
+                        "payment_transaction_conflict",
+                        "Payment order is already linked to another transaction.",
+                        status_code=409,
+                    )
+                return {
+                    "order": self._public_wechat_order(order),
+                    "tenant": self.get_tenant(str(order["tenant_id"])),
+                    "replayed": True,
+                }
+            prior_reference = conn.execute(
+                "SELECT * FROM gateway_payment_references WHERE external_reference = ?",
+                (reference,),
+            ).fetchone()
+            if prior_reference is not None:
+                raise GatewayStoreError(
+                    "payment_transaction_conflict",
+                    "WeChat transaction has already been used.",
+                    status_code=409,
+                )
+            tenant = conn.execute(
+                "SELECT balance_microusd FROM gateway_tenants WHERE id = ? AND status = 'active'",
+                (order["tenant_id"],),
+            ).fetchone()
+            if tenant is None:
+                raise GatewayStoreError(
+                    "tenant_not_found", "Active tenant was not found.", status_code=404
+                )
+            balance = int(tenant["balance_microusd"]) + int(order["credit_microusd"])
+            conn.execute(
+                "UPDATE gateway_tenants SET balance_microusd = ?, updated_at = ? WHERE id = ?",
+                (balance, now, order["tenant_id"]),
+            )
+            ledger = self._insert_ledger(
+                conn,
+                tenant_id=str(order["tenant_id"]),
+                request_id=str(order["id"]),
+                kind="credit",
+                amount=int(order["credit_microusd"]),
+                balance_after=balance,
+                idempotency_key=f"wechat:{reference}",
+                note=f"WeChat Native credit: {order['package_name']}",
+                now=now,
+            )
+            conn.execute(
+                """INSERT INTO gateway_payment_references
+                (external_reference, tenant_id, operation, amount_microusd, result_id, created_at)
+                VALUES (?, ?, 'wechat_native', ?, ?, ?)""",
+                (
+                    reference,
+                    order["tenant_id"],
+                    int(order["credit_microusd"]),
+                    ledger["id"],
+                    now,
+                ),
+            )
+            safe_payload = dict(provider_payload or {})
+            safe_payload.pop("payer", None)
+            conn.execute(
+                """UPDATE gateway_wechat_orders SET status = 'paid', transaction_id = ?,
+                provider_payload_json = ?, error_code = '', paid_at = ?, updated_at = ? WHERE id = ?""",
+                (
+                    reference,
+                    json.dumps(safe_payload, ensure_ascii=False, separators=(",", ":")),
+                    now,
+                    now,
+                    order["id"],
+                ),
+            )
+            updated = conn.execute(
+                "SELECT * FROM gateway_wechat_orders WHERE id = ?", (order["id"],)
+            ).fetchone()
+        return {
+            "order": self._public_wechat_order(dict(updated)),
+            "ledger_entry": ledger,
+            "tenant": self.get_tenant(str(order["tenant_id"])),
+            "replayed": False,
+        }
+
+    def get_wechat_order(
+        self,
+        order_id: str,
+        *,
+        tenant_id: str = "",
+        include_code_url: bool = False,
+    ) -> dict[str, Any]:
+        self.ensure_schema()
+        sql = "SELECT * FROM gateway_wechat_orders WHERE id = ?"
+        params: tuple[Any, ...] = (order_id,)
+        if tenant_id:
+            sql += " AND tenant_id = ?"
+            params = (order_id, tenant_id)
+        with self._connect() as conn:
+            row = conn.execute(sql, params).fetchone()
+        if row is None:
+            raise GatewayStoreError(
+                "payment_order_not_found", "WeChat payment order was not found.", status_code=404
+            )
+        return self._public_wechat_order(dict(row), include_code_url=include_code_url)
+
+    def get_wechat_order_by_trade_no(self, out_trade_no: str) -> dict[str, Any]:
+        self.ensure_schema()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM gateway_wechat_orders WHERE out_trade_no = ?", (out_trade_no,)
+            ).fetchone()
+        if row is None:
+            raise GatewayStoreError(
+                "payment_order_not_found", "WeChat payment order was not found.", status_code=404
+            )
+        return self._public_wechat_order(dict(row), include_code_url=True)
+
+    def list_wechat_orders(
+        self, *, tenant_id: str = "", limit: int = 100
+    ) -> list[dict[str, Any]]:
+        self.ensure_schema()
+        sql = "SELECT * FROM gateway_wechat_orders"
+        params: list[Any] = []
+        if tenant_id:
+            sql += " WHERE tenant_id = ?"
+            params.append(tenant_id)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 500)))
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [self._public_wechat_order(dict(row)) for row in rows]
 
     def renew_subscription(
         self,
@@ -885,6 +1451,14 @@ class GatewayStore:
         return self.get_api_key(key_id)
 
     def authenticate_api_key(self, token: str) -> GatewayPrincipal:
+        return self._authenticate_api_key(token, require_subscription=True)
+
+    def authenticate_billing_api_key(self, token: str) -> GatewayPrincipal:
+        return self._authenticate_api_key(token, require_subscription=False)
+
+    def _authenticate_api_key(
+        self, token: str, *, require_subscription: bool
+    ) -> GatewayPrincipal:
         match = _KEY_PATTERN.fullmatch(str(token or "").strip())
         if match is None:
             raise GatewayStoreError(
@@ -924,13 +1498,13 @@ class GatewayStore:
                 raise GatewayStoreError(
                     "invalid_api_key", "Missing or invalid API key.", status_code=401
                 )
-            if not row["plan_enabled"]:
+            if require_subscription and not row["plan_enabled"]:
                 raise GatewayStoreError(
                     "plan_unavailable",
                     "Tenant plan is not active.",
                     status_code=403,
                 )
-            if int(row["plan_monthly_fee_microusd"] or 0) > 0 and (
+            if require_subscription and int(row["plan_monthly_fee_microusd"] or 0) > 0 and (
                 row["subscription_expires_at"] is None
                 or float(row["subscription_expires_at"]) <= now
             ):
@@ -1981,6 +2555,11 @@ class GatewayStore:
                 FROM gateway_payment_references WHERE created_at >= ?""",
                 (today,),
             ).fetchone()
+            wechat = conn.execute(
+                """SELECT COUNT(*) AS paid_orders, COALESCE(SUM(amount_fen), 0) AS paid_fen
+                FROM gateway_wechat_orders WHERE status = 'paid' AND paid_at >= ?""",
+                (today,),
+            ).fetchone()
         revenue = int(counts["revenue"])
         upstream_cost = int(counts["upstream_cost"])
         subscription_cash = int(payments["subscription_cash"])
@@ -1997,6 +2576,8 @@ class GatewayStore:
             "confirmed_cash_microusd": subscription_cash + balance_cash,
             "subscription_cash_microusd": subscription_cash,
             "balance_cash_microusd": balance_cash,
+            "wechat_native_paid_orders": int(wechat["paid_orders"]),
+            "wechat_native_cash_fen": int(wechat["paid_fen"]),
             "active_tenants": tenant_count,
             "enabled_upstreams": upstream_count,
             "active_requests": active,
@@ -2136,7 +2717,10 @@ class GatewayStore:
         self.ensure_schema()
         with self._connect() as conn:
             tenant = conn.execute(
-                "SELECT * FROM gateway_tenants WHERE id = ?", (principal.tenant_id,)
+                """SELECT t.*, p.name AS plan_name
+                FROM gateway_tenants t LEFT JOIN gateway_plans p ON p.id = t.plan_id
+                WHERE t.id = ?""",
+                (principal.tenant_id,),
             ).fetchone()
             subscription_expires_at = conn.execute(
                 "SELECT MAX(period_end) FROM gateway_subscription_events WHERE tenant_id = ?",
@@ -2152,6 +2736,8 @@ class GatewayStore:
         return {
             "tenant_id": principal.tenant_id,
             "tenant_name": principal.tenant_name,
+            "plan_id": tenant["plan_id"],
+            "plan_name": tenant["plan_name"],
             "balance_microusd": int(tenant["balance_microusd"]),
             "limits": {"rpm": principal.rpm, "concurrency": principal.concurrency},
             "subscription_expires_at": subscription_expires_at,
@@ -2173,6 +2759,16 @@ class GatewayStore:
             item["price_snapshot"] = json.loads(item.pop("price_snapshot_json", "{}"))
         except json.JSONDecodeError:
             item["price_snapshot"] = {}
+        return item
+
+    @staticmethod
+    def _public_wechat_order(
+        item: dict[str, Any], *, include_code_url: bool = False
+    ) -> dict[str, Any]:
+        item.pop("provider_payload_json", None)
+        if not include_code_url:
+            item.pop("code_url", None)
+        item["amount_yuan"] = round(int(item.get("amount_fen") or 0) / 100, 2)
         return item
 
     @contextmanager

@@ -151,7 +151,9 @@ def test_gateway_setup_writes_only_admin_hash_and_prints_plaintext_once(
     assert "# PACER_ACME_EMAIL=" in contents
     assert "# CHECKPOINT_SMTP_PASSWORD=" in contents
     assert "# STRIPE_SECRET_KEY=" in contents
-    assert "# WECHAT_PAY_API_V3_KEY=" in contents
+    assert "# PACER_WECHAT_API_V3_KEY=" in contents
+    assert "# PACER_WECHAT_NOTIFY_URL=https://" in contents
+    assert "# PACER_WECHAT_CREDIT_PACKAGES_JSON=[" in contents
     assert "# ALIPAY_APP_PRIVATE_KEY_PATH=" in contents
     assert token not in build_env_file(salt="salt", sha256="hash")
 

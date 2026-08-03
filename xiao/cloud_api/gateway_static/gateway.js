@@ -15,6 +15,7 @@ const state = {
   ledgerTotal: 0,
   ledgerOffset: 0,
   subscriptions: [],
+  wechatOrders: [],
   timer: null,
   refreshing: false,
   refreshPending: false,
@@ -282,6 +283,29 @@ function bindActions() {
     }
   });
 
+  $("#wechatOrderRows").addEventListener("click", async (event) => {
+    const button = event.target.closest("button[data-action='reconcile-wechat']");
+    if (!button) return;
+    button.disabled = true;
+    try {
+      const result = await api(`/api/gateway/admin/wechat-orders/${encodeURIComponent(button.dataset.order)}/reconcile`, {
+        method: "POST",
+        body: {},
+      });
+      const message = result.status === "reconciled"
+        ? "支付订单已查单并同步"
+        : result.status === "deferred"
+          ? "微信暂未返回最终状态，稍后再试"
+          : "支付订单已经是终态";
+      showToast(message, result.status === "deferred");
+      await refreshAll();
+    } catch (error) {
+      showToast(error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  });
+
   $("#priceRows").addEventListener("click", (event) => {
     const button = event.target.closest("button[data-action='edit-price']");
     if (!button) return;
@@ -332,6 +356,7 @@ async function refreshAll({ silent = false } = {}) {
       { load: () => api(pageUrl("requests", state.requestOffset)), apply: applyRequests },
       { load: () => api(pageUrl("ledger", state.ledgerOffset)), apply: applyLedger },
       { load: () => api("/api/gateway/admin/subscriptions?limit=200"), apply: (value) => { state.subscriptions = value.items || []; } },
+      { load: () => api("/api/gateway/admin/wechat-orders?limit=200"), apply: (value) => { state.wechatOrders = value.items || []; } },
     ];
     const results = await Promise.allSettled(loaders.map((item) => item.load()));
     if (state.token !== tokenAtStart) return;
@@ -369,6 +394,7 @@ function renderAll() {
   renderRequests();
   renderLedger();
   renderSubscriptions();
+  renderWechatOrders();
 }
 
 function renderSummary() {
@@ -385,9 +411,16 @@ function renderSummary() {
   $("#metricTokens").textContent = compact(summary.tokens || 0);
   $("#metricActive").textContent = `${compact(summary.active_requests || 0)} 个在途请求`;
   $("#readyState").textContent = setup.ready ? "可接受客户请求" : "仍有配置缺口";
-  const labels = { tenant: "客户", price: "定价", upstream: "可用上游", customer_key: "客户 Key" };
+  const labels = {
+    tenant: "客户",
+    price: "定价",
+    upstream: "可用上游",
+    customer_key: "客户 Key",
+    wechat_payment: "微信支付",
+  };
+  const checks = { ...(setup.checks || {}), wechat_payment: Boolean(setup.payment?.ready) };
   $("#setupChecks").innerHTML = Object.entries(labels).map(([key, label]) =>
-    `<span class="check ${setup.checks?.[key] ? "ok" : ""}">${escapeHtml(label)}</span>`
+    `<span class="check ${checks[key] ? "ok" : ""}">${escapeHtml(label)}</span>`
   ).join("");
 }
 
@@ -503,6 +536,31 @@ function renderSubscriptions() {
       <td data-label="外部交易号" class="mono">${escapeHtml(item.external_reference || "-")}</td>
     </tr>`;
   }).join("") : emptyRow(7, "暂无订阅收款记录");
+}
+
+function renderWechatOrders() {
+  $("#wechatOrderCount").textContent = `${state.wechatOrders.length} 条`;
+  const statusLabels = {
+    creating: "创建中",
+    pending: "待支付",
+    paid: "已到账",
+    closed: "已关闭",
+    expired: "已过期",
+    failed: "失败",
+  };
+  $("#wechatOrderRows").innerHTML = state.wechatOrders.length ? state.wechatOrders.map((item) => {
+    const pending = ["creating", "pending"].includes(item.status);
+    const status = statusLabels[item.status] || item.status || "-";
+    return `<tr>
+      <td data-label="创建时间">${dateTime(item.created_at)}</td>
+      <td data-label="客户" class="mono">${escapeHtml(item.tenant_id)}</td>
+      <td data-label="额度包">${escapeHtml(item.package_name || item.package_id || "-")}</td>
+      <td data-label="金额"><b>¥${(Number(item.amount_fen || 0) / 100).toFixed(2)}</b></td>
+      <td data-label="状态"><span class="status ${item.status === "paid" ? "good" : pending ? "warn" : item.status === "failed" ? "bad" : ""}">${escapeHtml(status)}</span></td>
+      <td data-label="微信交易号" class="mono">${escapeHtml(item.transaction_id || "-")}</td>
+      <td data-label="操作">${pending ? `<button class="button small secondary" data-action="reconcile-wechat" data-order="${escapeAttr(item.id)}">查单恢复</button>` : "-"}</td>
+    </tr>`;
+  }).join("") : emptyRow(7, "暂无微信支付订单");
 }
 
 function openKeyModal(tenantId) {
@@ -621,6 +679,7 @@ function clearDashboardData() {
   state.ledgerTotal = 0;
   state.ledgerOffset = 0;
   state.subscriptions = [];
+  state.wechatOrders = [];
   state.refreshPending = false;
   renderAll();
 }

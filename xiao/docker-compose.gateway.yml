@@ -9,6 +9,7 @@ services:
       - "8000:8000"
     volumes:
       - pacer_gateway_data:/data
+      - ./cloud_api/secrets:/run/secrets:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://127.0.0.1:8000/v1/health"]

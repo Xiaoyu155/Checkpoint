@@ -40,6 +40,7 @@
       <button type="button" data-tab="requests">请求日志</button>
       <button type="button" data-tab="ledger">资金账本</button>
       <button type="button" data-tab="subscriptions">收款流水</button>
+      <button type="button" data-tab="wechat-orders">支付订单</button>
     </nav>
 
     <section class="view active" id="view-tenants">
@@ -127,6 +128,13 @@
       <div class="table-band full-height">
         <div class="panel-head"><h2>订阅收款流水</h2><span id="subscriptionCount">0 条</span></div>
         <div class="table-wrap"><table class="mobile-cards"><thead><tr><th>收款时间</th><th>客户</th><th>套餐</th><th>实收</th><th>发放额度</th><th>服务期间</th><th>外部交易号</th></tr></thead><tbody id="subscriptionRows"></tbody></table></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-wechat-orders">
+      <div class="table-band full-height">
+        <div class="panel-head"><h2>微信 Native 支付订单</h2><span id="wechatOrderCount">0 条</span></div>
+        <div class="table-wrap"><table class="mobile-cards"><thead><tr><th>创建时间</th><th>客户</th><th>额度包</th><th>金额</th><th>状态</th><th>微信交易号</th><th>操作</th></tr></thead><tbody id="wechatOrderRows"></tbody></table></div>
       </div>
     </section>
   </main>

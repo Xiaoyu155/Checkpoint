@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Pacer 额度中心</title>
+  <link rel="stylesheet" href="/billing.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/billing" aria-label="Pacer 额度中心">Pacer <span>额度中心</span></a>
+    <div class="connection" id="connectionState"><i></i><span>未连接</span></div>
+    <div class="top-actions">
+      <div class="balance-chip" id="topBalance" hidden><span>可用额度</span><strong>US$0.00</strong></div>
+      <button class="button secondary" id="disconnectButton" type="button" hidden>更换账户</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="auth-band" id="authView" aria-labelledby="authTitle">
+      <div>
+        <h1 id="authTitle">连接 Pacer 账户</h1>
+        <p>额度购买与 API 使用共用同一把客户 Key。</p>
+      </div>
+      <form id="authForm">
+        <div class="auth-switch" role="tablist" aria-label="登录方式">
+          <button class="row-action" id="emailModeButton" type="button">邮箱登录</button>
+          <button class="row-action active" id="apiKeyModeButton" type="button">API Key</button>
+        </div>
+        <div id="emailAuthPanel" hidden>
+          <label for="accountEmail">邮箱</label>
+          <input id="accountEmail" name="email" type="email" autocomplete="email" placeholder="you@example.com">
+          <label for="accountPassword">密码</label>
+          <input id="accountPassword" name="password" type="password" minlength="8" autocomplete="current-password" placeholder="至少 8 位">
+          <div class="auth-row">
+            <button class="button primary" id="emailLoginButton" type="button">登录</button>
+            <button class="button secondary" id="emailRegisterButton" type="button">注册</button>
+          </div>
+          <div id="registerCodePanel" hidden>
+            <label for="accountCode">邮箱验证码</label>
+            <div class="auth-row"><input id="accountCode" inputmode="numeric" maxlength="6" placeholder="6 位验证码"><button class="button secondary" id="requestCodeButton" type="button">获取验证码</button></div>
+          </div>
+        </div>
+        <div id="apiKeyAuthPanel">
+          <label for="apiKey">Pacer API Key</label>
+          <div class="auth-row">
+            <input id="apiKey" name="api_key" type="password" autocomplete="off" spellcheck="false" placeholder="pacer_sk_...">
+            <button class="button primary" type="submit">连接</button>
+          </div>
+        </div>
+        <p class="form-error" id="authError" role="alert" hidden></p>
+      </form>
+    </section>
+
+    <div id="billingView" hidden>
+      <section class="account-band" aria-labelledby="accountTitle">
+        <div>
+          <span class="eyebrow">当前账户</span>
+          <h1 id="accountTitle">-</h1>
+        </div>
+        <dl>
+          <div><dt>可用额度</dt><dd id="accountBalance">US$0.00</dd></div>
+          <div><dt>套餐</dt><dd id="accountPlan">-</dd></div>
+        </dl>
+      </section>
+
+      <div class="checkout-layout">
+        <section class="packages-section" aria-labelledby="packagesTitle">
+          <div class="section-head">
+            <div><span class="eyebrow">充值</span><h2 id="packagesTitle">选择额度包</h2></div>
+            <span class="provider-state" id="providerState">检查中</span>
+          </div>
+          <div class="package-grid" id="packageList" aria-live="polite"></div>
+        </section>
+
+        <section class="payment-tool" aria-labelledby="paymentTitle">
+          <div class="section-head">
+            <div><span class="eyebrow">微信 Native</span><h2 id="paymentTitle">支付订单</h2></div>
+            <span class="status neutral" id="orderStatus">暂无订单</span>
+          </div>
+
+          <div class="order-empty" id="orderEmpty">
+            <div class="wechat-mark" aria-hidden="true">微信</div>
+            <strong>等待创建订单</strong>
+          </div>
+
+          <div class="order-active" id="orderActive" hidden>
+            <div class="order-summary">
+              <div><span>应付金额</span><strong id="orderAmount">¥0.00</strong></div>
+              <div><span>到账额度</span><strong id="orderCredit">US$0.00</strong></div>
+            </div>
+            <div class="qr-frame" id="qrFrame">
+              <img id="paymentQr" width="252" height="252" alt="微信支付二维码">
+              <div class="qr-placeholder" id="qrPlaceholder">订单处理中</div>
+            </div>
+            <div class="order-meta">
+              <span id="orderCountdown">--:--</span>
+              <code id="orderNumber">-</code>
+            </div>
+            <button class="button danger" id="closeOrderButton" type="button">取消订单</button>
+          </div>
+
+          <div class="order-result" id="orderResult" hidden aria-live="polite">
+            <div class="result-mark" aria-hidden="true">✓</div>
+            <strong id="resultTitle">额度已到账</strong>
+            <span id="resultDetail"></span>
+          </div>
+        </section>
+      </div>
+
+      <section class="history-section" aria-labelledby="historyTitle">
+        <div class="section-head">
+          <div><span class="eyebrow">本地记录</span><h2 id="historyTitle">最近订单</h2></div>
+          <button class="icon-button" id="refreshButton" type="button" title="刷新订单" aria-label="刷新订单">↻</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>创建时间</th><th>额度包</th><th>金额</th><th>状态</th><th>订单号</th><th><span class="sr-only">操作</span></th></tr></thead>
+            <tbody id="orderRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script src="/billing.js"></script>
+</body>
+</html>

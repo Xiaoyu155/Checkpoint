@@ -1,0 +1,66 @@
+schema_version: 1
+min_runtime_version: "0.1.0"
+name: pacer_gateway_billing_acceptance
+version: 1
+description: Verify Pacer Gateway WeChat Native checkout, durable crediting, and the customer billing journey.
+tags: [verification, checkout, billing, gateway, browser]
+affects:
+  - .dockerignore
+  - .gitignore
+  - README.md
+  - pyproject.toml
+  - docker-compose.gateway.yml
+  - cloud_api/billing_demo.py
+  - cloud_api/gateway_routes.py
+  - cloud_api/gateway_static/
+  - cloud_api/gateway_store.py
+  - cloud_api/secrets/
+  - cloud_api/setup_gateway.py
+  - cloud_api/wechat_native.py
+  - docs/中转站_商业网关.md
+  - tests/test_cloud_gateway.py
+  - tests/test_cloud_gateway_billing.py
+  - tests/test_cloud_gateway_billing_browser.py
+  - tests/test_wechat_native.py
+  - examples/workflows/checkout/pacer_gateway_billing_acceptance.yaml
+  - src/visual_agent/workspace.py
+  - tests/test_console.py
+  - tests/test_workspace.py
+  - xiao/.gitignore
+  - xiao/README.md
+  - xiao/pyproject.toml
+  - xiao/docker-compose.gateway.yml
+  - xiao/cloud_api/billing_demo.py
+  - xiao/cloud_api/gateway_routes.py
+  - xiao/cloud_api/gateway_static/
+  - xiao/cloud_api/gateway_store.py
+  - xiao/cloud_api/secrets/
+  - xiao/cloud_api/setup_gateway.py
+  - xiao/cloud_api/wechat_native.py
+  - xiao/docs/中转站_商业网关.md
+  - xiao/tests/test_cloud_gateway.py
+  - xiao/tests/test_cloud_gateway_billing.py
+  - xiao/tests/test_cloud_gateway_billing_browser.py
+  - xiao/tests/test_wechat_native.py
+  - xiao/examples/workflows/checkout/pacer_gateway_billing_acceptance.yaml
+  - xiao/src/visual_agent/workspace.py
+  - xiao/tests/test_console.py
+  - xiao/tests/test_workspace.py
+visibility: private
+author: visual-agent-team
+license: ""
+steps:
+  - id: native_payment_contract
+    action: run_command
+    command: python -m pytest tests/test_wechat_native.py tests/test_cloud_gateway_billing.py -q
+    dry_run: false
+    expect_text: "passed"
+    timeout_seconds: 90
+    description: Verify strict signatures, certificate refresh, exact amounts, tenant isolation, and atomic replay-safe crediting.
+  - id: billing_browser_journey
+    action: run_command
+    command: python -m pytest tests/test_cloud_gateway_billing_browser.py -q
+    dry_run: false
+    expect_text: "passed"
+    timeout_seconds: 120
+    description: Verify API-key connection, Native QR rendering, polling, credit arrival, reload recovery, and responsive layout in Chromium.
