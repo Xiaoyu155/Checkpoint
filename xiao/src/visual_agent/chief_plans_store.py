@@ -123,6 +123,23 @@ def append_dispatch_record(workspace_root: str | Path, plan_id: str, record: dic
     return {"path": str(path), "record": entry}
 
 
+def load_dispatch_records(workspace_root: str | Path, plan_id: str) -> list[dict[str, Any]]:
+    path = plan_dir(workspace_root, plan_id) / "dispatches.jsonl"
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            records.append(payload)
+    return records
+
+
 def load_worker_records(workspace_root: str | Path, plan_id: str) -> list[dict[str, Any]]:
     path = plan_dir(workspace_root, plan_id) / "workers.jsonl"
     if not path.exists():

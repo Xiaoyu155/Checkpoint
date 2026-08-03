@@ -164,6 +164,57 @@ def test_standalone_mission_failures_never_become_success(
     assert result["reliability"]["routing_evidence"]["decision_id"] == "route-1"
 
 
+def test_terminal_mission_state_allows_idempotent_same_state_update(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    first = write_mission_state(
+        workspace,
+        "mission-blocked",
+        current_state="BLOCKED",
+        event="chief_run_finished",
+        status="stopped",
+        stop_reason="worker_error",
+    )
+    second = write_mission_state(
+        workspace,
+        "mission-blocked",
+        current_state="BLOCKED",
+        event="chief_run_finished",
+        status="stopped",
+        stop_reason="worker_error",
+        managed_runtime={
+            "budget_status": "within_budget",
+            "routing_evidence": {"decision_id": "route-1", "policy_match": True},
+        },
+    )
+
+    assert second["current_state"] == "BLOCKED"
+    assert second["revision"] == first["revision"] + 1
+    assert second["reliability"]["routing_evidence"]["decision_id"] == "route-1"
+    assert len(second["context"]["history"]) == 2
+
+
+def test_terminal_mission_state_rejects_different_terminal_update(tmp_path) -> None:
+    workspace = tmp_path / ".agent-workspace"
+    write_mission_state(
+        workspace,
+        "mission-blocked",
+        current_state="BLOCKED",
+        event="chief_run_finished",
+        status="stopped",
+        stop_reason="worker_error",
+    )
+
+    with pytest.raises(ValueError, match="terminal pipeline state is immutable"):
+        write_mission_state(
+            workspace,
+            "mission-blocked",
+            current_state="VERIFIED",
+            event="chief_run_finished",
+            status="verified",
+            stop_reason="verified",
+        )
+
+
 def test_pipeline_retry_requires_whitelist_and_starts_new_attempt(tmp_path) -> None:
     spec = SpecValidator().derive_request_spec(
         goal="Fix checkout",

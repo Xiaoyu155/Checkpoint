@@ -243,6 +243,41 @@ def write_mission_state(
         now=now,
     )
     previous_pipeline_state = str(state.get("current_state") or "")
+    if previous_pipeline_state in _PIPELINE_TERMINAL_STATES and not (
+        managed.terminal and event == "chief_run_resume_executing"
+    ):
+        if current_state != previous_pipeline_state:
+            raise ValueError(f"terminal pipeline state is immutable: {previous_pipeline_state}")
+        history = context.setdefault("history", [])
+        if isinstance(history, list):
+            entry = {"at": now, "event": str(event), "state": current_state}
+            entry.update({key: value for key, value in fields.items() if value is not None})
+            history.append(entry)
+        state.update(
+            {
+                "schema_version": int(state.get("schema_version") or 1),
+                "mission_id": mid,
+                "launch_id": str(state.get("launch_id") or launch_id or ""),
+                "current_state": current_state,
+                "revision": persisted_revision + 1,
+                "updated_at": now,
+                "managed": managed.to_dict(),
+                "idempotency_key": str(state.get("idempotency_key") or managed.idempotency_key),
+            }
+        )
+        _apply_managed_runtime(state, fields.get("managed_runtime"))
+        state["transition_valid"] = True
+        state.setdefault("created_at", now)
+        state.setdefault(
+            "metrics",
+            {
+                "total_tokens": 0,
+                "saved_tokens": 0,
+                "last_successful_step": 0,
+            },
+        )
+        _write_json_cas(path, state, expected_revision=persisted_revision)
+        return state
     if managed.terminal and event == "chief_run_resume_executing":
         attempts = (
             state.get("managed_attempt_history")

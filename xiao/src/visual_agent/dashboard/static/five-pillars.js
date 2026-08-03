@@ -36,16 +36,25 @@ async function loadEvidence() {
 function render() {
   const data = state.data || {};
   const program = data.program;
+  const activeLaunch = data.support?.launches?.active || {};
+  const trigger = activeLaunch.task_trigger || {};
+  const triggerDiagnosis = activeLaunch.trigger_diagnosis || {};
+  const triggerStatus = triggerDiagnosis.status || trigger.status || '';
+  const triggerReason = triggerDiagnosis.reason_code || '';
+  const triggerNotice = triggerStatus && triggerStatus !== 'not_required'
+    ? `任务触发：${triggerStatus}${triggerReason ? ` · ${triggerReason}` : ''}`
+    : '';
   renderSupport(data.support || {});
   setText('workspacePath', data.workspace_root || '');
   if (!program) {
-    setText('programTitle', '暂无已完成的双任务 Program');
-    setText('programStatus', data.error ? '读取失败' : '等待闭环');
-    setText('programId', '-');
-    setText('missionIds', '-');
+    setText('evidenceMode', activeLaunch.launch_id ? 'Pacer trigger diagnostics' : 'Pacer native evidence');
+    setText('programTitle', activeLaunch.launch_id ? '当前 Pacer 触发诊断' : '暂无已完成的双任务 Program');
+    setText('programStatus', data.error ? '读取失败' : triggerNotice || '等待闭环');
+    setText('programId', activeLaunch.launch_id || '-');
+    setText('missionIds', activeLaunch.task_generation ? `task generation ${activeLaunch.task_generation}` : '-');
     setText('providerModel', '-');
     setText('workerRepair', '-');
-    setText('acceptanceLine', data.error || '');
+    setText('acceptanceLine', data.error || triggerNotice || '');
     byId('pillarList').innerHTML = '<div class="empty">没有可展示的闭环证据。</div>';
     byId('evidencePanel').innerHTML = '';
     return;
@@ -66,7 +75,9 @@ function render() {
   setText('workerRepair', `${program.worker_count || 0} / ${program.repair_count || 0}`);
   setText(
     'acceptanceLine',
-    latestReview.evidence_integrity
+    triggerNotice
+      ? `${triggerNotice} · ${latestReview.evidence_integrity || program.verification_verdict || '等待结果'}`
+      : latestReview.evidence_integrity
       ? `证据 ${latestReview.evidence_integrity} · 标准 ${latestReview.acceptance_adequacy || 'unknown'} · 产品 ${productVerdict}`
       : `${program.verification_verdict || '无结论'} · ${brief(program.verification_command || '无验收命令', 150)}`,
   );

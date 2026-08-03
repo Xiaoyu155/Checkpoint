@@ -388,6 +388,7 @@ def _stage_label(stage: str) -> str:
         "verified": "Verified",
         "verified_blocked": "Verified but blocked",
         "worker_failed_tests_pass": "Worker failed; tests passed",
+        "worker_orphaned": "Background worker lost",
         "worker_blocked": "Worker blocked",
         "worker_activity_stale": "Worker activity stale",
         "blocked": "Blocked",

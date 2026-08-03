@@ -93,6 +93,7 @@ def create_mission(
     requirement_contract: dict[str, Any] | None = None,
     verification_env: list[dict[str, Any]] | None = None,
     test_command: str | None = None,
+    allow_dirty: bool = False,
     allow_test_edits: bool = False,
     merge: bool = False,
     reasoning_effort: str = "inherit",
@@ -122,6 +123,7 @@ def create_mission(
         "current_round": 0,
         "budget_policy": dict(budget_policy),
         "test_command": str(test_command or "").strip(),
+        "allow_dirty": bool(allow_dirty),
         "allow_test_edits": bool(allow_test_edits),
         "merge": bool(merge),
         "reasoning_effort": str(reasoning_effort or "inherit"),
@@ -210,6 +212,16 @@ def list_missions(workspace_root: str | Path) -> list[dict[str, Any]]:
     directory = missions_dir(workspace_root)
     if not directory.exists():
         return []
+    # Opportunistic *read-side* reconcile only marks dead/PID-reused workers.
+    # Do not spend tokens as a side effect of listing missions.
+    try:
+        from .chief_background import reconcile_workspace_backgrounds
+
+        reconcile_workspace_backgrounds(
+            workspace_root, update=True, limit=30, auto_resume=False
+        )
+    except Exception:
+        pass
     summaries: list[dict[str, Any]] = []
     for mission_path in sorted(directory.glob("*/mission.json")):
         try:
@@ -218,6 +230,14 @@ def list_missions(workspace_root: str | Path) -> list[dict[str, Any]]:
             continue
         if bool(payload.get("hidden")) or str(payload.get("status") or "").strip().lower() in {"archived", "deleted"}:
             continue
+        journey: dict[str, Any] = {}
+        journey_path = mission_path.parent / "journey.json"
+        if journey_path.exists():
+            try:
+                loaded_journey = json.loads(journey_path.read_text(encoding="utf-8"))
+                journey = loaded_journey if isinstance(loaded_journey, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                journey = {}
         summaries.append(
             {
                 "mission_id": str(payload.get("mission_id") or mission_path.parent.name),
@@ -232,6 +252,8 @@ def list_missions(workspace_root: str | Path) -> list[dict[str, Any]]:
                 "agent": str(payload.get("agent") or ""),
                 "merge_policy": str(payload.get("merge_policy") or ""),
                 "requirement_contract": payload.get("requirement_contract") if isinstance(payload.get("requirement_contract"), dict) else {},
+                "journey_status": str(journey.get("status") or ""),
+                "journey_summary": str(journey.get("summary") or ""),
             }
         )
     summaries.sort(key=lambda item: item["mission_id"], reverse=True)
@@ -297,14 +319,34 @@ def _reserve_mission_directory(
 
 
 def _atomic_write_json(path: Path, payload: Any) -> None:
+    """Atomic JSON write with Windows-friendly replace retries.
+
+    Concurrent mission processes can briefly lock the destination file and
+    raise WinError 5/32 on ``os.replace``. Retrying avoids false hard failures
+    during multi-mission stress.
+    """
+    import time
+
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    text = json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2)
+    last_error: OSError | None = None
     try:
-        temporary.write_text(
-            json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        os.replace(temporary, path)
+        temporary.write_text(text, encoding="utf-8")
+        for attempt in range(12):
+            try:
+                os.replace(temporary, path)
+                last_error = None
+                break
+            except OSError as exc:  # noqa: PERF203 - explicit retry path
+                last_error = exc
+                # 5 = access denied, 32 = sharing violation on Windows
+                winerr = getattr(exc, "winerror", None)
+                if winerr not in {5, 32} and not isinstance(exc, PermissionError):
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+        if last_error is not None:
+            raise last_error
     finally:
         try:
             temporary.unlink()

@@ -117,10 +117,16 @@ def build_project_memory(
     _save_index(workspace_path, next_cached_entries)
     entries.sort(key=lambda item: (int(item.get("relevance_score") or 0), item.get("updated_at", "")), reverse=True)
     query_present = bool(str(goal or "").strip())
+    durable = [item for item in entries if _is_durable(item)]
     if query_present:
         pool = [item for item in entries if int(item.get("relevance_score") or 0) >= MIN_RELEVANCE_SCORE]
+        # When the goal has no meaningful tokens (all stopwords), scoring produces
+        # zero for every entry. Fall back to durable pool so the worker always
+        # receives some context. A goal with real tokens that simply doesn't match
+        # any entry correctly returns an empty pool.
+        if not pool and not _tokens(str(goal)):
+            pool = durable or entries
     else:
-        durable = [item for item in entries if _is_durable(item)]
         pool = durable or entries
     selected = pool[: max(0, int(limit))]
     selected_ids = {str(item.get("memory_id") or "") for item in selected}
@@ -263,7 +269,9 @@ def project_memory_handoff_notes(
         if not isinstance(item, dict):
             continue
         objective = _one_line(str(item.get("objective") or ""), 180)
-        note = f"Related `{item.get('memory_id') or item.get('mission_id')}` [{item.get('status')}]: {objective}"
+        verification_outcome = str(item.get("verification_outcome") or "")
+        prefix = "[!] " if verification_outcome == "failed" else ""
+        note = f"{prefix}Related `{item.get('memory_id') or item.get('mission_id')}` [{item.get('status')}]: {objective}"
         verification = item.get("verification") if isinstance(item.get("verification"), dict) else {}
         if verification.get("verdict"):
             note += f"; verification={verification.get('verdict')}"
@@ -384,6 +392,16 @@ def _memory_entry(
             "verdict": verdict,
             "exit_code": command_verification.get("exit_code"),
         },
+        "verification_outcome": (
+            "verified"
+            if str(mission.get("status") or "") in {"verified", "merged"}
+            else (
+                "failed"
+                if str(mission.get("status") or "") in {"verification_failed", "merged_verification_failed", "verified_blocked"}
+                or verdict in {"fail", "failed"}
+                else ""
+            )
+        ),
         "worker_outcome": {
             "status": str(worker.get("status") or ""),
             "cwd": str(worker.get("cwd") or ""),
@@ -569,6 +587,11 @@ def score_memory_entry(
     if score > 0 and str(entry.get("status") or "") == "verified":
         score += 5
         reasons.append("verified")
+    if score > 0 and str(entry.get("verification_outcome") or "") == "failed":
+        # A failed-verification entry is valuable negative context — knowing what
+        # path broke verification is more actionable than knowing what succeeded.
+        score += 12
+        reasons.append("verification_failure_context")
     if str(entry.get("status") or "") in _PREVIEW_STATUSES or str(entry.get("stop_reason") or "") in _PREVIEW_STOP_REASONS:
         score = max(0, score - 20)
         reasons.append("preview_penalty")
