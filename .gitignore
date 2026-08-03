@@ -77,8 +77,18 @@ dev-archive/
 
 # ---- agent-workspace (DevPacer runtime) ----
 .agent-workspace/
-xiao.checkpoint-worktrees/
+*.checkpoint-worktrees/
 强制测试记录.md
+/gui/
+
+# ---- Pacer dogfood / acceptance sandboxes (runtime, not source) ----
+/pacer-demo-managed/
+/pacer-five-core-lab/
+/pacer-smoke-low/
+/pacer-managed-acceptance-*/
+
+# ---- Downloaded tooling ----
+.tools/
 
 # ---- Local external/reference material ----
 local-sub2api/

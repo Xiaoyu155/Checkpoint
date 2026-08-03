@@ -13,4 +13,6 @@ workflow_index.json
 强制测试记录.md
 model_api_keys.txt
 cloud_api/.env.gateway
+cloud_api/secrets/*
+!cloud_api/secrets/README.md
 gui/actions.jsonl
