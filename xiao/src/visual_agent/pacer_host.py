@@ -385,6 +385,24 @@ def save_host_session(workspace_root: str | Path, session: dict[str, Any]) -> Pa
     return path
 
 
+def _live_host_owner(workspace_root: str | Path) -> int:
+    """PID of a host that still owns this workspace, or 0 when it is free."""
+    session = load_host_session(workspace_root) or {}
+    if str(session.get("status") or "") != "running":
+        return 0
+    try:
+        pid = int(session.get("pid") or 0)
+    except (TypeError, ValueError):
+        return 0
+    if pid <= 0 or pid == os.getpid():
+        return 0
+    from .chief_background import process_status
+
+    state = process_status(pid)
+    alive = bool(state.get("alive")) if isinstance(state, dict) else False
+    return pid if alive else 0
+
+
 def request_host_stop(workspace_root: str | Path) -> Path:
     path = host_dir(workspace_root) / HOST_STOP_FLAG
     path.write_text(utc_now() + "\n", encoding="utf-8")
@@ -1516,7 +1534,24 @@ def run_host_session(
         "self_heal_attempts": 0,
         "pending_races": [],
         "race_outcomes": [],
+        # Recorded so a second host on the same workspace can be refused rather
+        # than silently doubling the spend and interleaving writes into this file.
+        "pid": os.getpid(),
     }
+    existing_owner = _live_host_owner(ws)
+    if existing_owner:
+        append_host_log(ws, f"HOST_REFUSED another host already owns this workspace pid={existing_owner}")
+        return {
+            "status": "blocked",
+            "stop_reason": "host_already_running",
+            "existing_pid": existing_owner,
+            "workspace_root": str(ws),
+            "message": (
+                f"这个工作区已经有一个托管进程在跑（PID {existing_owner}）。"
+                "两个 host 会各自派工、重复烧额度，并且互相覆盖 session.json。"
+                "先 `pacer host stop`，或者等它结束。"
+            ),
+        }
     save_host_session(ws, session)
     append_host_log(
         ws,

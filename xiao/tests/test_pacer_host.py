@@ -730,3 +730,43 @@ def test_run_host_session_launches_race_without_blocking_settle(tmp_path, monkey
 
     assert result["status"] == "completed"
     assert captured["settle"] is False
+
+
+def test_a_dead_host_session_does_not_block_a_new_one(tmp_path) -> None:
+    import json
+
+    from visual_agent.pacer_host import _live_host_owner
+
+    host = tmp_path / ".agent-workspace" / "host"
+    host.mkdir(parents=True)
+    (host / "session.json").write_text(json.dumps({"status": "running", "pid": 999_999}), encoding="utf-8")
+
+    assert _live_host_owner(tmp_path / ".agent-workspace") == 0
+
+
+def test_a_live_host_session_blocks_a_second_host(tmp_path) -> None:
+    import json
+    import os
+
+    from visual_agent.pacer_host import _live_host_owner
+
+    host = tmp_path / ".agent-workspace" / "host"
+    host.mkdir(parents=True)
+    # Two hosts on one workspace each launch missions for the same goals, double
+    # the spend, and interleave writes into a single session.json.
+    (host / "session.json").write_text(json.dumps({"status": "running", "pid": os.getppid()}), encoding="utf-8")
+
+    assert _live_host_owner(tmp_path / ".agent-workspace") == os.getppid()
+
+
+def test_a_stopped_session_leaves_the_workspace_free(tmp_path) -> None:
+    import json
+    import os
+
+    from visual_agent.pacer_host import _live_host_owner
+
+    host = tmp_path / ".agent-workspace" / "host"
+    host.mkdir(parents=True)
+    (host / "session.json").write_text(json.dumps({"status": "stopped", "pid": os.getppid()}), encoding="utf-8")
+
+    assert _live_host_owner(tmp_path / ".agent-workspace") == 0
