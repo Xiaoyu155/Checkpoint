@@ -506,12 +506,19 @@ class ManagedBudgetUsage:
     attempts: int
     repair_rounds: int
     same_failure_count: int = 0
+    # What the budget actually charges for. Cache reads are replayed context
+    # billed at a fraction of fresh input, so charging them would report a cheap
+    # cached run as exhausted — and an exhausted budget refuses repair rounds.
+    # total_tokens stays the honest total for reporting.
+    billable_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if self.elapsed_seconds < 0:
             raise ValueError("elapsed_seconds must be non-negative")
         if self.total_tokens is not None and self.total_tokens < 0:
             raise ValueError("total_tokens must be non-negative")
+        if self.billable_tokens is not None and self.billable_tokens < 0:
+            raise ValueError("billable_tokens must be non-negative")
         if min(self.attempts, self.repair_rounds, self.same_failure_count) < 0:
             raise ValueError("usage counters must be non-negative")
 
@@ -552,9 +559,10 @@ def assess_managed_budget(
     reasons: list[str] = []
     if usage.elapsed_seconds >= policy.max_wall_seconds:
         reasons.append("wall_budget_exhausted")
-    if usage.total_tokens is None:
+    charged_tokens = usage.billable_tokens if usage.billable_tokens is not None else usage.total_tokens
+    if charged_tokens is None:
         reasons.append("token_usage_unknown")
-    elif usage.total_tokens >= policy.max_total_tokens:
+    elif charged_tokens >= policy.max_total_tokens:
         reasons.append("token_budget_exhausted")
     if operation_name in {"worker_attempt", "repair"} and usage.attempts >= policy.max_attempts:
         reasons.append("attempt_budget_exhausted")
@@ -574,9 +582,7 @@ def assess_managed_budget(
         reason_codes=tuple(reasons),
         remaining_wall_seconds=max(0.0, policy.max_wall_seconds - usage.elapsed_seconds),
         remaining_tokens=(
-            None
-            if usage.total_tokens is None
-            else max(0, policy.max_total_tokens - usage.total_tokens)
+            None if charged_tokens is None else max(0, policy.max_total_tokens - charged_tokens)
         ),
         remaining_attempts=max(0, policy.max_attempts - usage.attempts),
         remaining_repair_rounds=max(0, policy.max_repair_rounds - usage.repair_rounds),

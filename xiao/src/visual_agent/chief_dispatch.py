@@ -1914,7 +1914,8 @@ def _dispatch_budget_assessment(
     usage_summary = summarize_worker_usage(worker_records)
     usage = ManagedBudgetUsage(
         elapsed_seconds=max(0.0, monotonic() - dispatch_started),
-        total_tokens=(
+        total_tokens=(int(usage_summary.get("total_tokens") or 0) if usage_complete else None),
+        billable_tokens=(
             int(
                 usage_summary.get("budget_tokens")
                 if usage_summary.get("budget_tokens") is not None
