@@ -220,7 +220,10 @@ _QUOTA_SIGNATURES = (
     "rate limit",
     "rate_limit",
     "rate-limited",
-    "429",
+    # NOTE: bare "429" used to live here and matched hex inside request ids
+    # (…7e23-4294-a7ef…), so a provider outage was reported as "quota exhausted"
+    # and could hand the task to a different subscription. Matched via
+    # _QUOTA_CODE_PATTERN below, which requires a real token boundary.
     "quota",
     "insufficient credit",
     "credit balance is too low",
@@ -264,14 +267,23 @@ _PROVIDER_5XX_SIGNATURES = (
 )
 
 
+# A bare status code must stand on its own. Substring matching finds "429"
+# inside request ids and turns a provider outage into "your quota ran out".
+_QUOTA_CODE_PATTERN = re.compile(r"(?<![0-9a-z-])429(?![0-9a-z-])", re.IGNORECASE)
+
+
 def looks_like_quota_exhaustion(*texts: str) -> bool:
     """True when worker output looks like a subscription quota / rate-limit block.
 
-    Deliberately broad: a false positive only means one extra cheap-backend
-    retry, while a miss would leave the user stuck exactly when they wanted to
-    keep going."""
+    Deliberately broad on wording: a false positive only means one extra
+    cheap-backend retry, while a miss would leave the user stuck exactly when
+    they wanted to keep going. Status codes are the exception — those are
+    matched on token boundaries, because a wrong quota verdict sends the task to
+    a different subscription and tells the user to go buy credit."""
     blob = " ".join(str(t or "") for t in texts).lower()
-    return any(sig in blob for sig in _QUOTA_SIGNATURES)
+    if any(sig in blob for sig in _QUOTA_SIGNATURES):
+        return True
+    return bool(_QUOTA_CODE_PATTERN.search(blob))
 
 
 def looks_like_provider_5xx(*texts: str) -> bool:

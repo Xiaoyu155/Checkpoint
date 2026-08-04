@@ -50,6 +50,14 @@ _ENVIRONMENT_MISSING_MARKERS = (
     "ai judge returned no json object",
 )
 
+_DEPENDENCY_MISSING_MARKERS = (
+    "err_module_not_found",
+    "cannot find package",
+    "cannot find module",
+    "modulenotfounderror: no module named",
+    "importerror: no module named",
+)
+
 
 def verification_env_from_required_names(names: list[str] | tuple[str, ...] | None) -> list[dict[str, str]]:
     entries: list[dict[str, str]] = []
@@ -319,6 +327,21 @@ def run_command_verification(
         result["classification_confidence"] = classification["classification_confidence"]
     if classification.get("matched_marker"):
         result["matched_marker"] = classification["matched_marker"]
+    # Name the shell that ran the gate: "it passed" means little without it, and
+    # a wrong-shell failure is unreadable without saying so out loud.
+    from .shell_dialect import prepare_shell_invocation, shell_mismatch_hint
+
+    invocation = prepare_shell_invocation(cmd)
+    result["shell_used"] = invocation["shell_used"]
+    result["shell_dialect"] = invocation["dialect"]
+    if invocation["warnings"]:
+        result["shell_warnings"] = invocation["warnings"]
+    if exit_code != 0:
+        hint = shell_mismatch_hint(command=cmd, shell_used=invocation["shell_used"], output=combined)
+        if hint:
+            result["shell_hint"] = hint
+            result["failure_kind"] = "test_command_wrong_shell"
+            result["classification_confidence"] = "definitive"
     return result
 
 
@@ -334,6 +357,13 @@ def _prepare_command(command: str) -> tuple[str | list[str], bool]:
         return cmd, True
     m = re.match(r"^\s*cmd(?:\.exe)?\s+/c\s+(?P<body>.+?)\s*$", cmd, re.IGNORECASE | re.DOTALL)
     if not m:
+        # ``shell=True`` on Windows means cmd.exe, but users write PowerShell.
+        # Run the command in the shell it was actually written for.
+        from .shell_dialect import prepare_shell_invocation
+
+        invocation = prepare_shell_invocation(cmd)
+        if not invocation["use_shell"]:
+            return invocation["argv"], False
         return cmd, True
     body = _strip_balanced_quotes(m.group("body").strip())
     lowered = re.sub(r"\s+", " ", body.strip().lower())
@@ -466,6 +496,16 @@ def classify_command_failure_detail(
         if marker in text:
             return {
                 "failure_kind": "verification_environment_missing",
+                "classification_confidence": "heuristic",
+                "matched_marker": marker,
+            }
+    # Missing dependencies are an environment fact, not a coding failure. Pacer
+    # verifies inside an isolation worktree, which by design holds only tracked
+    # files — node_modules and .venv are gitignored and do not follow it there.
+    for marker in _DEPENDENCY_MISSING_MARKERS:
+        if marker in text:
+            return {
+                "failure_kind": "dependencies_missing",
                 "classification_confidence": "heuristic",
                 "matched_marker": marker,
             }

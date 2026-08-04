@@ -143,7 +143,7 @@ def build_mission_journey(
         "can_claim_verified": can_claim_verified,
         "can_claim_delivered": can_claim_delivered,
         "summary": _journey_summary(phases),
-        "next_action": _next_action(status, delivery),
+        "next_action": _next_action(status, delivery, reason_codes),
         "reason_codes": reason_codes,
         "phases": phases,
         "links": links,
@@ -491,7 +491,14 @@ def _managed_phase(
     elif worker_status in {"failed", "crashed", "blocked"} or mission_status in {"failed", "blocked", "stopped"}:
         status = "blocked"
         reasons = ["managed_worker_failed"]
-        summary = f"worker={worker_status or '未启动'} · mission={mission_status or '未知'}"
+        # "worker=failed" alone sends the user hunting through logs for a cause
+        # that Pacer already has: the worker's own output says why it died.
+        cause = _worker_failure_cause(worker)
+        if cause:
+            reasons.append(cause["reason_code"])
+            summary = f"worker={worker_status or '未启动'} · {cause['message']}"
+        else:
+            summary = f"worker={worker_status or '未启动'} · mission={mission_status or '未知'}"
     else:
         status = "pending"
         reasons = ["managed_not_started"]
@@ -525,6 +532,32 @@ def _managed_phase(
     }
 
 
+_WORKER_FAILURE_MESSAGES = {
+    "provider_5xx": ("managed_provider_5xx", "编程助手的模型通道返回 5xx（服务端故障），不是代码问题。等通道恢复后重跑。"),
+    "provider_rate_limit": ("managed_provider_rate_limit", "模型额度用尽或被限流，worker 没能开始干活。"),
+    "not_authenticated": ("managed_not_authenticated", "编程助手没登录。先在终端里把它登录好再重跑。"),
+    "network_timeout": ("managed_network_timeout", "连模型通道超时，worker 没能完成。"),
+    "process_crash": ("managed_process_crash", "worker 进程崩溃了。"),
+}
+
+
+def _worker_failure_cause(worker: dict[str, Any]) -> dict[str, str]:
+    """Name why the worker died, using the output Pacer already captured."""
+
+    if not isinstance(worker, dict) or not worker:
+        return {}
+    try:
+        from .chief_dispatch import _managed_retry_failure_kind
+
+        kind = _managed_retry_failure_kind(worker, verification={})
+    except Exception:  # noqa: BLE001 - a missing cause is not worth failing over
+        return {}
+    entry = _WORKER_FAILURE_MESSAGES.get(str(kind))
+    if not entry:
+        return {}
+    return {"reason_code": entry[0], "message": entry[1]}
+
+
 def _acceptance_phase(
     mission: dict[str, Any],
     verification: dict[str, Any],
@@ -548,6 +581,12 @@ def _acceptance_phase(
         status = "passed"
         reasons: list[str] = []
         summary = f"验收通过：{command.get('command') or 'Checkpoint workflow'}"
+    elif verdict == "fail" and str(grade.get("reason_code") or "") == "acceptance_pre_existing_failure":
+        # Blaming the worker for a gate that was already red is the mirror image
+        # of calling a non-discriminating gate a pass.
+        status = "blocked"
+        reasons = ["acceptance_pre_existing_failure"]
+        summary = "验收环境本身跑不起来：这条命令在改动前就已经失败。"
     elif verdict in {"fail", "inspection_only", "coverage_gap"}:
         status = "blocked"
         reasons = [f"acceptance_{verdict}"]
@@ -800,7 +839,8 @@ def _journey_summary(phases: list[dict[str, Any]]) -> str:
     )
 
 
-def _next_action(status: str, delivery: dict[str, Any]) -> str:
+def _next_action(status: str, delivery: dict[str, Any], reason_codes: list[str] | None = None) -> str:
+    reason_codes = reason_codes or []
     if status == "completed":
         return "闭环已经完成，可以查看最终报告和账本。"
     if status == "verified_pending_delivery":
@@ -810,6 +850,17 @@ def _next_action(status: str, delivery: dict[str, Any]) -> str:
     if status == "verified_pending_dogfood":
         return "用户任务已验收；发布 Pacer 前还需绑定严格 Dogfood 证据。"
     if status == "blocked":
+        # Lead with the first thing that broke. Advising on acceptance while the
+        # worker never ran sends the user to the wrong place entirely.
+        for code, entry in _WORKER_FAILURE_MESSAGES.items():  # noqa: B007 - name unused
+            if entry[0] in reason_codes:
+                return f"{entry[1]} 这一步没过，后面的验收结果都不用先看。"
+        if "acceptance_pre_existing_failure" in reason_codes:
+            return (
+                "别去查 worker：验收命令在改动前就已经失败，问题在验收环境本身。"
+                "隔离 worktree 只带 git 跟踪的文件，node_modules / .venv 这类被忽略的依赖不会跟过去——"
+                "先让验收命令在隔离目录里能跑起来，再重跑这个 mission。"
+            )
         return "先处理第一个被阻塞阶段，再从原 mission 恢复。"
     if status == "regression_clear":
         return (

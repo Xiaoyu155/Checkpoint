@@ -55,8 +55,17 @@ def probe_base_command(
     verification_env: list[dict[str, Any]] | None = None,
     workspace_root: str | Path | None = None,
     runner: Callable[..., dict[str, Any]] | None = None,
+    prepare_base: Callable[[Path], Any] | None = None,
+    baseline_id: str = "",
 ) -> dict[str, Any]:
-    """Run ``command`` against ``base_ref`` in a throwaway worktree."""
+    """Run ``command`` against ``base_ref`` in a throwaway worktree.
+
+    ``prepare_base`` lets the caller reproduce whatever the worker's worktree
+    started from. That matters for repositories with uncommitted work: the
+    worker sees ``base_ref`` plus a dirty overlay, so probing bare ``base_ref``
+    would compare against a state that never existed and could excuse a
+    regression the worker really introduced.
+    """
 
     cmd = str(command or "").strip()
     base = str(base_ref or "").strip()
@@ -65,7 +74,8 @@ def probe_base_command(
     if not base:
         return _probe("unknown", reason="no_base_ref", base_ref=base)
 
-    cached = _cache_read(workspace_root, base, cmd)
+    cache_key_base = f"{base}|{baseline_id}" if baseline_id else base
+    cached = _cache_read(workspace_root, cache_key_base, cmd)
     if cached is not None:
         return {**cached, "cached": True}
 
@@ -89,6 +99,13 @@ def probe_base_command(
             base_ref=base,
             detail=(added.stderr or added.stdout or "").strip()[:400],
         )
+    if prepare_base is not None:
+        try:
+            prepare_base(target)
+        except Exception as exc:  # noqa: BLE001 - a baseline we cannot rebuild is unknown
+            _remove_worktree(root, target)
+            _discard(holder)
+            return _probe("unknown", reason="base_overlay_failed", base_ref=base, detail=str(exc)[:400])
     try:
         execute = runner or run_command_verification
         result = execute(
@@ -116,7 +133,7 @@ def probe_base_command(
         probe = _probe("failed_on_base", reason="gate_red_before_change", base_ref=base, exit_code=result.get("exit_code"))
     else:
         probe = _probe("unknown", reason=f"base_verdict_{verdict or 'missing'}", base_ref=base)
-    _cache_write(workspace_root, base, cmd, probe)
+    _cache_write(workspace_root, cache_key_base, cmd, probe)
     return probe
 
 
@@ -134,15 +151,28 @@ def classify_acceptance(
             "acceptance_no_command_gate",
             "没有验收命令，这次改动没有任何独立证据。",
         )
+    probe = base_probe if isinstance(base_probe, dict) else {}
+    status = str(probe.get("status") or "")
+
     if str(command.get("verdict") or "") != "pass":
+        if status == "failed_on_base":
+            # The gate was already red before the worker touched anything.
+            return _tier(
+                TIER_UNVERIFIED,
+                "acceptance_pre_existing_failure",
+                "验收命令在这次改动之前就已经失败了，所以这不是 worker 改坏的——是验收环境本身跑不起来。",
+            )
+        if status == "passed_on_base":
+            return _tier(
+                TIER_UNVERIFIED,
+                "acceptance_regression_introduced",
+                "验收命令在改动前是通过的，改动后失败了——这次改动确实破坏了原有行为。",
+            )
         return _tier(
             TIER_UNVERIFIED,
             "acceptance_command_failed",
             "验收命令没有通过。",
         )
-
-    probe = base_probe if isinstance(base_probe, dict) else {}
-    status = str(probe.get("status") or "")
     if status == "failed_on_base":
         return _tier(
             TIER_VERIFIED,

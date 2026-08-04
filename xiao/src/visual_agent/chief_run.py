@@ -127,6 +127,7 @@ def run_chief_mission(
     test_command: str | None = None,
     allow_test_edits: bool = False,
     base_probe_enabled: bool = True,
+    dependency_bootstrap_enabled: bool = True,
     merge: bool = False,
     require_env: tuple[str, ...] = (),
     verification_env: list[dict[str, Any]] | None = None,
@@ -626,6 +627,7 @@ def run_chief_mission(
         test_command=test_command,
         allow_test_edits=effective_allow_test_edits,
         base_probe_enabled=base_probe_enabled,
+        dependency_bootstrap_enabled=dependency_bootstrap_enabled,
         verification_env=requested_verification_env,
     )
     append_round(
@@ -726,6 +728,7 @@ def run_chief_mission(
         test_command=test_command,
         allow_test_edits=effective_allow_test_edits,
         base_probe_enabled=base_probe_enabled,
+        dependency_bootstrap_enabled=dependency_bootstrap_enabled,
         merge=effective_merge,
         verification_env=requested_verification_env,
         allow_prior_verified_evidence=_allow_prior_verified_evidence_for_resume(

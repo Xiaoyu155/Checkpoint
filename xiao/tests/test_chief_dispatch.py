@@ -3274,3 +3274,31 @@ def test_repair_evidence_is_redacted_and_capped_at_32kb_utf8() -> None:
     assert secret not in evidence
     assert len(evidence.encode("utf-8")) <= 32768
     assert evidence.endswith("错")
+
+
+def test_create_worktree_applies_uncommitted_deletions_not_just_edits(tmp_path) -> None:
+    from visual_agent.chief_dispatch import create_worktree
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "devpacer@example.local"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "DevPacer"], cwd=repo, check=True)
+    (repo / "keep.js").write_text("export const keep = 1;\n", encoding="utf-8")
+    (repo / "removed.js").write_text("export const gone = 1;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "baseline"], cwd=repo, check=True, capture_output=True, text=True)
+
+    # The user deleted a file but has not committed it yet.
+    (repo / "removed.js").unlink()
+    (repo / "keep.js").write_text("export const keep = 2;\n", encoding="utf-8")
+
+    worktree = tmp_path / "wt"
+    result = create_worktree(repo_root=repo, worktree=worktree, branch="devpacer-deletions", allow_dirty=True)
+
+    assert result["status"] == "created"
+    # Copying only edits hands the worker a repo that never existed, with
+    # already-deleted files still present and their stale tests still running.
+    assert result["dirty_file_overlay_deleted_files"] == 1
+    assert not (worktree / "removed.js").exists()
+    assert (worktree / "keep.js").read_text(encoding="utf-8") == "export const keep = 2;\n"

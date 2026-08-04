@@ -98,11 +98,34 @@ def test_missing_command_gate_is_unverified() -> None:
 def test_failed_command_is_not_graded_as_evidence() -> None:
     graded = classify_acceptance(
         command_result={"verdict": "fail", "command": "pytest -q"},
-        base_probe={"status": "failed_on_base"},
+        base_probe={"status": "unknown", "reason": "base_probe_disabled"},
     )
 
     assert graded["tier"] == TIER_UNVERIFIED
     assert graded["reason_code"] == "acceptance_command_failed"
+
+
+def test_a_gate_that_was_already_red_is_not_blamed_on_the_worker() -> None:
+    graded = classify_acceptance(
+        command_result={"verdict": "fail", "command": "npm test"},
+        base_probe={"status": "failed_on_base"},
+    )
+
+    # The mirror image of the false green: a pre-existing breakage reported as
+    # "the AI failed" sends the user chasing a bug that is not there.
+    assert graded["tier"] == TIER_UNVERIFIED
+    assert graded["reason_code"] == "acceptance_pre_existing_failure"
+    assert "不是 worker 改坏的" in graded["message"]
+
+
+def test_a_gate_that_was_green_and_is_now_red_is_a_real_regression() -> None:
+    graded = classify_acceptance(
+        command_result={"verdict": "fail", "command": "npm test"},
+        base_probe={"status": "passed_on_base"},
+    )
+
+    assert graded["tier"] == TIER_UNVERIFIED
+    assert graded["reason_code"] == "acceptance_regression_introduced"
 
 
 # --- the probe against a real git repository ---------------------------------

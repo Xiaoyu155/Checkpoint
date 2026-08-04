@@ -143,6 +143,17 @@ def _allow_automatic_low_cost_failover(worker_agent_norm: str) -> bool:
     return False
 
 
+def _bootstrap_probe_dependencies(target: Path, *, timeout_seconds: float) -> None:
+    """Best-effort install for a baseline worktree; never fails the probe."""
+
+    try:
+        from .dependency_bootstrap import bootstrap_worktree_dependencies
+
+        bootstrap_worktree_dependencies(target, timeout_seconds=timeout_seconds)
+    except Exception:  # noqa: BLE001 - an unbootstrappable baseline is just unknown
+        return
+
+
 def _grade_acceptance(
     *,
     command_result: dict[str, Any] | None,
@@ -153,6 +164,8 @@ def _grade_acceptance(
     verification_env: list[dict[str, Any]] | None,
     workspace_root: str | Path,
     enabled: bool = True,
+    source_repo_root: Path | None = None,
+    allow_dirty: bool = False,
 ) -> dict[str, Any]:
     """Grade the acceptance evidence: did this gate actually test this task?
 
@@ -162,8 +175,25 @@ def _grade_acceptance(
     from .acceptance_discrimination import classify_acceptance, probe_base_command
 
     probe: dict[str, Any] = {"status": "unknown", "reason": "base_probe_disabled"}
-    graded_pass = isinstance(command_result, dict) and str(command_result.get("verdict") or "") == "pass"
-    if enabled and graded_pass:
+    verdict = str(command_result.get("verdict") or "") if isinstance(command_result, dict) else ""
+    # Probe on failure too: a gate that was already red before the change means
+    # the environment is broken, not that the worker broke it.
+    graded = verdict in {"pass", "fail"} and bool(str(command or "").strip())
+    # The worker's worktree is base_ref plus the user's uncommitted work, so the
+    # probe has to reproduce that same starting point — otherwise a dirty repo
+    # gets compared against a state nobody ever ran.
+    overlay_source = source_repo_root if allow_dirty and source_repo_root else None
+    baseline_id = "dirty_overlay" if overlay_source is not None else "bootstrapped"
+
+    def prepare_base(target: Path) -> None:
+        if overlay_source is not None:
+            _overlay_dirty_context(repo_root=overlay_source, worktree=target, allow_dirty=True)
+        # The worker's worktree gets its dependencies installed, so the baseline
+        # needs them too — otherwise the two sides fail for different reasons and
+        # the comparison means nothing.
+        _bootstrap_probe_dependencies(target, timeout_seconds=timeout_seconds)
+
+    if enabled and graded:
         try:
             probe = probe_base_command(
                 command=command,
@@ -172,6 +202,8 @@ def _grade_acceptance(
                 timeout_seconds=timeout_seconds,
                 verification_env=verification_env,
                 workspace_root=workspace_root,
+                prepare_base=prepare_base,
+                baseline_id=baseline_id,
             )
         except Exception as exc:  # noqa: BLE001 - probing is evidence, not execution
             probe = {"status": "unknown", "reason": "base_probe_error", "detail": str(exc)[:400]}
@@ -347,6 +379,7 @@ def dispatch_chief_plan(
     test_command: str | None = None,
     allow_test_edits: bool = False,
     base_probe_enabled: bool = True,
+    dependency_bootstrap_enabled: bool = True,
     merge: bool = False,
     command_runner: CommandRunner | None = None,
     codex_runner: Any = None,
@@ -831,6 +864,39 @@ def dispatch_chief_plan(
         if key not in {"status", "path", "branch"}:
             preview["worktree"][key] = value
     preview["worktree"]["created"] = True
+    # The preflight above measured the source repo, but verification runs here.
+    # A git worktree carries only tracked files, so gitignored dependency trees
+    # (node_modules, .venv) do not follow it — and the gate then fails for
+    # reasons that have nothing to do with the worker.
+    if command_mode:
+        worktree_dependencies = dependency_preflight(
+            worktree_project_root,
+            str(test_command or raw_test_command or ""),
+        )
+        preview["verification"]["dependency_worktree"] = worktree_dependencies
+        if not worktree_dependencies.get("deps_installed"):
+            # Install rather than link: sharing a mutable node_modules with the
+            # user's project would give up the isolation that makes an
+            # autonomous worker safe to run at all.
+            from .dependency_bootstrap import bootstrap_worktree_dependencies
+
+            bootstrap = bootstrap_worktree_dependencies(
+                worktree_project_root,
+                enabled=dependency_bootstrap_enabled,
+                timeout_seconds=timeout_seconds,
+            )
+            preview["verification"]["dependency_bootstrap"] = bootstrap
+            if bootstrap.get("status") not in {"installed", "skipped"}:
+                preview["verification"]["dependency_gap"] = {
+                    "reason": "dependencies_not_in_worktree",
+                    "message": (
+                        "隔离 worktree 里没有依赖（依赖目录被 gitignore，git worktree 不会带过去），"
+                        f"自动安装也没成功（{bootstrap.get('status')}）。"
+                        "验收命令很可能因为找不到依赖而失败，这与 worker 的改动无关。"
+                    ),
+                    "manager": str(worktree_dependencies.get("manager") or ""),
+                    "worktree": str(worktree_project_root),
+                }
     if setup.get("status") == "reused":
         preview["worktree"]["reused"] = True
     _write_worktree_gitignore(worktree, repo_root)
@@ -1114,6 +1180,8 @@ def dispatch_chief_plan(
             timeout_seconds=timeout_seconds,
             trusted_workspace_snapshot=trusted_workspace_snapshot,
             base_probe_enabled=base_probe_enabled,
+            source_repo_root=repo_root,
+            allow_dirty=allow_dirty,
         )
     verification_attempts.append(verification)
 
@@ -1290,6 +1358,8 @@ def dispatch_chief_plan(
             timeout_seconds=timeout_seconds,
             trusted_workspace_snapshot=trusted_workspace_snapshot,
             base_probe_enabled=base_probe_enabled,
+            source_repo_root=repo_root,
+            allow_dirty=allow_dirty,
         )
         verification_attempts.append(verification)
 
@@ -3119,6 +3189,8 @@ def run_dispatch_verification(
     timeout_seconds: float = 900.0,
     trusted_workspace_snapshot: dict[str, str] | None = None,
     base_probe_enabled: bool = True,
+    source_repo_root: Path | None = None,
+    allow_dirty: bool = False,
 ) -> dict[str, Any]:
     verification_workspace_path = (verification_workspace_root or workspace_root).expanduser().resolve()
     progress_mission_id = str(mission_id or plan_id)
@@ -3278,6 +3350,8 @@ def run_dispatch_verification(
                 verification_env=verification_env,
                 workspace_root=workspace_root,
                 enabled=base_probe_enabled,
+                source_repo_root=source_repo_root,
+                allow_dirty=allow_dirty,
             ),
             "verification_timeout": timeout_info,
             "markdown": (
@@ -4855,12 +4929,18 @@ def _overlay_local_dirty_files(*, repo_root: Path, worktree: Path, allow_dirty: 
         except OSError as exc:
             errors.append(f"{path}: {type(exc).__name__}: {exc}"[:200])
 
-    if copied == 0 and not errors:
+    # Deletions are part of the working state too. Copying only modifications
+    # and additions hands the worker a repo that never existed, with files the
+    # user already deleted still present — and their stale tests still running.
+    deleted = _apply_local_dirty_deletions(repo=repo, target=target, errors=errors)
+
+    if copied == 0 and deleted == 0 and not errors:
         return {}
     baseline = _prefix_overlay_baseline(_commit_dirty_overlay_baseline(target), "dirty_file_overlay")
     result: dict[str, Any] = {
-        "dirty_file_overlay": "copied" if copied else "failed",
+        "dirty_file_overlay": "copied" if (copied or deleted) else "failed",
         "dirty_file_overlay_files": copied,
+        "dirty_file_overlay_deleted_files": deleted,
         "dirty_file_overlay_ignored_files": ignored_copied,
         "dirty_file_overlay_skipped": skipped,
         **baseline,
@@ -4868,6 +4948,25 @@ def _overlay_local_dirty_files(*, repo_root: Path, worktree: Path, allow_dirty: 
     if errors:
         result["dirty_file_overlay_errors"] = errors[:5]
     return result
+
+
+def _apply_local_dirty_deletions(*, repo: Path, target: Path, errors: list[str]) -> int:
+    """Mirror the user's uncommitted deletions into the overlaid worktree."""
+
+    removed = 0
+    for path in _git_lines(repo, ["git", "-C", str(repo), "ls-files", "--deleted"]):
+        normalized = _normalize_repo_path(path)
+        if not normalized or not _local_dirty_overlay_allowed(normalized, ignored=False):
+            continue
+        victim = target / normalized
+        if not victim.is_file():
+            continue
+        try:
+            victim.unlink()
+            removed += 1
+        except OSError as exc:
+            errors.append(f"{normalized}: {type(exc).__name__}: {exc}"[:200])
+    return removed
 
 
 def _local_dirty_overlay_candidates(repo: Path) -> list[tuple[str, bool]]:

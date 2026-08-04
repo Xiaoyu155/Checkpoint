@@ -38,6 +38,7 @@ def start_background_chief_run(
     test_command: str | None = None,
     allow_test_edits: bool = False,
     base_probe_enabled: bool = True,
+    dependency_bootstrap_enabled: bool = True,
     merge: bool = False,
     skip_liveness_probe: bool = False,
     execution_policy: dict[str, Any] | None = None,
@@ -120,6 +121,7 @@ def _start_background_chief_run_locked(
     test_command: str | None = None,
     allow_test_edits: bool = False,
     base_probe_enabled: bool = True,
+    dependency_bootstrap_enabled: bool = True,
     merge: bool = False,
     execution_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -290,6 +292,7 @@ def run_background_worker(
     test_command: str | None = None,
     allow_test_edits: bool = False,
     base_probe_enabled: bool = True,
+    dependency_bootstrap_enabled: bool = True,
     merge: bool = False,
     watchdog_interval_seconds: float = 60.0,
     watchdog_terminator: Any = None,
@@ -340,6 +343,7 @@ def run_background_worker(
             test_command=test_command or str(background.get("test_command") or "") or None,
             allow_test_edits=allow_test_edits or bool(background.get("allow_test_edits")),
             base_probe_enabled=base_probe_enabled,
+            dependency_bootstrap_enabled=dependency_bootstrap_enabled,
             merge=merge or bool(background.get("merge")),
             execution_policy=execution_policy,
         )

@@ -47,3 +47,25 @@ def test_recent_quota_failure_ignores_invalid_or_future_timestamps(tmp_path: Pat
 
     path.write_text(f'{{"codex": {time.time()}}}\n', encoding="utf-8")
     assert agent_backends.has_recent_quota_failure("codex", store_path=path) is True
+
+
+def test_status_code_inside_a_request_id_is_not_quota_exhaustion() -> None:
+    from visual_agent.agent_backends import looks_like_quota_exhaustion
+
+    outage = (
+        "unexpected status 503 Service Unavailable: Service temporarily unavailable, "
+        "url: https://relay.example/responses, request id: c92f7c6e-7e23-4294-a7ef-c0235f14d"
+    )
+
+    # "429" as a substring lives inside plenty of hex ids. Reading a provider
+    # outage as an exhausted subscription hands the task to a different account
+    # and tells the user to go buy credit they do not need.
+    assert looks_like_quota_exhaustion(outage) is False
+
+
+def test_a_real_rate_limit_is_still_detected() -> None:
+    from visual_agent.agent_backends import looks_like_quota_exhaustion
+
+    assert looks_like_quota_exhaustion("Error: 429 Too Many Requests") is True
+    assert looks_like_quota_exhaustion("http 429: rate limit reached") is True
+    assert looks_like_quota_exhaustion("You have hit your usage limit") is True

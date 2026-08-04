@@ -150,6 +150,7 @@ def _handle_chief_dispatch(args: Any) -> int:
         test_command=getattr(args, "test_command", None),
         allow_test_edits=getattr(args, "allow_test_edits", False),
         base_probe_enabled=not getattr(args, "no_base_probe", False),
+        dependency_bootstrap_enabled=not getattr(args, "no_dep_bootstrap", False),
         merge=getattr(args, "merge", False),
         workspace_root=args.workspace_root,
         plan_id=args.plan,
@@ -184,6 +185,7 @@ def _run_chief_mission_args(args: Any, *, execute: bool, dry_run: bool, resume_m
         test_command=getattr(args, "test_command", None),
         allow_test_edits=getattr(args, "allow_test_edits", False),
         base_probe_enabled=not getattr(args, "no_base_probe", False),
+        dependency_bootstrap_enabled=not getattr(args, "no_dep_bootstrap", False),
         merge=getattr(args, "merge", False),
         require_env=tuple(getattr(args, "require_env", []) or ()),
         goal=args.goal,
@@ -1056,6 +1058,7 @@ def _handle_chief_background_worker(args: Any) -> int:
         test_command=getattr(args, "test_command", None),
         allow_test_edits=getattr(args, "allow_test_edits", False),
         base_probe_enabled=not getattr(args, "no_base_probe", False),
+        dependency_bootstrap_enabled=not getattr(args, "no_dep_bootstrap", False),
         merge=getattr(args, "merge", False),
         execution_policy=execution_policy,
     )
