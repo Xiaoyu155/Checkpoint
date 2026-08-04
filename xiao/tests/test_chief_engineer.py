@@ -338,3 +338,19 @@ def test_assess_goal_clarity_passes_diagnosis_goals() -> None:
     assert is_diagnosis_goal("排查登录接口报错")
     assert is_diagnosis_goal("investigate why the nightly job stopped")
     assert not is_diagnosis_goal("把按钮改成蓝色")
+
+
+def test_first_run_on_a_fresh_workspace_is_not_blocked(tmp_path) -> None:
+    from visual_agent.chief_engineer import build_chief_plan
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    workspace = tmp_path / "repo" / ".agent-workspace"
+
+    plan = build_chief_plan(goal="add a helper to a.py", workspace_root=workspace, repo_root=repo)
+
+    # The second identical run used to succeed because the first left the
+    # workspace behind on its way out; that taught users the tool is flaky
+    # rather than that they had a setup step.
+    assert plan.status != "blocked"
+    assert workspace.is_dir()

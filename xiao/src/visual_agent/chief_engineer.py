@@ -98,6 +98,18 @@ def build_chief_plan(
     clarity = assess_goal_clarity(objective, answers=answer_list)
 
     if not workspace_path.exists():
+        # Running the very same command a second time used to succeed, because
+        # the first attempt left the workspace behind on its way out. Blocking
+        # on a missing workspace therefore taught users that Pacer is flaky
+        # rather than that they had a step to run. Create it and continue.
+        try:
+            from .workspace import init_workspace
+
+            init_workspace(workspace_path)
+        except Exception:  # noqa: BLE001 - fall through to the explicit block below
+            pass
+
+    if not workspace_path.exists():
         init_command = f"checkpoint init --root {_quote_cli(workspace_path)}"
         permissions = permission_plan([init_command], repo_root=repo_path)
         return ChiefPlan(
