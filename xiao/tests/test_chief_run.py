@@ -1277,3 +1277,26 @@ def test_mission_status_payload_reports_stale_running_worker_activity(tmp_path, 
     assert payload["progress"]["stage"] == "worker_activity_stale"
     assert payload["progress"]["needs_attention"] is True
     assert "no live background worker" in payload["message"]
+
+
+def test_quota_block_after_acceptance_passed_is_still_verified() -> None:
+    from visual_agent.chief_run import _stop_reason_from_dispatch
+
+    dispatch = {
+        "status": "verified",
+        "quota_exhausted": True,
+        "latest_verification": {"verdict": "pass"},
+    }
+
+    # A rate limit can land on a trailing turn after the work is finished.
+    # Reporting quota_exhausted over a verified result sends the user to re-run
+    # work that is already done and proven — the opposite of saving quota.
+    assert _stop_reason_from_dispatch(dispatch, {}) == "verified"
+
+
+def test_quota_block_without_acceptance_is_still_quota_exhausted() -> None:
+    from visual_agent.chief_run import _stop_reason_from_dispatch
+
+    dispatch = {"status": "worker_failed", "quota_exhausted": True, "latest_verification": {}}
+
+    assert _stop_reason_from_dispatch(dispatch, {}) == "quota_exhausted"

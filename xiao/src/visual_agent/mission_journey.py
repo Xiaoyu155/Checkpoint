@@ -473,7 +473,20 @@ def _managed_phase(
     managed_runtime = dispatch.get("managed_runtime") if isinstance(dispatch.get("managed_runtime"), dict) else {}
     if not managed_runtime and isinstance(record.get("managed_runtime"), dict):
         managed_runtime = record["managed_runtime"]
-    if mission_status in {"verified", "merged"} and dispatch_status in {"verified", "merged"}:
+    # A mission can be stopped for an incidental reason (a trailing rate limit)
+    # after the change already passed acceptance. Acceptance is the authority on
+    # whether the objective was met, so honour it even when the mission's own
+    # label says stopped — otherwise the user is told to re-run finished work.
+    # In-memory payloads nest the result under latest_verification; the record
+    # persisted to dispatches.jsonl carries a flat verdict instead.
+    gate_verdict = str(
+        (dispatch.get("latest_verification") or record.get("latest_verification") or {}).get("verdict")
+        or record.get("verdict")
+        or dispatch.get("verdict")
+        or ""
+    )
+    accepted_by_gate = dispatch_status in {"verified", "merged"} and gate_verdict == "pass"
+    if (mission_status in {"verified", "merged"} or accepted_by_gate) and dispatch_status in {"verified", "merged"}:
         status = "passed"
         reasons: list[str] = (
             [] if worker_status == "completed" else ["managed_worker_unclean_but_accepted"]
@@ -534,7 +547,7 @@ def _managed_phase(
 
 _WORKER_FAILURE_MESSAGES = {
     "provider_5xx": ("managed_provider_5xx", "编程助手的模型通道返回 5xx（服务端故障），不是代码问题。等通道恢复后重跑。"),
-    "provider_rate_limit": ("managed_provider_rate_limit", "模型额度用尽或被限流，worker 没能开始干活。"),
+    "provider_rate_limit": ("managed_provider_rate_limit", "模型额度用尽或被限流，worker 中途停了。"),
     "not_authenticated": ("managed_not_authenticated", "编程助手没登录。先在终端里把它登录好再重跑。"),
     "network_timeout": ("managed_network_timeout", "连模型通道超时，worker 没能完成。"),
     "process_crash": ("managed_process_crash", "worker 进程崩溃了。"),

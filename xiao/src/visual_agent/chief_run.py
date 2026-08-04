@@ -989,12 +989,17 @@ def _stop_reason_from_dispatch(dispatch: dict[str, Any], budget: dict[str, Any])
         if reason == "pytest_not_importable":
             return "pytest_not_importable"
         return _dispatch_stop_reason(dispatch)
-    if dispatch.get("quota_exhausted"):
-        # The worker never got to do the task; a gate failure here is noise.
-        return "quota_exhausted"
     latest = dispatch.get("latest_verification") if isinstance(dispatch.get("latest_verification"), dict) else {}
     verdict = str(latest.get("verdict") or "")
-    if status in {"verified", "merged"} and verdict == "pass":
+    accepted = status in {"verified", "merged"} and verdict == "pass"
+    if dispatch.get("quota_exhausted") and not accepted:
+        # A quota block usually means the worker never got to do the task. But it
+        # can also land on a trailing turn after the work is finished, and
+        # acceptance — not the worker's exit code — is the authority on whether
+        # the objective was met. Reporting quota_exhausted over a verified result
+        # sends the user to re-run work that is already done and proven.
+        return "quota_exhausted"
+    if accepted:
         return "verified"
     # Defensive: if verification passed with a completed worker, never call it budget_exhausted.
     if verdict == "pass" and status in {"verified", "merged", "no_product_changes"}:

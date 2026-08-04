@@ -418,3 +418,22 @@ def _seed_verified_mission(
         },
     )
     return workspace, mission["mission_id"]
+
+
+def test_stopped_mission_whose_gate_passed_is_read_as_verified(tmp_path: Path) -> None:
+    workspace, mission_id = _seed_verified_mission(tmp_path, memory_injected=True)
+    mission_path = workspace / "missions" / mission_id / "mission.json"
+
+    # The worker died on a trailing rate limit after the change already passed
+    # acceptance, so the mission carries a stopped label over a proven result.
+    mission = json.loads(mission_path.read_text(encoding="utf-8"))
+    mission["status"] = "stopped"
+    mission["stop_reason"] = "quota_exhausted"
+    mission_path.write_text(json.dumps(mission, ensure_ascii=False), encoding="utf-8")
+
+    journey = build_mission_journey(workspace_root=workspace, mission_id=mission_id)
+    managed = next(item for item in journey["phases"] if item["id"] == "managed")
+
+    assert managed["status"] == "passed"
+    assert journey["can_claim_verified"] is True
+    assert journey["status"] == "verified_pending_delivery"
