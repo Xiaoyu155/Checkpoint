@@ -3302,3 +3302,34 @@ def test_create_worktree_applies_uncommitted_deletions_not_just_edits(tmp_path) 
     assert result["dirty_file_overlay_deleted_files"] == 1
     assert not (worktree / "removed.js").exists()
     assert (worktree / "keep.js").read_text(encoding="utf-8") == "export const keep = 2;\n"
+
+
+def test_post_merge_verification_keeps_the_acceptance_grade(tmp_path) -> None:
+    from visual_agent.chief_dispatch import _run_post_merge_command_verification
+    from visual_agent.chief_plans_store import load_verification
+
+    workspace = tmp_path / "workspace"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    grade = {
+        "tier": "verified",
+        "reason_code": "acceptance_gate_discriminating",
+        "discriminating": True,
+    }
+
+    payload = _run_post_merge_command_verification(
+        workspace_root=workspace,
+        plan_id="p-merge",
+        mission_id="m-merge",
+        repo_root=repo,
+        command="python -c \"pass\"",
+        timeout_seconds=120.0,
+        prior_acceptance=grade,
+    )
+
+    # This record overwrites the pre-merge one on disk, so a merged mission —
+    # the only path that actually delivers — would otherwise lose the answer to
+    # "did this prove the objective?".
+    assert payload["acceptance"]["tier"] == "verified"
+    saved = load_verification(workspace, "p-merge")
+    assert saved["acceptance"]["reason_code"] == "acceptance_gate_discriminating"

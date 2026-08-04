@@ -1500,6 +1500,11 @@ def dispatch_chief_plan(
                 command=effective_verification_command,
                 verification_env=verification_env,
                 timeout_seconds=timeout_seconds,
+                prior_acceptance=(
+                    latest_verification.get("acceptance")
+                    if isinstance(latest_verification, dict)
+                    else None
+                ),
             )
             merge_result["post_merge_verification"] = {
                 "verdict": post_merge_verification.get("verdict"),
@@ -1649,6 +1654,7 @@ def _run_post_merge_command_verification(
     command: str,
     verification_env: list[dict[str, Any]] | None = None,
     timeout_seconds: float = 900.0,
+    prior_acceptance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
     save_mission_progress(
@@ -1676,6 +1682,10 @@ def _run_post_merge_command_verification(
         "repo_root": str(repo_root),
         "workspace_root": str(workspace_root),
         "run_profile": "post-merge",
+        # This record overwrites the pre-merge one on disk. Without carrying the
+        # grade forward, every merged mission — the only path that actually
+        # delivers — loses the answer to "did this prove the objective?".
+        **({"acceptance": prior_acceptance} if isinstance(prior_acceptance, dict) and prior_acceptance else {}),
         "passed": 1 if verdict == "pass" else 0,
         "inspection_only": 0,
         "failed": 0 if verdict == "pass" else 1,
