@@ -721,6 +721,25 @@ def test_build_worker_command_claude_code_yolo_uses_bypass_permissions(tmp_path)
     assert cmd["resolved_approval"] == "bypassPermissions"
 
 
+def test_build_worker_command_non_headless_agent_records_routing_identity(tmp_path) -> None:
+    plan = {"objective": "fix", "acceptance_criteria": [], "selected_workflows": [], "changed_files": []}
+    track = {"id": "track_1_mimo", "agent": "mimo", "model": "mimo-1"}
+
+    cmd = build_worker_command(
+        plan=plan,
+        track=track,
+        worktree=Path(tmp_path),
+        verification_command="python -m pytest -q",
+    )
+
+    # Without these the mission journey cannot bind the routing decision to the
+    # worker that ran, and reports routing_identity_missing.
+    assert cmd["resolved_provider"] == "mimo"
+    assert cmd["provider_source"] == "agent_profile"
+    assert cmd["routing_evidence"]["request"]["provider"] == "mimo"
+    assert cmd["routing_evidence"]["request"]["model"] == cmd["resolved_model"]
+
+
 def test_build_worker_command_appends_prompt_suffix_to_codex_stdin(tmp_path) -> None:
     plan = {"objective": "fix", "acceptance_criteria": [], "selected_workflows": [], "changed_files": []}
     track = {"id": "track_1_codex", "agent": "codex"}

@@ -119,6 +119,39 @@ def test_routing_request_mismatch_breaks_the_mission_chain(tmp_path: Path) -> No
     assert journey["can_claim_verified"] is False
 
 
+def test_missing_routing_identity_is_reported_as_an_evidence_gap(tmp_path: Path) -> None:
+    workspace, mission_id = _seed_verified_mission(
+        tmp_path,
+        memory_injected=True,
+        merge_status="merged",
+        resolved_provider="",
+    )
+
+    journey = build_mission_journey(workspace_root=workspace, mission_id=mission_id)
+    routing = next(item for item in journey["phases"] if item["id"] == "routing")
+
+    # Acceptance is independent of routing evidence, so the mission is still
+    # verified — but an unproven routing chain must not read as passed, and
+    # Pacer must not claim the result was delivered on that basis.
+    assert routing["status"] == "incomplete"
+    assert routing["reason_codes"] == ["routing_identity_missing"]
+    assert journey["can_claim_verified"] is True
+    assert journey["can_claim_delivered"] is False
+    assert "证据不完整" in journey["summary"]
+
+
+def test_acceptance_reports_execution_not_the_workflow_run_profile(tmp_path: Path) -> None:
+    workspace, mission_id = _seed_verified_mission(tmp_path, memory_injected=True)
+
+    journey = build_mission_journey(workspace_root=workspace, mission_id=mission_id)
+    acceptance = next(item for item in journey["phases"] if item["id"] == "acceptance")
+
+    # A test command that really ran must not be labelled `dry-run`.
+    assert acceptance["details"]["executed"] is True
+    assert acceptance["details"]["exit_code"] == 0
+    assert "run_profile" not in acceptance["details"]
+
+
 def test_preview_is_in_progress_instead_of_a_broken_chain(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     repo = tmp_path / "repo"
@@ -250,6 +283,7 @@ def _seed_verified_mission(
     merge_status: str = "",
     worker_status: str = "completed",
     budget_status: str = "within_budget",
+    resolved_provider: str = "openai",
 ) -> tuple[Path, str]:
     workspace = tmp_path / "workspace"
     repo = tmp_path / "repo"
@@ -282,7 +316,7 @@ def _seed_verified_mission(
             "agent": "codex",
             "status": worker_status,
             "exit_code": 0 if worker_status == "completed" else 1,
-            "resolved_provider": "openai",
+            "resolved_provider": resolved_provider,
             "resolved_model": "gpt-test",
             "cwd": str(repo),
         },
@@ -299,7 +333,7 @@ def _seed_verified_mission(
         saved["plan_id"],
         {
             "mission_id": mission["mission_id"],
-            "resolved_provider": "openai",
+            "resolved_provider": resolved_provider,
             "resolved_model": "gpt-test",
             "worker_attempts": 1,
             "project_memory_usage": usage,

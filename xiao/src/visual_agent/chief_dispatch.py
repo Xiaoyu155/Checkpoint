@@ -1405,6 +1405,13 @@ def dispatch_chief_plan(
             latest_verification = post_merge_verification
             if post_merge_verification.get("verdict") != "pass":
                 status = "merged_verification_failed"
+        # The isolation worktree has served its purpose once the change is
+        # merged and re-verified on the target branch. Leaving it behind is how
+        # a month of dogfooding accumulated dozens of full repo copies.
+        if merge_result.get("status") == "merged" and status == "verified":
+            from .worktree_gc import reap_mission_worktree
+
+            merge_result["worktree_cleanup"] = reap_mission_worktree(repo_root, worktree, branch=branch)
 
     payload = {
         **preview,
@@ -2466,11 +2473,22 @@ def build_worker_command(
                     requested_model=resolved_model,
                 ),
             }
+        # Non-headless agents still have to state who ran the task; without a
+        # provider and routing evidence the mission journey cannot bind the
+        # routing decision to the worker that executed it.
+        fallback_model = _resolved_or_inherited(str(track.get("model") or ""), "model")
         return {
             "argv": [agent, prompt],
             "display": format_argv([agent, prompt]),
-            "resolved_model": _resolved_or_inherited(str(track.get("model") or ""), "model"),
+            "resolved_model": fallback_model,
             "resolved_reasoning_effort": str(reasoning_effort or track.get("reasoning_effort") or "inherit"),
+            "resolved_provider": agent,
+            "provider_source": "agent_profile",
+            "routing_evidence": routing_request_evidence(
+                selection,
+                requested_provider=agent,
+                requested_model=fallback_model,
+            ),
         }
     # Sandbox and approval are root Codex options.  ``codex exec`` accepts the
     # sandbox flag too, but ``codex exec resume`` does not, so keeping both
