@@ -284,6 +284,24 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
         self.wfile.flush()
 
+    _MAX_DISCARDED_BODY = 8 * 1024 * 1024
+
+    def _discard_body(self) -> None:
+        """Consume the request body so a refusal reaches the client cleanly."""
+        try:
+            remaining = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return
+        remaining = min(max(remaining, 0), self._MAX_DISCARDED_BODY)
+        while remaining > 0:
+            try:
+                chunk = self.rfile.read(min(remaining, 65536))
+            except OSError:
+                return
+            if not chunk:
+                return
+            remaining -= len(chunk)
+
     def _read_body(self) -> dict[str, Any]:
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -309,6 +327,11 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             reason = self._api_request_block_reason(path, require_json=True)
             if reason:
                 status = 415 if reason == "API requests must use Content-Type: application/json." else 403
+                # Answering without draining the request body leaves unread data
+                # in the socket; the peer then sees a connection abort instead of
+                # this response, so a blocked cross-site POST looks like a broken
+                # server rather than a refused one.
+                self._discard_body()
                 self._send_json({"ok": False, "error": reason}, status=status)
                 return
         payload = self._read_body()
