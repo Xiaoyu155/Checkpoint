@@ -15,10 +15,13 @@ def handle_pacer_management(argv: Sequence[str]) -> int | None:
     arguments = [str(item) for item in argv]
     if not arguments:
         return None
+    # `pacer usage timeline` is how people say it; the parser is flat.
+    if len(arguments) >= 2 and arguments[0] == "usage" and arguments[1] == "timeline":
+        arguments = ["usage-timeline", *arguments[2:]]
     command = arguments[0]
     from .cli_chief import CHIEF_COMMANDS
 
-    if command in {"doctor", "agents", "init", "quickstart", "app", "chat", "shell"} or command in CHIEF_COMMANDS:
+    if command in {"doctor", "agents", "init", "quickstart", "app", "chat", "shell", "journey", "usage", "usage-timeline", "worktrees"} or command in CHIEF_COMMANDS:
         if command in {"chat", "shell"}:
             from .interactive_agent import run_interactive_agent
 

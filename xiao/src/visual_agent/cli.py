@@ -640,6 +640,28 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     usage.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing agent_session.json.")
     usage.add_argument("--format", choices=["json", "markdown"], default="json", help="Output format. Default: json.")
 
+    usage_timeline = subparsers.add_parser(
+        "usage-timeline",
+        help="Show what Pacer actually did recently, across every local workspace. Also: pacer usage timeline.",
+    )
+    usage_timeline.add_argument("--workspace-root", action="append", default=None, help="Workspace root to read. Repeatable. Default: discover under --base.")
+    usage_timeline.add_argument("--base", default=None, help="Directory to scan for .agent-workspace. Default: current directory.")
+    usage_timeline.add_argument("--days", type=int, default=14, help="How far back to look. Default: 14.")
+    usage_timeline.add_argument("--limit", type=int, default=100, help="Maximum missions to show. Default: 100.")
+    usage_timeline.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    worktrees = subparsers.add_parser("worktrees", help="List Pacer isolation worktrees and reclaim finished ones.")
+    worktrees.add_argument("--repo-root", default=".", help="Repository whose isolation worktrees to inspect. Default: current directory.")
+    worktrees.add_argument("--reap", action="store_true", help="Actually remove the reclaimable worktrees. Default: report only.")
+    worktrees.add_argument("--keep-days", type=float, default=2.0, help="Keep worktrees younger than this many days. Default: 2.")
+    worktrees.add_argument("--keep-last", type=int, default=2, help="Always keep this many most recent worktrees. Default: 2.")
+    worktrees.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
+    journey = subparsers.add_parser("journey", help="Show the five-pillar evidence chain for a mission.")
+    journey.add_argument("mission_id", nargs="?", default=None, help="Mission id. Default: the most recent mission.")
+    journey.add_argument("--workspace-root", default=".agent-workspace", help="Workspace root containing missions/.")
+    journey.add_argument("--format", choices=["json", "markdown"], default="markdown", help="Output format. Default: markdown.")
+
     activate = subparsers.add_parser("activate", help="Activate a local license key.")
     activate.add_argument("--key", required=True, help="License key to write locally.")
     activate.add_argument("--tier", choices=["pro", "team", "enterprise"], default="pro", help="License tier to write. Default: pro.")

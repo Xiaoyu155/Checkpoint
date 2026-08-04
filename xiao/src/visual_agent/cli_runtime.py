@@ -32,6 +32,9 @@ RUNTIME_COMMANDS = {
     "export-runs",
     "usage-status",
     "usage",
+    "usage-timeline",
+    "journey",
+    "worktrees",
     "activate",
     "save-task-context",
     "summarize-latest-failure",
@@ -228,6 +231,47 @@ def handle_runtime_command(args: Any) -> int:
         else:
             print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
         return 0
+    if args.command == "usage-timeline":
+        from .usage_timeline import collect_usage_timeline, discover_workspace_roots, usage_timeline_to_markdown
+
+        roots: list[Any]
+        if args.workspace_root:
+            roots = [Path(item).expanduser().resolve() for item in args.workspace_root]
+        else:
+            roots = list(discover_workspace_roots(args.base or Path.cwd()))
+        payload = collect_usage_timeline(roots, days=args.days, limit=args.limit)
+        if args.format == "markdown":
+            print(usage_timeline_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "worktrees":
+        from .worktree_gc import reap_worktrees, worktree_report_to_markdown
+
+        payload = reap_worktrees(
+            Path(args.repo_root).expanduser().resolve(),
+            keep_days=args.keep_days,
+            keep_last=args.keep_last,
+            dry_run=not args.reap,
+        )
+        if args.format == "markdown":
+            print(worktree_report_to_markdown(payload))
+        else:
+            print(json.dumps(to_jsonable(payload), ensure_ascii=False, indent=2))
+        return 1 if payload.get("failed") else 0
+    if args.command == "journey":
+        from .mission_journey import build_latest_mission_journey, build_mission_journey, mission_journey_report
+
+        workspace_root = Path(args.workspace_root).expanduser().resolve()
+        if args.mission_id:
+            journey = build_mission_journey(workspace_root=workspace_root, mission_id=args.mission_id)
+        else:
+            journey = build_latest_mission_journey(workspace_root)
+        if args.format == "markdown":
+            print(mission_journey_report(journey))
+        else:
+            print(json.dumps(to_jsonable(journey), ensure_ascii=False, indent=2))
+        return 0 if journey.get("phases") else 1
     if args.command == "activate":
         from .licensing import activate_license, default_license_path
 

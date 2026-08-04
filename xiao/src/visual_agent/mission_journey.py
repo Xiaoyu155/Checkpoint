@@ -97,13 +97,17 @@ def build_mission_journey(
     continuity_status = _continuity_status(links)
     phase_map = {item["id"]: item for item in phases}
     can_claim_verified = (
-        phase_map["routing"]["status"] == "passed"
+        phase_map["routing"]["status"] in {"passed", "incomplete"}
         and phase_map["managed"]["status"] == "passed"
         and phase_map["acceptance"]["status"] == "passed"
         and phase_map["memory"]["status"] not in {"blocked", "failed"}
         and not any(item["status"] == "broken" for item in links[:3])
     )
-    can_claim_delivered = can_claim_verified and phase_map["delivery"]["status"] == "passed"
+    can_claim_delivered = (
+        can_claim_verified
+        and phase_map["routing"]["status"] == "passed"
+        and phase_map["delivery"]["status"] == "passed"
+    )
     status = _journey_status(
         mission=mission_payload,
         phases=phase_map,
@@ -111,7 +115,7 @@ def build_mission_journey(
         can_claim_delivered=can_claim_delivered,
     )
     current_phase = next(
-        (item["id"] for item in phases if item["status"] not in {"passed", "not_applicable"}),
+        (item["id"] for item in phases if item["status"] not in {"passed", "not_applicable", "incomplete"}),
         "delivery",
     )
     reason_codes = list(
@@ -242,6 +246,67 @@ def mission_journey_to_markdown(journey: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+_PHASE_MARKS = {
+    "passed": "✓",
+    "incomplete": "!",
+    "ready": "·",
+    "not_applicable": "-",
+    "pending": "·",
+    "blocked": "✗",
+    "failed": "✗",
+}
+
+
+def mission_journey_report(journey: dict[str, Any]) -> str:
+    """Full human-readable evidence chain for one mission.
+
+    ``mission_journey_to_markdown`` is the one-glance form used inside chat
+    replies; this is the version behind ``pacer journey``, so it spells out every
+    phase and where the evidence lives.
+    """
+
+    if not journey or not journey.get("phases"):
+        return "闭环证据暂不可用：这个任务还没有 journey 记录。"
+    lines = [
+        f"# 任务闭环 · {journey.get('mission_id') or ''}",
+        "",
+        f"- 目标：{journey.get('objective') or ''}",
+        f"- 状态：**{journey.get('status') or 'unknown'}**（{journey.get('summary') or ''}）",
+        f"- 可以声称通过验收：`{bool(journey.get('can_claim_verified'))}` · 可以声称已交付：`{bool(journey.get('can_claim_delivered'))}`",
+    ]
+    if journey.get("next_action"):
+        lines.append(f"- 下一步：{journey.get('next_action')}")
+    if journey.get("continuity_status") == "broken":
+        lines.append("- ⚠ 证据链断开，Pacer 不会把这次任务当作完整交付。")
+    lines.append("")
+    phases = journey.get("phases") if isinstance(journey.get("phases"), list) else []
+    for phase in phases:
+        if not isinstance(phase, dict):
+            continue
+        status = str(phase.get("status") or "")
+        mark = _PHASE_MARKS.get(status, "·")
+        lines.append(f"## {mark} {phase.get('title') or phase.get('id')} — {status}")
+        if phase.get("summary"):
+            lines.append(f"- {phase.get('summary')}")
+        details = phase.get("details") if isinstance(phase.get("details"), dict) else {}
+        for key, value in details.items():
+            if value in ("", None, [], {}, False, 0):
+                continue
+            if key == "memory_entry_labels" and isinstance(value, list):
+                lines.append("- 注入的记忆条目：")
+                for entry in value[:8]:
+                    if isinstance(entry, dict):
+                        lines.append(f"  - `{entry.get('id')}` {str(entry.get('objective') or '')[:80]}")
+                continue
+            lines.append(f"- {key}: `{value}`")
+        if phase.get("reason_codes"):
+            lines.append(f"- 原因码：{', '.join(str(code) for code in phase['reason_codes'])}")
+        lines.append("")
+    if journey.get("workspace_root"):
+        lines.append(f"证据目录：`{journey.get('workspace_root')}`")
+    return "\n".join(lines)
+
+
 def _routing_phase(
     plan: dict[str, Any],
     workers: list[dict[str, Any]],
@@ -284,9 +349,11 @@ def _routing_phase(
             status = "blocked"
             reasons = ["routing_request_mismatch"]
         else:
-            # Worker ran but provider/model fields missing in evidence — treat as
-            # a data gap, not a routing failure. Journey can still claim verified.
-            status = "passed"
+            # Worker ran, but the record does not say which provider/model served
+            # it. Acceptance is independent of this, so the mission can still be
+            # called verified — but the routing pillar must not read as passed,
+            # and Pacer will not claim delivery on an unproven routing chain.
+            status = "incomplete"
             reasons = ["routing_identity_missing"]
     elif plan:
         status = "ready"
@@ -494,7 +561,11 @@ def _acceptance_phase(
             "verdict": verdict,
             "command": str(command.get("command") or ""),
             "exit_code": command.get("exit_code"),
-            "run_profile": str(latest.get("run_profile") or ""),
+            # ``run_profile`` describes the Checkpoint workflow profile, not the
+            # test command. Reporting it next to a command that really ran made
+            # passing acceptance read as "dry-run"; state execution directly.
+            "executed": bool(command.get("command")),
+            "workflow_run_profile": str(latest.get("run_profile") or ""),
         },
     }
 
@@ -584,7 +655,7 @@ def _continuity_links(
     managed_status = str(phases["managed"].get("status") or "")
     acceptance_status = str(phases["acceptance"].get("status") or "")
     delivery_status = str(phases["delivery"].get("status") or "")
-    routing_ok = routing_status == "passed" and bool(latest_worker)
+    routing_ok = routing_status in {"passed", "incomplete"} and bool(latest_worker)
     memory_selected = int((phases["memory"].get("details") or {}).get("selected_entries") or 0)
     memory_ok = phases["memory"]["status"] == "passed" if memory_selected else True
     verification_plan = str(verification.get("plan_id") or plan_id)
@@ -695,6 +766,7 @@ def _journey_summary(phases: list[dict[str, Any]]) -> str:
         "blocked": "被阻塞",
         "failed": "失败",
         "partial": "证据待补",
+        "incomplete": "证据不完整",
         "not_applicable": "本次无需",
     }
     return " → ".join(

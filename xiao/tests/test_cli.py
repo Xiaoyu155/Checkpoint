@@ -5,6 +5,7 @@ import subprocess
 import socketserver
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Thread
 from types import SimpleNamespace
@@ -2015,3 +2016,48 @@ def cli_run_result(workflow: str) -> WorkflowRunResult:
         run_profile="dry-run",
     )
 
+
+
+def test_usage_timeline_cli_reports_missions_across_workspaces(tmp_path, capsys) -> None:
+    workspace = tmp_path / "project" / ".agent-workspace"
+    mission_dir = workspace / "missions" / "20260804-demo"
+    mission_dir.mkdir(parents=True)
+    (mission_dir / "mission.json").write_text(
+        json.dumps(
+            {
+                "mission_id": "20260804-demo",
+                "objective": "add a version endpoint",
+                "status": "verified",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (mission_dir / "journey.json").write_text(
+        json.dumps(
+            {
+                "mission_id": "20260804-demo",
+                "status": "completed",
+                "can_claim_verified": True,
+                "can_claim_delivered": True,
+                "phases": [{"id": "routing", "status": "passed", "details": {"provider": "openai", "model": "gpt-5.5"}}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(["usage-timeline", "--base", str(tmp_path), "--days", "14"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "Pacer 使用时间线" in out
+    assert "add a version endpoint" in out
+
+
+def test_worktrees_cli_defaults_to_reporting_without_removing(tmp_path, capsys) -> None:
+    exit_code = main(["worktrees", "--repo-root", str(tmp_path), "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["dry_run"] is True
+    assert payload["removed_count"] == 0
