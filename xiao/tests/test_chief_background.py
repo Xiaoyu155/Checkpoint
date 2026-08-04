@@ -516,3 +516,65 @@ def test_mission_status_reconciles_missing_background_process(tmp_path, monkeypa
     assert payload["stop_reason"] == "worker_orphaned"
     assert "final_report_path" in payload
     assert (workspace.root / "missions" / mission_id / "final_report.md").exists()
+
+
+def test_interrupted_foreground_mission_is_reconciled(tmp_path) -> None:
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from visual_agent.chief_background import reconcile_workspace_backgrounds
+
+    workspace = tmp_path / ".agent-workspace"
+    mission_dir = workspace / "missions" / "20260708-151040-3984f9"
+    mission_dir.mkdir(parents=True)
+    stale = (datetime.now(timezone.utc) - timedelta(days=26)).isoformat()
+    # A foreground run that was interrupted leaves mission.json claiming
+    # "running" and writes no background.json at all, so nothing could see it —
+    # while the host kept counting it as an active mission and refused to launch
+    # any work for the whole session.
+    (mission_dir / "mission.json").write_text(
+        json.dumps(
+            {
+                "mission_id": "20260708-151040-3984f9",
+                "status": "running",
+                "objective": "interrupted run",
+                "created_at": stale,
+                "updated_at": stale,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    items = reconcile_workspace_backgrounds(workspace, update=True, auto_resume=False)
+
+    assert any(item.get("abandoned") for item in items)
+    reconciled = json.loads((mission_dir / "mission.json").read_text(encoding="utf-8"))
+    assert reconciled["status"] == "stopped"
+
+
+def test_a_recently_active_mission_is_left_alone(tmp_path) -> None:
+    import json
+    from datetime import datetime, timezone
+
+    from visual_agent.chief_background import reconcile_workspace_backgrounds
+
+    workspace = tmp_path / ".agent-workspace"
+    mission_dir = workspace / "missions" / "20260804-000000-aaaaaa"
+    mission_dir.mkdir(parents=True)
+    (mission_dir / "mission.json").write_text(
+        json.dumps(
+            {
+                "mission_id": "20260804-000000-aaaaaa",
+                "status": "running",
+                "objective": "live run",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    items = reconcile_workspace_backgrounds(workspace, update=True, auto_resume=False)
+
+    assert not any(item.get("abandoned") for item in items)
+    assert json.loads((mission_dir / "mission.json").read_text(encoding="utf-8"))["status"] == "running"

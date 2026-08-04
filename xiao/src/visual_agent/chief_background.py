@@ -587,6 +587,24 @@ def _classify_orphan_stop_reason(
     return "worker_orphaned"
 
 
+# A foreground mission that is genuinely alive touches its record far more often
+# than this; anything quieter has been dead since the process went away.
+_ABANDONED_AFTER_SECONDS = 30 * 60
+
+
+def _mission_idle_seconds(mission: dict[str, Any]) -> float | None:
+    stamp = str(mission.get("updated_at") or mission.get("created_at") or "").strip()
+    if not stamp:
+        return None
+    try:
+        parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
+
+
 def reconcile_workspace_backgrounds(
     workspace_root: str | Path,
     *,
@@ -646,6 +664,29 @@ def reconcile_workspace_backgrounds(
                         entry["auto_resume"] = resumed
                         if resumed.get("status") == "background_started":
                             auto_resume_budget -= 1
+                results.append(entry)
+            continue
+
+        # Path A2: claims running but left no background record at all. A
+        # foreground run that was interrupted never writes one, so nothing above
+        # can see it — and the host counts it as an active mission forever. One
+        # such mission from 27 days ago was enough to block a hosted session from
+        # launching any work at all.
+        if not isinstance(record, dict) and status in {"running", "background_running"}:
+            idle_seconds = _mission_idle_seconds(mission)
+            if idle_seconds is not None and idle_seconds >= _ABANDONED_AFTER_SECONDS:
+                entry = {
+                    "mission_id": mid,
+                    "abandoned": {
+                        "status": "abandoned",
+                        "idle_seconds": round(idle_seconds),
+                        "reason": "no_background_record",
+                    },
+                }
+                if update:
+                    mission["status"] = "stopped"
+                    mission["stop_reason"] = "worker_orphaned"
+                    save_mission(workspace_path, mission)
                 results.append(entry)
             continue
 
