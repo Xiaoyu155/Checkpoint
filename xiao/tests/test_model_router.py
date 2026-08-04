@@ -73,3 +73,33 @@ def test_tier_task_kind_mapping() -> None:
     assert tier_task_kind("cheap") == "fast"
     assert tier_task_kind("standard") == "balanced"
     assert tier_task_kind("strong") == "implementation"
+
+
+def test_money_and_credential_work_is_never_routed_cheap() -> None:
+    from visual_agent.model_router import route_task
+
+    # "修复支付回调验签失败" matched no term and went to the balanced tier: a
+    # cheap model quietly handling signature verification is the case this
+    # ladder exists to prevent.
+    for goal in (
+        "修复支付回调验签失败的问题",
+        "调整退款对账逻辑",
+        "更新 API 密钥的读取方式",
+        "fix the payment webhook signature check",
+    ):
+        assert route_task(objective=goal, changed_files=["a.py"]).tier == "strong", goal
+
+
+def test_security_wins_even_when_the_edit_sounds_mechanical() -> None:
+    from visual_agent.model_router import route_task
+
+    decision = route_task(objective="修正支付金额提示语的错别字", changed_files=["a.py"])
+
+    assert decision.tier == "strong"
+
+
+def test_common_chinese_wording_for_mechanical_edits_routes_cheap() -> None:
+    from visual_agent.model_router import route_task
+
+    for goal in ("把 README 里的拼写错误改一下", "调整一下代码排版", "给这个常量换个名字"):
+        assert route_task(objective=goal, changed_files=["a.py"]).tier == "cheap", goal

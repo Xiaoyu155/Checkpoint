@@ -23,6 +23,13 @@ _STRONG_TERMS = {
     "distributed", "transaction", "schema", "rewrite", "design",
     "重构", "架构", "并发", "异步", "安全", "认证", "鉴权", "加密", "迁移", "性能",
     "重新设计", "分布式", "事务", "线程", "竞态", "死锁", "重写",
+    # Money and credentials. "修复支付回调验签失败" matched nothing here and was
+    # routed to the balanced tier — a cheap model quietly handling signature
+    # verification is exactly the case this ladder exists to prevent.
+    "payment", "signature", "signing", "webhook", "callback", "credential",
+    "secret", "token", "password", "permission", "privilege", "sandbox escape",
+    "支付", "付款", "退款", "对账", "验签", "签名", "密钥", "凭证", "口令",
+    "权限", "越权", "回调", "令牌",
 }
 # Signals that a task is mechanical (cheap model is enough).
 _CHEAP_TERMS = {
@@ -31,6 +38,10 @@ _CHEAP_TERMS = {
     "spelling", "punctuation", "constant", "message",
     "文案", "重命名", "改名", "注释", "格式", "错别字", "措辞", "改字", "标点",
     "空格", "缩进", "字符串", "提示语", "文字",
+    # Same idea said differently: "改一下拼写错误" matched nothing and paid for
+    # the balanced tier. Only unambiguous mechanical wording belongs here —
+    # a wrong cheap route costs a wasted round.
+    "拼写", "别字", "排版", "换行", "空行", "变量名", "函数名", "常量",
 }
 _SMALL_SCOPE_TERMS = {
     "small", "small-scope", "small scope", "small change", "offline-testable",
