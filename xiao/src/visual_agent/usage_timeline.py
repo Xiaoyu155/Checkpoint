@@ -174,6 +174,7 @@ def _entry(
     pillars: dict[str, str] = {}
     routing_summary = ""
     memory_entries = 0
+    acceptance_tier = ""
     for phase in phases:
         if not isinstance(phase, dict):
             continue
@@ -187,6 +188,8 @@ def _entry(
             routing_summary = " / ".join(part for part in (agent, provider, model) if part)
         elif phase_id == "memory":
             memory_entries = int(details.get("selected_entries") or 0)
+        elif phase_id == "acceptance":
+            acceptance_tier = str(details.get("acceptance_tier") or "")
     return {
         "workspace_root": str(workspace_root),
         "project": workspace_root.parent.name,
@@ -203,6 +206,7 @@ def _entry(
         "reason_codes": [str(code) for code in (journey.get("reason_codes") or [])],
         "routing": routing_summary,
         "memory_entries": memory_entries,
+        "acceptance_tier": acceptance_tier,
         "pillars": pillars,
     }
 
@@ -262,6 +266,8 @@ def usage_timeline_to_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- 路由：{entry.get('routing')}")
         if entry.get("memory_entries"):
             lines.append(f"- 记忆：注入 {entry.get('memory_entries')} 条")
+        if entry.get("acceptance_tier") == "regression_clear":
+            lines.append("- 验收：只证明没弄坏，没证明目标达成")
         if entry.get("next_action"):
             lines.append(f"- 下一步：{entry.get('next_action')}")
         if entry.get("reason_codes"):

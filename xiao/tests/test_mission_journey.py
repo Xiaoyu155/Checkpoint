@@ -152,6 +152,62 @@ def test_acceptance_reports_execution_not_the_workflow_run_profile(tmp_path: Pat
     assert "run_profile" not in acceptance["details"]
 
 
+def test_non_discriminating_gate_cannot_claim_the_objective_was_met(tmp_path: Path) -> None:
+    workspace, mission_id = _seed_verified_mission(
+        tmp_path,
+        memory_injected=True,
+        acceptance_grade={
+            "tier": "regression_clear",
+            "reason_code": "acceptance_gate_not_discriminating",
+            "message": "验收命令在改动前就已经通过。",
+            "discriminating": False,
+        },
+    )
+
+    journey = build_mission_journey(workspace_root=workspace, mission_id=mission_id)
+    acceptance = next(item for item in journey["phases"] if item["id"] == "acceptance")
+
+    assert acceptance["status"] == "incomplete"
+    assert acceptance["details"]["acceptance_tier"] == "regression_clear"
+    assert acceptance["details"]["gate_discriminating"] is False
+    assert journey["can_claim_verified"] is False
+    assert journey["status"] == "regression_clear"
+    assert "证明不了" in journey["next_action"] or "没弄坏" in journey["next_action"]
+    # A weak gate is weak evidence, not a broken chain.
+    assert not any(item["status"] == "broken" for item in journey["links"])
+
+
+def test_discriminating_gate_still_claims_verified(tmp_path: Path) -> None:
+    workspace, mission_id = _seed_verified_mission(
+        tmp_path,
+        memory_injected=True,
+        acceptance_grade={
+            "tier": "verified",
+            "reason_code": "acceptance_gate_discriminating",
+            "message": "验收命令在改动前是失败的。",
+            "discriminating": True,
+        },
+    )
+
+    journey = build_mission_journey(workspace_root=workspace, mission_id=mission_id)
+    acceptance = next(item for item in journey["phases"] if item["id"] == "acceptance")
+
+    assert acceptance["status"] == "passed"
+    assert journey["can_claim_verified"] is True
+
+
+def test_records_without_grading_keep_their_historical_reading(tmp_path: Path) -> None:
+    workspace, mission_id = _seed_verified_mission(tmp_path, memory_injected=True)
+
+    journey = build_mission_journey(workspace_root=workspace, mission_id=mission_id)
+    acceptance = next(item for item in journey["phases"] if item["id"] == "acceptance")
+
+    # Missions recorded before grading existed are not retroactively downgraded.
+    assert acceptance["status"] == "passed"
+    assert acceptance["details"]["acceptance_tier"] == ""
+    assert journey["can_claim_verified"] is True
+
+
 def test_preview_is_in_progress_instead_of_a_broken_chain(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     repo = tmp_path / "repo"
@@ -284,6 +340,7 @@ def _seed_verified_mission(
     worker_status: str = "completed",
     budget_status: str = "within_budget",
     resolved_provider: str = "openai",
+    acceptance_grade: dict | None = None,
 ) -> tuple[Path, str]:
     workspace = tmp_path / "workspace"
     repo = tmp_path / "repo"
@@ -357,6 +414,7 @@ def _seed_verified_mission(
                 "command": "python -m pytest -q",
                 "exit_code": 0,
             },
+            **({"acceptance": acceptance_grade} if acceptance_grade else {}),
         },
     )
     return workspace, mission["mission_id"]

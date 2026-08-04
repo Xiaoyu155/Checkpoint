@@ -149,6 +149,7 @@ def _handle_chief_dispatch(args: Any) -> int:
     payload = dispatch_chief_plan(
         test_command=getattr(args, "test_command", None),
         allow_test_edits=getattr(args, "allow_test_edits", False),
+        base_probe_enabled=not getattr(args, "no_base_probe", False),
         merge=getattr(args, "merge", False),
         workspace_root=args.workspace_root,
         plan_id=args.plan,
@@ -182,6 +183,7 @@ def _run_chief_mission_args(args: Any, *, execute: bool, dry_run: bool, resume_m
     return run_chief_mission(
         test_command=getattr(args, "test_command", None),
         allow_test_edits=getattr(args, "allow_test_edits", False),
+        base_probe_enabled=not getattr(args, "no_base_probe", False),
         merge=getattr(args, "merge", False),
         require_env=tuple(getattr(args, "require_env", []) or ()),
         goal=args.goal,
@@ -1053,6 +1055,7 @@ def _handle_chief_background_worker(args: Any) -> int:
         allow_coverage_gap=args.allow_coverage_gap,
         test_command=getattr(args, "test_command", None),
         allow_test_edits=getattr(args, "allow_test_edits", False),
+        base_probe_enabled=not getattr(args, "no_base_probe", False),
         merge=getattr(args, "merge", False),
         execution_policy=execution_policy,
     )

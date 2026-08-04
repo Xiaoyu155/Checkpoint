@@ -534,7 +534,17 @@ def _acceptance_phase(
     latest = latest if isinstance(latest, dict) else {}
     command = latest.get("command_verification") if isinstance(latest.get("command_verification"), dict) else {}
     verdict = str(latest.get("verdict") or command.get("verdict") or "")
-    if verdict == "pass":
+    # Records written before acceptance grading existed carry no tier; they keep
+    # their historical reading rather than being retroactively downgraded.
+    grade = latest.get("acceptance") if isinstance(latest.get("acceptance"), dict) else {}
+    tier = str(grade.get("tier") or "")
+    if verdict == "pass" and tier and tier != "verified":
+        # The gate passed but did not prove the objective. Saying "passed" here
+        # is exactly the false green this grading exists to stop.
+        status = "incomplete"
+        reasons = [str(grade.get("reason_code") or "acceptance_not_discriminating")]
+        summary = f"只证明没弄坏：{command.get('command') or 'Checkpoint workflow'}"
+    elif verdict == "pass":
         status = "passed"
         reasons: list[str] = []
         summary = f"验收通过：{command.get('command') or 'Checkpoint workflow'}"
@@ -566,6 +576,9 @@ def _acceptance_phase(
             # passing acceptance read as "dry-run"; state execution directly.
             "executed": bool(command.get("command")),
             "workflow_run_profile": str(latest.get("run_profile") or ""),
+            "acceptance_tier": tier,
+            "acceptance_message": str(grade.get("message") or ""),
+            "gate_discriminating": grade.get("discriminating"),
         },
     }
 
@@ -680,8 +693,15 @@ def _continuity_links(
         _link(
             "managed_to_acceptance",
             managed_ok and acceptance_ok and verification_plan == plan_id,
-            "worker 产物由同一 plan 的验收门检查。",
+            (
+                "验收门跑过了，但它证明不了这次目标达成。"
+                if acceptance_status == "incomplete"
+                else "worker 产物由同一 plan 的验收门检查。"
+            ),
             "managed_acceptance_chain_broken",
+            # An acceptance gate that ran but did not discriminate is weak
+            # evidence, not a broken chain.
+            partial=managed_ok and acceptance_status == "incomplete",
             pending=managed_status in {"ready", "pending", "active"} or acceptance_status in {"pending", "active"},
         ),
         _link(
@@ -691,7 +711,9 @@ def _continuity_links(
             "acceptance_delivery_chain_pending",
             ready=delivery_status == "ready",
             pending=acceptance_status in {"pending", "active"},
-            partial=acceptance_ok and delivery_status == "partial",
+            # Weak acceptance evidence blocks the delivery claim, but the chain
+            # itself is not broken — the user just has to decide.
+            partial=(acceptance_ok and delivery_status == "partial") or acceptance_status == "incomplete",
         ),
     ]
 
@@ -752,6 +774,9 @@ def _journey_status(
         return "verified_pending_dogfood" if phases["delivery"]["status"] == "partial" else "verified_pending_delivery"
     if any(item["status"] in {"blocked", "failed"} for item in phases.values()):
         return "blocked"
+    if phases["acceptance"]["status"] == "incomplete":
+        # The work ran and broke nothing, but nothing proved the objective.
+        return "regression_clear"
     if str(mission.get("status") or "") in {"running", "background_running", "created", "preview"}:
         return "in_progress"
     return "partial"
@@ -786,6 +811,11 @@ def _next_action(status: str, delivery: dict[str, Any]) -> str:
         return "用户任务已验收；发布 Pacer 前还需绑定严格 Dogfood 证据。"
     if status == "blocked":
         return "先处理第一个被阻塞阶段，再从原 mission 恢复。"
+    if status == "regression_clear":
+        return (
+            "改动没弄坏现有测试，但验收命令证明不了这次目标已达成。"
+            "给一条改动前会失败的验收命令再跑一次，或者自己看一眼 diff 再决定合并。"
+        )
     if delivery.get("status") == "pending":
         return "继续托管，完成 worker 与验收后再交付。"
     return "查看阶段原因代码，修复断链后继续原 mission。"

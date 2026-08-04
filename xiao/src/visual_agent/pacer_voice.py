@@ -106,6 +106,7 @@ def user_story(
     verification_command: str = "",
     worktree: str = "",
     message_fallback: str = "",
+    acceptance_tier: str = "",
 ) -> dict[str, Any]:
     """Build a plain-language user-facing story.
 
@@ -146,6 +147,31 @@ def user_story(
             is_code_problem=False,
             choices=["等验收结果", "如果验收命令不对，我们可以改成你平时用的那条"],
             technical_tag=stage_key,
+        )
+
+    # Being straight about what the gate did and did not prove matters more than
+    # sounding confident: a command that was already green before the change
+    # cannot tell the user their objective was met.
+    if reason == "verified" and str(acceptance_tier or "") == "regression_clear":
+        return _story(
+            headline="改完了，但我不能替你打包票说这件事做到了。",
+            what=(
+                "编程助手改完了，验收命令"
+                + (f"（`{cmd}`）" if cmd else "")
+                + "也过了——但这条命令在改动之前本来就是通过的，"
+                "所以它只能证明「没弄坏别的东西」，证明不了「你要的事做成了」。"
+                + (f" 大概动了 {count} 个产品文件。" if count is not None else "")
+                + " 改动还在隔离文件夹里"
+                + (f"（{wt}）" if wt else "")
+                + "。"
+            ),
+            is_code_problem=False,
+            choices=[
+                "给我一条「改之前会失败」的验收命令，我重跑一遍",
+                "想自己打开隔离文件夹看一眼再决定",
+                "看过没问题的话，告诉我合并",
+            ],
+            technical_tag="verified_regression_clear",
         )
 
     # Terminal stories by stop_reason

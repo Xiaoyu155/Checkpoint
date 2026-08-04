@@ -65,3 +65,33 @@ def test_worker_prompt_is_debate_not_handcuff() -> None:
     assert "conserve" not in prompt.lower() or "budget" not in prompt.lower()
     assert "guidance only" in prompt.lower() or "not a whitelist" in prompt.lower()
     assert "micromanage" in prompt.lower() or "autonomy" in prompt.lower()
+
+
+def test_verified_with_a_non_discriminating_gate_does_not_promise_the_objective() -> None:
+    from visual_agent.pacer_voice import user_story
+
+    story = user_story(
+        stop_reason="verified",
+        status="verified",
+        goal="给项目加个 /version 接口",
+        verification_command="python -m pytest -q",
+        acceptance_tier="regression_clear",
+    )
+
+    assert "不能替你打包票" in story["headline"]
+    assert "没弄坏" in story["what_happened"]
+    assert story["technical_tag"] == "verified_regression_clear"
+
+
+def test_verified_with_a_discriminating_gate_still_says_it_is_done() -> None:
+    from visual_agent.pacer_voice import user_story
+
+    story = user_story(
+        stop_reason="verified",
+        status="verified",
+        goal="给项目加个 /version 接口",
+        verification_command="python -m pytest -q",
+        acceptance_tier="verified",
+    )
+
+    assert "可以收工" in story["headline"]

@@ -126,6 +126,7 @@ def run_chief_mission(
     allow_coverage_gap: bool = False,
     test_command: str | None = None,
     allow_test_edits: bool = False,
+    base_probe_enabled: bool = True,
     merge: bool = False,
     require_env: tuple[str, ...] = (),
     verification_env: list[dict[str, Any]] | None = None,
@@ -624,6 +625,7 @@ def run_chief_mission(
         repair_strategy=effective_repair_strategy,
         test_command=test_command,
         allow_test_edits=effective_allow_test_edits,
+        base_probe_enabled=base_probe_enabled,
         verification_env=requested_verification_env,
     )
     append_round(
@@ -723,6 +725,7 @@ def run_chief_mission(
         repair_strategy=effective_repair_strategy,
         test_command=test_command,
         allow_test_edits=effective_allow_test_edits,
+        base_probe_enabled=base_probe_enabled,
         merge=effective_merge,
         verification_env=requested_verification_env,
         allow_prior_verified_evidence=_allow_prior_verified_evidence_for_resume(
@@ -1457,6 +1460,11 @@ def _chief_run_three_section_markdown(
         verification_command=cmd,
         worktree=wt,
         message_fallback=str(payload.get("message") or ""),
+        acceptance_tier=str(
+            (latest_verification.get("acceptance") or {}).get("tier") or ""
+            if isinstance(latest_verification.get("acceptance"), dict)
+            else ""
+        ),
     )
     lines = list(user_markdown_section(story))
     lines.extend(

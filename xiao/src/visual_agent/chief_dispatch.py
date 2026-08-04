@@ -143,6 +143,42 @@ def _allow_automatic_low_cost_failover(worker_agent_norm: str) -> bool:
     return False
 
 
+def _grade_acceptance(
+    *,
+    command_result: dict[str, Any] | None,
+    command: str,
+    repo_root: Path,
+    base_ref: str,
+    timeout_seconds: float,
+    verification_env: list[dict[str, Any]] | None,
+    workspace_root: str | Path,
+    enabled: bool = True,
+) -> dict[str, Any]:
+    """Grade the acceptance evidence: did this gate actually test this task?
+
+    Never raises: a probe failure must degrade the claim, not the mission.
+    """
+
+    from .acceptance_discrimination import classify_acceptance, probe_base_command
+
+    probe: dict[str, Any] = {"status": "unknown", "reason": "base_probe_disabled"}
+    graded_pass = isinstance(command_result, dict) and str(command_result.get("verdict") or "") == "pass"
+    if enabled and graded_pass:
+        try:
+            probe = probe_base_command(
+                command=command,
+                repo_root=repo_root,
+                base_ref=base_ref,
+                timeout_seconds=timeout_seconds,
+                verification_env=verification_env,
+                workspace_root=workspace_root,
+            )
+        except Exception as exc:  # noqa: BLE001 - probing is evidence, not execution
+            probe = {"status": "unknown", "reason": "base_probe_error", "detail": str(exc)[:400]}
+    graded = classify_acceptance(command_result=command_result, base_probe=probe)
+    return {**graded, "base_probe": probe}
+
+
 def _is_weak_command_gate(command: str) -> bool:
     value = str(command or "").strip()
     if not value:
@@ -310,6 +346,7 @@ def dispatch_chief_plan(
     model_policy: dict[str, Any] | None = None,
     test_command: str | None = None,
     allow_test_edits: bool = False,
+    base_probe_enabled: bool = True,
     merge: bool = False,
     command_runner: CommandRunner | None = None,
     codex_runner: Any = None,
@@ -1076,6 +1113,7 @@ def dispatch_chief_plan(
             allow_test_edits=allow_test_edits,
             timeout_seconds=timeout_seconds,
             trusted_workspace_snapshot=trusted_workspace_snapshot,
+            base_probe_enabled=base_probe_enabled,
         )
     verification_attempts.append(verification)
 
@@ -1251,6 +1289,7 @@ def dispatch_chief_plan(
             allow_test_edits=allow_test_edits,
             timeout_seconds=timeout_seconds,
             trusted_workspace_snapshot=trusted_workspace_snapshot,
+            base_probe_enabled=base_probe_enabled,
         )
         verification_attempts.append(verification)
 
@@ -3079,6 +3118,7 @@ def run_dispatch_verification(
     allow_test_edits: bool = False,
     timeout_seconds: float = 900.0,
     trusted_workspace_snapshot: dict[str, str] | None = None,
+    base_probe_enabled: bool = True,
 ) -> dict[str, Any]:
     verification_workspace_path = (verification_workspace_root or workspace_root).expanduser().resolve()
     progress_mission_id = str(mission_id or plan_id)
@@ -3229,6 +3269,16 @@ def run_dispatch_verification(
             "test_files_changed": tampered,
             "acceptance_chain_files_changed": chain_tampered,
             "command_verification": command_result,
+            "acceptance": _grade_acceptance(
+                command_result=command_result,
+                command=test_command,
+                repo_root=Path(repo_root),
+                base_ref=str(worktree_base or ""),
+                timeout_seconds=timeout_info["timeout_seconds"],
+                verification_env=verification_env,
+                workspace_root=workspace_root,
+                enabled=base_probe_enabled,
+            ),
             "verification_timeout": timeout_info,
             "markdown": (
                 f"Test command `{test_command}` passed (exit 0)."
