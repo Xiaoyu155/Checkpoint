@@ -3400,3 +3400,37 @@ def test_budget_tokens_never_go_negative() -> None:
     records = [{"status": "completed", "usage": {"total_tokens": 100, "cache_read_input_tokens": 999}}]
 
     assert summarize_worker_usage(records)["budget_tokens"] == 0
+
+
+def test_a_diff_that_trails_a_markdown_fence_still_applies() -> None:
+    from visual_agent.chief_dispatch import _extract_unified_diff
+
+    # A model that writes a sentence before its ```diff block sends the whole
+    # reply down the "find diff --git" path, which used to read to the end of
+    # the message — so the closing fence became a diff line and git apply
+    # refused the patch with "corrupt patch at line N".
+    reply = (
+        "好的，这是补丁：\n"
+        "```diff\n"
+        "diff --git a/x.js b/x.js\n"
+        "--- a/x.js\n"
+        "+++ b/x.js\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+        "```\n"
+        "希望有帮助！"
+    )
+
+    diff = _extract_unified_diff(reply)
+
+    assert "```" not in diff
+    assert diff.strip().endswith("+new")
+
+
+def test_a_clean_diff_is_left_intact() -> None:
+    from visual_agent.chief_dispatch import _extract_unified_diff
+
+    reply = "diff --git a/x.js b/x.js\n--- a/x.js\n+++ b/x.js\n@@ -1 +1 @@\n-old\n+new\n"
+
+    assert _extract_unified_diff(reply).strip().endswith("+new")

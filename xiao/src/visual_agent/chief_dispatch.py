@@ -4093,6 +4093,22 @@ def _is_ignored_context_path(path: str) -> bool:
     return any(lowered == prefix.rstrip("/") or lowered.startswith(prefix) for prefix in ignored)
 
 
+def _trim_at_closing_fence(diff_text: str) -> str:
+    """Drop a markdown fence (and anything after it) that trails a diff.
+
+    A model that writes a sentence before its ```diff block sends the whole
+    reply down the "find diff --git" path, which used to keep reading to the end
+    of the message — so the closing fence became a diff line and `git apply`
+    refused the patch with "corrupt patch".
+    """
+
+    lines = diff_text.split("\n")
+    for index, line in enumerate(lines):
+        if line.strip().startswith("```"):
+            return "\n".join(lines[:index]).strip()
+    return diff_text.strip()
+
+
 def _extract_unified_diff(text: str) -> str:
     raw = str(text or "").strip()
     if not raw:
@@ -4124,9 +4140,9 @@ def _extract_unified_diff(text: str) -> str:
     # Fallback: look for diff patterns in the raw text
     idx = raw.find("diff --git ")
     if idx >= 0:
-        return raw[idx:].strip() + "\n"
+        return _trim_at_closing_fence(raw[idx:]) + "\n"
     if raw.startswith("--- ") and "\n+++ " in raw:
-        return raw + "\n"
+        return _trim_at_closing_fence(raw) + "\n"
 
     # Last resort: try to extract from code blocks more aggressively
     if "```" in raw:
