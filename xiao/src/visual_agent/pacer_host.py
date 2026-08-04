@@ -507,6 +507,21 @@ def _host_agent_capability(agent: str, *, mode: str | None = None) -> dict[str, 
     agent_name = normalize_agent_name(agent)
     profile = load_agent_profile(agent_name)
     if not isinstance(profile, dict):
+        # API-backed patch workers (mimo, bugteam) are dispatched directly rather
+        # than through a CLI, so they have no CLI profile to register. Dispatch
+        # already accepts them; requiring a profile here rejected exactly the
+        # cheap backends a user picks to keep a long hosted run affordable.
+        from .agent_backends import resolve_backend_by_name
+
+        backend = resolve_backend_by_name(agent_name)
+        if isinstance(backend, dict) and backend:
+            return {
+                "ok": True,
+                "agent": agent_name,
+                "primary_role": "implementation",
+                "worker_kind": "api_backend",
+                "model": backend.get("model") or "",
+            }
         return {
             "ok": False,
             "agent": agent_name,

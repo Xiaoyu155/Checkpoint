@@ -770,3 +770,22 @@ def test_a_stopped_session_leaves_the_workspace_free(tmp_path) -> None:
     (host / "session.json").write_text(json.dumps({"status": "stopped", "pid": os.getppid()}), encoding="utf-8")
 
     assert _live_host_owner(tmp_path / ".agent-workspace") == 0
+
+
+def test_api_backed_workers_are_accepted_for_hosting() -> None:
+    from visual_agent.pacer_host import _host_agent_capability
+
+    # mimo and bugteam are dispatched straight to an API rather than through a
+    # CLI, so they have no CLI profile. Requiring one rejected exactly the cheap
+    # backends a user picks to keep a long hosted run affordable.
+    for agent in ("mimo", "bugteam"):
+        capability = _host_agent_capability(agent)
+        assert capability["ok"] is True, agent
+        assert capability["worker_kind"] == "api_backend"
+
+
+def test_an_inspection_lane_is_still_refused_for_hosting() -> None:
+    from visual_agent.pacer_host import _host_agent_capability
+
+    assert _host_agent_capability("gemini")["ok"] is False
+    assert _host_agent_capability("no-such-agent")["stop_reason"] == "agent_unsupported"
