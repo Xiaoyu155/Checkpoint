@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 from .agent_backends import (
     canonical_backend_name,
+    looks_like_provider_5xx,
     looks_like_quota_exhaustion,
     redact_backend,
     resolve_backend_by_name,
@@ -1049,15 +1050,27 @@ def dispatch_chief_plan(
     repair_env: dict[str, str] | None = None
     repair_backend: dict[str, Any] | None = None
     active_codex_provider = codex_provider
-    quota_hit = (
-        worker_backend is None
-        and worker_record.get("status") != "completed"
-        and looks_like_quota_exhaustion(worker_record.get("stdout_tail"), worker_record.get("stderr_tail"))
+    worker_unfinished = worker_backend is None and worker_record.get("status") != "completed"
+    quota_exhausted_hit = worker_unfinished and looks_like_quota_exhaustion(
+        worker_record.get("stdout_tail"), worker_record.get("stderr_tail")
     )
-    if quota_hit:
-        # Record the quota failure so future dispatches can skip this agent
+    # An upstream outage and an exhausted quota are different causes with the
+    # same remedy: this backend cannot serve the task right now, so try another
+    # one instead of failing the mission. Relay 5xx was the single most common
+    # cause of lost runs in dogfooding.
+    provider_down_hit = worker_unfinished and looks_like_provider_5xx(
+        worker_record.get("stdout_tail"), worker_record.get("stderr_tail")
+    )
+    quota_hit = quota_exhausted_hit or provider_down_hit
+    if quota_exhausted_hit:
+        # Record the quota failure so future dispatches can skip this agent. A
+        # transient outage must not poison that cache — the account is fine.
         from .agent_backends import record_quota_failure
         record_quota_failure(worker_agent_norm)
+    if provider_down_hit:
+        preview["worker"]["provider_unavailable"] = (
+            "上游返回 5xx，这次失败不是代码问题；Pacer 会尝试换一个后端继续。"
+        )
     if (
         quota_hit
         and worker_agent_norm == "codex"
@@ -1901,7 +1914,15 @@ def _dispatch_budget_assessment(
     usage_summary = summarize_worker_usage(worker_records)
     usage = ManagedBudgetUsage(
         elapsed_seconds=max(0.0, monotonic() - dispatch_started),
-        total_tokens=(int(usage_summary.get("total_tokens") or 0) if usage_complete else None),
+        total_tokens=(
+            int(
+                usage_summary.get("budget_tokens")
+                if usage_summary.get("budget_tokens") is not None
+                else usage_summary.get("total_tokens") or 0
+            )
+            if usage_complete
+            else None
+        ),
         attempts=len(worker_records),
         repair_rounds=max(0, int(repair_rounds)),
         same_failure_count=max(0, int(same_failure_count)),
@@ -2328,6 +2349,17 @@ def summarize_worker_usage(records: list[dict[str, Any] | None]) -> dict[str, An
         "reasoning_output_tokens": token_totals["reasoning_output_tokens"],
         "num_turns": num_turns,
         "total_tokens": token_totals["total_tokens"],
+        # Cache reads are replayed context, not new work, and they are billed at a
+        # fraction of fresh input. Charging them against the token budget made a
+        # 94-second first-try claude-code mission that cost $0.53 report
+        # token_budget_exhausted against a 120k budget (246k "used", 210k of it
+        # cache reads) — and an exhausted budget refuses repair rounds, turning a
+        # fixable failure into a hard stop. It also penalises exactly the caching
+        # that keeps spend down.
+        "budget_tokens": max(
+            0,
+            token_totals["total_tokens"] - token_totals["cache_read_tokens"],
+        ),
         "spent_usd": round(spent_usd, 4),
         "saved_usd": round(saved_usd, 4),
     }

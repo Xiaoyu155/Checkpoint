@@ -3333,3 +3333,70 @@ def test_post_merge_verification_keeps_the_acceptance_grade(tmp_path) -> None:
     assert payload["acceptance"]["tier"] == "verified"
     saved = load_verification(workspace, "p-merge")
     assert saved["acceptance"]["reason_code"] == "acceptance_gate_discriminating"
+
+
+def test_upstream_outage_triggers_failover_like_an_exhausted_quota() -> None:
+    from visual_agent.agent_backends import looks_like_provider_5xx, looks_like_quota_exhaustion
+
+    outage = (
+        '{"type":"error","message":"Reconnecting... 1/5 (unexpected status 503 Service '
+        'Unavailable: Service temporarily unavailable, url: https://relay.example/responses, '
+        'request id: c92f7c6e-7e23-4294-a7ef)"}'
+    )
+
+    # Every failover path used to be gated on quota exhaustion alone, so a relay
+    # outage — the most common cause of lost runs in dogfooding — failed the
+    # mission instead of trying another backend. The two causes differ but the
+    # remedy is the same.
+    assert looks_like_quota_exhaustion(outage) is False
+    assert looks_like_provider_5xx(outage) is True
+
+
+def test_a_transient_outage_does_not_poison_the_quota_cache() -> None:
+    from visual_agent.agent_backends import looks_like_quota_exhaustion, looks_like_provider_5xx
+
+    outage = "unexpected status 502 Bad Gateway from upstream"
+    exhausted = "You have hit your usage limit for this week"
+
+    # record_quota_failure makes later dispatches skip the agent entirely, so it
+    # must fire for a real quota block and never for a passing outage.
+    assert looks_like_quota_exhaustion(outage) is False
+    assert looks_like_provider_5xx(outage) is True
+    assert looks_like_quota_exhaustion(exhausted) is True
+    assert looks_like_provider_5xx(exhausted) is False
+
+
+def test_cache_reads_are_not_charged_against_the_token_budget() -> None:
+    from visual_agent.chief_dispatch import summarize_worker_usage
+
+    # Real numbers from a claude-code mission that finished first try in 94s
+    # for $0.53. Charging cache reads at full weight made it report
+    # token_budget_exhausted against the default 120k budget, and an exhausted
+    # budget refuses repair rounds — turning a fixable failure into a hard stop.
+    records = [
+        {
+            "status": "completed",
+            "usage": {
+                "input_tokens": 18,
+                "output_tokens": 4142,
+                "cache_read_input_tokens": 210675,
+                "cache_creation_input_tokens": 31676,
+                "num_turns": 11,
+                "cost_usd": 0.5311815,
+            },
+        }
+    ]
+
+    summary = summarize_worker_usage(records)
+
+    assert summary["total_tokens"] == 246511, "reporting keeps the honest total"
+    assert summary["budget_tokens"] == 35836, "the budget excludes replayed context"
+    assert summary["budget_tokens"] < 120_000, "a cheap first-try run must not read as exhausted"
+
+
+def test_budget_tokens_never_go_negative() -> None:
+    from visual_agent.chief_dispatch import summarize_worker_usage
+
+    records = [{"status": "completed", "usage": {"total_tokens": 100, "cache_read_input_tokens": 999}}]
+
+    assert summarize_worker_usage(records)["budget_tokens"] == 0
