@@ -107,6 +107,7 @@ def user_story(
     worktree: str = "",
     message_fallback: str = "",
     acceptance_tier: str = "",
+    delivery_status: str = "",
 ) -> dict[str, Any]:
     """Build a plain-language user-facing story.
 
@@ -147,6 +148,29 @@ def user_story(
             is_code_problem=False,
             choices=["等验收结果", "如果验收命令不对，我们可以改成你平时用的那条"],
             technical_tag=stage_key,
+        )
+
+    # Passing acceptance in the worker's own directory is not the same as the
+    # user being able to have the change. Saying "done" here is the exact lie
+    # that hid a broken feature for a day: 22/22 green, and it could not start
+    # from a clean checkout.
+    if reason == "verified" and str(delivery_status or "") == "not_delivered":
+        return _story(
+            headline="改完了，也测过了，但现在还交不到你手上。",
+            what=(
+                "编程助手改完了，验收命令"
+                + (f"（`{cmd}`）" if cmd else "")
+                + "也过了。可我把这份改动单独拿到一个干净目录里重跑，它起不来——"
+                "说明它还依赖着某些没被一起交出去的东西。"
+                "所以我不敢说「做完了」，那样你合并进去会发现是坏的。"
+            ),
+            is_code_problem=None,
+            choices=[
+                "让我找出它还缺什么，一起补齐再交",
+                "先看看改动本身，缺的那部分你可能心里有数",
+                "先放着，这份成果不会丢",
+            ],
+            technical_tag="verified_not_delivered",
         )
 
     # Being straight about what the gate did and did not prove matters more than

@@ -38,6 +38,7 @@ from .command_verification import (
 from .chief_plans_store import append_dispatch_record, append_worker_record, load_plan, plan_dir, save_plan, save_verification
 from .change_set import collect_repository_change_set
 from .codex_check import codex_check_to_markdown, is_runtime_changed_file, run_codex_check
+from .delivery_check import delivery_markdown_lines
 from .diff_review import review_markdown_lines
 from .diff_summary import build_diff_summary
 from .dynamic_model_selector import routing_request_evidence
@@ -391,6 +392,7 @@ def dispatch_chief_plan(
     allow_test_edits: bool = False,
     base_probe_enabled: bool = True,
     dependency_bootstrap_enabled: bool = True,
+    delivery_check: bool = True,
     merge: bool = False,
     command_runner: CommandRunner | None = None,
     codex_runner: Any = None,
@@ -1511,6 +1513,26 @@ def dispatch_chief_plan(
         from .agent_backends import clear_quota_failure
         clear_quota_failure(worker_agent_norm)
 
+    # Acceptance proves the command passed in the worker's directory. It does not
+    # prove the user can have the change: on 2026-08-04 a verified feature could
+    # not run from a clean checkout because it imported a symbol that only existed
+    # in uncommitted edits. So before claiming done, commit the work and re-run
+    # acceptance against the committed branch alone.
+    delivery = _run_dispatch_delivery_check(
+        status=status,
+        repo_root=repo_root,
+        worktree=worktree,
+        worktree_project_root=worktree_project_root,
+        branch=branch,
+        objective=str(plan.get("objective") or ""),
+        plan_id=plan_id,
+        mission_id=progress_mission_id,
+        command=effective_verification_command,
+        env=verification_env,
+        timeout_seconds=timeout_seconds,
+        enabled=delivery_check,
+    )
+
     # Close the loop: merge the worker's isolated branch back only when the
     # change is genuinely verified. Verification is the sole gate — never merge
     # anything that did not pass, and abort on any conflict rather than force it.
@@ -1521,8 +1543,23 @@ def dispatch_chief_plan(
         else []
     )
     rejected_claims = evidence_ledger.get("rejected") if isinstance(evidence_ledger.get("rejected"), list) else []
+    not_delivered = isinstance(delivery, dict) and delivery.get("status") == "not_delivered"
     if merge:
-        if status == "verified" and rejected_claims:
+        if status == "verified" and not_delivered:
+            # Merging a change that cannot pass on its own would move the broken
+            # state onto the target branch and call it done.
+            merge_result = {
+                "status": "skipped",
+                "reason": (
+                    "not merged: the committed branch does not pass acceptance on its own, so the "
+                    "change depends on something that was never committed. Commit what it needs first."
+                ),
+                "delivery_check": {
+                    "status": "not_delivered",
+                    "exit_code": delivery.get("exit_code"),
+                },
+            }
+        elif status == "verified" and rejected_claims:
             # A citation to a file that does not exist is the cheapest reliable
             # signal that the worker asserted something it did not check.
             merge_result = {
@@ -1613,6 +1650,7 @@ def dispatch_chief_plan(
         "worker_objections": worker_objection_summary,
         "declared_scope_audit": declared_scope_audit,
         "evidence_ledger": evidence_ledger,
+        **({"delivery_check": delivery} if delivery is not None else {}),
         **({"diff_review": diff_review} if diff_review is not None else {}),
         "toolchain_violation": toolchain_violation,
         "verification_attempts": verification_attempts,
@@ -1652,6 +1690,16 @@ def dispatch_chief_plan(
         payload.setdefault("warnings", []).append(
             f"编程助手提出了异议（{objection.get('kind')}）：{objection.get('summary') or '见报告'}。"
             "Pacer 没有替你采纳，请看报告的「编程助手的异议」一节。"
+        )
+    if not_delivered:
+        payload.setdefault("warnings", []).append(
+            "验收在工作目录里通过了，但把这份改动单独拿到干净目录就跑不起来——"
+            "它还依赖着没有一起交出去的东西。现在还不能说这件事做完了。"
+        )
+    elif isinstance(delivery, dict) and delivery.get("status") == "unchecked":
+        payload.setdefault("warnings", []).append(
+            f"没能验证「拿走就能用」（{delivery.get('reason') or '原因未知'}），"
+            "所以结论只覆盖「在这台机器上跑得通」。"
         )
     if isinstance(diff_review, dict) and diff_review.get("findings"):
         # Surfaced, never enforced: a reviewer that can fail a dispatch would
@@ -4768,6 +4816,156 @@ def run_process_capture(
         }
 
 
+def _run_dispatch_delivery_check(
+    *,
+    status: str,
+    repo_root: Path,
+    worktree: Path,
+    worktree_project_root: Path,
+    branch: str,
+    objective: str,
+    plan_id: str,
+    mission_id: str,
+    command: str,
+    env: dict[str, str] | None,
+    timeout_seconds: float,
+    enabled: bool,
+) -> dict[str, Any] | None:
+    """Commit the verified work, then prove it stands on its own.
+
+    Only runs on a verified dispatch: asking whether a failed change is
+    deliverable answers a question nobody asked, and costs a full test run.
+    """
+    if not enabled or status != "verified":
+        return None
+    try:
+        return _delivery_check_attempt(
+            repo_root=repo_root,
+            worktree=worktree,
+            worktree_project_root=worktree_project_root,
+            branch=branch,
+            objective=objective,
+            plan_id=plan_id,
+            mission_id=mission_id,
+            command=command,
+            env=env,
+            timeout_seconds=timeout_seconds,
+        )
+    except Exception as error:  # noqa: BLE001
+        # A check that cannot run must degrade to "I could not tell you", never
+        # to a failed dispatch: the work itself already passed acceptance.
+        return {"schema_version": 1, "status": "unchecked", "reason": f"delivery check errored: {error}"}
+
+
+def _delivery_check_attempt(
+    *,
+    repo_root: Path,
+    worktree: Path,
+    worktree_project_root: Path,
+    branch: str,
+    objective: str,
+    plan_id: str,
+    mission_id: str,
+    command: str,
+    env: dict[str, str] | None,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    from .delivery_check import run_delivery_check
+
+    if not Path(worktree_project_root).is_dir():
+        return {"schema_version": 1, "status": "unchecked", "reason": "worktree is not available"}
+    committed = commit_worker_changes(
+        worktree=worktree_project_root,
+        message=_delivery_commit_message(objective=objective, plan_id=plan_id, mission_id=mission_id),
+    )
+    if committed.get("status") == "failed":
+        return {
+            "schema_version": 1,
+            "status": "unchecked",
+            "reason": str(committed.get("reason") or "could not commit the worker's changes"),
+        }
+    if committed.get("status") == "nothing_to_commit" and not _git_head(worktree_project_root):
+        return {"schema_version": 1, "status": "unchecked", "reason": "no committed work to check"}
+    check = run_delivery_check(
+        repo_root=repo_root,
+        branch=branch,
+        command=command,
+        env=env,
+        timeout_seconds=timeout_seconds,
+    )
+    if committed.get("commit"):
+        check["commit"] = committed["commit"]
+    return check
+
+
+def _delivery_commit_message(*, objective: str, plan_id: str, mission_id: str) -> str:
+    """A commit that says which mission produced it and what proved it.
+
+    Attribution is the half of delivery that a person cannot reconstruct later:
+    once five missions' output sits in one working tree, nobody can tell which
+    line came from which goal.
+    """
+    headline = str(objective or "Pacer change").strip().splitlines()[0][:72]
+    lines = [f"Pacer verified change: {headline}", ""]
+    if mission_id:
+        lines.append(f"Pacer-Mission: {mission_id}")
+    if plan_id:
+        lines.append(f"Pacer-Plan: {plan_id}")
+    lines.append("Pacer-Verdict: verified")
+    return "\n".join(lines)
+
+
+def commit_worker_changes(*, worktree: Path, message: str) -> dict[str, Any]:
+    """Commit the worker's edits onto its own branch — user code only.
+
+    Pacer's own runtime artifacts (workspace dir, generated .gitignore, mandatory
+    record, tool caches) must never ride along: committing them makes a later
+    merge collide with the main repo's untracked copies of the same files.
+
+    Committing is also what makes the change *checkable*: until the work is a
+    commit, "it passes" only describes this machine's working directory.
+    """
+    def g(*args: str) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(
+                ["git", *args], cwd=str(worktree), capture_output=True, text=True, check=False
+            )
+        except (OSError, ValueError) as error:
+            # A missing worktree or a git that will not start must not raise out
+            # of here: callers treat this as a step, not as the dispatch itself.
+            return subprocess.CompletedProcess(args=list(args), returncode=1, stdout="", stderr=str(error))
+
+    drop_gitignore = _gitignore_change_is_only_devpacer_block(worktree)
+    g("add", "-A")
+    for artifact in (
+        ".agent-workspace",
+        ".npm-cache",
+        ".dart-home",
+        ".dart_tool",
+        "强制测试记录.md",
+        "*__pycache__*",
+        "*.pytest_cache*",
+    ):
+        g("reset", "-q", "HEAD", "--", artifact)
+    if drop_gitignore:
+        g("reset", "-q", "HEAD", "--", ".gitignore")
+    status = g("status", "--porcelain")
+    staged = g("diff", "--cached", "--name-only")
+    if not (status.stdout.strip() and staged.stdout.strip()):
+        return {"status": "nothing_to_commit"}
+    commit = g(
+        "-c", "user.email=pacer@local", "-c", "user.name=Pacer",
+        "commit", "-m", message,
+    )
+    if commit.returncode != 0:
+        return {
+            "status": "failed",
+            "reason": "could not commit worker changes: " + (commit.stderr or commit.stdout).strip()[:300],
+        }
+    head = g("rev-parse", "HEAD")
+    return {"status": "committed", "commit": head.stdout.strip()}
+
+
 def merge_worktree_branch(*, repo_root: Path, worktree: Path, branch: str, message: str) -> dict[str, Any]:
     """Merge a verified worker branch back into the main repo's current branch.
 
@@ -4779,34 +4977,10 @@ def merge_worktree_branch(*, repo_root: Path, worktree: Path, branch: str, messa
     def g(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, check=False)
 
-    # 1) Commit the worker's (uncommitted) edits onto its own branch — user code
-    # only. Pacer's own runtime artifacts (workspace dir, generated .gitignore,
-    # mandatory record, tool caches) must never ride along: committing them makes
-    # the merge collide with the main repo's untracked copies of the same files.
-    drop_gitignore = _gitignore_change_is_only_devpacer_block(worktree)
-    g(worktree, "add", "-A")
-    for artifact in (
-        ".agent-workspace",
-        ".npm-cache",
-        ".dart-home",
-        ".dart_tool",
-        "强制测试记录.md",
-        "*__pycache__*",
-        "*.pytest_cache*",
-    ):
-        g(worktree, "reset", "-q", "HEAD", "--", artifact)
-    if drop_gitignore:
-        g(worktree, "reset", "-q", "HEAD", "--", ".gitignore")
-    wt_status = g(worktree, "status", "--porcelain")
-    staged = g(worktree, "diff", "--cached", "--name-only")
-    if wt_status.stdout.strip() and staged.stdout.strip():
-        commit = g(
-            worktree,
-            "-c", "user.email=pacer@local", "-c", "user.name=Pacer",
-            "commit", "-m", f"Pacer verified change: {message}",
-        )
-        if commit.returncode != 0:
-            return {"status": "failed", "reason": "could not commit worker changes: " + (commit.stderr or commit.stdout).strip()[:300]}
+    # 1) Commit the worker's (uncommitted) edits onto its own branch.
+    committed = commit_worker_changes(worktree=worktree, message=f"Pacer verified change: {message}")
+    if committed.get("status") == "failed":
+        return {"status": "failed", "reason": committed.get("reason") or "could not commit worker changes"}
 
     # Nothing new on the branch => nothing to merge.
     ahead = g(repo_root, "rev-list", "--count", f"HEAD..{branch}")
@@ -5734,6 +5908,7 @@ def chief_dispatch_to_markdown(payload: dict[str, Any]) -> str:
     lines.extend(objection_markdown_lines(payload.get("worker_objections")))
     lines.extend(scope_markdown_lines(payload.get("declared_scope_audit")))
     lines.extend(claims_markdown_lines(payload.get("evidence_ledger")))
+    lines.extend(delivery_markdown_lines(payload.get("delivery_check")))
     lines.extend(review_markdown_lines(payload.get("diff_review")))
     if payload.get("worker_record"):
         record = payload["worker_record"]
