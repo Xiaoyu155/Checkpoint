@@ -44,6 +44,58 @@ _INCONCLUSIVE_FAILURE_KINDS = {
 
 _PROBE_CACHE_NAME = "acceptance_probes.json"
 
+# 门"红"有两种，含义完全相反：
+#   (a) 契约先行——功能还没写，所以它红。这是期望状态。
+#   (b) 门自己坏了——语法错误、模块加载失败，它根本没在检查。
+# 两者在退出码上一模一样，但 (b) 意味着无论 worker 做什么它都红。
+# 2026-08-05 实测：一道有语法错误的门被当成 (a) 派了工，worker 为了让它能跑
+# 去改了测试文件，触发防篡改，整轮报废——而根因只是那道门从未真正执行过。
+_GATE_LOAD_FAILURE_MARKERS = (
+    "syntaxerror",
+    "err_module_not_found",
+    "cannot find module",
+    "cannot find package",
+    "modulenotfounderror",
+    "importerror",
+    "error collecting",
+    "errors during collection",
+    "internalerror",
+    "unable to import",
+    "failed to load config",
+    "cannot resolve entry",
+)
+
+# "一个用例都没跑"和"跑了但没过"是两回事：前者说明门没生效。
+_ZERO_EXECUTION_MARKERS = (
+    "# tests 0",
+    "no tests found",
+    "no tests ran",
+    "collected 0 items",
+    "found 0 tests",
+    "ran 0 tests",
+)
+
+
+def assess_gate_health(result: dict[str, Any] | None) -> dict[str, Any]:
+    """判断验收命令是"跑过并给出结论"还是"根本没跑起来"。
+
+    只在门为红时才有意义：绿的门必然执行过。
+    """
+    record = result if isinstance(result, dict) else {}
+    text = " ".join(
+        str(record.get(key) or "")
+        for key in ("output_tail", "raw_output_tail", "reason", "markdown")
+    ).lower()
+    if not text.strip():
+        return {"status": "unknown", "reason": "no_output_to_judge"}
+    for marker in _GATE_LOAD_FAILURE_MARKERS:
+        if marker in text:
+            return {"status": "broken", "reason": "gate_failed_to_load", "signal": marker}
+    for marker in _ZERO_EXECUTION_MARKERS:
+        if marker in text:
+            return {"status": "broken", "reason": "gate_executed_nothing", "signal": marker.strip()}
+    return {"status": "runnable", "reason": "gate_reported_failures"}
+
 
 def probe_base_command(
     *,
@@ -130,7 +182,21 @@ def probe_base_command(
     elif failure_kind in _INCONCLUSIVE_FAILURE_KINDS:
         probe = _probe("unknown", reason=f"base_run_{failure_kind}", base_ref=base, exit_code=result.get("exit_code"))
     elif verdict == "fail":
-        probe = _probe("failed_on_base", reason="gate_red_before_change", base_ref=base, exit_code=result.get("exit_code"))
+        health = assess_gate_health(result)
+        if health.get("status") == "broken":
+            # 一道跑不起来的门无论如何都红，所以它证明不了"改动前是失败的"，
+            # 只证明它自己坏了。当成 failed_on_base 会让人以为契约成立。
+            probe = _probe(
+                "gate_broken",
+                reason=str(health.get("reason") or "gate_not_runnable"),
+                base_ref=base,
+                exit_code=result.get("exit_code"),
+                detail=str(health.get("signal") or "")[:120],
+            )
+        else:
+            probe = _probe(
+                "failed_on_base", reason="gate_red_before_change", base_ref=base, exit_code=result.get("exit_code")
+            )
     else:
         probe = _probe("unknown", reason=f"base_verdict_{verdict or 'missing'}", base_ref=base)
     _cache_write(workspace_root, cache_key_base, cmd, probe)
@@ -155,6 +221,12 @@ def classify_acceptance(
     status = str(probe.get("status") or "")
 
     if str(command.get("verdict") or "") != "pass":
+        if status == "gate_broken":
+            return _tier(
+                TIER_UNVERIFIED,
+                "acceptance_gate_broken",
+                "验收命令本身跑不起来（不是失败，是没执行），所以它既证明不了做成了，也证明不了没做成。先修好这条命令。",
+            )
         if status == "failed_on_base":
             # The gate was already red before the worker touched anything.
             return _tier(
