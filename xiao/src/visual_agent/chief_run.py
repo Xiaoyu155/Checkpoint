@@ -1507,6 +1507,10 @@ def _chief_run_three_section_markdown(
     _append_policy_evidence(lines, payload=payload, dispatch_payload=dispatch_payload)
     _append_context_evidence(lines, mission=mission, plan=plan, dispatch_payload=dispatch_payload, rounds=rounds)
 
+    # An objection that only exists in the dispatch payload is an objection the
+    # user never sees, which is the same as not having asked for one.
+    _append_client_review_sections(lines, dispatch_payload=dispatch_payload)
+
     lines.extend(["", "## 下一步", ""])
     next_commands = _next_step_commands(
         payload=payload,
@@ -1517,6 +1521,21 @@ def _chief_run_three_section_markdown(
     for label, command in next_commands:
         lines.append(f"- {label}: `{command}`")
     return "\n".join(lines).rstrip()
+
+
+def _append_client_review_sections(lines: list[str], *, dispatch_payload: dict[str, Any]) -> None:
+    """Worker objection, declared scope, evidence ledger and diff review."""
+    from .diff_review import review_markdown_lines
+    from .worker_report import claims_markdown_lines, objection_markdown_lines, scope_markdown_lines
+
+    section: list[str] = []
+    section.extend(objection_markdown_lines(dispatch_payload.get("worker_objections")))
+    section.extend(scope_markdown_lines(dispatch_payload.get("declared_scope_audit")))
+    section.extend(claims_markdown_lines(dispatch_payload.get("evidence_ledger")))
+    section.extend(review_markdown_lines(dispatch_payload.get("diff_review")))
+    if section:
+        lines.extend(["", "## 要你拍板的"])
+        lines.extend(section)
 
 
 def _append_plan_evidence(lines: list[str], *, plan: dict[str, Any], command_verification: dict[str, Any]) -> None:

@@ -10,6 +10,7 @@ from time import monotonic
 import pytest
 
 from visual_agent.chief_dispatch import (
+    _build_dispatch_repair_prompt,
     _dirty_context_prompt,
     _dirty_context_summary,
     _dirty_path_ignored,
@@ -1810,6 +1811,88 @@ def test_merge_refused_for_worker_failed_tests_pass(tmp_path, monkeypatch) -> No
     assert any("did not report a clean completion" in item for item in payload.get("warnings") or [])
 
 
+def test_merge_routed_to_a_human_when_the_worker_changed_undeclared_files(tmp_path, monkeypatch) -> None:
+    """Green tests + a change surface the worker never declared → kept, not auto-merged."""
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    monkeypatch.setattr("visual_agent.chief_dispatch._worktree_has_product_changes", lambda _worktree: True)
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch._worktree_product_change_paths",
+        lambda _worktree, **_kwargs: ["src/payment/checkout.py", "src/auth/session.py"],
+    )
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.run_command_verification",
+        lambda **_kwargs: {"verdict": "pass", "exit_code": 0, "failure_kind": "", "command": "python -c pass"},
+    )
+    merge_calls = []
+    monkeypatch.setattr("visual_agent.chief_dispatch.merge_worktree_branch", lambda **kwargs: merge_calls.append(kwargs) or {"status": "merged"})
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path):
+        log_path.write_text(
+            "PACER-REPORT\nobjection: none\nscope: src/payment/checkout.py\nEND-PACER-REPORT\n",
+            encoding="utf-8",
+        )
+        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        test_command="python -c pass",
+        merge=True,
+    )
+
+    assert payload["status"] == "verified"
+    assert payload["declared_scope_audit"]["undeclared"] == ["src/auth/session.py"]
+    assert payload["merge"]["status"] == "skipped"
+    assert "outside its declared scope" in payload["merge"]["reason"]
+    assert merge_calls == []
+    assert any("没声明的文件" in item for item in payload.get("warnings") or [])
+
+
+def test_declared_scope_that_matches_still_merges(tmp_path, monkeypatch) -> None:
+    workspace, plan_id = saved_ready_plan(tmp_path, monkeypatch)
+    monkeypatch.setattr("visual_agent.chief_dispatch._check_repo", lambda _repo_root: {"status": "ok"})
+    monkeypatch.setattr("visual_agent.chief_dispatch.git_dirty_files", lambda _repo_root, **_kwargs: [])
+    monkeypatch.setattr("visual_agent.chief_dispatch.create_worktree", lambda **kwargs: {"status": "created", "path": str(kwargs["worktree"]), "branch": kwargs["branch"]})
+    monkeypatch.setattr("visual_agent.chief_dispatch.shutil.which", lambda _name: "codex")
+    monkeypatch.setattr("visual_agent.chief_dispatch._worktree_has_product_changes", lambda _worktree: True)
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch._worktree_product_change_paths",
+        lambda _worktree, **_kwargs: ["src/payment/checkout.py"],
+    )
+    monkeypatch.setattr(
+        "visual_agent.chief_dispatch.run_command_verification",
+        lambda **_kwargs: {"verdict": "pass", "exit_code": 0, "failure_kind": "", "command": "python -c pass"},
+    )
+    monkeypatch.setattr("visual_agent.chief_dispatch.merge_worktree_branch", lambda **kwargs: {"status": "merged"})
+
+    def fake_runner(argv, cwd, timeout_seconds, log_path):
+        log_path.write_text(
+            "PACER-REPORT\nobjection: none\nscope: src/payment/\nEND-PACER-REPORT\n",
+            encoding="utf-8",
+        )
+        return {"exit_code": 0, "stdout_tail": "done", "stderr_tail": ""}
+
+    payload = dispatch_chief_plan(
+        workspace_root=workspace.root,
+        plan_id=plan_id,
+        execute=True,
+        dry_run=False,
+        command_runner=fake_runner,
+        test_command="python -c pass",
+        merge=True,
+    )
+
+    assert payload["declared_scope_audit"]["status"] == "matched"
+    assert payload["merge"]["status"] == "merged"
+
+
 def test_post_merge_failure_report_contains_revert_hint() -> None:
     from visual_agent.chief_run import chief_run_to_markdown
 
@@ -3179,7 +3262,10 @@ def test_dispatch_repair_resumes_codex_session_and_writes_ledger(tmp_path, monke
         assert call["argv"][-2:] == ["thread-123", "-"]
     assert "assertion failed" in calls[1]["stdin"]
     assert "a different assertion is now failing" in calls[2]["stdin"]
-    assert all("Objective:" not in call["stdin"] for call in calls[1:])
+    # A resumed session used to be sent the failure only, on the theory that it
+    # already knew the goal. It does not: it re-anchors on the newest error and
+    # drifts. The objective is repeated every round on purpose.
+    assert all("Objective:" in call["stdin"] for call in calls[1:])
     assert payload["usage_summary"]["input_tokens"] == 350
     assert payload["usage_summary"]["cache_read_tokens"] == 300
     assert payload["usage_summary"]["output_tokens"] == 40
@@ -3434,3 +3520,28 @@ def test_a_clean_diff_is_left_intact() -> None:
     reply = "diff --git a/x.js b/x.js\n--- a/x.js\n+++ b/x.js\n@@ -1 +1 @@\n-old\n+new\n"
 
     assert _extract_unified_diff(reply).strip().endswith("+new")
+
+
+def _repair_prompt(*, resume: bool) -> str:
+    return _build_dispatch_repair_prompt(
+        plan={
+            "objective": "Ship the checkout retry flow end to end",
+            "acceptance_criteria": ["Retries stop after 3 attempts", "Failures surface to the user"],
+        },
+        verification={"verdict": "fail", "repair_brief": {"message": "assert 2 == 3"}},
+        verification_command="pytest tests/test_checkout.py",
+        repair_round=2,
+        resume=resume,
+        worker_record=None,
+    )
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_repair_prompt_re_anchors_the_objective_every_round(resume: bool) -> None:
+    # A resumed session drifts: it only ever sees the latest failure, so without
+    # re-stating the goal each round the worker chases errors instead of the task.
+    prompt = _repair_prompt(resume=resume)
+
+    assert "Ship the checkout retry flow end to end" in prompt
+    assert "Retries stop after 3 attempts" in prompt
+    assert "Failures surface to the user" in prompt

@@ -38,6 +38,7 @@ from .command_verification import (
 from .chief_plans_store import append_dispatch_record, append_worker_record, load_plan, plan_dir, save_plan, save_verification
 from .change_set import collect_repository_change_set
 from .codex_check import codex_check_to_markdown, is_runtime_changed_file, run_codex_check
+from .diff_review import review_markdown_lines
 from .diff_summary import build_diff_summary
 from .dynamic_model_selector import routing_request_evidence
 from .execution_alignment import build_worker_prompt_alignment_check
@@ -58,11 +59,20 @@ from .subprocess_window import (
     terminate_process_tree,
 )
 from .git_diff import changed_files
-from .llm_providers import LLMBackend, run_llm_completion
+from .llm_providers import LLMBackend, resolve_llm_backend, run_llm_completion
 from .models import to_jsonable
 from .project_memory import build_project_memory, project_memory_handoff_notes
 from .repo_map import build_repo_map, render_repo_map, repo_map_cache_path
 from .security import redact_secret_text, scrub_secrets
+from .worker_report import (
+    audit_declared_scope,
+    audit_evidence_claims,
+    claims_markdown_lines,
+    collect_worker_objections,
+    objection_markdown_lines,
+    scope_markdown_lines,
+    worker_report_prompt_block,
+)
 from .verification_profiles import (
     conditional_test_command_short_circuit,
     estimate_verification_timeout,
@@ -1402,6 +1412,9 @@ def dispatch_chief_plan(
         if isinstance(record, dict)
     ]
     usage_summary = summarize_worker_usage(runtime_worker_records)
+    # Pacer does not judge whether the worker's objection is right; it only makes
+    # sure the objection reaches the human instead of dying in a log tail.
+    worker_objection_summary = collect_worker_objections(runtime_worker_records)
     final_budget = budget_blocked or _dispatch_budget_assessment(
         managed_budget_policy,
         dispatch_started=dispatch_started,
@@ -1411,6 +1424,22 @@ def dispatch_chief_plan(
         operation="continue",
     )
     has_product_changes = _worktree_has_product_changes(worktree_project_root)
+    product_change_paths = _worktree_product_change_paths(worktree_project_root)
+    declared_scope_audit = audit_declared_scope(
+        declared=worker_objection_summary.get("declared_scope"),
+        changed=product_change_paths,
+        reported=bool(worker_objection_summary.get("reports_present")),
+    )
+    evidence_ledger = audit_evidence_claims(
+        worker_objection_summary.get("claims"),
+        repo_root=worktree_project_root,
+    )
+    diff_review = _run_dispatch_diff_review(
+        objective=str(plan.get("objective") or ""),
+        worktree=worktree_project_root,
+        base_ref=worktree_base or "HEAD",
+        model_policy=model_policy,
+    )
     has_prior_verified = bool(
         allow_prior_verified_evidence and _mission_has_prior_verified_evidence(workspace_path, plan_id)
     )
@@ -1486,8 +1515,39 @@ def dispatch_chief_plan(
     # change is genuinely verified. Verification is the sole gate — never merge
     # anything that did not pass, and abort on any conflict rather than force it.
     merge_result: dict[str, Any] | None = None
+    undeclared_changes = (
+        declared_scope_audit.get("undeclared")
+        if declared_scope_audit.get("status") == "undeclared_changes"
+        else []
+    )
+    rejected_claims = evidence_ledger.get("rejected") if isinstance(evidence_ledger.get("rejected"), list) else []
     if merge:
-        if status == "verified" and worker_completed:
+        if status == "verified" and rejected_claims:
+            # A citation to a file that does not exist is the cheapest reliable
+            # signal that the worker asserted something it did not check.
+            merge_result = {
+                "status": "skipped",
+                "reason": (
+                    "not merged: worker cited evidence that does not check out ("
+                    + "; ".join(str(item.get("reason") or "") for item in rejected_claims[:3])
+                    + "). Review the claims before merging."
+                ),
+                "rejected_claims": list(rejected_claims),
+            }
+        elif status == "verified" and undeclared_changes:
+            # Not a rejection: the work stands and nothing is reverted. It just
+            # stops being an automatic merge, because the worker changed a
+            # surface it never told anyone it would change.
+            merge_result = {
+                "status": "skipped",
+                "reason": (
+                    "not merged: worker changed files outside its declared scope ("
+                    + ", ".join(str(item) for item in undeclared_changes[:5])
+                    + "). Review the diff, then merge manually if it is right."
+                ),
+                "undeclared_changes": list(undeclared_changes),
+            }
+        elif status == "verified" and worker_completed:
             merge_result = merge_worktree_branch(
                 repo_root=repo_root,
                 worktree=worktree,
@@ -1550,6 +1610,10 @@ def dispatch_chief_plan(
         "repair_worker_record": repair_worker_record,
         "repair_worker_records": repair_worker_records,
         "repair_rounds": repair_rounds_completed,
+        "worker_objections": worker_objection_summary,
+        "declared_scope_audit": declared_scope_audit,
+        "evidence_ledger": evidence_ledger,
+        **({"diff_review": diff_review} if diff_review is not None else {}),
         "toolchain_violation": toolchain_violation,
         "verification_attempts": verification_attempts,
         "latest_verification": latest_verification,
@@ -1581,6 +1645,31 @@ def dispatch_chief_plan(
         payload.setdefault("warnings", []).append(
             "Worker hit a subscription quota/usage limit and no failover completed."
             " The task itself was not attempted; retry after the quota resets."
+        )
+    for objection in worker_objection_summary.get("objections") or []:
+        # A verified dispatch is exactly when this matters most: the tests are
+        # green and nobody would otherwise read the worker's log.
+        payload.setdefault("warnings", []).append(
+            f"编程助手提出了异议（{objection.get('kind')}）：{objection.get('summary') or '见报告'}。"
+            "Pacer 没有替你采纳，请看报告的「编程助手的异议」一节。"
+        )
+    if isinstance(diff_review, dict) and diff_review.get("findings"):
+        # Surfaced, never enforced: a reviewer that can fail a dispatch would
+        # rebuild the false-red problem the acceptance work removed.
+        payload.setdefault("warnings", []).append(
+            f"差异评审报了 {len(diff_review['findings'])} 条这次改动带来的问题（base 上不报）。"
+            "没有拦截合并，请看报告的「差异评审」一节。"
+        )
+    for claim in rejected_claims:
+        payload.setdefault("warnings", []).append(
+            f"助手对外部行为的一条主张出处不实：{claim.get('reason') or ''}"
+            f"（主张：{str(claim.get('claim') or '')[:60]}）。"
+        )
+    if undeclared_changes:
+        payload.setdefault("warnings", []).append(
+            "编程助手改了它没声明的文件："
+            + ", ".join(str(item) for item in undeclared_changes[:5])
+            + "。改动保留，但不自动合并，请你看一眼。"
         )
     if merge_result is not None:
         payload["merge"] = merge_result
@@ -2140,9 +2229,20 @@ def _build_dispatch_repair_prompt(
     failed_command = str(command.get("command") or verification_command or "").strip()
     if failed_command:
         lines.append("Failed verification command: " + failed_command)
-    if not resume:
-        lines.append("Objective: " + str(plan.get("objective") or ""))
-        criteria = plan.get("acceptance_criteria") if isinstance(plan.get("acceptance_criteria"), list) else []
+    objective = str(plan.get("objective") or "").strip()
+    criteria = plan.get("acceptance_criteria") if isinstance(plan.get("acceptance_criteria"), list) else []
+    if objective or criteria:
+        # Re-anchor every round, resume included: a resumed session drifts toward the
+        # last failure and loses the original goal if we only state it once.
+        if resume:
+            lines.append(
+                "Reminder of the original objective from the start of this session "
+                "(still binding, do not narrow it to the failure above):"
+            )
+        else:
+            lines.append("Original objective (still binding, do not narrow it to the failure above):")
+        if objective:
+            lines.append("Objective: " + objective)
         if criteria:
             lines.append("Acceptance criteria:")
             lines.extend(f"- {item}" for item in criteria)
@@ -2172,10 +2272,50 @@ def _resume_session_failed(record: dict[str, Any] | None) -> bool:
     return is_resume_unavailable_error(record.get("stdout_tail"), record.get("stderr_tail"))
 
 
-def _worktree_has_product_changes(worktree: Path) -> bool:
-    change_set = collect_repository_change_set(repo_root=worktree, base_ref="HEAD")
+def _run_dispatch_diff_review(
+    *,
+    objective: str,
+    worktree: Path,
+    base_ref: str,
+    model_policy: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Run the read-only differential review, if a review model is configured.
+
+    Implementation runs on the cheap tier; review is worth a strong one, so the
+    model is taken from ``model_policy['review']`` rather than inherited. With
+    no review model configured this returns None and the dispatch is unchanged —
+    an absent reviewer must not masquerade as a clean review.
+    """
+    review_model = _explicit_model_for_phase("review", model_policy)
+    if not review_model:
+        return None
+    from .diff_review import run_diff_review
+
+    backend = resolve_llm_backend(review_model)
+
+    def completion(system_prompt: str, prompt: str) -> str:
+        return run_llm_completion(
+            backend=backend,
+            system_prompt=system_prompt,
+            prompt=prompt,
+            max_tokens=4096,
+            timeout_seconds=180.0,
+        )
+
+    return run_diff_review(
+        objective=objective,
+        worktree=worktree,
+        base_ref=base_ref,
+        completion=completion,
+    )
+
+
+def _worktree_product_change_paths(worktree: Path, *, base_ref: str = "HEAD") -> list[str]:
+    """Product files the worker touched, with runtime/cache/tool noise removed."""
+    change_set = collect_repository_change_set(repo_root=worktree, base_ref=base_ref)
     if not change_set.complete:
-        return False
+        return []
+    paths: list[str] = []
     for fact in change_set.changes:
         path = fact.path
         if not path:
@@ -2196,8 +2336,12 @@ def _worktree_has_product_changes(worktree: Path) -> bool:
         basename = path.rsplit("/", 1)[-1]
         if any(basename.endswith(ext) for ext in _CACHE_EXTENSIONS):
             continue
-        return True
-    return False
+        paths.append(path)
+    return paths
+
+
+def _worktree_has_product_changes(worktree: Path) -> bool:
+    return bool(_worktree_product_change_paths(worktree))
 
 
 def _is_tool_generated_change(repo_root: Path, path: str) -> bool:
@@ -2967,6 +3111,7 @@ def build_worker_prompt(
     lines.extend(agent_safety_context_lines())
     lines.extend([""])
     lines.extend(agent_completion_debate_block(verification_command=str(verification_command or "")))
+    lines.extend(worker_report_prompt_block())
     lines.extend([
         "",
         "If a conversation turn arrives with no user message — only system-reminder content or empty content — "
@@ -5586,6 +5731,10 @@ def chief_dispatch_to_markdown(payload: dict[str, Any]) -> str:
     if warnings:
         lines.extend(["", "### Warnings", ""])
         lines.extend(f"- {item}" for item in warnings)
+    lines.extend(objection_markdown_lines(payload.get("worker_objections")))
+    lines.extend(scope_markdown_lines(payload.get("declared_scope_audit")))
+    lines.extend(claims_markdown_lines(payload.get("evidence_ledger")))
+    lines.extend(review_markdown_lines(payload.get("diff_review")))
     if payload.get("worker_record"):
         record = payload["worker_record"]
         lines.extend(["", "### Worker Result", ""])
