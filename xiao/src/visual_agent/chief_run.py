@@ -982,6 +982,38 @@ def _managed_retry_failure_kind(dispatch: dict[str, Any]) -> str:
     return ""
 
 
+#: 拒绝类失败：Pacer 不是"没跑完"，而是看到证据被动过、边界被越过，主动拒绝验收。
+#: 这类结论加多少轮、给多少预算都不会变，所以永远不能被预算结论盖掉。
+_REFUSAL_STOP_REASONS: dict[str, str] = {
+    "test_tampering": "evidence_rejected",
+    "acceptance_chain_tampering": "evidence_rejected",
+    "workspace_tampering": "evidence_rejected",
+    "scope_violation": "scope_violation",
+    "scope_audit_failed": "scope_violation",
+}
+
+
+def _refusal_stop_reason(latest: dict[str, Any]) -> str:
+    """从验收记录里认出"这是拒绝，不是没跑完"。
+
+    实测出来的缺陷（2026-08-05）：worker 改了验收用的测试文件，Pacer 正确地
+    拒绝了验收；但用户看到的停止原因是"这轮时间和次数用满了"，给出的下一步是
+    "加大轮数后重试"——照做会永远失败，因为轮数从来不是原因。
+    真因被预算结论盖掉，等于把人送去做无用功。
+    """
+    if not isinstance(latest, dict):
+        return ""
+    repair = latest.get("repair_brief") if isinstance(latest.get("repair_brief"), dict) else {}
+    for key in (latest.get("source"), latest.get("failure_kind"), repair.get("source"), repair.get("failure_kind")):
+        mapped = _REFUSAL_STOP_REASONS.get(str(key or "").strip())
+        if mapped:
+            return mapped
+    # 篡改记录有时只留下被改的文件名，没有留下 source。
+    if latest.get("tampered_test_files") or latest.get("tampered_workspace_files"):
+        return "evidence_rejected"
+    return ""
+
+
 def _stop_reason_from_dispatch(dispatch: dict[str, Any], budget: dict[str, Any]) -> str:
     status = str(dispatch.get("status") or "")
     if status in {"blocked", "preflight_blocked"}:
@@ -1001,6 +1033,11 @@ def _stop_reason_from_dispatch(dispatch: dict[str, Any], budget: dict[str, Any])
         return "quota_exhausted"
     if accepted:
         return "verified"
+    # 拒绝先于预算：这一条必须排在所有 budget 分支之前。顺序反了，用户就会被
+    # 告知"加大轮数后重试"，而真实原因是验收证据被动过——重试一万次也一样。
+    refusal = _refusal_stop_reason(latest)
+    if refusal:
+        return refusal
     # Defensive: if verification passed with a completed worker, never call it budget_exhausted.
     if verdict == "pass" and status in {"verified", "merged", "no_product_changes"}:
         return "verified" if status != "no_product_changes" else "no_product_changes"
@@ -1731,6 +1768,19 @@ def _next_step_commands(
         if mission_id:
             commands.append(("查看任务状态", f"checkpoint mission status --mission {_ps_quote(mission_id)}"))
             commands.append(("拆小目标后重试", f"checkpoint mission resume --mission {_ps_quote(mission_id)} --execute --max-repair-rounds 0"))
+    elif stop_reason == "evidence_rejected":
+        # 重试对拒绝类失败毫无意义：要么本来就该改测试（那就明说允许），
+        # 要么让助手只动产品代码。所以这里一条"重试"都不给。
+        if worktree.get("path"):
+            commands.append(("先看助手到底改了什么", f"git -C {_ps_quote(str(worktree.get('path')))} diff HEAD -- test tests"))
+        if mission_id:
+            commands.append((
+                "确实需要改测试就明说允许",
+                f"checkpoint mission resume --mission {_ps_quote(mission_id)} --execute --allow-test-edits",
+            ))
+    elif stop_reason == "scope_violation":
+        if worktree.get("path"):
+            commands.append(("看越界改到了哪里", f"git -C {_ps_quote(str(worktree.get('path')))} status --short"))
     elif stop_reason == "quota_exhausted":
         commands.append(("下次启动自动等额度恢复", "pacer host run --wake-on-quota --goal \"<goal>\" --execute"))
         if mission_id:
