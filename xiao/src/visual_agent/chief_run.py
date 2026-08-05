@@ -1531,10 +1531,12 @@ def _chief_run_three_section_markdown(
 def _append_client_review_sections(lines: list[str], *, dispatch_payload: dict[str, Any]) -> None:
     """Worker objection, declared scope, evidence ledger and diff review."""
     from .delivery_check import delivery_markdown_lines
+    from .evidence_pack import evidence_markdown_lines
     from .diff_review import review_markdown_lines
     from .worker_report import claims_markdown_lines, objection_markdown_lines, scope_markdown_lines
 
     section: list[str] = []
+    section.extend(evidence_markdown_lines(dispatch_payload.get("completion_evidence")))
     section.extend(delivery_markdown_lines(dispatch_payload.get("delivery_check")))
     section.extend(objection_markdown_lines(dispatch_payload.get("worker_objections")))
     section.extend(scope_markdown_lines(dispatch_payload.get("declared_scope_audit")))

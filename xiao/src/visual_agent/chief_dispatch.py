@@ -39,6 +39,7 @@ from .chief_plans_store import append_dispatch_record, append_worker_record, loa
 from .change_set import collect_repository_change_set
 from .codex_check import codex_check_to_markdown, is_runtime_changed_file, run_codex_check
 from .delivery_check import delivery_markdown_lines
+from .evidence_pack import evidence_markdown_lines
 from .diff_review import review_markdown_lines
 from .diff_summary import build_diff_summary
 from .dynamic_model_selector import routing_request_evidence
@@ -1436,6 +1437,11 @@ def dispatch_chief_plan(
         worker_objection_summary.get("claims"),
         repo_root=worktree_project_root,
     )
+    completion_evidence = _build_dispatch_evidence_pack(
+        objective=str(plan.get("objective") or ""),
+        verification=latest_verification,
+        command=effective_verification_command,
+    )
     diff_review = _run_dispatch_diff_review(
         objective=str(plan.get("objective") or ""),
         worktree=worktree_project_root,
@@ -1651,6 +1657,7 @@ def dispatch_chief_plan(
         "declared_scope_audit": declared_scope_audit,
         "evidence_ledger": evidence_ledger,
         **({"delivery_check": delivery} if delivery is not None else {}),
+        **({"completion_evidence": completion_evidence} if completion_evidence is not None else {}),
         **({"diff_review": diff_review} if diff_review is not None else {}),
         "toolchain_violation": toolchain_violation,
         "verification_attempts": verification_attempts,
@@ -4816,6 +4823,35 @@ def run_process_capture(
         }
 
 
+def _build_dispatch_evidence_pack(
+    *,
+    objective: str,
+    verification: dict[str, Any] | None,
+    command: str,
+) -> dict[str, Any] | None:
+    """Turn the acceptance run into a list of behaviors a non-reader can judge."""
+    from .evidence_pack import build_evidence_pack
+
+    record = verification if isinstance(verification, dict) else {}
+    command_verification = (
+        record.get("command_verification") if isinstance(record.get("command_verification"), dict) else {}
+    )
+    # The untruncated tail is the one that still has the early test names in it.
+    output = str(
+        command_verification.get("raw_output_tail")
+        or command_verification.get("output_tail")
+        or ""
+    )
+    if not output.strip():
+        return None
+    return build_evidence_pack(
+        objective=objective,
+        command=str(command_verification.get("command") or command or ""),
+        output=output,
+        exit_code=command_verification.get("exit_code"),
+    )
+
+
 def _run_dispatch_delivery_check(
     *,
     status: str,
@@ -5908,6 +5944,7 @@ def chief_dispatch_to_markdown(payload: dict[str, Any]) -> str:
     lines.extend(objection_markdown_lines(payload.get("worker_objections")))
     lines.extend(scope_markdown_lines(payload.get("declared_scope_audit")))
     lines.extend(claims_markdown_lines(payload.get("evidence_ledger")))
+    lines.extend(evidence_markdown_lines(payload.get("completion_evidence")))
     lines.extend(delivery_markdown_lines(payload.get("delivery_check")))
     lines.extend(review_markdown_lines(payload.get("diff_review")))
     if payload.get("worker_record"):
