@@ -1440,6 +1440,124 @@ def start_hosted_goal(
     }
 
 
+#: 重试有意义的停止原因：这些失败是"这一轮没做成"，换一次可能就成了。
+_RETRYABLE_STOP_REASONS = frozenset(
+    {
+        "same_failure_repeated",
+        "verification_failed",
+        "worker_error",
+        "budget_exhausted",
+        "provider_5xx",
+        "provider_rate_limit",
+        "network_timeout",
+        "process_crash",
+        "worker_orphaned",
+    }
+)
+
+#: 重试没有意义的停止原因：Pacer 是主动拒绝，或者缺的是人的决定与环境，
+#: 不是缺次数。对这些重试，就是昨天刚修掉的那种"让人白费功夫"。
+_UNRETRYABLE_STOP_REASONS = frozenset(
+    {
+        "evidence_rejected",
+        "scope_violation",
+        "worker_toolchain_violation",
+        "needs_clarification",
+        "quota_exhausted",
+        "not_authenticated",
+        "agent_unavailable",
+        "pytest_not_importable",
+        "verification_environment_missing",
+        "permission_required",
+        "coverage_gap",
+        "no_product_changes",
+        "verified",
+    }
+)
+
+
+def _host_duration_lines(end_summary: dict[str, Any] | None) -> list[str]:
+    """把"要了多久 / 实际多久"摆到结果最上面，提前结束不许含糊过去。"""
+    summary = end_summary if isinstance(end_summary, dict) else {}
+    if not summary:
+        return []
+    requested = float(summary.get("requested_seconds") or 0)
+    elapsed = float(summary.get("elapsed_seconds") or 0)
+    lines = [f"- 实际用时：{elapsed / 60:.0f} 分钟（申请 {requested / 60:.0f} 分钟）"]
+    if summary.get("ended_early"):
+        lines.append(
+            "- **提前结束**：目标清单已消费完，可重试的失败任务也重试过了。"
+            "托管时长是上限，不是承诺跑满。"
+        )
+    unfinished = summary.get("unfinished") if isinstance(summary.get("unfinished"), list) else []
+    if unfinished:
+        lines.append(f"- 仍未做成：{len(unfinished)} 项")
+        for item in unfinished[:5]:
+            lines.append(
+                f"  - `{item.get('stop_reason')}` {str(item.get('objective') or '')[:48]}"
+            )
+    return lines
+
+
+def retryable_stopped_missions(
+    workspace_root: Any,
+    launched_ids: list[str] | None,
+    *,
+    retry_counts: dict[str, int] | None = None,
+    max_retries: int = 1,
+) -> list[dict[str, Any]]:
+    """本轮启动过、已经停下、且重试有可能改变结果的任务。
+
+    托管跑不满时长的真正代价不是"时间没用掉"，而是**手里还有预算、也明知
+    有几件事没做成，却直接收工**。2026-08-06 实测：申请 5 小时，45 分钟就
+    HOST_DRAINED，3 个 same_failure_repeated 的任务被原样丢下，剩下 4 个多
+    小时一点没用。
+    """
+    counts = retry_counts or {}
+    wanted = {str(item) for item in (launched_ids or []) if str(item)}
+    if not wanted:
+        return []
+    pending: list[dict[str, Any]] = []
+    for row in list_missions(workspace_root):
+        mission_id = str(row.get("mission_id") or "")
+        if mission_id not in wanted:
+            continue
+        if str(row.get("status") or "") != "stopped":
+            continue
+        reason = str(row.get("stop_reason") or "").strip()
+        if reason in _UNRETRYABLE_STOP_REASONS or reason not in _RETRYABLE_STOP_REASONS:
+            continue
+        if int(counts.get(mission_id) or 0) >= max(0, int(max_retries)):
+            continue
+        pending.append({"mission_id": mission_id, "stop_reason": reason, "objective": row.get("objective")})
+    return pending
+
+
+def host_end_summary(
+    *,
+    requested_hours: float,
+    started_at_monotonic: float,
+    now_monotonic: float,
+    reason: str,
+    unfinished: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """托管结束时如实说明"要了多久、实际跑了多久、为什么提前结束"。
+
+    用户说"托管五小时"，拿到 45 分钟却看不出差别，这本身就是一句谎。
+    """
+    requested = max(0.0, float(requested_hours)) * 3600.0
+    elapsed = max(0.0, float(now_monotonic) - float(started_at_monotonic))
+    early = requested > 0 and elapsed < requested * 0.9
+    return {
+        "schema_version": 1,
+        "requested_seconds": round(requested, 1),
+        "elapsed_seconds": round(elapsed, 1),
+        "ended_early": bool(early),
+        "end_reason": str(reason or ""),
+        "unfinished": list(unfinished or []),
+    }
+
+
 def run_host_session(
     *,
     workspace_root: str | Path,
@@ -1478,6 +1596,7 @@ def run_host_session(
     poll = float(poll_seconds if poll_seconds is not None else policy.get("poll_seconds") or 90)
     hours = max(0.1, float(hours))
     deadline = time.time() + hours * 3600
+    started_monotonic = time.monotonic()
     clear_host_stop(ws)
 
     do_wake = policy.get("wake_on_quota") if wake_on_quota is None else wake_on_quota
@@ -1845,7 +1964,77 @@ def run_host_session(
                     save_host_session(ws, session)
                     time.sleep(min(poll, 60))
                     continue
-            append_host_log(ws, "HOST_DRAINED all goals finished")
+            # 目标清单消费完 ≠ 活干完了。收工之前，先把这轮里"重试有可能改变
+            # 结果"的失败任务捡回来——手里还有几个小时预算，却丢下明知没做成的
+            # 事直接结束，是把用户要的托管缩水成了一次派工。
+            retry_counts = dict(session.get("goal_retry_counts") or {})
+            if time.time() < deadline and not host_stop_requested(ws):
+                pending_retries = retryable_stopped_missions(
+                    ws,
+                    session.get("launched_mission_ids") or [],
+                    retry_counts=retry_counts,
+                    max_retries=int(policy.get("max_auto_resumes_per_mission") or 1),
+                )
+                if pending_retries:
+                    target = pending_retries[0]
+                    mission_id = str(target.get("mission_id") or "")
+                    retry_counts[mission_id] = int(retry_counts.get(mission_id) or 0) + 1
+                    session["goal_retry_counts"] = retry_counts
+                    # 重开一轮而不是 resume：same_failure_repeated 的含义正是
+                    # "沿着原会话修了两次都没修好"，再沿着同一条路续跑最可能
+                    # 撞同一堵墙。干净的 worktree 反而更有机会。
+                    resumed = start_hosted_goal(
+                        workspace_root=ws,
+                        repo_root=repo,
+                        goal=str(target.get("objective") or ""),
+                        agent=agent_name,
+                        test_command=test_command,
+                        allow_dirty=allow_dirty,
+                        allow_test_edits=allow_test_edits,
+                        merge=merge,
+                        max_rounds=int(policy.get("max_rounds") or 3),
+                        max_repair_rounds=int(policy.get("max_repair_rounds") or 1),
+                        max_wall_minutes=int(policy.get("max_wall_minutes") or 50),
+                        max_worker_minutes=int(policy.get("max_worker_minutes") or 35),
+                        reasoning_effort=effective_reasoning_effort,
+                        model_policy=effective_model_policy,
+                        execution_policy=effective_execution_policy,
+                    )
+                    new_id = str(resumed.get("mission_id") or "")
+                    if new_id:
+                        ids = list(session.get("launched_mission_ids") or [])
+                        ids.append(new_id)
+                        session["launched_mission_ids"] = ids
+                        retry_counts[new_id] = retry_counts[mission_id]
+                    append_host_log(
+                        ws,
+                        f"HOST_RETRY status={resumed.get('status')} mission={mission_id} "
+                        f"stop={target.get('stop_reason')} attempt={retry_counts[mission_id]}",
+                    )
+                    save_host_session(ws, session)
+                    if str(resumed.get("status") or "") in {"background_started", "running"}:
+                        launches.append({**resumed, "retry_of": mission_id})
+                        time.sleep(min(poll, 60))
+                        continue
+            session["end_summary"] = host_end_summary(
+                requested_hours=hours,
+                started_at_monotonic=started_monotonic,
+                now_monotonic=time.monotonic(),
+                reason="goals_and_retries_exhausted",
+                unfinished=retryable_stopped_missions(
+                    ws,
+                    session.get("launched_mission_ids") or [],
+                    retry_counts=retry_counts,
+                    max_retries=0,
+                ),
+            )
+            append_host_log(
+                ws,
+                "HOST_DRAINED all goals finished"
+                f" requested={session['end_summary']['requested_seconds']:.0f}s"
+                f" elapsed={session['end_summary']['elapsed_seconds']:.0f}s"
+                f" unfinished={len(session['end_summary']['unfinished'])}",
+            )
             # Scan launched missions to build an outcome summary for the caller.
             _launched_ids = session.get("launched_mission_ids") or []
             if _launched_ids:
@@ -1936,6 +2125,7 @@ def host_run_to_markdown(result: dict[str, Any]) -> str:
         f"- 时长目标：{session.get('hours')}h · 助手：`{session.get('agent')}`",
         f"- 启动任务数：{session.get('launched_count')}",
         f"- 目标进度：{session.get('goal_index')}/{len(session.get('goals') or [])}",
+        *_host_duration_lines(session.get("end_summary")),
         "",
         host_dashboard_to_markdown(dash) if dash else "",
     ]
