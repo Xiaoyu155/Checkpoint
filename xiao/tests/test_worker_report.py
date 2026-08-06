@@ -327,3 +327,43 @@ def test_the_run_report_stays_quiet_when_there_is_nothing_to_decide() -> None:
     )
 
     assert "要你拍板的" not in report
+
+
+def test_the_goal_itself_names_the_change_surface_when_the_worker_stays_silent() -> None:
+    from visual_agent.worker_report import infer_declared_scope
+
+    # 实测：claude-code 的报告交回率是 0/17。目标里写着路径，答案就在那儿，
+    # 根本不需要它配合。
+    scope = infer_declared_scope(
+        "把 frontend/src/pages/tools/reminders.vue 的空态改成使用共享组件 EmptyState，"
+        "配 /static/illustrations/brand-empty-reminders.png 插画。"
+    )
+
+    assert "src/pages/tools/reminders.vue" in scope
+
+
+def test_a_silent_worker_is_still_held_to_the_goal_s_named_files() -> None:
+    audit = audit_declared_scope(
+        declared=["src/pages/tools/reminders.vue"],
+        changed=["src/pages/tools/reminders.vue", "src/services/payments.js"],
+        reported=False,
+    )
+
+    assert audit["status"] == "undeclared_changes"
+    assert audit["undeclared"] == ["src/services/payments.js"]
+    assert audit["declared_by"] == "goal"
+
+
+def test_a_worker_declaration_still_wins_when_it_exists() -> None:
+    audit = audit_declared_scope(
+        declared=["src/a.py"], changed=["src/a.py"], reported=True
+    )
+
+    assert audit["declared_by"] == "worker"
+
+
+def test_a_goal_that_names_no_file_is_honestly_undeclarable() -> None:
+    from visual_agent.worker_report import infer_declared_scope
+
+    assert infer_declared_scope("把界面做得好看一点") == []
+    assert audit_declared_scope(declared=[], changed=["src/a.py"], reported=False)["status"] == "not_declared"

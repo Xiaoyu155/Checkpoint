@@ -68,6 +68,7 @@ from .repo_map import build_repo_map, render_repo_map, repo_map_cache_path
 from .security import redact_secret_text, scrub_secrets
 from .worker_report import (
     audit_declared_scope,
+    infer_declared_scope,
     audit_evidence_claims,
     claims_markdown_lines,
     collect_worker_objections,
@@ -1428,8 +1429,13 @@ def dispatch_chief_plan(
     )
     has_product_changes = _worktree_has_product_changes(worktree_project_root)
     product_change_paths = _worktree_product_change_paths(worktree_project_root)
+    # worker 交回声明的比例实测是 0/17，所以不能只靠它：目标文本里点名的文件
+    # 同样是一份声明，而且不需要 worker 配合。
+    _declared = list(worker_objection_summary.get("declared_scope") or [])
+    if not _declared:
+        _declared = infer_declared_scope(str(plan.get("objective") or ""))
     declared_scope_audit = audit_declared_scope(
-        declared=worker_objection_summary.get("declared_scope"),
+        declared=_declared,
         changed=product_change_paths,
         reported=bool(worker_objection_summary.get("reports_present")),
     )

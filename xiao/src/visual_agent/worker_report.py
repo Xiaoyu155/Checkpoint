@@ -240,6 +240,30 @@ def collect_worker_objections(records: list[dict[str, Any]] | None) -> dict[str,
     }
 
 
+_GOAL_PATH = re.compile(r"[\w./\\-]+\.(?:vue|js|mjs|cjs|ts|tsx|jsx|py|go|rb|java|rs|css|json|md)\b")
+
+
+def infer_declared_scope(objective: str) -> list[str]:
+    """从目标文本里推断改动面，作为 worker 未声明时的替代。
+
+    实测（2026-08-06）：claude-code 的 PACER-REPORT 交回率是 0/17。求 worker
+    填表这条路走不通，但"改动是否超出了目标点名的文件"这件事根本不需要它配合——
+    目标里写着 `src/pages/tools/reminders.vue`，答案就在那儿。
+    """
+    found: list[str] = []
+    for raw in _GOAL_PATH.findall(str(objective or "")):
+        path = raw.replace("\\", "/").strip().strip(".,;：，。")
+        while path.startswith("./"):
+            path = path[2:]
+        # 目标里常写成 frontend/src/... 而改动面是相对仓库根的 src/...
+        for prefix in ("frontend/", "backend/"):
+            if path.startswith(prefix):
+                path = path[len(prefix) :]
+        if path and path not in found:
+            found.append(path)
+    return found
+
+
 def audit_declared_scope(
     *,
     declared: list[str] | None,
@@ -256,23 +280,16 @@ def audit_declared_scope(
     """
     changed_paths = [str(item).replace("\\", "/").strip() for item in changed or [] if str(item).strip()]
     declared_paths = [str(item).replace("\\", "/").strip() for item in declared or [] if str(item).strip()]
+    source = "worker" if reported and declared_paths else ("goal" if declared_paths else "none")
     if not changed_paths:
         return {"schema_version": 1, "status": "no_changes", "declared": declared_paths, "undeclared": []}
-    if not reported:
-        return {
-            "schema_version": 1,
-            "status": "not_declared",
-            "declared": [],
-            "undeclared": [],
-            "reason": "worker filed no report, so no change surface was declared",
-        }
     if not declared_paths:
         return {
             "schema_version": 1,
             "status": "not_declared",
             "declared": [],
             "undeclared": [],
-            "reason": "worker filed a report with no scope lines",
+            "reason": "既没有 worker 声明，目标文本里也没点名任何文件",
         }
     undeclared = [path for path in changed_paths if not _covered_by(path, declared_paths)]
     return {
@@ -280,6 +297,7 @@ def audit_declared_scope(
         "status": "undeclared_changes" if undeclared else "matched",
         "declared": declared_paths,
         "undeclared": undeclared,
+        "declared_by": source,
     }
 
 
