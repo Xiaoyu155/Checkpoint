@@ -203,6 +203,7 @@ def build_welcome_message(cli_name: str = "checkpoint") -> str:
             "  pacer                 # 进入对话；/菜单 看命令",
             "  pacer codex           # 高级：把终端交给 Codex 本尊",
             "  pacer yolo            # 高级：Claude Code 全权限交互模式",
+            "  pacer chat            # 省额度聊天窗：一个窗口，会话到阈值无损轮转",
             "  pacer host yolo --goal \"...\" --execute  # 高级：Claude Code 全权限托管",
             f"  {cli_name} --help",
             f"  {cli_name} mission list",
@@ -1743,6 +1744,12 @@ def main(argv: list[str] | None = None) -> int:
         # Claude Code passthrough for users who want the native interactive CLI.
         if argv[0] in {"claude", "cc", "--claude"}:
             return launch_claude_code(argv[1:])
+        # C-layer chat window: Pacer owns the REPL, drives Claude headless,
+        # and rotates the billed session losslessly at exact turn boundaries.
+        if argv[0] in {"chat", "--chat"}:
+            from .claude_chat import run_claude_chat
+
+            return run_claude_chat(argv[1:])
         # Explicit Claude Code YOLO shortcut: remove conflicting permission flags
         # and force Claude's native bypassPermissions mode.
         if argv[0] in {"yolo", "claude-yolo", "cc-yolo", "--claude-yolo"}:
