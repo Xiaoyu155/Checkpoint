@@ -23,27 +23,9 @@ from visual_agent.pacer_launch_context import (
     write_launch_liveness,
 )
 
-REAL_PRELOAD_PACER_MEMORY = codex_launcher._preload_pacer_memory
 REAL_TASK_REVIEW_SUBPROCESS_RUN = task_review._SUBPROCESS_RUN
 
 
-@pytest.fixture(autouse=True)
-def _stable_python_runtime(monkeypatch):
-    monkeypatch.setattr(
-        codex_launcher,
-        "resolve_python_runtime",
-        lambda _root, **_kwargs: {
-            "executable": "",
-            "source": "unavailable",
-            "available": False,
-            "pytest_available": False,
-            "probe_status": "not_found",
-            "trusted_venv": False,
-            "root": "",
-            "bound_repo_root": str(_root),
-        },
-    )
-    monkeypatch.setattr(codex_launcher, "_preload_pacer_memory", lambda **_kwargs: None)
 
 
 def _stub_native_codex(monkeypatch, calls, *, returncode: int = 0) -> None:
@@ -113,6 +95,24 @@ def _ownership_lines(prompt: str) -> list[str]:
         for line in prompt.splitlines()
         if line.startswith(PACER_LAUNCH_OWNERSHIP_PREFIX)
     ]
+
+
+@pytest.fixture(autouse=True)
+def _stable_python_runtime(monkeypatch):
+    monkeypatch.setattr(
+        codex_launcher,
+        "resolve_python_runtime",
+        lambda _root, **_kwargs: {
+            "executable": "",
+            "source": "unavailable",
+            "available": False,
+            "pytest_available": False,
+            "probe_status": "not_found",
+            "trusted_venv": False,
+            "root": "",
+            "bound_repo_root": str(_root),
+        },
+    )
 
 
 def test_native_routing_injects_selected_model_and_provider(tmp_path) -> None:
@@ -324,41 +324,6 @@ def test_launch_binds_relative_sibling_without_changing_process_cwd(
     ]
 
 
-def test_launch_binds_absolute_inline_cd_for_memory_and_manifest(tmp_path, monkeypatch) -> None:
-    process_cwd = tmp_path / "caller"
-    repo = tmp_path / "absolute-source"
-    process_cwd.mkdir()
-    repo.mkdir()
-    calls = []
-    memory_calls = []
-    _stub_native_codex(monkeypatch, calls)
-    monkeypatch.setattr(
-        codex_launcher,
-        "_preload_pacer_memory",
-        lambda **kwargs: memory_calls.append(kwargs)
-        or {"memory_receipt": "absolute-receipt", "effective_memory": {"hit": False}},
-    )
-    cd_argument = f"--cd={repo}"
-
-    assert codex_launcher.launch_codex(
-        [cd_argument, "exec", "修复绝对路径项目"],
-        cwd=process_cwd,
-    ) == 78
-
-    command, options = calls[0]
-    assert cd_argument in command
-    assert options["cwd"] == str(process_cwd.resolve())
-    assert memory_calls[0]["repo_root"] == repo.resolve()
-    assert memory_calls[0]["workspace_root"] == repo.resolve() / ".agent-workspace"
-    manifest_path = next((repo / ".agent-workspace" / "pacer_native" / "launches").glob("*.json"))
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["process_cwd"] == str(process_cwd.resolve())
-    assert manifest["effective_repo_root"] == str(repo.resolve())
-    assert "修复绝对路径项目" not in manifest_path.read_text(encoding="utf-8")
-    assert codex_launcher.PACER_BOOTSTRAP_MEMORY_MARKER in command[-1]
-    assert _ownership_lines(command[-1]) == [
-        codex_launcher.rollout_ownership_marker(manifest["launch_id"])
-    ]
 
 
 def test_missing_cd_target_degrades_pacer_but_preserves_native_codex_result(
@@ -1020,44 +985,6 @@ def test_launch_pacer_exec_prefixes_stdin_without_moving_marker(tmp_path, monkey
     assert options["errors"] == "replace"
 
 
-def test_launch_preloads_memory_once_for_real_exec_task(tmp_path, monkeypatch) -> None:
-    process_calls = []
-    memory_calls = []
-    _stub_native_codex(monkeypatch, process_calls)
-
-    def fake_preload(**kwargs):
-        memory_calls.append(kwargs)
-        active = read_active_launch(kwargs["workspace_root"], launch_id=kwargs["launch_id"])
-        assert active["status"] == "running"
-        return {
-            "schema_version": 2,
-            "response_detail": "compact",
-            "status": "memory_loaded",
-            "memory_receipt": "receipt-exec-1",
-            "effective_memory": {"hit": True, "formal_entries": 0, "native_history_entries": 1},
-        }
-
-    monkeypatch.setattr(codex_launcher, "_preload_pacer_memory", fake_preload)
-
-    assert codex_launcher.launch_codex(
-        ["-m", "gpt-5.6-sol", "exec", "--json", "修复登录错误"],
-        cwd=tmp_path,
-    ) == 78
-
-    assert len(memory_calls) == 1
-    assert memory_calls[0]["goal"] == "修复登录错误"
-    assert memory_calls[0]["repo_root"] == tmp_path.resolve()
-    assert memory_calls[0]["workspace_root"] == tmp_path.resolve() / ".agent-workspace"
-    prompt = process_calls[0][0][-1]
-    _assert_native_control(prompt, task="修复登录错误")
-    assert prompt.splitlines().count(codex_launcher.PACER_BOOTSTRAP_MEMORY_MARKER) == 1
-    assert "memory_receipt=receipt-exec-1" in prompt
-    assert "Do not call mcp__pacer__get_pacer_memory again" in prompt
-    assert '"memory_receipt":"receipt-exec-1"' in prompt
-    manifest = next((tmp_path / ".agent-workspace" / "pacer_native" / "launches").glob("*.json"))
-    persisted = json.loads(manifest.read_text(encoding="utf-8"))
-    assert persisted["mode"] == "exec"
-    assert persisted["liveness"]["stall_detection_enabled"] is True
 
 
 def test_launch_pre_registers_task_evidence_before_starting_codex(tmp_path, monkeypatch) -> None:
@@ -1216,89 +1143,10 @@ def test_resume_blocks_tampered_recovery_evidence(tmp_path, monkeypatch, tamper)
     assert len(calls) == 1
 
 
-def test_launch_memory_preload_failure_warns_and_preserves_native_prompt(tmp_path, monkeypatch, capsys) -> None:
-    process_calls = []
-    _stub_native_codex(monkeypatch, process_calls)
-
-    def fail_preload(**_kwargs):
-        raise RuntimeError("memory unavailable")
-
-    monkeypatch.setattr(codex_launcher, "_preload_pacer_memory", fail_preload)
-
-    assert codex_launcher.launch_codex(["exec", "修复登录错误"], cwd=tmp_path) == 78
-
-    _assert_native_control(process_calls[0][0][-1], task="修复登录错误")
-    assert process_calls[0][0][-1].splitlines().count(codex_launcher.PACER_BOOTSTRAP_MEMORY_MARKER) == 0
-    assert "memory preload: RuntimeError" in capsys.readouterr().err
 
 
-def test_launch_preloads_stdin_task_without_moving_dash_marker(tmp_path, monkeypatch) -> None:
-    process_calls = []
-    memory_calls = []
-    _stub_native_codex(monkeypatch, process_calls)
-    monkeypatch.setattr(codex_launcher.sys, "stdin", io.StringIO("审查并修复并发错误"))
-    monkeypatch.setattr(
-        codex_launcher,
-        "_preload_pacer_memory",
-        lambda **kwargs: memory_calls.append(kwargs)
-        or {"memory_receipt": "receipt-stdin-1", "effective_memory": {"hit": False}},
-    )
-
-    assert codex_launcher.launch_codex(["exec", "--json", "-"], cwd=tmp_path) == 78
-
-    command, options = process_calls[0]
-    assert command[-3:] == ["exec", "--json", "-"]
-    assert len(memory_calls) == 1
-    assert memory_calls[0]["goal"] == "审查并修复并发错误"
-    _assert_native_control(options["input"], task="审查并修复并发错误")
-    assert codex_launcher.PACER_BOOTSTRAP_MEMORY_MARKER in options["input"]
-    assert "memory_receipt=receipt-stdin-1" in options["input"]
 
 
-def test_memory_preload_binds_launch_id_and_restores_environment(tmp_path, monkeypatch) -> None:
-    observed = []
-
-    def fake_payload(args):
-        observed.append((os.environ.get("PACER_LAUNCH_ID"), args))
-        return {"memory_receipt": "receipt-env-1", "summary": "safe"}
-
-    monkeypatch.setattr(codex_launcher, "_get_pacer_memory_payload", fake_payload)
-    monkeypatch.delenv("PACER_LAUNCH_ID", raising=False)
-    payload = REAL_PRELOAD_PACER_MEMORY(
-        workspace_root=tmp_path / ".agent-workspace",
-        repo_root=tmp_path,
-        launch_id="launch-inner",
-        goal="真实任务",
-    )
-
-    assert payload["memory_receipt"] == "receipt-env-1"
-    assert observed == [
-        (
-            "launch-inner",
-            {
-                "workspace_root": str(tmp_path / ".agent-workspace"),
-                "repo_root": str(tmp_path),
-                "goal": "真实任务",
-                "detail": "compact",
-            },
-        )
-    ]
-    assert "PACER_LAUNCH_ID" not in os.environ
-
-    monkeypatch.setenv("PACER_LAUNCH_ID", "launch-outer")
-    monkeypatch.setattr(
-        codex_launcher,
-        "_get_pacer_memory_payload",
-        lambda _args: (_ for _ in ()).throw(RuntimeError("failed")),
-    )
-    with pytest.raises(RuntimeError, match="failed"):
-        REAL_PRELOAD_PACER_MEMORY(
-            workspace_root=tmp_path / ".agent-workspace",
-            repo_root=tmp_path,
-            launch_id="launch-failing",
-            goal="失败任务",
-        )
-    assert os.environ["PACER_LAUNCH_ID"] == "launch-outer"
 
 
 @pytest.mark.parametrize(
@@ -1317,48 +1165,8 @@ def test_task_text_is_extracted_only_from_supported_real_task_forms(argv, stdin_
     assert codex_launcher._pacer_task_text(argv, stdin_text=stdin_text) == expected
 
 
-@pytest.mark.parametrize(
-    "argv",
-    [
-        [],
-        ["review"],
-        ["resume"],
-        ["resume", "--last"],
-        ["resume", "session-name"],
-        ["plugin", "list"],
-    ],
-)
-def test_no_task_and_management_launches_do_not_preload_memory(tmp_path, monkeypatch, argv) -> None:
-    process_calls = []
-    _stub_native_codex(monkeypatch, process_calls)
-
-    def unexpected_preload(**_kwargs):
-        raise AssertionError("plain or taskless Codex launch must not preload Pacer memory")
-
-    monkeypatch.setattr(codex_launcher, "_preload_pacer_memory", unexpected_preload)
-
-    assert codex_launcher.launch_codex(argv, cwd=tmp_path) == 0
-    assert len(process_calls) == 1
-    if not argv:
-        _assert_native_control(process_calls[0][0][-1])
-        assert "PACER_WAIT_FOR_TASK_V1" in process_calls[0][0][-1]
-        assert "Wait for the user's task and do not call any tool yet." in process_calls[0][0][-1]
 
 
-def test_empty_exec_stdin_does_not_preload_memory(tmp_path, monkeypatch) -> None:
-    process_calls = []
-    _stub_native_codex(monkeypatch, process_calls)
-    monkeypatch.setattr(codex_launcher.sys, "stdin", io.StringIO(""))
-
-    def unexpected_preload(**_kwargs):
-        raise AssertionError("empty stdin is not a real task")
-
-    monkeypatch.setattr(codex_launcher, "_preload_pacer_memory", unexpected_preload)
-
-    assert codex_launcher.launch_codex(["exec", "-"], cwd=tmp_path) == 0
-    assert process_calls[0][0][-2:] == ["exec", "-"]
-    _assert_native_control(process_calls[0][1]["input"])
-    assert "PACER_WAIT_FOR_TASK_V1" in process_calls[0][1]["input"]
 
 
 def test_prepare_interactive_pacer_injects_control_without_changing_native_mode() -> None:

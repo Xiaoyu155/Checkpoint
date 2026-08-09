@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import re
@@ -127,7 +127,6 @@ def workspace_session_snapshot_text(workspace: Path, *, max_chars: int = MAX_SNA
         text = "No session data yet. Run a workflow first."
     else:
         text = _session_to_snapshot_text(session)
-    text = append_latest_repair_summary(workspace, text)
     status_path = workspace.parent / ".visual-agent-status.md"
     text = text.rstrip() + f"\n\nVisual status file: {status_path.resolve()}"
     return clamp_ai_text(text, max_chars=max_chars, suffix="...[truncated, use MCP tools for details]")
@@ -365,36 +364,6 @@ def _session_to_snapshot_text(session: AgentSession) -> str:
     lines.append(f"Next action: {session.next_action}")
     lines.append(f"Context fetched: {int(session.updated_at)}")
     return _sanitize_text("\n".join(lines))
-
-
-def append_latest_repair_summary(workspace: Path, text: str) -> str:
-    try:
-        from .repair_history import list_repair_history
-
-        history = list_repair_history(workspace, limit=1)
-    except Exception:
-        return text
-    entries = history.get("entries") if isinstance(history.get("entries"), list) else []
-    if not entries:
-        return text
-    latest = entries[0] if isinstance(entries[0], dict) else {}
-    if not latest:
-        return text
-    lines = [
-        text.rstrip(),
-        "",
-        "Latest Repair:",
-        f"  Status: {_sanitize_text(str(latest.get('status') or ''))[:80]}",
-        f"  Workflow: {_sanitize_text(str(latest.get('workflow') or ''))[:120]}",
-        f"  Classification: {_sanitize_text(str(latest.get('classification') or ''))[:80]}",
-    ]
-    if latest.get("verification_status"):
-        lines.append(f"  Verification: {_sanitize_text(str(latest.get('verification_status') or ''))[:80]}")
-    if latest.get("rollback_status"):
-        lines.append(f"  Rollback: {_sanitize_text(str(latest.get('rollback_status') or ''))[:80]}")
-    if latest.get("recommended_fix"):
-        lines.append(f"  Fix: {_sanitize_text(str(latest.get('recommended_fix') or ''))[:180]}")
-    return "\n".join(lines)
 
 
 def _write_session(workspace: Path, session: AgentSession) -> None:

@@ -1,6 +1,0 @@
-node_modules/**
-src/**
-*.vsix
-out/**/*.map
-tsconfig.json
-package-lock.json

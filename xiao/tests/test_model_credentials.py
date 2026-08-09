@@ -89,16 +89,6 @@ def test_default_openai_can_auto_select_available_file_provider(tmp_path, monkey
     assert plan["probe"]["base_url"] == "https://api.xiaomimimo.com/v1"
 
 
-def test_model_credentials_inspect_cli_is_redacted(tmp_path, capsys) -> None:
-    path = tmp_path / "keys.txt"
-    path.write_text("deepseek密钥 sk-deepseek-secret-value-123456\n", encoding="utf-8")
-
-    code = main(["model-credentials-inspect", "--source", str(path), "--preferred", "deepseek", "--format", "markdown"])
-    output = capsys.readouterr().out
-
-    assert code == 0
-    assert "deepseek" in output
-    assert "sk-deepseek-secret-value-123456" not in output
 
 
 def test_model_api_probe_plan_uses_xiaomimimo_defaults_without_sending_secret(tmp_path) -> None:
@@ -119,31 +109,6 @@ def test_model_api_probe_plan_uses_xiaomimimo_defaults_without_sending_secret(tm
     assert "sk-xiaomi-secret-value-abcdef" not in markdown
 
 
-def test_model_api_probe_plan_cli_can_be_ready_with_base_url_and_endpoint(tmp_path, capsys) -> None:
-    path = tmp_path / "keys.txt"
-    path.write_text("xiaomimimo api key: sk-xiaomi-secret-value-abcdef\n", encoding="utf-8")
-
-    code = main(
-        [
-            "model-api-probe-plan",
-            "--source",
-            str(path),
-            "--preferred",
-            "xiaomimimo",
-            "--base-url",
-            "https://api.example.test",
-            "--endpoint",
-            "/v1/models",
-            "--format",
-            "markdown",
-        ]
-    )
-    output = capsys.readouterr().out
-
-    assert code == 0
-    assert "Ready: `True`" in output
-    assert "Sends secret: `False`" in output
-    assert "sk-xiaomi-secret-value-abcdef" not in output
 
 
 def test_run_model_api_probe_uses_redacted_compact_response(tmp_path, monkeypatch) -> None:

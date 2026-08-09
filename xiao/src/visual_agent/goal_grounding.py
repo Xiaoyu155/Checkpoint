@@ -30,7 +30,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
-from .goal_intake import resolve_cheap_backend
+from .cheap_backends import resolve_cheap_backend
 
 # The grounding reviewer prefers MiMo: document review is read-heavy, and MiMo
 # credits are prepaid and plentiful, so burning them on reading is free-ish.

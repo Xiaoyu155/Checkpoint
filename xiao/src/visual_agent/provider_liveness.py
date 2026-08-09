@@ -91,9 +91,10 @@ def probe_worker_agent_liveness(
     if agent_norm == "codex":
         inspector = account_inspector
         if inspector is None:
-            from .pacer_support import inspect_codex_account
-
-            inspector = inspect_codex_account
+            # The account inspector lived in the dispatch support layer, which
+            # is gone. Without an injected one there is nothing to check, so
+            # report unknown rather than pretend the provider is down.
+            return {**base, "status": "unknown", "details": {"source": "no_inspector"}}
         inspected = inspector(use_cache=use_cache)
         account = inspected if isinstance(inspected, dict) else {"raw": inspected}
         details = dict(account) if isinstance(account, dict) else {"raw": account}

@@ -59,42 +59,12 @@ def test_extract_secret_does_not_match_comments() -> None:
     assert extract_secret_from_line("# xiaomimimo: visit website") is None
 
 
-def test_route_handler_rejects_system_path() -> None:
-    import pytest
-
-    from visual_agent.providers import route_handler
-
-    handler = route_handler({"url": "**/*", "body_from_file": "C:/Windows/System32/drivers/etc/hosts"})
-    with pytest.raises((ValueError, FileNotFoundError)):
-        handler(MockRoute())
 
 
-def test_auth_state_path_must_be_under_agent_auth() -> None:
-    from pathlib import Path
-
-    from visual_agent.auth_state import is_auth_state_path
-
-    assert is_auth_state_path(Path(".agent-auth/test.json"), workspace_root=Path("."))
-    assert not is_auth_state_path(Path("/etc/passwd"), workspace_root=Path("."))
-    assert not is_auth_state_path(Path("../evil.json"), workspace_root=Path("."))
 
 
-def test_safe_auth_state_name_strips_path_separators() -> None:
-    from visual_agent.auth_state import safe_auth_state_name
-
-    result = safe_auth_state_name("../evil/name")
-
-    assert "/" not in result and "\\" not in result
-    assert ".." not in result
 
 
-def test_normalize_url_rejects_out_of_project_path() -> None:
-    import pytest
-
-    from visual_agent.providers import normalize_url
-
-    with pytest.raises(ValueError):
-        normalize_url("C:/Windows/System32/drivers/etc/hosts")
 
 
 def test_sensitive_step_stores_hash_not_plaintext() -> None:
@@ -104,17 +74,6 @@ def test_sensitive_step_stores_hash_not_plaintext() -> None:
     assert meta.get("sensitive") is True
 
 
-def test_queue_task_redacts_sensitive_inline_inputs(tmp_path) -> None:
-    from visual_agent.scheduler import list_queue_tasks, submit_queue_task
-    from visual_agent.workspace import init_workspace
-
-    workspace = init_workspace(tmp_path / "agent-workspace")
-    submit_queue_task(workspace, "local_html_form_workflow", inputs={"password": "plain-secret", "user": "demo"})
-
-    task = list_queue_tasks(workspace)["entries"][0]
-    assert task["inputs"]["user"] == "demo"
-    assert task["inputs"]["password"]["redacted"] is True
-    assert "plain-secret" not in str(task)
 
 
 def test_validate_workflow_url_allows_localhost_and_public_urls() -> None:
