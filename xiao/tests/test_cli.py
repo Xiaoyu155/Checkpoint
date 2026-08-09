@@ -243,22 +243,13 @@ def test_pacer_cc_alias_delegates_to_claude(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", [r"C:\Python\Scripts\pacer.exe", "cc", "--dangerously-skip-permissions"])
     monkeypatch.setattr(cli.shutil, "which", lambda name: r"C:\Tools\claude.exe" if name == "claude" else None)
 
-    # guarded_run uses Popen when the Job Object guard is available (Windows).
-    # Patch at the process_guard level so the mock intercepts both paths.
-    class _FakePopen:
-        def __init__(self, argv, **kw):
-            calls.append(list(argv))
-            self.pid = 12345
-            self.args = argv
-            self.returncode = 41
-        def __enter__(self): return self
-        def __exit__(self, *_): pass
-        def communicate(self, input=None, timeout=None): return None, None
-        def kill(self): pass
-        def wait(self): pass
+    # Interactive launches route through the quota-protecting session rotation
+    # proxy; the normalized argv must reach it intact.
+    def fake_rotation(executable, argv, **kwargs):
+        calls.append([executable, *argv])
+        return 41
 
-    monkeypatch.setattr(_pg.subprocess, "Popen", _FakePopen)
-    monkeypatch.setattr(_pg.subprocess, "run", lambda argv, **kw: calls.append(list(argv)) or subprocess.CompletedProcess(argv, 41))
+    monkeypatch.setattr("visual_agent.claude_rotation.run_claude_with_rotation", fake_rotation)
 
     assert main() == 41
     assert calls == [[r"C:\Tools\claude.exe", "--permission-mode", "bypassPermissions"]]
@@ -283,20 +274,11 @@ def test_pacer_yolo_alias_forces_claude_bypass_permissions(monkeypatch) -> None:
     )
     monkeypatch.setattr(cli.shutil, "which", lambda name: r"C:\Tools\claude.exe" if name == "claude" else None)
 
-    class _FakePopen:
-        def __init__(self, argv, **kw):
-            calls.append(list(argv))
-            self.pid = 12345
-            self.args = argv
-            self.returncode = 43
-        def __enter__(self): return self
-        def __exit__(self, *_): pass
-        def communicate(self, input=None, timeout=None): return None, None
-        def kill(self): pass
-        def wait(self): pass
+    def fake_rotation(executable, argv, **kwargs):
+        calls.append([executable, *argv])
+        return 43
 
-    monkeypatch.setattr(_pg.subprocess, "Popen", _FakePopen)
-    monkeypatch.setattr(_pg.subprocess, "run", lambda argv, **kw: calls.append(list(argv)) or subprocess.CompletedProcess(argv, 43))
+    monkeypatch.setattr("visual_agent.claude_rotation.run_claude_with_rotation", fake_rotation)
 
     assert main() == 43
     assert calls == [[r"C:\Tools\claude.exe", "--permission-mode", "bypassPermissions", "fix bug"]]
