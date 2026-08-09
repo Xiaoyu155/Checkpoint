@@ -17,6 +17,7 @@ import pytest
 
 from visual_agent import cli
 from visual_agent.claude_rotation import (
+    argv_with_model,
     DEFAULT_ROTATE_TOKENS,
     SessionMeter,
     build_handoff,
@@ -29,13 +30,15 @@ from visual_agent.claude_rotation import (
 )
 
 
-def _assistant_record(*, text="", tools=(), usage=None, cwd="D:/proj"):
+def _assistant_record(*, text="", tools=(), usage=None, cwd="D:/proj", model=""):
     content = [{"type": "tool_use", "name": name, "input": {"file_path": path}} for name, path in tools]
     if text:
         content.append({"type": "text", "text": text})
     record = {"type": "assistant", "cwd": cwd, "message": {"content": content}}
     if usage is not None:
         record["message"]["usage"] = usage
+    if model:
+        record["message"]["model"] = model
     return record
 
 
@@ -105,6 +108,42 @@ class TestSessionMeter:
         meter = SessionMeter(path=transcript)
         meter.refresh()  # last_growth = now
         assert not meter.at_turn_boundary()
+
+
+class TestModelPreservation:
+    """A /model switch mid-session must survive rotation, or the user's choice
+    silently reverts to the default on the next window."""
+
+    def test_meter_tracks_latest_model(self, tmp_path):
+        transcript = tmp_path / "s.jsonl"
+        _write_jsonl(
+            transcript,
+            [
+                _assistant_record(text="a", model="claude-fable-5"),
+                _assistant_record(text="b", model="claude-opus-5"),
+            ],
+        )
+        meter = SessionMeter(path=transcript)
+        meter.refresh()
+        assert meter.last_model == "claude-opus-5"
+
+    def test_argv_with_model_replaces_existing_choice(self):
+        argv = ["--permission-mode", "bypassPermissions", "--model", "sonnet"]
+        assert argv_with_model(argv, "claude-opus-5") == [
+            "--model",
+            "claude-opus-5",
+            "--permission-mode",
+            "bypassPermissions",
+        ]
+        assert argv_with_model(["--model=sonnet", "-x"], "claude-opus-5") == [
+            "--model",
+            "claude-opus-5",
+            "-x",
+        ]
+
+    def test_argv_unchanged_when_no_model_observed(self):
+        argv = ["--permission-mode", "bypassPermissions"]
+        assert argv_with_model(argv, "") == argv
 
 
 class TestDiscoverSessionJsonl:

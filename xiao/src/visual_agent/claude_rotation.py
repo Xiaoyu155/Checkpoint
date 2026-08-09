@@ -115,6 +115,7 @@ class SessionMeter:
     path: Path
     total_tokens: int = 0
     last_context_tokens: int = 0
+    last_model: str = ""
     last_record_final_text: bool = False
     last_growth: float = field(default_factory=time.time)
     _offset: int = 0
@@ -152,6 +153,12 @@ class SessionMeter:
         kind = record.get("type")
         if kind == "assistant":
             message = record.get("message")
+            if isinstance(message, dict):
+                # A mid-session /model switch shows up here; the fresh session
+                # must inherit it or the user's choice silently reverts.
+                model = str(message.get("model") or "").strip()
+                if model:
+                    self.last_model = model
             usage = message.get("usage") if isinstance(message, dict) else None
             if isinstance(usage, dict):
                 turn_input = (
@@ -309,6 +316,29 @@ def build_handoff(jsonl_path: Path, *, max_chars: int = 6000) -> str:
     return text if len(text) <= max_chars else text[: max_chars - 1] + "…"
 
 
+def argv_with_model(argv: list[str], model: str) -> list[str]:
+    """Carry the session's live model into the next process.
+
+    The user may have switched with /model mid-session; a relaunch that drops
+    that choice is a silent downgrade (or upgrade) they never asked for.
+    """
+    if not model:
+        return list(argv)
+    cleaned: list[str] = []
+    skip_next = False
+    for token in argv:
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "--model":
+            skip_next = True
+            continue
+        if token.startswith("--model="):
+            continue
+        cleaned.append(token)
+    return ["--model", model, *cleaned]
+
+
 def rotation_prompt(handoff: str) -> str:
     return (
         "上一个会话因上下文规模达到额度保护阈值被 Pacer 自动轮转，你是接续会话。"
@@ -367,13 +397,14 @@ def run_claude_with_rotation(
     projects_root = projects_root or claude_projects_root()
     used_transcripts: set[Path] = set()
     pending_prompt: str | None = None
+    live_model = ""
     rotations = 0
 
     guard = ProcessGuard()
     guard.start()
     try:
         while True:
-            launch_argv = list(argv)
+            launch_argv = argv_with_model(argv, live_model)
             if pending_prompt:
                 launch_argv.append(pending_prompt)
             command = prepare_subprocess_command([executable, *launch_argv])
@@ -427,11 +458,13 @@ def run_claude_with_rotation(
             handoff = build_handoff(meter.path) if meter else ""
             saved = save_handoff(handoff, cwd=cwd) if handoff else None
             pending_prompt = rotation_prompt(handoff)
+            live_model = (meter.last_model if meter else "") or live_model
             location = f"，交接存档 {saved}" if saved else ""
+            model_note = f"，沿用模型 {live_model}" if live_model else ""
             print(
                 f"\n[pacer] 第 {rotations} 次会话轮转：上一会话消耗约 "
                 f"{(meter.total_tokens if meter else 0) / 1_000_000:.0f}M token，已达阈值。"
-                f"正在带交接开启新会话{location}……\n"
+                f"正在带交接开启新会话{location}{model_note}……\n"
             )
             sys.stdout.flush()
     finally:

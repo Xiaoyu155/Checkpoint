@@ -39,6 +39,26 @@ _MAX_HISTORY = 12
 
 
 @dataclass
+class RateLimit:
+    """Real subscription quota, straight from the engine's rate_limit_event."""
+
+    kind: str = ""
+    utilization: float = 0.0
+    resets_at: int = 0
+    status: str = ""
+
+    def describe(self) -> str:
+        label = {"seven_day": "周额度", "five_hour": "5小时额度"}.get(self.kind, self.kind or "额度")
+        text = f"{label} 已用 {self.utilization * 100:.0f}%"
+        if self.resets_at:
+            remaining = self.resets_at - time.time()
+            if remaining > 0:
+                hours = remaining / 3600
+                text += f"，{hours / 24:.1f} 天后重置" if hours >= 24 else f"，{hours:.1f} 小时后重置"
+        return text
+
+
+@dataclass
 class TurnResult:
     session_id: str = ""
     text: str = ""
@@ -46,6 +66,7 @@ class TurnResult:
     touched: list[str] = field(default_factory=list)
     ok: bool = True
     error: str = ""
+    rate_limits: dict[str, RateLimit] = field(default_factory=dict)
 
 
 @dataclass
@@ -56,10 +77,12 @@ class ChatState:
     history: list[dict[str, str]] = field(default_factory=list)
     touched: list[str] = field(default_factory=list)
     pending_handoff: str = ""
+    rate_limits: dict[str, RateLimit] = field(default_factory=dict)
 
     def record_turn(self, prompt: str, result: TurnResult) -> None:
         self.session_id = result.session_id or self.session_id
         self.session_tokens += result.tokens
+        self.rate_limits.update(result.rate_limits)
         self.history.append({"user": prompt, "assistant": result.text})
         if len(self.history) > _MAX_HISTORY:
             self.history.pop(0)
@@ -72,18 +95,42 @@ class ChatState:
         self.session_tokens = 0
 
 
-def headless_argv(base_flags: list[str], *, resume_id: str, prompt: str) -> list[str]:
-    argv = list(base_flags)
-    if resume_id:
-        argv += ["--resume", resume_id]
-    # stream-json in print mode requires --verbose.
-    argv += ["-p", "--output-format", "stream-json", "--verbose", prompt]
-    return argv
+def format_tokens(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.0f}k"
+    return str(count)
 
 
-def fold_event(event: dict[str, Any], result: TurnResult) -> str | None:
+def fold_event(
+    event: dict[str, Any],
+    result: TurnResult,
+    *,
+    on_text: Callable[[str], None] | None = None,
+) -> str | None:
     """Absorb one stream-json event; return a progress line to display, if any."""
     kind = event.get("type")
+    if kind == "stream_event":
+        inner = event.get("event") or {}
+        if inner.get("type") == "content_block_delta":
+            delta = inner.get("delta") or {}
+            if delta.get("type") == "text_delta" and on_text:
+                chunk = str(delta.get("text") or "")
+                if chunk:
+                    on_text(chunk)
+        return None
+    if kind == "rate_limit_event":
+        info = event.get("rate_limit_info") or {}
+        limit = RateLimit(
+            kind=str(info.get("rateLimitType") or ""),
+            utilization=float(info.get("utilization") or 0.0),
+            resets_at=int(info.get("resetsAt") or 0),
+            status=str(info.get("status") or ""),
+        )
+        if limit.kind:
+            result.rate_limits[limit.kind] = limit
+        return None
     if kind == "assistant":
         message = event.get("message") or {}
         content = message.get("content")
@@ -131,40 +178,82 @@ def fold_event(event: dict[str, Any], result: TurnResult) -> str | None:
     return None
 
 
-def run_turn(
-    executable: str,
-    base_flags: list[str],
-    *,
-    prompt: str,
-    resume_id: str,
-    environ: dict[str, str] | None = None,
-    on_progress: Callable[[str], None] | None = None,
-) -> TurnResult:
-    from .process_guard import ProcessGuard
-    from .subprocess_window import prepare_subprocess_command
+class ClaudeSession:
+    """One long-lived Claude process fed by stream-json on stdin.
 
-    child_env = dict(os.environ if environ is None else environ)
-    child_env.setdefault("MAX_THINKING_TOKENS", DEFAULT_MAX_THINKING_TOKENS)
-    command = prepare_subprocess_command(
-        [executable, *headless_argv(base_flags, resume_id=resume_id, prompt=prompt)]
-    )
-    result = TurnResult()
-    guard = ProcessGuard()
-    guard.start()
-    try:
-        process = subprocess.Popen(
-            command,
+    Measured: respawning per turn costs 7-11s of startup every time, which is
+    what made the window feel dead. A persistent process answers follow-up
+    turns in ~2s. Rotation still spawns a new process -- but only once per
+    threshold crossing, not once per message.
+    """
+
+    def __init__(
+        self,
+        executable: str,
+        base_flags: list[str],
+        *,
+        environ: dict[str, str] | None = None,
+        resume_id: str = "",
+    ) -> None:
+        from .process_guard import ProcessGuard
+        from .subprocess_window import prepare_subprocess_command
+
+        child_env = dict(os.environ if environ is None else environ)
+        child_env.setdefault("MAX_THINKING_TOKENS", DEFAULT_MAX_THINKING_TOKENS)
+        argv = list(base_flags)
+        if resume_id:
+            argv += ["--resume", resume_id]
+        argv += [
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+        ]
+        self._guard = ProcessGuard()
+        self._guard.start()
+        self.process = subprocess.Popen(
+            prepare_subprocess_command([executable, *argv]),
             env=child_env,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",
+            bufsize=1,
         )
-        guard.adopt(process.pid)
-        assert process.stdout is not None
+        self._guard.adopt(self.process.pid)
+        self.session_id = resume_id
+
+    @property
+    def alive(self) -> bool:
+        return self.process.poll() is None
+
+    def send(
+        self,
+        text: str,
+        *,
+        on_text: Callable[[str], None] | None = None,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> TurnResult:
+        result = TurnResult(session_id=self.session_id)
+        if not self.alive or self.process.stdin is None or self.process.stdout is None:
+            result.ok = False
+            result.error = "session_dead"
+            return result
+        payload = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
         try:
-            for line in process.stdout:
+            self.process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            self.process.stdin.flush()
+        except (OSError, ValueError):
+            result.ok = False
+            result.error = "session_dead"
+            return result
+        try:
+            for line in self.process.stdout:
                 line = line.strip()
                 if not line:
                     continue
@@ -172,29 +261,36 @@ def run_turn(
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                progress = fold_event(event, result)
+                progress = fold_event(event, result, on_text=on_text)
                 if progress and on_progress:
                     on_progress(progress)
-        except KeyboardInterrupt:
-            # User cancelled the turn; kill it but keep the window alive.
-            if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True)
+                if event.get("type") == "result":
+                    break
             else:
-                process.terminate()
+                result.ok = False
+                result.error = "session_ended"
+        except KeyboardInterrupt:
             result.ok = False
             result.error = "interrupted"
-        stderr_text = ""
+        self.session_id = result.session_id or self.session_id
+        return result
+
+    def close(self) -> None:
         try:
-            stderr_text = (process.stderr.read() or "").strip() if process.stderr else ""
+            if self.process.stdin:
+                self.process.stdin.close()
         except (OSError, ValueError):
             pass
-        returncode = process.wait()
-        if returncode != 0 and result.ok and not result.text:
-            result.ok = False
-            result.error = stderr_text or f"claude exited with code {returncode}"
-    finally:
-        guard.close()
-    return result
+        if self.alive:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(self.process.pid), "/T", "/F"], capture_output=True)
+            else:
+                self.process.terminate()
+            try:
+                self.process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                pass
+        self._guard.close()
 
 
 def build_chat_handoff(state: ChatState, *, max_chars: int = 6000) -> str:
@@ -221,14 +317,32 @@ def build_chat_handoff(state: ChatState, *, max_chars: int = 6000) -> str:
 
 
 def status_text(state: ChatState, threshold: int) -> str:
-    used = state.session_tokens / 1_000_000
-    cap = threshold / 1_000_000
     session = state.session_id or "（首条消息后建立）"
-    return (
-        f"当前会话 {session}\n"
-        f"会话消耗 {used:.1f}M / {cap:.0f}M token（到阈值自动无损轮转）\n"
-        f"本窗口已轮转 {state.rotations} 次"
-    )
+    lines = [
+        f"当前会话 {session}",
+        f"会话消耗 {format_tokens(state.session_tokens)} / {format_tokens(threshold)}（到阈值自动无损轮转）",
+        f"本窗口已轮转 {state.rotations} 次",
+    ]
+    # Subscription quota is what actually runs out, so lead the eye to it.
+    for kind in ("seven_day", "five_hour"):
+        limit = state.rate_limits.get(kind)
+        if limit:
+            lines.append(limit.describe())
+    if not state.rate_limits:
+        lines.append("订阅额度：本窗口还没收到额度事件（发一条消息后显示）")
+    return "\n".join(lines)
+
+
+def receipt_text(state: ChatState, result: TurnResult, threshold: int, elapsed: float) -> str:
+    parts = [
+        f"本回合 {format_tokens(result.tokens)}",
+        f"会话 {format_tokens(state.session_tokens)}/{format_tokens(threshold)}",
+        f"{elapsed:.0f}s",
+    ]
+    weekly = state.rate_limits.get("seven_day")
+    if weekly:
+        parts.insert(2, f"周额度 {weekly.utilization * 100:.0f}%")
+    return "—— " + " · ".join(parts)
 
 
 def run_claude_chat(argv: list[str], *, environ: dict[str, str] | None = None) -> int:
@@ -247,72 +361,103 @@ def run_claude_chat(argv: list[str], *, environ: dict[str, str] | None = None) -
         base_flags += ["--permission-mode", "bypassPermissions"]
 
     state = ChatState()
+    session: ClaudeSession | None = None
     print(
-        f"[pacer chat] 一个项目一个窗口。会话到 {threshold // 1_000_000}M token 在回合之间无损轮转"
-        f"（{ROTATE_TOKENS_ENV} 可调）。命令：/status /rotate /new /exit"
+        f"[pacer chat] 一个项目一个窗口。会话到 {format_tokens(threshold)} token 在回合之间无损轮转"
+        f"（{ROTATE_TOKENS_ENV} 可调）。每回合小票显示真实周额度。命令：/status /rotate /new /exit"
     )
-    while True:
-        try:
-            raw = input("\n你> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 0
-        if not raw:
-            continue
-        if raw in {"/exit", "/quit", "exit", "quit"}:
-            return 0
-        if raw == "/status":
-            print(status_text(state, threshold))
-            continue
-        if raw in {"/rotate", "/new"}:
-            if raw == "/rotate" and state.history:
-                pending = build_chat_handoff(state)
-                save_handoff(pending, cwd=os.getcwd())
-                state.rotations += 1
-                state.reset_session()
-                state.pending_handoff = pending
-                print("[pacer chat] 已手动轮转，下一条消息将带交接开启新会话。")
-            else:
-                state.reset_session()
-                state.history.clear()
-                state.touched.clear()
-                print("[pacer chat] 已开启全新会话（不带交接）。")
-            continue
 
-        prompt = raw
-        resume_id = state.session_id
-        if state.session_tokens >= threshold and state.history:
+    def open_session(resume_id: str = "") -> ClaudeSession:
+        return ClaudeSession(executable, base_flags, environ=env_source, resume_id=resume_id)
+
+    def rotate(reason: str, *, carry_handoff: bool) -> None:
+        nonlocal session
+        if carry_handoff and state.history:
             handoff = build_chat_handoff(state)
-            save_handoff(handoff, cwd=os.getcwd())
+            saved = save_handoff(handoff, cwd=os.getcwd())
+            state.pending_handoff = handoff
             state.rotations += 1
-            state.reset_session()
-            resume_id = ""
-            prompt = rotation_prompt(handoff) + "\n\n---\n\n用户的新消息：" + raw
-            print(
-                f"[pacer chat] 会话达到阈值，已在回合之间无损轮转（第 {state.rotations} 次），带交接继续。"
-            )
-        if state.pending_handoff and not resume_id:
-            prompt = rotation_prompt(state.pending_handoff) + "\n\n---\n\n用户的新消息：" + raw
+            suffix = f"，交接存档 {saved}" if saved else ""
+        else:
             state.pending_handoff = ""
+            state.history.clear()
+            state.touched.clear()
+            suffix = ""
+        state.reset_session()
+        if session is not None:
+            session.close()
+            session = None
+        print(f"[pacer chat] {reason}{suffix}")
 
-        started = time.time()
-        result = run_turn(
-            executable,
-            base_flags,
-            prompt=prompt,
-            resume_id=resume_id,
-            environ=env_source,
-            on_progress=lambda line: print(line, flush=True),
-        )
-        if result.text:
-            print(f"\n{result.text}")
-        if not result.ok and result.error and result.error != "interrupted":
-            print(f"[pacer chat] 本回合异常：{result.error}")
-        elif result.error == "interrupted":
-            print("[pacer chat] 已取消本回合。")
-        state.record_turn(raw, result)
-        elapsed = time.time() - started
-        print(
-            f"\n—— {result.tokens / 1_000_000:.1f}M token · 本会话累计 "
-            f"{state.session_tokens / 1_000_000:.1f}M / {threshold // 1_000_000}M · {elapsed:.0f}s"
-        )
+    try:
+        while True:
+            try:
+                raw = input("\n你> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 0
+            if not raw:
+                continue
+            if raw in {"/exit", "/quit", "exit", "quit"}:
+                return 0
+            if raw == "/status":
+                print(status_text(state, threshold))
+                continue
+            if raw == "/rotate":
+                rotate("已手动轮转，下一条消息带交接开启新会话", carry_handoff=True)
+                continue
+            if raw == "/new":
+                rotate("已开启全新会话（不带交接）", carry_handoff=False)
+                continue
+
+            if state.session_tokens >= threshold and state.history:
+                rotate(
+                    f"会话达到 {format_tokens(threshold)} 阈值，已在回合之间无损轮转"
+                    f"（第 {state.rotations + 1} 次），带交接继续",
+                    carry_handoff=True,
+                )
+
+            prompt = raw
+            if state.pending_handoff:
+                prompt = rotation_prompt(state.pending_handoff) + "\n\n---\n\n用户的新消息：" + raw
+                state.pending_handoff = ""
+
+            if session is None or not session.alive:
+                # Resume keeps the persistent process cheap to replace if the
+                # engine exits on its own; a rotation deliberately has no id.
+                session = open_session(state.session_id)
+
+            started = time.time()
+            streamed = False
+
+            def emit_text(chunk: str) -> None:
+                nonlocal streamed
+                if not streamed:
+                    print()
+                    streamed = True
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+
+            result = session.send(
+                prompt,
+                on_text=emit_text,
+                on_progress=lambda line: print(line, flush=True),
+            )
+            if streamed:
+                print()
+            elif result.text:
+                print(f"\n{result.text}")
+            if result.error == "interrupted":
+                print("[pacer chat] 已取消本回合，会话保留。")
+                session.close()
+                session = None
+            elif result.error in {"session_dead", "session_ended"}:
+                print("[pacer chat] 引擎退出，下一条消息会自动续上当前会话。")
+                session = None
+            elif not result.ok and result.error:
+                print(f"[pacer chat] 本回合异常：{result.error}")
+            state.record_turn(raw, result)
+            print(receipt_text(state, result, threshold, time.time() - started))
+    finally:
+        if session is not None:
+            session.close()
