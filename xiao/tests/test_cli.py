@@ -243,13 +243,16 @@ def test_pacer_cc_alias_delegates_to_claude(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", [r"C:\Python\Scripts\pacer.exe", "cc", "--dangerously-skip-permissions"])
     monkeypatch.setattr(cli.shutil, "which", lambda name: r"C:\Tools\claude.exe" if name == "claude" else None)
 
-    # Interactive launches route through the quota-protecting session rotation
-    # proxy; the normalized argv must reach it intact.
-    def fake_rotation(executable, argv, **kwargs):
-        calls.append([executable, *argv])
-        return 41
+    # By default this is a plain passthrough carrying only the engine's
+    # context cap; session rotation is opt-in.
+    monkeypatch.delenv("PACER_CLAUDE_ROTATE", raising=False)
+    monkeypatch.setenv("PACER_AUTOCOMPACT", "off")
 
-    monkeypatch.setattr("visual_agent.claude_rotation.run_claude_with_rotation", fake_rotation)
+    def fake_guarded_run(command, **kw):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 41)
+
+    monkeypatch.setattr(_pg, "guarded_run", fake_guarded_run)
 
     assert main() == 41
     assert calls == [[r"C:\Tools\claude.exe", "--permission-mode", "bypassPermissions"]]
@@ -274,11 +277,14 @@ def test_pacer_yolo_alias_forces_claude_bypass_permissions(monkeypatch) -> None:
     )
     monkeypatch.setattr(cli.shutil, "which", lambda name: r"C:\Tools\claude.exe" if name == "claude" else None)
 
-    def fake_rotation(executable, argv, **kwargs):
-        calls.append([executable, *argv])
-        return 43
+    monkeypatch.delenv("PACER_CLAUDE_ROTATE", raising=False)
+    monkeypatch.setenv("PACER_AUTOCOMPACT", "off")
 
-    monkeypatch.setattr("visual_agent.claude_rotation.run_claude_with_rotation", fake_rotation)
+    def fake_guarded_run(command, **kw):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 43)
+
+    monkeypatch.setattr(_pg, "guarded_run", fake_guarded_run)
 
     assert main() == 43
     assert calls == [[r"C:\Tools\claude.exe", "--permission-mode", "bypassPermissions", "fix bug"]]

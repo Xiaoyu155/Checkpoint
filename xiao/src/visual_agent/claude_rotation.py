@@ -39,6 +39,18 @@ IDLE_SECONDS = 10.0
 ROTATE_ENV = "PACER_CLAUDE_ROTATE"
 ROTATE_TOKENS_ENV = "PACER_CLAUDE_ROTATE_TOKENS"
 
+AUTOCOMPACT_ENV = "PACER_AUTOCOMPACT"
+DEFAULT_AUTOCOMPACT_TOKENS = "100000"
+"""Primary, non-destructive quota lever.
+
+Per-request cost is the context carried, so capping the context caps the bill.
+The engine's own `--autocompact` does that in-session: same process, same
+model, same MCP connections, engine-quality summarisation, nothing to lose if
+it fires while the user is working. Rotation (kill + restart + distilled
+handoff) buys a lower floor but risks in-session state and makes the fresh
+session re-discover files it already knew, so it is opt-in only.
+"""
+
 _CAVEAT_MARKERS = (
     "<local-command-caveat>",
     "<command-name>",
@@ -53,8 +65,29 @@ def claude_projects_root() -> Path:
 
 
 def rotation_enabled(environ: dict[str, str] | None = None) -> bool:
+    """Off unless asked for: killing a live session is the risky lever."""
     env = os.environ if environ is None else environ
-    return str(env.get(ROTATE_ENV, "1")).strip().lower() not in {"0", "off", "false", "no"}
+    return str(env.get(ROTATE_ENV, "0")).strip().lower() in {"1", "on", "true", "yes"}
+
+
+def autocompact_setting(environ: dict[str, str] | None = None) -> str:
+    env = os.environ if environ is None else environ
+    raw = str(env.get(AUTOCOMPACT_ENV, "")).strip()
+    if not raw:
+        return DEFAULT_AUTOCOMPACT_TOKENS
+    if raw.lower() in {"off", "0", "no", "false"}:
+        return ""
+    return raw
+
+
+def argv_with_autocompact(argv: list[str], value: str) -> list[str]:
+    """Add the engine's own context cap, never overriding an explicit choice."""
+    if not value:
+        return list(argv)
+    for token in argv:
+        if token == "--autocompact" or token.startswith("--autocompact="):
+            return list(argv)
+    return ["--autocompact", value, *argv]
 
 
 def rotate_threshold(environ: dict[str, str] | None = None) -> int:
@@ -389,8 +422,8 @@ def run_claude_with_rotation(
     child_env.setdefault("MAX_THINKING_TOKENS", DEFAULT_MAX_THINKING_TOKENS)
 
     print(
-        f"[pacer] 额度保护已开启：单会话到 {threshold // 1_000_000}M token 自动轮转并交接；"
-        f"关闭方式 {ROTATE_ENV}=0，调阈值 {ROTATE_TOKENS_ENV}=<tokens>。"
+        f"[pacer] 已开启激进模式：单会话到 {threshold // 1_000_000}M token 会杀掉会话重开并交接"
+        f"（会中断你正在做的事）。关闭方式 {ROTATE_ENV}=0，调阈值 {ROTATE_TOKENS_ENV}=<tokens>。"
     )
 
     cwd = cwd or os.getcwd()

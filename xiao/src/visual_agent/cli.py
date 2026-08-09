@@ -98,12 +98,23 @@ def launch_claude_code(argv: list[str]) -> int:
         return 127
     from .subprocess_window import prepare_subprocess_command
     from .process_guard import guarded_run
-    from .claude_rotation import is_interactive_launch, rotation_enabled, run_claude_with_rotation
+    from .claude_rotation import (
+        argv_with_autocompact,
+        autocompact_setting,
+        is_interactive_launch,
+        rotation_enabled,
+        run_claude_with_rotation,
+    )
 
     argv = normalize_claude_passthrough_argv(argv)
+    if is_interactive_launch(argv):
+        # Default quota lever: cap the context the engine carries per request.
+        # In-session and non-destructive -- nothing about the live session is
+        # disturbed, unlike rotation below.
+        argv = argv_with_autocompact(argv, autocompact_setting())
     if rotation_enabled() and is_interactive_launch(argv):
-        # Quota protection: keep the window, rotate the billed session once it
-        # crosses the token threshold, carrying a distilled handoff forward.
+        # Opt-in backstop: rotate the billed session once it crosses the token
+        # threshold, carrying a distilled handoff forward.
         return run_claude_with_rotation(executable, argv)
     # Guarded so a hard-killed Pacer cannot leave Claude's MCP stdio servers
     # running as orphans; see .process_guard.

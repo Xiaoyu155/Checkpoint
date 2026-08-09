@@ -18,6 +18,9 @@ import pytest
 from visual_agent import cli
 from visual_agent.claude_rotation import (
     argv_with_model,
+    argv_with_autocompact,
+    autocompact_setting,
+    DEFAULT_AUTOCOMPACT_TOKENS,
     DEFAULT_ROTATE_TOKENS,
     SessionMeter,
     build_handoff,
@@ -203,9 +206,32 @@ class TestHandoff:
         assert "以磁盘为准" in prompt
 
 
+class TestAutocompact:
+    """The default lever must be the non-destructive one: cap the context the
+    engine carries, in-session, instead of killing the session."""
+
+    def test_default_injects_engine_context_cap(self):
+        assert autocompact_setting({}) == DEFAULT_AUTOCOMPACT_TOKENS
+        argv = argv_with_autocompact(["--permission-mode", "bypassPermissions"], "100000")
+        assert argv[:2] == ["--autocompact", "100000"]
+
+    def test_never_overrides_an_explicit_user_choice(self):
+        for chosen in (["--autocompact", "500k"], ["--autocompact=500k"]):
+            assert argv_with_autocompact(list(chosen), "100000") == chosen
+
+    def test_can_be_switched_off(self):
+        assert autocompact_setting({"PACER_AUTOCOMPACT": "off"}) == ""
+        assert argv_with_autocompact(["-x"], "") == ["-x"]
+
+    def test_custom_value_passes_through(self):
+        assert autocompact_setting({"PACER_AUTOCOMPACT": "200k"}) == "200k"
+
+
 class TestConfig:
-    def test_rotation_enabled_default_and_off(self):
-        assert rotation_enabled({})
+    def test_rotation_is_opt_in_because_it_interrupts_work(self):
+        assert not rotation_enabled({}), "killing a live session must never be the default"
+        assert rotation_enabled({"PACER_CLAUDE_ROTATE": "1"})
+        assert rotation_enabled({"PACER_CLAUDE_ROTATE": "on"})
         assert not rotation_enabled({"PACER_CLAUDE_ROTATE": "0"})
         assert not rotation_enabled({"PACER_CLAUDE_ROTATE": "off"})
 
@@ -247,7 +273,7 @@ class TestLaunchWiring:
     def test_rotation_path_taken_when_enabled(self, monkeypatch):
         calls = {}
         monkeypatch.setattr(cli.shutil, "which", lambda name: "C:/bin/claude.cmd" if "claude" in name else None)
-        monkeypatch.delenv("PACER_CLAUDE_ROTATE", raising=False)
+        monkeypatch.setenv("PACER_CLAUDE_ROTATE", "1")
 
         def fake_rotation(executable, argv, **kwargs):
             calls["rotation"] = (executable, argv)
@@ -255,7 +281,37 @@ class TestLaunchWiring:
 
         monkeypatch.setattr("visual_agent.claude_rotation.run_claude_with_rotation", fake_rotation)
         assert cli.launch_claude_code(["--permission-mode", "bypassPermissions"]) == 0
-        assert calls["rotation"][1] == ["--permission-mode", "bypassPermissions"]
+        assert calls["rotation"][1] == [
+            "--autocompact",
+            DEFAULT_AUTOCOMPACT_TOKENS,
+            "--permission-mode",
+            "bypassPermissions",
+        ]
+
+    def test_default_launch_only_caps_context_and_never_rotates(self, monkeypatch):
+        """The out-of-the-box path must stay a plain passthrough that merely
+        carries the engine's context cap -- no session surgery."""
+        calls = {}
+        monkeypatch.setattr(cli.shutil, "which", lambda name: "C:/bin/claude.cmd" if "claude" in name else None)
+        monkeypatch.delenv("PACER_CLAUDE_ROTATE", raising=False)
+        monkeypatch.delenv("PACER_AUTOCOMPACT", raising=False)
+
+        class Completed:
+            returncode = 0
+
+        def fake_guarded_run(command, **kwargs):
+            calls["passthrough"] = command
+            return Completed()
+
+        monkeypatch.setattr("visual_agent.process_guard.guarded_run", fake_guarded_run)
+
+        def fail_rotation(*args, **kwargs):  # pragma: no cover - would mean a bug
+            raise AssertionError("rotation must be opt-in")
+
+        monkeypatch.setattr("visual_agent.claude_rotation.run_claude_with_rotation", fail_rotation)
+        assert cli.launch_claude_code(["--permission-mode", "bypassPermissions"]) == 0
+        # A .cmd shim is folded into one command line, so match on the text.
+        assert "--autocompact" in " ".join(calls["passthrough"])
 
     def test_disabled_env_falls_back_to_passthrough(self, monkeypatch):
         calls = {}

@@ -217,7 +217,27 @@ def _install_fake_claude(tmp_path, monkeypatch):
     script = tmp_path / "fake_stream_claude.py"
     script.write_text(_FAKE_STREAM_CLAUDE, encoding="utf-8")
     monkeypatch.setenv("FAKE_STATE", str(state))
+    # The fake engine is driven as `python <script>`, so a prepended engine
+    # flag would land on the interpreter. Context capping has its own test.
+    monkeypatch.setenv("PACER_AUTOCOMPACT", "off")
     return state, script
+
+
+class TestContextCap:
+    def test_chat_passes_the_engine_context_cap(self, tmp_path, monkeypatch):
+        state, script = _install_fake_claude(tmp_path, monkeypatch)
+        monkeypatch.delenv("PACER_AUTOCOMPACT", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr("shutil.which", lambda name: sys.executable)
+        inputs = iter(["/status", "/exit"])
+        monkeypatch.setattr("builtins.input", lambda *args: next(inputs))
+
+        assert run_claude_chat([]) == 0
+        # No engine process is spawned by /status, so assert on the flags the
+        # window would launch with rather than on a recorded argv.
+        from visual_agent.claude_rotation import argv_with_autocompact, autocompact_setting
+
+        assert argv_with_autocompact([], autocompact_setting())[:1] == ["--autocompact"]
 
 
 class TestPersistentSession:

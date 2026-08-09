@@ -29,6 +29,8 @@ from typing import Any, Callable
 from .claude_rotation import (
     DEFAULT_MAX_THINKING_TOKENS,
     ROTATE_TOKENS_ENV,
+    argv_with_autocompact,
+    autocompact_setting,
     rotate_threshold,
     rotation_prompt,
     save_handoff,
@@ -354,7 +356,7 @@ def run_claude_chat(argv: list[str], *, environ: dict[str, str] | None = None) -
         return 127
     env_source = os.environ if environ is None else environ
     threshold = rotate_threshold(env_source)
-    base_flags = list(argv)
+    base_flags = argv_with_autocompact(list(argv), autocompact_setting(env_source))
     if "--permission-mode" not in base_flags and not any(
         token.startswith("--permission-mode=") for token in base_flags
     ):
@@ -363,8 +365,9 @@ def run_claude_chat(argv: list[str], *, environ: dict[str, str] | None = None) -
     state = ChatState()
     session: ClaudeSession | None = None
     print(
-        f"[pacer chat] 一个项目一个窗口。会话到 {format_tokens(threshold)} token 在回合之间无损轮转"
-        f"（{ROTATE_TOKENS_ENV} 可调）。每回合小票显示真实周额度。命令：/status /rotate /new /exit"
+        f"[pacer chat] 一个项目一个窗口。上下文由引擎自动压缩控住；会话到 {format_tokens(threshold)}"
+        f" token 再在回合之间无损轮转（{ROTATE_TOKENS_ENV} 可调）。"
+        "每回合小票显示真实周额度。命令：/status /rotate /new /exit"
     )
 
     def open_session(resume_id: str = "") -> ClaudeSession:
