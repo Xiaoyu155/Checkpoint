@@ -129,15 +129,26 @@ def test_pacer_yolo_alias_forces_claude_bypass_permissions(monkeypatch) -> None:
     assert calls == [[r"C:\Tools\claude.exe", "--permission-mode", "bypassPermissions", "fix bug"]]
 
 
-def test_pacer_chat_alias_starts_the_pacer_owned_repl(monkeypatch) -> None:
-    import visual_agent.claude_chat as claude_chat
+def test_pacer_task_starts_the_per_task_native_window_loop(monkeypatch) -> None:
+    import visual_agent.pacer_task as pacer_task
 
     calls = []
-    monkeypatch.setattr(sys, "argv", [r"C:\Python\Scripts\pacer.exe", "chat", "--model", "opus"])
-    monkeypatch.setattr(claude_chat, "run_claude_chat", lambda argv: calls.append(list(argv)) or 7)
+    monkeypatch.setattr(sys, "argv", [r"C:\Python\Scripts\pacer.exe", "task", "--model", "opus"])
+    monkeypatch.setattr(pacer_task, "run_pacer_task", lambda argv: calls.append(list(argv)) or 7)
 
     assert main() == 7
     assert calls == [["--model", "opus"]]
+
+
+def test_pacer_chat_is_an_alias_for_pacer_task(monkeypatch) -> None:
+    import visual_agent.pacer_task as pacer_task
+
+    calls = []
+    monkeypatch.setattr(sys, "argv", [r"C:\Python\Scripts\pacer.exe", "chat"])
+    monkeypatch.setattr(pacer_task, "run_pacer_task", lambda argv: calls.append(list(argv)) or 0)
+
+    assert main() == 0
+    assert calls == [[]]
 
 
 def test_pacer_gm_alias_delegates_to_gemini(monkeypatch) -> None:

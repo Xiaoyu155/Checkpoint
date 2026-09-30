@@ -37,9 +37,9 @@ def launch_claude_code(argv: list[str]) -> int:
 
     argv = normalize_claude_passthrough_argv(argv)
     if is_interactive_launch(argv):
-        # Default quota lever: cap the context the engine carries per request.
-        # In-session and non-destructive -- nothing about the live session is
-        # disturbed, unlike rotation below.
+        # Opt-in only (PACER_AUTOCOMPACT=<tokens>): forcing a small window
+        # made the engine stall on minutes-long compaction; default is the
+        # engine's own behaviour, quota saving lives in `pacer chat`.
         argv = argv_with_autocompact(argv, autocompact_setting())
     if rotation_enabled() and is_interactive_launch(argv):
         # Opt-in backstop: rotate the billed session once it crosses the token
@@ -110,15 +110,15 @@ def build_welcome_message(cli_name: str = "checkpoint") -> str:
             "Pacer — 帮你把编程助手交的活验一遍的工具。",
             "",
             "启动开发工具（原生窗口，/model 等命令照常可用）：",
-            "  pacer claude          # Claude Code；自动注入 --autocompact 省额度",
+            "  pacer claude          # Claude Code 原生窗口",
             "  pacer yolo            # Claude Code 全权限交互模式",
             "  pacer codex           # 把终端交给 Codex 本尊",
             "  pacer gemini          # Gemini CLI",
-            "  pacer chat            # 省额度聊天窗：会话到阈值无损轮转",
+            "  pacer task            # 每个任务一个原生窗口：按内容自动选模型，退出即交接开下一个",
             "",
             "省额度：",
-            "  交互式启动默认注入 --autocompact 100000（PACER_AUTOCOMPACT=off 关闭）。",
-            "  更激进的杀进程轮转默认关闭，需要 PACER_CLAUDE_ROTATE=1。",
+            "  --autocompact 注入已改为可选（PACER_AUTOCOMPACT=<tokens> 开启）。",
+            "  杀进程轮转默认关闭，需要 PACER_CLAUDE_ROTATE=1。",
             "",
             f"  {cli_name} --help",
         ]
@@ -223,12 +223,14 @@ def main(argv: list[str] | None = None) -> int:
         # Claude Code passthrough for users who want the native interactive CLI.
         if argv[0] in {"claude", "cc", "--claude"}:
             return launch_claude_code(argv[1:])
-        # Pacer-owned REPL that drives Claude headless and rotates the billed
-        # session losslessly at exact turn boundaries.
-        if argv[0] in {"chat", "--chat"}:
-            from .claude_chat import run_claude_chat
+        # One real native Claude window per task: Pacer picks the model up
+        # front from the task's content and stitches a handoff between
+        # windows by reading Claude's own on-disk session transcript --
+        # never intercepts the native TUI itself (see pacer_task.py).
+        if argv[0] in {"task", "--task", "chat", "--chat"}:
+            from .pacer_task import run_pacer_task
 
-            return run_claude_chat(argv[1:])
+            return run_pacer_task(argv[1:])
         # Explicit Claude Code YOLO shortcut: remove conflicting permission flags
         # and force Claude's native bypassPermissions mode.
         if argv[0] in {"yolo", "claude-yolo", "cc-yolo", "--claude-yolo"}:

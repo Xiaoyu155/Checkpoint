@@ -40,16 +40,25 @@ ROTATE_ENV = "PACER_CLAUDE_ROTATE"
 ROTATE_TOKENS_ENV = "PACER_CLAUDE_ROTATE_TOKENS"
 
 AUTOCOMPACT_ENV = "PACER_AUTOCOMPACT"
-DEFAULT_AUTOCOMPACT_TOKENS = "100000"
-"""Primary, non-destructive quota lever.
+"""Opt-in engine context cap: `PACER_AUTOCOMPACT=<tokens>` injects
+`--autocompact <tokens>`.
 
-Per-request cost is the context carried, so capping the context caps the bill.
-The engine's own `--autocompact` does that in-session: same process, same
-model, same MCP connections, engine-quality summarisation, nothing to lose if
-it fires while the user is working. Rotation (kill + restart + distilled
-handoff) buys a lower floor but risks in-session state and makes the fresh
-session re-discover files it already knew, so it is opt-in only.
+Reversed 2026-08-10, same day it shipped as the default: a 100k window makes
+the engine compact constantly, and each compaction is a minutes-long blocking
+progress bar (measured 5m+ on 2.1.226). Quota is a soft constraint; waiting
+is a hard pain. The no-wait lever is now chat-side rotation once the carried
+context crosses DEFAULT_ROTATE_CONTEXT_TOKENS (claude_chat.py): same quota
+ceiling, but the cost is one ~10s restart at a turn boundary instead of a
+compaction stall mid-work.
 """
+
+DEFAULT_ROTATE_CONTEXT_TOKENS = 150_000
+"""Per-turn carried context (input + cache) that triggers chat rotation.
+
+Billing follows the context carried each request, not session totals; the
+measured burn data put 93% of spend in turns above 150k context, so that is
+the cut line."""
+ROTATE_CONTEXT_ENV = "PACER_CLAUDE_ROTATE_CONTEXT"
 
 _CAVEAT_MARKERS = (
     "<local-command-caveat>",
@@ -71,11 +80,10 @@ def rotation_enabled(environ: dict[str, str] | None = None) -> bool:
 
 
 def autocompact_setting(environ: dict[str, str] | None = None) -> str:
+    """Empty unless explicitly requested: blocking compaction is opt-in."""
     env = os.environ if environ is None else environ
     raw = str(env.get(AUTOCOMPACT_ENV, "")).strip()
-    if not raw:
-        return DEFAULT_AUTOCOMPACT_TOKENS
-    if raw.lower() in {"off", "0", "no", "false"}:
+    if not raw or raw.lower() in {"off", "0", "no", "false"}:
         return ""
     return raw
 
@@ -98,6 +106,16 @@ def rotate_threshold(environ: dict[str, str] | None = None) -> int:
     except ValueError:
         return DEFAULT_ROTATE_TOKENS
     return value if value > 0 else DEFAULT_ROTATE_TOKENS
+
+
+def rotate_context_threshold(environ: dict[str, str] | None = None) -> int:
+    env = os.environ if environ is None else environ
+    raw = str(env.get(ROTATE_CONTEXT_ENV, "")).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_ROTATE_CONTEXT_TOKENS
+    return value if value > 0 else DEFAULT_ROTATE_CONTEXT_TOKENS
 
 
 def is_interactive_launch(argv: list[str]) -> bool:

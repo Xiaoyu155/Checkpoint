@@ -20,8 +20,9 @@ from visual_agent.claude_rotation import (
     argv_with_model,
     argv_with_autocompact,
     autocompact_setting,
-    DEFAULT_AUTOCOMPACT_TOKENS,
+    DEFAULT_ROTATE_CONTEXT_TOKENS,
     DEFAULT_ROTATE_TOKENS,
+    rotate_context_threshold,
     SessionMeter,
     build_handoff,
     discover_session_jsonl,
@@ -207,11 +208,15 @@ class TestHandoff:
 
 
 class TestAutocompact:
-    """The default lever must be the non-destructive one: cap the context the
-    engine carries, in-session, instead of killing the session."""
+    """Reversed 2026-08-10: a forced small window made the engine stall on
+    minutes-long blocking compaction, so injection must be opt-in."""
 
-    def test_default_injects_engine_context_cap(self):
-        assert autocompact_setting({}) == DEFAULT_AUTOCOMPACT_TOKENS
+    def test_default_injects_nothing(self):
+        assert autocompact_setting({}) == ""
+        assert argv_with_autocompact(["-x"], "") == ["-x"]
+
+    def test_opt_in_injects_engine_context_cap(self):
+        assert autocompact_setting({"PACER_AUTOCOMPACT": "100000"}) == "100000"
         argv = argv_with_autocompact(["--permission-mode", "bypassPermissions"], "100000")
         assert argv[:2] == ["--autocompact", "100000"]
 
@@ -219,9 +224,9 @@ class TestAutocompact:
         for chosen in (["--autocompact", "500k"], ["--autocompact=500k"]):
             assert argv_with_autocompact(list(chosen), "100000") == chosen
 
-    def test_can_be_switched_off(self):
-        assert autocompact_setting({"PACER_AUTOCOMPACT": "off"}) == ""
-        assert argv_with_autocompact(["-x"], "") == ["-x"]
+    def test_off_values_stay_off(self):
+        for value in ("off", "0", "no", "false"):
+            assert autocompact_setting({"PACER_AUTOCOMPACT": value}) == ""
 
     def test_custom_value_passes_through(self):
         assert autocompact_setting({"PACER_AUTOCOMPACT": "200k"}) == "200k"
@@ -240,6 +245,12 @@ class TestConfig:
         assert rotate_threshold({"PACER_CLAUDE_ROTATE_TOKENS": "5000000"}) == 5_000_000
         assert rotate_threshold({"PACER_CLAUDE_ROTATE_TOKENS": "banana"}) == DEFAULT_ROTATE_TOKENS
         assert rotate_threshold({"PACER_CLAUDE_ROTATE_TOKENS": "-3"}) == DEFAULT_ROTATE_TOKENS
+
+    def test_context_threshold_parsing_falls_back_on_garbage(self):
+        assert rotate_context_threshold({}) == DEFAULT_ROTATE_CONTEXT_TOKENS
+        assert rotate_context_threshold({"PACER_CLAUDE_ROTATE_CONTEXT": "80000"}) == 80_000
+        assert rotate_context_threshold({"PACER_CLAUDE_ROTATE_CONTEXT": "banana"}) == DEFAULT_ROTATE_CONTEXT_TOKENS
+        assert rotate_context_threshold({"PACER_CLAUDE_ROTATE_CONTEXT": "-3"}) == DEFAULT_ROTATE_CONTEXT_TOKENS
 
 
 class TestInteractiveLaunchDetection:
@@ -274,6 +285,7 @@ class TestLaunchWiring:
         calls = {}
         monkeypatch.setattr(cli.shutil, "which", lambda name: "C:/bin/claude.cmd" if "claude" in name else None)
         monkeypatch.setenv("PACER_CLAUDE_ROTATE", "1")
+        monkeypatch.delenv("PACER_AUTOCOMPACT", raising=False)
 
         def fake_rotation(executable, argv, **kwargs):
             calls["rotation"] = (executable, argv)
@@ -281,16 +293,11 @@ class TestLaunchWiring:
 
         monkeypatch.setattr("visual_agent.claude_rotation.run_claude_with_rotation", fake_rotation)
         assert cli.launch_claude_code(["--permission-mode", "bypassPermissions"]) == 0
-        assert calls["rotation"][1] == [
-            "--autocompact",
-            DEFAULT_AUTOCOMPACT_TOKENS,
-            "--permission-mode",
-            "bypassPermissions",
-        ]
+        assert calls["rotation"][1] == ["--permission-mode", "bypassPermissions"]
 
-    def test_default_launch_only_caps_context_and_never_rotates(self, monkeypatch):
-        """The out-of-the-box path must stay a plain passthrough that merely
-        carries the engine's context cap -- no session surgery."""
+    def test_default_launch_is_plain_passthrough(self, monkeypatch):
+        """Out of the box: no --autocompact injection (blocking compaction is
+        opt-in) and no session surgery -- the engine runs untouched."""
         calls = {}
         monkeypatch.setattr(cli.shutil, "which", lambda name: "C:/bin/claude.cmd" if "claude" in name else None)
         monkeypatch.delenv("PACER_CLAUDE_ROTATE", raising=False)
@@ -311,7 +318,24 @@ class TestLaunchWiring:
         monkeypatch.setattr("visual_agent.claude_rotation.run_claude_with_rotation", fail_rotation)
         assert cli.launch_claude_code(["--permission-mode", "bypassPermissions"]) == 0
         # A .cmd shim is folded into one command line, so match on the text.
-        assert "--autocompact" in " ".join(calls["passthrough"])
+        assert "--autocompact" not in " ".join(calls["passthrough"])
+
+    def test_opt_in_env_injects_engine_context_cap(self, monkeypatch):
+        calls = {}
+        monkeypatch.setattr(cli.shutil, "which", lambda name: "C:/bin/claude.cmd" if "claude" in name else None)
+        monkeypatch.delenv("PACER_CLAUDE_ROTATE", raising=False)
+        monkeypatch.setenv("PACER_AUTOCOMPACT", "120000")
+
+        class Completed:
+            returncode = 0
+
+        def fake_guarded_run(command, **kwargs):
+            calls["passthrough"] = command
+            return Completed()
+
+        monkeypatch.setattr("visual_agent.process_guard.guarded_run", fake_guarded_run)
+        assert cli.launch_claude_code(["--permission-mode", "bypassPermissions"]) == 0
+        assert "--autocompact 120000" in " ".join(calls["passthrough"])
 
     def test_disabled_env_falls_back_to_passthrough(self, monkeypatch):
         calls = {}
