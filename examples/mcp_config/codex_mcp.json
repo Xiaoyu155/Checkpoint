@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "visual-agent": {
+      "command": "D:\\visual-agent-latest\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "visual_agent.mcp_server",
+        "--workspace-root",
+        "D:\\visual-agent-latest\\.agent-workspace"
+      ],
+      "cwd": "D:\\visual-agent-latest",
+      "env": {
+        "PYTHONPATH": "D:\\visual-agent-latest\\src"
+      }
+    }
+  }
+}
