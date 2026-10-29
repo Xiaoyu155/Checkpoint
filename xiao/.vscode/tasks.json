@@ -1,0 +1,53 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Pacer Auto: 极速无状态编码",
+      "type": "shell",
+      "command": "python",
+      "args": [
+        "-m",
+        "visual_agent.cli",
+        "auto",
+        "${input:pacerGoal}"
+      ],
+      "options": {
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}/src"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Pacer Verify: 工程防伪验收",
+      "type": "shell",
+      "command": "python",
+      "args": [
+        "-m",
+        "visual_agent.cli",
+        "verify"
+      ],
+      "options": {
+        "env": {
+          "PYTHONPATH": "${workspaceFolder}/src"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "pacerGoal",
+      "type": "promptString",
+      "description": "输入要交给 Pacer 极速完成的任务描述"
+    }
+  ]
+}

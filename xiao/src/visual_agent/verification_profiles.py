@@ -518,3 +518,126 @@ def _dedupe_profiles(profiles: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(command)
         kept.append(profile)
     return kept
+
+
+_DANGEROUS_OPERATORS_RE = re.compile(r"[;&|><$`\n\r]")
+_DANGEROUS_FLAG_RE = re.compile(r"(?:^|\s)(?:-c|--eval)\b", re.IGNORECASE)
+_TRIVIAL_BYPASS_RE = re.compile(r"^(?:true\b|echo\b|exit\s+0\b|:)", re.IGNORECASE)
+_SAFE_RUNNER_PREFIXES = (
+    "pytest",
+    "python -m pytest",
+    "python -u -m pytest",
+    "python -m unittest",
+    "npm test",
+    "npm run test",
+    "pnpm test",
+    "pnpm run test",
+    "yarn test",
+    "cargo test",
+    "go test",
+    "vitest",
+    "jest",
+)
+
+
+def validate_safe_verification_command(
+    command: str,
+    repo_root: str | Path | None = None,
+) -> tuple[bool, str]:
+    """Validate that a verification command is safe to execute.
+
+    Prevents shell injection, arbitrary Python -c evaluation, and trivial bypass commands
+    (e.g. 'true', 'echo ok'), while allowing genuine targeted test commands like:
+    `pytest examples/delta_action/test_delta.py -q`
+    """
+    raw = str(command or "").strip()
+    if not raw:
+        return False, "Verification command is empty."
+
+    # 1. Shell chaining / redirection operators are strictly forbidden
+    if _DANGEROUS_OPERATORS_RE.search(raw):
+        return False, "Dangerous shell operators (; & | > < $ `) are forbidden in verification command."
+
+    # 2. Arbitrary code eval flags (-c, --eval) are strictly forbidden
+    if _DANGEROUS_FLAG_RE.search(raw):
+        return False, "Arbitrary eval flags (-c / --eval) are forbidden in verification command."
+
+    # 3. Trivial bypass commands are forbidden
+    if _TRIVIAL_BYPASS_RE.match(raw):
+        return False, "Trivial bypass commands (true, echo, exit 0) are forbidden in verification command."
+
+    # 4. Must start with a known valid test runner
+    clean_lower = raw.lower()
+    matches_runner = False
+    for prefix in _SAFE_RUNNER_PREFIXES:
+        if (
+            clean_lower == prefix
+            or clean_lower.startswith(f"{prefix} ")
+            or clean_lower.startswith(f"{prefix}.exe ")
+            or clean_lower.startswith(f"{prefix}.cmd ")
+        ):
+            matches_runner = True
+            break
+    if not matches_runner:
+        if re.search(r"python(?:\d+(?:\.\d+)?)?(?:\.exe)?[\"']?\s+(?:-u\s+)?-m\s+(?:pytest|unittest)\b", clean_lower):
+            matches_runner = True
+
+    if not matches_runner:
+        return False, (
+            "Verification command must invoke a standard test runner "
+            "(pytest, python -m pytest, npm test, cargo test, go test)."
+        )
+
+    # 5. Path traversal check on arguments
+    if repo_root:
+        root = Path(repo_root).expanduser().resolve()
+        tokens = raw.split()
+        for tok in tokens[1:]:
+            if ".." in tok:
+                cand = (root / tok).resolve()
+                try:
+                    cand.relative_to(root)
+                except ValueError:
+                    return False, f"Verification command argument '{tok}' escapes repository root."
+
+    return True, "Valid and safe verification command."
+
+
+def find_colocated_test_command(
+    target_files: list[str],
+    repo_root: str | Path,
+) -> str | None:
+    """Find adjacent or matching test files for target files to enable fast targeted verification."""
+    root = Path(repo_root).expanduser().resolve()
+    for rel_str in target_files:
+        clean_rel = str(rel_str or "").strip().replace("\\", "/").lstrip("/")
+        if not clean_rel or clean_rel.startswith(("tests/", "test/")):
+            continue
+        full_path = (root / clean_rel).resolve()
+        parent_dir = full_path.parent
+        stem = full_path.stem
+
+        candidates: list[Path] = [
+            parent_dir / f"test_{stem}.py",
+            parent_dir / f"{stem}_test.py",
+        ]
+        if parent_dir.is_dir():
+            folder_tests = sorted(parent_dir.glob("test_*.py"))
+            candidates.extend(folder_tests)
+
+        candidates.extend([
+            parent_dir / "tests" / f"test_{stem}.py",
+            parent_dir / "test" / f"test_{stem}.py",
+            root / "tests" / f"test_{stem}.py",
+            root / "tests" / f"test_{parent_dir.name}.py",
+        ])
+
+        for cand in candidates:
+            if cand.is_file():
+                try:
+                    rel_test = cand.relative_to(root).as_posix()
+                    return f"python -m pytest {rel_test} -q"
+                except ValueError:
+                    continue
+    return None
+

@@ -16,3 +16,8 @@ cloud_api/.env.gateway
 cloud_api/secrets/*
 !cloud_api/secrets/README.md
 gui/actions.jsonl
+.pacer/canvas.json
+.pacer/traces.jsonl
+.pacer/*.lock
+.pytest_cache_local/
+

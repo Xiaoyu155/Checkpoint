@@ -1,21 +1,22 @@
-## Checkpoint / DevPacer
+## Pacer Multi-Model Coding & Verification Engine
 
-Read `.visual-agent-status.md` before planning fixes.
+Use Pacer for automated coding, diff patching, and test verification.
 
-Use Checkpoint after UI, workflow, mission, queue, or verification-related code
-changes.
-
-- Workspace root: `.agent-workspace`
-- Fast check: `python -m visual_agent.cli codex-check --workspace-root .agent-workspace --repo-root .`
-- Real interaction check when product behavior matters: `python -m visual_agent.cli codex-check --workspace-root .agent-workspace --repo-root . --run-profile supervised`
-- Include slow visual/OCR workflows only when needed: add `--include-slow`
-- Resume context in a new chat: `python -m visual_agent.cli context-snapshot --workspace-root .agent-workspace --format markdown`
-- Read compact failure details before opening full reports: `python -m visual_agent.cli summarize-latest-failure --workspace-root .agent-workspace --format json`
+- Pacer backends health check:
+  `python -m visual_agent.cli backends`
+- Fast automated execution (Stateless Canvas + AST Indexer + Multi-model Patching):
+  `python -m visual_agent.cli auto "<goal>" --workspace-root .`
+- High-speed streaming query with xAI Grok (Sub2API):
+  `python -m visual_agent.cli grok "<prompt>"`
+- Verification check:
+  `python -m visual_agent.cli verify`
+- Full test suite:
+  `python -m pytest -q`
 
 Product boundaries:
 
-- DevPacer is the mission/orchestration layer.
-- Checkpoint is the verification engine.
-- Default executable coding worker is Codex.
-- Gemini is a multimodal inspection lane, not a default coding worker.
-- Do not treat `dry-run` / `inspection_only` as product acceptance.
+- Pacer is the orchestration and execution engine.
+- Fast coding and diff patch workers: xAI Grok (Sub2API) and Gemini Flash.
+- High-complexity fallback and deep architecture: Codex Plus.
+- Domestic model worker gateway: WorkBuddy (DeepSeek / Kimi / GLM).
+- Strict guardrails: Local AST indexing (<20ms), transactional SEARCH/REPLACE diffs, test tamper guards, zero local offline models.

@@ -129,15 +129,26 @@ def test_pacer_yolo_alias_forces_claude_bypass_permissions(monkeypatch) -> None:
     assert calls == [[r"C:\Tools\claude.exe", "--permission-mode", "bypassPermissions", "fix bug"]]
 
 
-def test_pacer_chat_alias_starts_the_pacer_owned_repl(monkeypatch) -> None:
-    import visual_agent.claude_chat as claude_chat
+def test_pacer_task_starts_the_per_task_native_window_loop(monkeypatch) -> None:
+    import visual_agent.pacer_task as pacer_task
 
     calls = []
-    monkeypatch.setattr(sys, "argv", [r"C:\Python\Scripts\pacer.exe", "chat", "--model", "opus"])
-    monkeypatch.setattr(claude_chat, "run_claude_chat", lambda argv: calls.append(list(argv)) or 7)
+    monkeypatch.setattr(sys, "argv", [r"C:\Python\Scripts\pacer.exe", "task", "--model", "opus"])
+    monkeypatch.setattr(pacer_task, "run_pacer_task", lambda argv: calls.append(list(argv)) or 7)
 
     assert main() == 7
     assert calls == [["--model", "opus"]]
+
+
+def test_pacer_chat_is_an_alias_for_pacer_task(monkeypatch) -> None:
+    import visual_agent.pacer_task as pacer_task
+
+    calls = []
+    monkeypatch.setattr(sys, "argv", [r"C:\Python\Scripts\pacer.exe", "chat"])
+    monkeypatch.setattr(pacer_task, "run_pacer_task", lambda argv: calls.append(list(argv)) or 0)
+
+    assert main() == 0
+    assert calls == [[]]
 
 
 def test_pacer_gm_alias_delegates_to_gemini(monkeypatch) -> None:
@@ -166,3 +177,71 @@ def test_completion_command_writes_scripts(tmp_path: Path, capsys) -> None:
         assert path.exists()
         assert "pacer" in path.read_text(encoding="utf-8")
     assert "bash:" in output
+
+
+def test_pacer_backends_prints_status(capsys) -> None:
+    code = main(["backends"])
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert "Pacer 本机 AI 引擎聚合与连接状态" in output
+    assert "Gemini" in output
+    assert "WorkBuddy" in output
+    assert "Codex" in output
+
+
+def test_pacer_plan_command(capsys, monkeypatch) -> None:
+    from visual_agent import gemini_bridge
+
+    monkeypatch.setattr(gemini_bridge, "is_gemini_available", lambda: False)
+    code = main(["plan", "实现测试功能模块"])
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert "Pacer Plan" in output
+    assert "生成子任务数" in output
+    assert "task_1" in output
+
+
+def test_pacer_auto_dry_run(capsys, monkeypatch) -> None:
+    from visual_agent import gemini_bridge
+
+    monkeypatch.setattr(gemini_bridge, "is_gemini_available", lambda: False)
+    code = main(["auto", "--dry-run", "构建自动验证测试用例"])
+    output = capsys.readouterr().out
+
+    assert code == 0
+    assert "--dry-run" in output
+    assert "生成子任务数" in output
+
+
+def test_pacer_embed_positional_and_merge_existing_tasks(tmp_path: Path, capsys) -> None:
+    import json
+    vscode_dir = tmp_path / ".vscode"
+    vscode_dir.mkdir(parents=True)
+    custom_tasks = {
+        "version": "2.0.0",
+        "tasks": [
+            {"label": "my-build", "type": "shell", "command": "cargo build"}
+        ],
+        "inputs": [
+            {"id": "myInput", "type": "promptString"}
+        ],
+    }
+    (vscode_dir / "tasks.json").write_text(json.dumps(custom_tasks), encoding="utf-8")
+
+    code = main(["embed", str(tmp_path)])
+    output = capsys.readouterr().out
+    assert code == 0
+    assert "Pacer 已成功嵌入" in output
+
+    updated_tasks = json.loads((vscode_dir / "tasks.json").read_text(encoding="utf-8"))
+    task_labels = [t["label"] for t in updated_tasks["tasks"]]
+    assert "my-build" in task_labels
+    assert "Pacer Auto: 极速无状态编码" in task_labels
+    assert "Pacer Verify: 工程防伪验收" in task_labels
+
+    input_ids = [i["id"] for i in updated_tasks["inputs"]]
+    assert "myInput" in input_ids
+    assert "pacerGoal" in input_ids
+

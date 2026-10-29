@@ -190,6 +190,9 @@ def guarded_run(command: Any, **kwargs: Any) -> subprocess.CompletedProcess:
         run_input = kwargs.pop("input", None)
         if run_input is not None:
             kwargs["stdin"] = subprocess.PIPE
+        if kwargs.pop("capture_output", False):
+            kwargs["stdout"] = subprocess.PIPE
+            kwargs["stderr"] = subprocess.PIPE
         check = bool(kwargs.pop("check", False))
         timeout = kwargs.pop("timeout", None)
 

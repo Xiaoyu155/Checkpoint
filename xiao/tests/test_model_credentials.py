@@ -76,6 +76,7 @@ def test_default_openai_can_auto_select_available_file_provider(tmp_path, monkey
     path.write_text("xiaomimimo api key: sk-xiaomi-secret-value-abcdef\n", encoding="utf-8")
     monkeypatch.delenv("VISUAL_AGENT_MODEL_PROVIDER", raising=False)
     monkeypatch.delenv("VISUAL_AGENT_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     result = inspect_model_credentials(source=path)
     plan = build_model_api_probe_plan(source=path)

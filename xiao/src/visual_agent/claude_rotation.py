@@ -40,16 +40,25 @@ ROTATE_ENV = "PACER_CLAUDE_ROTATE"
 ROTATE_TOKENS_ENV = "PACER_CLAUDE_ROTATE_TOKENS"
 
 AUTOCOMPACT_ENV = "PACER_AUTOCOMPACT"
-DEFAULT_AUTOCOMPACT_TOKENS = "100000"
-"""Primary, non-destructive quota lever.
+"""Opt-in engine context cap: `PACER_AUTOCOMPACT=<tokens>` injects
+`--autocompact <tokens>`.
 
-Per-request cost is the context carried, so capping the context caps the bill.
-The engine's own `--autocompact` does that in-session: same process, same
-model, same MCP connections, engine-quality summarisation, nothing to lose if
-it fires while the user is working. Rotation (kill + restart + distilled
-handoff) buys a lower floor but risks in-session state and makes the fresh
-session re-discover files it already knew, so it is opt-in only.
+Reversed 2026-08-10, same day it shipped as the default: a 100k window makes
+the engine compact constantly, and each compaction is a minutes-long blocking
+progress bar (measured 5m+ on 2.1.226). Quota is a soft constraint; waiting
+is a hard pain. The no-wait lever is now chat-side rotation once the carried
+context crosses DEFAULT_ROTATE_CONTEXT_TOKENS (claude_chat.py): same quota
+ceiling, but the cost is one ~10s restart at a turn boundary instead of a
+compaction stall mid-work.
 """
+
+DEFAULT_ROTATE_CONTEXT_TOKENS = 150_000
+"""Per-turn carried context (input + cache) that triggers chat rotation.
+
+Billing follows the context carried each request, not session totals; the
+measured burn data put 93% of spend in turns above 150k context, so that is
+the cut line."""
+ROTATE_CONTEXT_ENV = "PACER_CLAUDE_ROTATE_CONTEXT"
 
 _CAVEAT_MARKERS = (
     "<local-command-caveat>",
@@ -71,11 +80,10 @@ def rotation_enabled(environ: dict[str, str] | None = None) -> bool:
 
 
 def autocompact_setting(environ: dict[str, str] | None = None) -> str:
+    """Empty unless explicitly requested: blocking compaction is opt-in."""
     env = os.environ if environ is None else environ
     raw = str(env.get(AUTOCOMPACT_ENV, "")).strip()
-    if not raw:
-        return DEFAULT_AUTOCOMPACT_TOKENS
-    if raw.lower() in {"off", "0", "no", "false"}:
+    if not raw or raw.lower() in {"off", "0", "no", "false"}:
         return ""
     return raw
 
@@ -98,6 +106,16 @@ def rotate_threshold(environ: dict[str, str] | None = None) -> int:
     except ValueError:
         return DEFAULT_ROTATE_TOKENS
     return value if value > 0 else DEFAULT_ROTATE_TOKENS
+
+
+def rotate_context_threshold(environ: dict[str, str] | None = None) -> int:
+    env = os.environ if environ is None else environ
+    raw = str(env.get(ROTATE_CONTEXT_ENV, "")).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_ROTATE_CONTEXT_TOKENS
+    return value if value > 0 else DEFAULT_ROTATE_CONTEXT_TOKENS
 
 
 def is_interactive_launch(argv: list[str]) -> bool:
@@ -417,13 +435,15 @@ def run_claude_with_rotation(
 
     env_source = os.environ if environ is None else environ
     threshold = rotate_threshold(env_source)
+    context_threshold = rotate_context_threshold(env_source) if ROTATE_CONTEXT_ENV in env_source else 0
     child_env = dict(env_source)
     # A-layer knob: cap extended thinking unless the user chose their own cap.
     child_env.setdefault("MAX_THINKING_TOKENS", DEFAULT_MAX_THINKING_TOKENS)
 
+    context_note = f" 或单回合上下文到 {context_threshold // 1_000}k token" if context_threshold > 0 else ""
     print(
-        f"[pacer] 已开启激进模式：单会话到 {threshold // 1_000_000}M token 会杀掉会话重开并交接"
-        f"（会中断你正在做的事）。关闭方式 {ROTATE_ENV}=0，调阈值 {ROTATE_TOKENS_ENV}=<tokens>。"
+        f"[pacer] 已开启激进模式：单会话到 {threshold // 1_000_000}M token{context_note} 会杀掉会话重开并交接"
+        f"（会中断你正在做的事）。关闭方式 {ROTATE_ENV}=0，调会话阈值 {ROTATE_TOKENS_ENV}=<tokens>，调回合阈值 {ROTATE_CONTEXT_ENV}=<tokens>。"
     )
 
     cwd = cwd or os.getcwd()
@@ -475,7 +495,11 @@ def run_claude_with_rotation(
                 if meter is None:
                     continue
                 meter.refresh()
-                if meter.total_tokens >= threshold and meter.at_turn_boundary(idle_seconds=idle_seconds):
+                should_rotate = (
+                    meter.total_tokens >= threshold
+                    or (context_threshold > 0 and meter.last_context_tokens >= context_threshold)
+                )
+                if should_rotate and meter.at_turn_boundary(idle_seconds=idle_seconds):
                     rotate_requested = True
                     _kill_tree(process)
                     try:

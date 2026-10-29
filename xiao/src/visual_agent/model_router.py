@@ -54,6 +54,44 @@ _OBJECTIVE_FILE_RE = re.compile(
 )
 _FUNCTION_CONTRACT_RE = re.compile(r"\b[a-zA-Z_]\w*\s*\([^()\n]{0,120}\)")
 
+# Negation clauses: when a user explicitly states "do not refactor architecture"
+# or "不要重构代码、不要动认证鉴权", those negated clauses must not trigger a
+# false-positive escalation to the strong tier.
+# Conjunctions (e.g. 'but', 'however', '但是', '而是') stop the negation so
+# subsequent positive requirements (e.g. "Do not refactor but secure payment")
+# are preserved and correctly routed.
+_CONJUNCTION_BOUNDARY = r"(?!\b(?:but|however|except|instead|while|yet|and\s+also)\b|但|但是|然而|不过|而是|并且|同时)"
+
+_NEGATED_CLAUSE_PATTERNS = (
+    re.compile(
+        rf"(?:不要|不得|不能|无需|无须|禁止|切勿|千万别|可别|别[去再动改碰删加写用做把让])(?:{_CONJUNCTION_BOUNDARY}[^，。；！？,.;!?\n]){{1,40}}",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:do\s+not|don't|must\s+not|should\s+not|without|never|avoid)\s+(?:{_CONJUNCTION_BOUNDARY}[^,.;!?\n]){{1,60}}",
+        re.IGNORECASE,
+    ),
+)
+
+_ASCII_WORD_RE = re.compile(r"^[a-z0-9 _-]+$", re.IGNORECASE)
+
+
+def _strip_negated_clauses(text: str) -> str:
+    """Remove negated constraint clauses before scanning for strong/cheap signals."""
+    cleaned = str(text or "")
+    for pattern in _NEGATED_CLAUSE_PATTERNS:
+        cleaned = pattern.sub(" ", cleaned)
+    return cleaned
+
+
+def _term_matches(term: str, text: str) -> bool:
+    """Match ASCII terms on word boundaries and CJK terms by substring."""
+    if _ASCII_WORD_RE.match(term):
+        # Enforce word boundary so "auth" does not false-match "author" or "authority"
+        pattern = rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])"
+        return bool(re.search(pattern, text, re.IGNORECASE))
+    return term in text
+
 
 @dataclass(frozen=True)
 class RouteDecision:
@@ -70,19 +108,20 @@ def route_task(
     acceptance_criteria: list[str] | None = None,
     repeated_failure: bool = False,
 ) -> RouteDecision:
-    text = str(objective or "").lower()
+    raw_text = str(objective or "").lower()
+    positive_text = _strip_negated_clauses(raw_text)
     files = [str(f) for f in (changed_files or []) if str(f).strip()]
     # Only count real product files, not Checkpoint's own workspace artifacts.
     product_files = [f for f in files if not f.replace("\\", "/").startswith(".agent-workspace")]
     criteria_count = len(acceptance_criteria or [])
 
-    strong_hits = sorted({term for term in _STRONG_TERMS if term in text})
-    cheap_hits = sorted({term for term in _CHEAP_TERMS if term in text})
-    small_scope_hits = sorted({term for term in _SMALL_SCOPE_TERMS if term in text})
+    strong_hits = sorted({term for term in _STRONG_TERMS if _term_matches(term, positive_text)})
+    cheap_hits = sorted({term for term in _CHEAP_TERMS if _term_matches(term, positive_text)})
+    small_scope_hits = sorted({term for term in _SMALL_SCOPE_TERMS if _term_matches(term, positive_text)})
     word_count = len([w for w in re.split(r"\s+", str(objective or "").strip()) if w])
     objective_files = sorted(set(_OBJECTIVE_FILE_RE.findall(str(objective or ""))))
     function_contract = bool(_FUNCTION_CONTRACT_RE.search(str(objective or "")))
-    exact_result_contract = "returns exactly" in text or ("返回" in text and "测试" in text)
+    exact_result_contract = "returns exactly" in raw_text or ("返回" in raw_text and "测试" in raw_text)
     narrow_testable_contract = (
         len(objective_files) == 1
         and function_contract
