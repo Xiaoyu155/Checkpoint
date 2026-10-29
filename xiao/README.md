@@ -74,6 +74,8 @@
 
 ## ⚡ 快速开始
 
+> 📖 **详尽中英双语使用手册已上线**：[查看完整《Pacer 快速上手与操作指南》(docs/quickstart.md)](docs/quickstart.md)
+
 ### 1. 安装要求
 - Python >= 3.10
 - Git (Windows / Linux / macOS)
