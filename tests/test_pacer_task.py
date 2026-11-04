@@ -140,7 +140,7 @@ class TestRunPacerTaskEndToEnd:
         output = capsys.readouterr().out
         assert "重任务" in output and "轻任务" in output
 
-    def test_defaults_to_bypass_permissions_since_a_window_opens_per_task(self, tmp_path, monkeypatch):
+    def test_does_not_default_to_bypass_permissions(self, tmp_path, monkeypatch):
         state, projects, workdir, script = _install_fake_claude(tmp_path, monkeypatch)
         inputs = iter(["做点什么", "/exit"])
         monkeypatch.setattr("builtins.input", lambda *a: next(inputs))
@@ -149,8 +149,7 @@ class TestRunPacerTaskEndToEnd:
         assert run_pacer_task([str(script)]) == 0
 
         argv = json.loads((state / "argv-1.json").read_text(encoding="utf-8"))
-        idx = argv.index("--permission-mode")
-        assert argv[idx + 1] == "bypassPermissions"
+        assert "--permission-mode" not in argv
 
     def test_does_not_override_an_explicit_permission_mode(self, tmp_path, monkeypatch):
         state, projects, workdir, script = _install_fake_claude(tmp_path, monkeypatch)

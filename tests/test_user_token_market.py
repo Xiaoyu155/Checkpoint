@@ -15,12 +15,20 @@ from visual_agent.user_token_market import (
 KEY = b"p" * 32
 
 
+@pytest.fixture(autouse=True)
+def example_gateway(monkeypatch):
+    from visual_agent import user_token_market
+    monkeypatch.setitem(user_token_market._HOSTS, "gateway.example", user_token_market._HostRule(
+        "google", frozenset({SourceKind.FIRST_PARTY_GATEWAY}), ("gemini-4",), 443, ("argon", "gemini 4")
+    ))
+
+
 def provenance(**overrides) -> TokenProvenance:
     payload = {
         "owner_id": "yxq190606_pro",
         "source_kind": SourceKind.FIRST_PARTY_GATEWAY,
         "provider": "google",
-        "endpoint_host": "direct.aiboxz.com",
+        "endpoint_host": "gateway.example",
         "endpoint_port": 443,
         "advertised_model": "gemini-4",
         "observed_model": "4 Argon",
@@ -74,7 +82,7 @@ def test_listing_rejects_secrets_and_other_owners() -> None:
                 "owner_id": "yxq190606_pro",
                 "source_kind": "first_party_gateway",
                 "provider": "google",
-                "endpoint_host": "direct.aiboxz.com",
+                "endpoint_host": "gateway.example",
                 "endpoint_port": 443,
                 "advertised_model": "gemini-4",
                 "observed_model": "4 Argon",

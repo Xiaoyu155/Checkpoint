@@ -16,3 +16,13 @@ def test_timeout_is_failure(tmp_path, monkeypatch):
     monkeypatch.setattr("visual_agent.command_verification.guarded_run", timeout)
     result = run_command_verification(command=[sys.executable, "-m", "pytest"], repo_root=tmp_path, timeout_seconds=1)
     assert result["failure_kind"] == "command_timeout"
+
+
+def test_quoted_script_and_exit_code(tmp_path):
+    from visual_agent.command_verification import verification_command_argv
+    script = tmp_path / "script with spaces.py"
+    script.write_text("raise SystemExit(7)\n", encoding="utf-8")
+    argv = verification_command_argv(f'"{sys.executable}" "{script}"', tmp_path)
+    result = run_command_verification(command=argv, repo_root=tmp_path)
+    assert result["exit_code"] == 7
+    assert result["verdict"] == "fail"

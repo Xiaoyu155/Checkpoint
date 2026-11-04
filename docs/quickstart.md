@@ -53,7 +53,7 @@ pacer backends
 ```json
 {
   "grok_api_key": "您的_Sub2API_或_xAI_Key",
-  "sub2api_base": "https://direct.aiboxz.com/v1",
+  "sub2api_base": "https://your-gateway.example/v1",
   "grok_model": "grok-4.7-latest"
 }
 ```
@@ -161,7 +161,7 @@ To unlock 3-second streaming generation, configure xAI Grok (via Sub2API or xAI 
 ```json
 {
   "grok_api_key": "your_api_key_here",
-  "sub2api_base": "https://direct.aiboxz.com/v1",
+  "sub2api_base": "https://your-gateway.example/v1",
   "grok_model": "grok-4.7-latest"
 }
 ```

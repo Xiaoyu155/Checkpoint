@@ -213,11 +213,9 @@ def api_nodes(slot: str, data: dict | None = None) -> list[ProviderNode]:
 
 def _is_vps_gateway(base_url: str) -> bool:
     """True when a resolved base URL points at the overseas Gemini 4 pool."""
-    from .gemini4_vps_client import DIRECT_GATEWAY_URLS
-    host = urlsplit(str(base_url or "")).netloc.lower()
-    if not host:
-        return False
-    return any(urlsplit(base).netloc.lower() == host for base in DIRECT_GATEWAY_URLS)
+    parsed = urlsplit(str(base_url or ""))
+    host = (parsed.hostname or "").lower()
+    return bool(parsed.scheme in {"http", "https"} and host and host != "generativelanguage.googleapis.com")
 
 
 def architect_node(data: dict | None = None, *, probe: bool = True) -> ProviderNode:

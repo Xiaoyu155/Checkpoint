@@ -271,13 +271,13 @@ def run_command_verification(
 ) -> dict[str, Any]:
     root = Path(repo_root).expanduser().resolve()
     if not isinstance(command, (list, tuple)) or any(not isinstance(item, str) for item in command):
-        return {"verdict": "fail", "command": "", "reason": "verification requires an argv list of strings", "failure_kind": "test_command_invalid"}
+        return {"verdict": "fail", "command": "", "exit_code": None, "reason": "verification requires an argv list of strings", "failure_kind": "test_command_invalid"}
     argv_command = True
     argv = list(command)
     cmd = subprocess.list2cmdline(argv)
     prepared_command = argv
     if not cmd:
-        return {"verdict": "skipped", "command": "", "reason": "no test command provided"}
+        return {"verdict": "skipped", "command": "", "exit_code": None, "reason": "no test command provided"}
     if argv_command:
         is_safe, safety_reason = validate_safe_verification_argv(argv, repo_root=root)
         if not is_safe:

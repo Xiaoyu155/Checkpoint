@@ -104,14 +104,12 @@ def gemini4_pool_state(timeout: float = 1.5) -> dict[str, Any]:
         pool_size         : total accounts in the pool (None if unreported)
         checked_at        : monotonic timestamp of the probe
 
-    Both gateway aliases are probed in parallel so the worst case is one
-    timeout rather than one per URL, and the result is cached for
-    ``_POOL_STATE_TTL`` seconds so a burst of planning/review calls does not
-    hammer the gateway.
+    The configured gateway result is cached briefly, keyed by its base URL.
     """
     now = time.monotonic()
+    base = gemini4_settings()["base_url"]
     cached = _POOL_STATE.get("value")
-    if cached is not None and now - float(_POOL_STATE.get("at") or 0.0) < _POOL_STATE_TTL:
+    if cached is not None and _POOL_STATE.get("base_url") == base and now - float(_POOL_STATE.get("at") or 0.0) < _POOL_STATE_TTL:
         return dict(cached)
 
     state: dict[str, Any] = {
@@ -123,7 +121,7 @@ def gemini4_pool_state(timeout: float = 1.5) -> dict[str, Any]:
     try:
         from concurrent.futures import ThreadPoolExecutor
 
-        urls = [gemini4_settings()["base_url"]] if gemini4_settings()["base_url"] else []
+        urls = [base] if base else []
         with ThreadPoolExecutor(max_workers=max(1, len(urls))) as pool:
             probed = list(pool.map(lambda base: _probe_pool(base, timeout), urls))
     except Exception:
@@ -136,6 +134,7 @@ def gemini4_pool_state(timeout: float = 1.5) -> dict[str, Any]:
             break
 
     _POOL_STATE["at"] = time.monotonic()
+    _POOL_STATE["base_url"] = base
     _POOL_STATE["value"] = dict(state)
     return state
 

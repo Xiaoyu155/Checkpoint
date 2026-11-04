@@ -191,12 +191,24 @@ def test_disabled_architect_never_probes_the_pool(monkeypatch):
 
 def test_pool_state_reports_reachable_and_accounts(monkeypatch):
     from visual_agent import gemini4_vps_client
+    monkeypatch.setenv("PACER_GEMINI4_BASE_URL", "https://example.test/gemini4")
     _fake_health(monkeypatch, {"available_accounts": 3, "pool_size": 8})
     state = gemini4_vps_client.gemini4_pool_state()
     assert state["reachable"] is True
     assert state["available_accounts"] == 3
     assert state["pool_size"] == 8
     assert gemini4_vps_client.is_gemini4_vps_pool_healthy() is True
+
+
+def test_pool_state_cache_tracks_configured_base(monkeypatch):
+    from visual_agent import gemini4_vps_client
+    calls = []
+    monkeypatch.setattr(gemini4_vps_client, "_probe_pool", lambda base, timeout: calls.append(base) or {"available_accounts": 1, "pool_size": 1})
+    monkeypatch.setenv("PACER_GEMINI4_BASE_URL", "https://first.example/gemini4")
+    gemini4_vps_client.gemini4_pool_state()
+    monkeypatch.setenv("PACER_GEMINI4_BASE_URL", "https://second.example/gemini4")
+    gemini4_vps_client.gemini4_pool_state()
+    assert calls == ["https://first.example/gemini4", "https://second.example/gemini4"]
 
 
 def test_empty_account_pool_falls_back_to_a_local_plan_without_calling_gemini4(tmp_path, monkeypatch):

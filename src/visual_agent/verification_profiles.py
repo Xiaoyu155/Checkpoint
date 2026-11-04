@@ -556,53 +556,11 @@ def validate_safe_verification_command(
     if not raw:
         return False, "Verification command is empty."
 
-    # 1. Shell chaining / redirection operators are strictly forbidden
-    if _DANGEROUS_OPERATORS_RE.search(raw):
-        return False, "Dangerous shell operators (; & | > < $ `) are forbidden in verification command."
-
-    # 2. Arbitrary code eval flags (-c, --eval) are strictly forbidden
-    if _DANGEROUS_FLAG_RE.search(raw):
-        return False, "Arbitrary eval flags (-c / --eval) are forbidden in verification command."
-
-    # 3. Trivial bypass commands are forbidden
-    if _TRIVIAL_BYPASS_RE.match(raw):
-        return False, "Trivial bypass commands (true, echo, exit 0) are forbidden in verification command."
-
-    # 4. Must start with a known valid test runner
-    clean_lower = raw.lower()
-    matches_runner = False
-    for prefix in _SAFE_RUNNER_PREFIXES:
-        if (
-            clean_lower == prefix
-            or clean_lower.startswith(f"{prefix} ")
-            or clean_lower.startswith(f"{prefix}.exe ")
-            or clean_lower.startswith(f"{prefix}.cmd ")
-        ):
-            matches_runner = True
-            break
-    if not matches_runner:
-        if re.search(r"python(?:\d+(?:\.\d+)?)?(?:\.exe)?[\"']?\s+(?:-u\s+)?-m\s+(?:pytest|unittest)\b", clean_lower):
-            matches_runner = True
-
-    if not matches_runner:
-        return False, (
-            "Verification command must invoke a standard test runner "
-            "(pytest, python -m pytest, npm test, cargo test, go test)."
-        )
-
-    # 5. Path traversal check on arguments
-    if repo_root:
-        root = Path(repo_root).expanduser().resolve()
-        tokens = raw.split()
-        for tok in tokens[1:]:
-            if ".." in tok:
-                cand = (root / tok).resolve()
-                try:
-                    cand.relative_to(root)
-                except ValueError:
-                    return False, f"Verification command argument '{tok}' escapes repository root."
-
-    return True, "Valid and safe verification command."
+    try:
+        argv = parse_verification_command_argv(raw)
+    except ValueError as exc:
+        return False, str(exc)
+    return validate_safe_verification_argv(argv, repo_root)
 
 
 def parse_verification_command_argv(command: str) -> list[str]:
@@ -628,9 +586,19 @@ def validate_safe_verification_argv(
     if not args or not args[0].strip():
         return False, "Verification argv is empty."
     executable = Path(args[0].strip('"\'')).name.casefold()
-    if executable.startswith("python") or _PYTHON_EXE_TOKEN.match(Path(executable).stem):
-        if len(args) < 3 or args[1:3] != ["-m", "pytest"] and args[1:3] != ["-m", "unittest"]:
-            return False, "Python verification argv must invoke pytest or unittest as a module."
+    if re.fullmatch(r"python(?:3(?:\.\d+)?)?(?:\.exe)?", executable) or Path(args[0]).resolve() == Path(sys.executable).resolve():
+        pyargs = args[1:]
+        if pyargs and pyargs[0] == "-u":
+            pyargs = pyargs[1:]
+        if len(pyargs) >= 2 and pyargs[:2] in (["-m", "pytest"], ["-m", "unittest"]):
+            pass
+        elif pyargs and pyargs[0].lower().endswith(".py") and repo_root:
+            root = Path(repo_root).expanduser().resolve()
+            script = (root / pyargs[0]).resolve()
+            if not script.is_relative_to(root) or not script.is_file():
+                return False, "Python script must be a file inside the repository."
+        else:
+            return False, "Python verification must invoke pytest, unittest, or a repository script."
     elif executable in {"pytest", "pytest.exe", "pytest.cmd", "pytest.bat"}:
         pass
     elif executable in {"npm", "npm.exe", "npm.cmd", "npm.bat"}:
@@ -644,8 +612,10 @@ def validate_safe_verification_argv(
             return False, "Go verification argv must invoke `go test`."
     else:
         return False, "Verification argv must invoke a standard test runner."
-    if any(token in {"-c", "--eval"} for token in args[1:]):
+    if any(token in {"-c", "--eval"} or token.startswith("--eval=") for token in args[1:]):
         return False, "Arbitrary evaluation flags are forbidden in verification argv."
+    if any(_DANGEROUS_OPERATORS_RE.search(token) for token in args):
+        return False, "Dangerous shell operators are forbidden in verification argv."
     if repo_root:
         root = Path(repo_root).expanduser().resolve()
         for token in args[1:]:

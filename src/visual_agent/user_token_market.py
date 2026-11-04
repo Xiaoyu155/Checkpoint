@@ -67,13 +67,6 @@ _HOSTS: dict[str, _HostRule] = {
         "google", frozenset({SourceKind.OFFICIAL_API}), ("gemini-",), 443
     ),
     "api.x.ai": _HostRule("xai", frozenset({SourceKind.OFFICIAL_API}), ("grok-",), 443),
-    "direct.aiboxz.com": _HostRule(
-        "google",
-        frozenset({SourceKind.FIRST_PARTY_GATEWAY}),
-        ("gemini-4",),
-        443,
-        ("argon", "gemini 4"),
-    ),
     "127.0.0.1": _HostRule(
         "workbuddy",
         frozenset({SourceKind.DESKTOP_SESSION}),

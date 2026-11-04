@@ -34,6 +34,7 @@ def test_grok_401_is_offline(monkeypatch) -> None:
     import urllib.error
 
     monkeypatch.setattr("visual_agent.model_health.is_grok_available", lambda: True)
+    monkeypatch.setattr("visual_agent.grok_bridge.get_grok_api_base", lambda: "https://example.test/v1")
 
     def boom(*_args, **_kwargs):
         raise urllib.error.HTTPError("https://example.test/models", 401, "Unauthorized", hdrs=None, fp=None)

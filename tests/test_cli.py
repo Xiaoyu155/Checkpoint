@@ -293,8 +293,8 @@ def test_pacer_verify_Failure_prints_real_pytest_output(tmp_path, monkeypatch, c
 def test_verification_child_disables_plugin_autoload(tmp_path, monkeypatch):
     from visual_agent.command_verification import run_command_verification
     monkeypatch.delenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", raising=False)
-    command = f'''"{sys.executable}" -c "import os; assert os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD'] == '1'"'''
-    result = run_command_verification(command=command, repo_root=tmp_path)
+    (tmp_path / "test_env.py").write_text("import os\ndef test_env():\n    assert os.environ['PYTEST_DISABLE_PLUGIN_AUTOLOAD'] == '1'\n", encoding="utf-8")
+    result = run_command_verification(command=[sys.executable, "-m", "pytest", "-q", "test_env.py"], repo_root=tmp_path)
     assert result["exit_code"] == 0
 
 

@@ -3,7 +3,7 @@
 Provides non-blocking concurrent health probes, latency measurement,
 and operational status reporting for all Pacer integrated AI engines:
 1. OpenAI Codex Plus (CLI: codex.CMD)
-2. xAI Grok (Sub2API: https://direct.aiboxz.com/v1)
+2. xAI Grok (configured Sub2API endpoint)
 3. Overseas VPS Gemini 4 (8-Account Jio Pool)
 4. WorkBuddy Desktop Gateway (127.0.0.1:57756 / local DeepSeek)
 5. Gemini Flash CLI (gemini.CMD)
@@ -175,6 +175,12 @@ def check_grok_health(timeout: float = 2.5) -> ModelHealthStatus:
 
     endpoint = get_grok_api_base()
     api_key = get_grok_api_key()
+    from urllib.parse import urlsplit
+    parsed = urlsplit(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ModelHealthStatus(name="grok", status="offline", role="Grok", latency_ms=0.0,
+                                 details="Grok endpoint is not configured", error="Invalid API base URL",
+                                 installed=False, reachable=False)
     try:
         import urllib.request
 
@@ -260,11 +266,11 @@ def check_grok_health(timeout: float = 2.5) -> ModelHealthStatus:
 def check_gemini4_vps_health(timeout: float = 2.5) -> ModelHealthStatus:
     """Check Overseas VPS Gemini 4 Jio Account Pool connectivity via HTTPS / socket."""
     t0 = time.perf_counter()
-    # 1. Primary: Direct HTTPS health probe against Caddy reverse-proxy endpoints
-    vps_urls = [
-        "https://direct.aiboxz.com/gemini4/health",
-        "https://vps.aiboxz.com/gemini4/health",
-    ]
+    from .gemini4_vps_client import gemini4_settings
+    from urllib.parse import urlsplit
+    base = str(gemini4_settings().get("base_url") or "").rstrip("/")
+    parsed = urlsplit(base)
+    vps_urls = [base + "/health"] if parsed.scheme in {"http", "https"} and parsed.hostname else []
     for url in vps_urls:
         try:
             import json
@@ -314,39 +320,11 @@ def check_gemini4_vps_health(timeout: float = 2.5) -> ModelHealthStatus:
         except Exception:
             continue
 
-    # 2. Fallback: Raw socket probe if accessible
-    vps_ip = "192.255.206.89"
-    vps_port = 8999
-    try:
-        if live_socket_probe_blocked():
-            raise OSError("Live provider health probes are disabled during pytest.")
-        sock = socket.create_connection((vps_ip, vps_port), timeout=min(timeout, 1.0))
-        sock.close()
-        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
-        # TCP reachable only — does not prove the gateway or the account pool works.
-        return ModelHealthStatus(
-            name="gemini4_vps",
-            status="degraded",
-            role="架构设计、深度审查与许愿分析",
-            latency_ms=latency_ms,
-            details=f"http://{vps_ip}:{vps_port} (仅 TCP 可达；网关与账号池未验证)",
-            installed=True,
-            reachable=True,
-            authenticated=None,
-            generation_verified=False,
-        )
-    except Exception as exc:
-        latency_ms = round((time.perf_counter() - t0) * 1000, 1)
-        return ModelHealthStatus(
-            name="gemini4_vps",
-            status="offline",
-            role="架构设计、深度审查与许愿分析",
-            latency_ms=latency_ms,
-            details="https://direct.aiboxz.com/gemini4",
-            error=str(exc),
-            installed=False,
-            reachable=False,
-        )
+    return ModelHealthStatus(
+        name="gemini4_vps", status="offline", role="架构设计、深度审查与许愿分析",
+        latency_ms=round((time.perf_counter() - t0) * 1000, 1),
+        details=base, error="Gateway unavailable or not configured", installed=False, reachable=False,
+    )
 
 
 def check_workbuddy_health(timeout: float = 1.0) -> ModelHealthStatus:

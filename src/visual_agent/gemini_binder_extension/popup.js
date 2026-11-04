@@ -32,7 +32,7 @@ function details(binding){
 }
 async function load(){
  const data=await chrome.storage.local.get(['gatewayUrl','adminKey','autoSyncEnabled','bindingV2','bindingStatus','accId']);
- el('gatewayUrl').value=data.gatewayUrl||'https://direct.aiboxz.com/gemini4';el('adminKey').value=data.adminKey||'';
+ el('gatewayUrl').value=data.gatewayUrl||'';el('adminKey').value=data.adminKey||'';
  el('autoSync').checked=data.autoSyncEnabled!==false;el('accountId').value=data.accId||'';details(data.bindingV2);
  if(!(await handshake()))return;
  const check=await send({action:'inspect'});

@@ -21,7 +21,9 @@ def test_select_best_backend_routes_wish_and_review_to_gemini4() -> None:
         assert select_best_backend("reviewer", "review PR diff") == "gemini4_vps"
 
 
-def test_invoke_gemini4_vps_https_mock() -> None:
+def test_invoke_gemini4_vps_https_mock(monkeypatch) -> None:
+    monkeypatch.setenv("PACER_GEMINI4_BASE_URL", "https://example.test/gemini4")
+    monkeypatch.setenv("PACER_GEMINI4_API_KEY", "test-only")
     mock_response = {
         "model": "gemini-4",
         "choices": [{"message": {"content": "Architecture approved via HTTPS."}}],
@@ -41,7 +43,11 @@ def test_invoke_gemini4_vps_https_mock() -> None:
         assert res.tokens_used == 42
 
 
-def test_invoke_gemini4_vps_ssh_fallback_mock() -> None:
+def test_invoke_gemini4_vps_ssh_fallback_mock(monkeypatch) -> None:
+    from visual_agent import gemini4_vps_client
+    monkeypatch.setattr(gemini4_vps_client, "gemini4_settings", lambda: {"allow_ssh_fallback": True, "api_key": "test-only"})
+    for name, value in {"VPS_IP": "example.test", "VPS_USER": "test-user", "KEY_PATH": "test-key", "SOCKS_PROXY_HOST": "localhost", "GATEWAY_URL": "http://localhost:1234"}.items():
+        monkeypatch.setattr(gemini4_vps_client, name, value)
     mock_response = {
         "model": "gemini-4",
         "choices": [{"message": {"content": "Architecture approved via SSH."}}],

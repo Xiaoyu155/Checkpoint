@@ -226,9 +226,6 @@ DASHBOARD_HTML_TEMPLATE = """<!DOCTYPE html>
                             集成 xAI Grok 4.7-latest 极速代码推理，3.2 秒流式出码。支持 OpenAI、Claude、DeepSeek 统一中继。
                         </p>
                         <div class="pt-2">
-                            <a href="https://direct.aiboxz.com" target="_blank" class="inline-block px-3 py-1 rounded bg-sky-600 hover:bg-sky-500 text-white font-medium text-[11px] transition-all" id="sponsor_btn">
-                                了解高速网关 →
-                            </a>
                         </div>
                     </div>
 

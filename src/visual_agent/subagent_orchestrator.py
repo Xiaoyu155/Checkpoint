@@ -40,6 +40,7 @@ from .acceptance_discrimination import (
 from .anti_slop import detect_slop_in_files, format_slop_critique
 from .canvas_manager import CanvasManager, estimate_tokens
 from .command_verification import (
+    verification_command_argv,
     changed_acceptance_chain_files,
     changed_test_files,
     changed_snapshot_files,
@@ -339,8 +340,8 @@ def verify_acceptance_exam(
                 child_env = os.environ.copy()
                 child_env.setdefault("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
                 res = subprocess.run(
-                    cmd,
-                    shell=True,
+                    verification_command_argv(cmd, root),
+                    shell=False,
                     cwd=str(root),
                     capture_output=True,
                     text=True,
