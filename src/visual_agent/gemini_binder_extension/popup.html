@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Gemini 4 开发接入</title><link rel="stylesheet" href="popup.css"></head>
+<body><header><span class="tag">WEB → PACER</span><h1>Gemini 4 开发接入</h1><p>绑定当前浏览器配置中的登录会话</p></header>
+<section id="status" class="notice" role="status" aria-live="polite">正在检查当前登录…</section><button id="reloadExtension" type="button" hidden>重新加载插件</button><form id="bindingForm" novalidate>
+<label for="gatewayUrl">反代网关地址</label><input id="gatewayUrl" type="url" required placeholder="https://你的网关/gemini4">
+<label for="adminKey">网关管理密钥</label><input id="adminKey" type="password" autocomplete="off" placeholder="仅保存在此浏览器配置中" required>
+<label for="accountId">账号备注 ID</label><input id="accountId" placeholder="留空自动生成，已有账号可填写原 ID" maxlength="100">
+<label class="check"><input id="autoSync" type="checkbox" checked> 浏览器运行时同步会话更新</label>
+<label class="check caution"><input id="replaceExisting" type="checkbox"> 确认替换同名 ID 的旧会话</label>
+<button id="bind" type="submit">验证 Gemini 4 并绑定</button></form>
+<section class="details"><div id="bound">尚未绑定</div><div id="model">模型尚未验证</div><div id="verifiedAt"></div></section>
+<div class="utilities"><button id="openPanel" type="button">在独立页面中绑定</button></div>
+<div class="version">插件界面 v2.0.3 · <span id="workerVersion">正在检查后台版本</span></div>
+<footer>每个浏览器配置绑定一个账号。切换账号后会暂停自动同步；关闭浏览器、退出登录或需要安全验证时，插件无法代替重新登录。</footer>
+<script src="core.js"></script><script src="popup.js"></script></body></html>

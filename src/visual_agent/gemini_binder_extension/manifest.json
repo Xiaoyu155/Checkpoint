@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini 4 网关一键入池助手",
+  "version": "2.0.3",
+  "description": "无需打开 F12，一键读取已登录的 Google 凭证并推送到 VPS Gemini 4 网关",
+  "permissions": [
+    "cookies",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://*.google.com/*",
+    "https://direct.aiboxz.com/*"
+  ],
+  "optional_host_permissions": ["https://*/*", "http://127.0.0.1/*", "http://localhost/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Gemini 4 网关入池"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

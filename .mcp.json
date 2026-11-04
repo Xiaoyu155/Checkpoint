@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "pacer": {
+      "command": "python",
+      "args": [
+        "-m",
+        "visual_agent.mcp_server"
+      ],
+      "env": {
+        "PYTHONPATH": "src"
+      }
+    }
+  }
+}

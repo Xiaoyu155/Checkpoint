@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "target_score": 95,
+  "release_score": 100,
+  "required_independent_runs": 3,
+  "same_candidate_required": true,
+  "bootstrap": {
+    "parent_source": "git-parent-wheel",
+    "candidate_build": "python-build-wheel",
+    "fresh_environment_required": true,
+    "pip_check_required": true,
+    "candidate_self_check_required": true
+  },
+  "attestation": {
+    "provider": "github-artifact-attestation",
+    "repository": "Xiaoyu155/Checkpoint",
+    "signer_workflow": "Xiaoyu155/Checkpoint/.github/workflows/pacer-dogfood.yml@refs/heads/main",
+    "attest_evidence": true,
+    "attest_candidate": true,
+    "static_secret_required": false
+  },
+  "lanes": {
+    "local": {
+      "required": true,
+      "minimum_score": 85,
+      "purpose": "fast A-to-B generation and acceptance feedback"
+    },
+    "ci": {
+      "required": true,
+      "minimum_score": 95,
+      "purpose": "OIDC-attested candidate and evidence verification"
+    },
+    "release": {
+      "required": true,
+      "minimum_score": 100,
+      "purpose": "three independent runs against one immutable candidate wheel"
+    }
+  },
+  "github_references": [
+    {
+      "repository": "actions/attest-build-provenance",
+      "commit": "0f67c3f4856b2e3261c31976d6725780e5e4c373",
+      "path": ".github/workflows/ci.yml",
+      "adopted_pattern": "least-privilege OIDC and subject digest binding"
+    },
+    {
+      "repository": "slsa-framework/slsa-github-generator",
+      "commit": "4d014fae4dbd39eb09e8d40348b73db095e6ba9a",
+      "path": ".github/workflows/generator_generic_slsa3.yml",
+      "adopted_pattern": "separate provenance job and secure artifact handoff"
+    },
+    {
+      "repository": "astral-sh/ruff",
+      "commit": "a616e0873c32d3f82d89af4a9959dcf6f5a3d04a",
+      "path": ".github/workflows/release.yml",
+      "adopted_pattern": "pinned actions, immutable build artifacts, attest before publish"
+    },
+    {
+      "repository": "pantsbuild/pants",
+      "commit": "4f08d3faeef64e36c9299f94f94bf9681d9846b7",
+      "path": ".github/workflows/release.yaml",
+      "adopted_pattern": "bootstrap the tool, build with itself, smoke test, attest wheels"
+    },
+    {
+      "repository": "sigstore/cosign",
+      "commit": "8ca5b2002f5cd43614c476665e2055e59392b59d",
+      "path": ".github/workflows/kind-verify-attestation.yaml",
+      "adopted_pattern": "verify identity, issuer, subject, and policy with maintained tooling"
+    }
+  ]
+}

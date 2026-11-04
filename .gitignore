@@ -1,0 +1,24 @@
+# Pacer / Checkpoint runtime output
+artifacts/
+.runs/
+runs/
+tmp_bugteam_workspace/
+tmp_intake_probe/
+__pycache__/
+reports/
+agent_session.json
+run_history.jsonl
+workflow_index.json
+.visual-agent-status.md
+强制测试记录.md
+model_api_keys.txt
+cloud_api/.env.gateway
+cloud_api/secrets/*
+!cloud_api/secrets/README.md
+gui/actions.jsonl
+.pacer/canvas.json
+.pacer/traces.jsonl
+.pacer/*.lock
+.pacer/
+.pytest_cache_local/
+
