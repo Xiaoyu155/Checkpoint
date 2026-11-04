@@ -343,7 +343,12 @@ def _handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         tampered_tests = changed_test_files(repo_root=cwd)
         tampered_chain = changed_acceptance_chain_files(repo_root=cwd, command=cmd)
 
-        verif = run_command_verification(command=cmd, repo_root=cwd)
+        from .command_verification import verification_command_argv
+        try:
+            cmd_argv = verification_command_argv(cmd, cwd)
+        except ValueError as exc:
+            return {"isError": True, "content": [{"type": "text", "text": f"Invalid verification command: {exc}"}]}
+        verif = run_command_verification(command=cmd_argv, repo_root=cwd)
         passed = (verif.get("verdict") == "pass") and not tampered_tests and not tampered_chain
         cm = CanvasManager(cwd)
 

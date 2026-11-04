@@ -24,7 +24,15 @@ from typing import Any
 from .process_guard import guarded_run
 from .security import redact_secret_text
 from .subprocess_window import hidden_subprocess_kwargs
-from .verification_profiles import conditional_test_command_short_circuit, validate_safe_verification_argv
+from .verification_profiles import (conditional_test_command_short_circuit, validate_safe_verification_argv,
+                                    validate_safe_verification_command, parse_verification_command_argv)
+
+
+def verification_command_argv(command: str, repo_root: str | Path) -> list[str]:
+    safe, reason = validate_safe_verification_command(command, repo_root=repo_root)
+    if not safe:
+        raise ValueError(reason)
+    return parse_verification_command_argv(command)
 
 # The command gate is only trustworthy while the tests themselves are what the
 # user wrote. A worker that edits tests can turn any failure green, so test
@@ -262,15 +270,12 @@ def run_command_verification(
     base_timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     root = Path(repo_root).expanduser().resolve()
-    argv_command = not isinstance(command, str)
-    if argv_command:
-        argv = [str(item) for item in command]
-        cmd = subprocess.list2cmdline(argv)
-        prepared_command: str | list[str] = argv
-        shell = False
-    else:
-        cmd = str(command or "").strip()
-        prepared_command, shell = _prepare_command(cmd)
+    if not isinstance(command, (list, tuple)) or any(not isinstance(item, str) for item in command):
+        return {"verdict": "fail", "command": "", "reason": "verification requires an argv list of strings", "failure_kind": "test_command_invalid"}
+    argv_command = True
+    argv = list(command)
+    cmd = subprocess.list2cmdline(argv)
+    prepared_command = argv
     if not cmd:
         return {"verdict": "skipped", "command": "", "reason": "no test command provided"}
     if argv_command:
@@ -312,12 +317,13 @@ def run_command_verification(
         }
     child_env = {**os.environ, **(env or {})}
     child_env.setdefault("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    baseline = snapshot_verification_files(repo_root=root, command=cmd)
     started = monotonic()
     try:
         completed = guarded_run(
             prepared_command,
             cwd=str(root),
-            shell=shell,  # let users pass a natural command line (pytest -q, npm test)
+            shell=False,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
@@ -361,6 +367,10 @@ def run_command_verification(
             "classification_confidence": "definitive",
         }
 
+    changed = changed_snapshot_files(baseline, snapshot_verification_files(repo_root=root, command=cmd))
+    if changed:
+        return {"verdict": "fail", "command": cmd, "exit_code": exit_code,
+                "failure_kind": "test_command_invalid", "reason": "Acceptance files changed during verification: " + ", ".join(changed), "output_tail": ""}
     combined = (stdout + ("\n" if stdout and stderr else "") + stderr).strip()
     if exit_code != 0:
         combined = _append_referenced_log_tails(combined, root)
@@ -408,35 +418,6 @@ def run_command_verification(
             result["failure_kind"] = "test_command_wrong_shell"
             result["classification_confidence"] = "definitive"
     return result
-
-
-def _prepare_command(command: str | list[str] | tuple[str, ...]) -> tuple[str | list[str], bool]:
-    """Return a subprocess command and shell mode.
-
-    Most commands intentionally keep ``shell=True`` so users can paste natural
-    command lines. On Windows, direct ``cmd /c if exist ... else ...`` checks are
-    fragile when Python wraps them in another shell; run that form as argv.
-    """
-    if not isinstance(command, str):
-        return [str(token) for token in command], False
-    cmd = str(command or "").strip()
-    if not _is_windows():
-        return cmd, True
-    m = re.match(r"^\s*cmd(?:\.exe)?\s+/c\s+(?P<body>.+?)\s*$", cmd, re.IGNORECASE | re.DOTALL)
-    if not m:
-        # ``shell=True`` on Windows means cmd.exe, but users write PowerShell.
-        # Run the command in the shell it was actually written for.
-        from .shell_dialect import prepare_shell_invocation
-
-        invocation = prepare_shell_invocation(cmd)
-        if not invocation["use_shell"]:
-            return invocation["argv"], False
-        return cmd, True
-    body = _strip_balanced_quotes(m.group("body").strip())
-    lowered = re.sub(r"\s+", " ", body.strip().lower())
-    if lowered.startswith("if exist ") and "(exit /b 0)" in lowered and " else " in lowered and "(exit /b 1)" in lowered:
-        return ["cmd", "/c", body], False
-    return cmd, True
 
 
 def _strip_balanced_quotes(value: str) -> str:

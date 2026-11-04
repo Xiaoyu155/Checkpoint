@@ -117,13 +117,6 @@ def run_pacer_task(argv: list[str], *, environ: dict[str, str] | None = None) ->
     cwd = os.getcwd()
     projects_root = claude_projects_root()
     base_flags = argv_with_autocompact(list(argv), autocompact_setting(env_source))
-    if "--permission-mode" not in base_flags and not any(
-        token.startswith("--permission-mode=") for token in base_flags
-    ):
-        # A window opens per task -- reconfirming permissions on every one
-        # would fight the whole point of this command. Pass your own
-        # --permission-mode to override.
-        base_flags += ["--permission-mode", "bypassPermissions"]
     child_env = dict(env_source)
     child_env.setdefault("MAX_THINKING_TOKENS", DEFAULT_MAX_THINKING_TOKENS)
     model_map = parse_task_model_map(env_source.get(MODEL_MAP_ENV, ""), DEFAULT_MODEL_MAP)
@@ -135,8 +128,7 @@ def run_pacer_task(argv: list[str], *, environ: dict[str, str] | None = None) ->
 
     print(
         "[pacer task] 每个任务一个真正的 Claude 原生窗口：这一步没有 Pacer 拦截，"
-        "Todo 面板、原生渲染都和你自己敲 claude 一样。默认 --permission-mode bypassPermissions"
-        "（一个任务一个窗口，逐个确认权限太烦；想要正常确认自己传 --permission-mode 覆盖）。"
+        "Todo 面板、原生渲染都和你自己敲 claude 一样。"
         "任务结束请退出这个窗口（Ctrl+D 或 /exit），Pacer 会读它自己的会话记录做交接，"
         "再问你下一个任务、按内容自动选模型开新窗口。"
     )

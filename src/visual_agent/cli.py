@@ -660,14 +660,19 @@ def run_pacer_auto(argv: list[str] | None = None) -> int:
             return 1
         raise
     if managed and summary["success"]:
-        from .command_verification import run_command_verification
+        from .command_verification import run_command_verification, verification_command_argv
         from .worktree_gc import commit_managed_worktree
         commands = list(dict.fromkeys(t.verification_command for t in plan.tasks if t.verification_command))
         if not commands:
             print("[Pacer Auto] 没有可执行的验收命令；不提交，保留隔离工作树。")
             return 1
         for command in commands:
-            verification = run_command_verification(command=command, repo_root=ws_path)
+            try:
+                argv = verification_command_argv(command, ws_path)
+            except ValueError as exc:
+                print(f"[Pacer Auto] 验收命令无效: {exc}")
+                return 1
+            verification = run_command_verification(command=argv, repo_root=ws_path)
             if verification.get("verdict") != "pass":
                 print("\n".join(str(verification.get("raw_output_tail") or verification.get("output_tail") or "").splitlines()[-80:]))
                 print(f"[Pacer Auto] 验收失败；未提交，保留隔离工作树: {ws_path}")
@@ -817,7 +822,13 @@ def run_pacer_verify(argv: list[str] | None = None) -> int:
             print(f"错误: 验收配置链文件被修改 ({', '.join(chain_tampered)})，拒绝执行验收。")
             return 1
 
-    cmd_res = run_command_verification(command=cmd, repo_root=repo_root)
+    from .command_verification import verification_command_argv
+    try:
+        cmd_argv = verification_command_argv(cmd, repo_root)
+    except ValueError as exc:
+        print(f"Invalid verification command: {exc}")
+        return 1
+    cmd_res = run_command_verification(command=cmd_argv, repo_root=repo_root)
     verdict_ok = cmd_res.get("verdict") == "pass"
     print(f"本次命令输出: {cmd} (exit={cmd_res.get('exit_code')})")
     if not verdict_ok:
