@@ -320,10 +320,24 @@ def check_gemini4_vps_health(timeout: float = 2.5) -> ModelHealthStatus:
         except Exception:
             continue
 
+    if vps_urls:
+        try:
+            if live_socket_probe_blocked():
+                raise OSError("Live provider health probes are disabled during pytest.")
+            sock = socket.create_connection((parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)), timeout=min(timeout, 1.0))
+            sock.close()
+            return ModelHealthStatus(name="gemini4_vps", status="degraded", role="架构设计、深度审查与许愿分析",
+                                     latency_ms=round((time.perf_counter() - t0) * 1000, 1),
+                                     details=f"{base} (TCP reachable; gateway and pool unverified)",
+                                     installed=True, reachable=True, authenticated=None, generation_verified=False)
+        except OSError as exc:
+            error = str(exc)
+    else:
+        error = "Gateway unavailable or not configured"
     return ModelHealthStatus(
         name="gemini4_vps", status="offline", role="架构设计、深度审查与许愿分析",
         latency_ms=round((time.perf_counter() - t0) * 1000, 1),
-        details=base, error="Gateway unavailable or not configured", installed=False, reachable=False,
+        details=base, error=error, installed=False, reachable=False,
     )
 
 

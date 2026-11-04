@@ -128,7 +128,8 @@ def test_check_grok_health_no_key() -> None:
 
 
 def test_check_gemini4_vps_health_failure() -> None:
-    with patch("socket.create_connection", side_effect=OSError("connection refused")):
+    with patch("visual_agent.gemini4_vps_client.gemini4_settings", return_value={"base_url": "https://example.test"}), \
+         patch("socket.create_connection", side_effect=OSError("connection refused")):
         res = check_gemini4_vps_health(timeout=0.1)
         assert res.status == "offline"
         assert "connection refused" in str(res.error)
@@ -167,7 +168,8 @@ def test_gemini4_empty_pool_is_degraded_not_online() -> None:
         def __exit__(self, *a):
             return False
 
-    with patch("urllib.request.urlopen", return_value=_Resp({"available_accounts": 0, "pool_size": 6})):
+    with patch("visual_agent.gemini4_vps_client.gemini4_settings", return_value={"base_url": "https://example.test"}), \
+         patch("urllib.request.urlopen", return_value=_Resp({"available_accounts": 0, "pool_size": 6})):
         res = check_gemini4_vps_health(timeout=0.5)
         assert res.status == "degraded"
         assert res.reachable is True
@@ -177,7 +179,8 @@ def test_gemini4_empty_pool_is_degraded_not_online() -> None:
 
 def test_gemini4_socket_only_is_degraded_not_online() -> None:
     """A raw TCP connection only proves reachability, not gateway/pool health."""
-    with patch("urllib.request.urlopen", side_effect=OSError("https down")), \
+    with patch("visual_agent.gemini4_vps_client.gemini4_settings", return_value={"base_url": "https://example.test"}), \
+         patch("urllib.request.urlopen", side_effect=OSError("https down")), \
          patch("socket.create_connection", return_value=MagicMock()):
         res = check_gemini4_vps_health(timeout=0.5)
         assert res.status == "degraded"

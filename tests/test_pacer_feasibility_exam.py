@@ -243,13 +243,13 @@ class TestPacerFeasibilityExam(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _init_git_repo(root)
-            (root / "app.py").write_text("x = 1\n", encoding="utf-8")
+            (root / "app.py").write_text("print('ok')\n", encoding="utf-8")
             subprocess.run(["git", "add", "."], cwd=str(root), check=True)
             subprocess.run(["git", "commit", "-m", "init"], cwd=str(root), check=True, capture_output=True)
 
             # Command passes on base
             probe = probe_base_command(
-                command=f'"{sys.executable}" -c "print(\'ok\')"',
+                command=f'"{sys.executable}" app.py',
                 repo_root=root,
                 base_ref="HEAD",
             )

@@ -614,7 +614,7 @@ def validate_safe_verification_argv(
         return False, "Verification argv must invoke a standard test runner."
     if any(token in {"-c", "--eval"} or token.startswith("--eval=") for token in args[1:]):
         return False, "Arbitrary evaluation flags are forbidden in verification argv."
-    if any(_DANGEROUS_OPERATORS_RE.search(token) for token in args):
+    if any(re.search(r"[;&|><\n\r]", token) for token in args):
         return False, "Dangerous shell operators are forbidden in verification argv."
     if repo_root:
         root = Path(repo_root).expanduser().resolve()

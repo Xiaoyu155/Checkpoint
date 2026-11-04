@@ -148,8 +148,8 @@ def test_acceptance_execution_check_hides_windows(monkeypatch, tmp_path) -> None
     passed, _results, _critique = subagent_orchestrator.verify_acceptance_exam(task, tmp_path)
 
     assert passed is True
-    assert calls[0][0] == "pytest -q"
-    assert calls[0][1]["shell"] is True
+    assert calls[0][0] == ["pytest", "-q"]
+    assert calls[0][1]["shell"] is False
     _assert_hidden(calls[0][1])
 
 

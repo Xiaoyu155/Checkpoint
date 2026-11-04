@@ -224,6 +224,7 @@ def test_assertion_cmd_takes_precedence_over_verification_command(tmp_path: Path
     """Each exam's own assertion_cmd must run, not be replaced by the
     task-wide verification_command."""
     (tmp_path / "x.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "exit_three.py").write_text("raise SystemExit(3)\n", encoding="utf-8")
     task = SubagentTask(
         id="t_prec",
         title="precedence",
@@ -236,7 +237,7 @@ def test_assertion_cmd_takes_precedence_over_verification_command(tmp_path: Path
             {
                 "id": "q1",
                 "check_type": "execution",
-                "assertion_cmd": "python -c \"import sys; sys.exit(3)\"",
+                "assertion_cmd": "python exit_three.py",
                 "expected_exit_code": 0,
                 "target_files": ["x.py"],
             }

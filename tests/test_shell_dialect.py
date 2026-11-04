@@ -88,20 +88,19 @@ def test_powershell_verification_command_actually_runs() -> None:
         timeout_seconds=120.0,
     )
 
-    # Before shell routing this died in cmd.exe with "is not recognized".
-    assert result["verdict"] == "pass"
-    assert result["shell_used"].startswith(("pwsh", "powershell"))
+    assert result["verdict"] == "fail"
+    assert result["failure_kind"] == "test_command_invalid"
 
 
 def test_verification_records_which_shell_ran_the_gate() -> None:
     root = Path(tempfile.mkdtemp())
     (root / "t.py").write_text("print('ok')\n", encoding="utf-8")
 
-    result = run_command_verification(command="python t.py", repo_root=root, timeout_seconds=120.0)
+    result = run_command_verification(command=[sys.executable, "t.py"], repo_root=root, timeout_seconds=120.0)
 
     assert result["verdict"] == "pass"
-    assert result["shell_used"]
-    assert result["shell_dialect"] == DIALECT_NEUTRAL
+    assert result["shell_used"] == "argv"
+    assert result["shell_dialect"] == "argv"
 
 
 def test_argv_verification_treats_shell_metacharacters_as_path_data(tmp_path) -> None:
