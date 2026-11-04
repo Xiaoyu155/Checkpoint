@@ -27,7 +27,11 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
-from .command_verification import run_command_verification
+from .command_verification import run_command_verification, verification_command_argv
+
+
+def _run_parsed_verification(*, command: str, repo_root: str | Path, **kwargs: Any) -> dict[str, Any]:
+    return run_command_verification(command=verification_command_argv(command, repo_root), repo_root=repo_root, **kwargs)
 
 
 TIER_VERIFIED = "verified"
@@ -303,7 +307,7 @@ def probe_base_command(
             _discard(holder)
             return _probe("unknown", reason="base_overlay_failed", base_ref=base, detail=str(exc)[:400])
     try:
-        execute = runner or run_command_verification
+        execute = runner or _run_parsed_verification
         result = execute(
             command=cmd,
             repo_root=target,
@@ -382,7 +386,7 @@ def probe_workspace_command(
         prepare_base, baseline_id = snapshot_workspace_overlay(root, target_prefix=workspace_prefix)
         if prepare_base is None:
             return _probe("unknown", reason=baseline_id, base_ref="HEAD")
-        base_runner = runner or run_command_verification
+        base_runner = runner or _run_parsed_verification
         if workspace_prefix.parts:
             def run_from_workspace(**kwargs: Any) -> dict[str, Any]:
                 kwargs["repo_root"] = Path(kwargs["repo_root"]) / workspace_prefix
@@ -412,7 +416,7 @@ def probe_workspace_command(
         cached = _cache_read(root, cache_base, cmd)
         if cached is not None:
             return {**cached, "cached": True}
-        execute = runner or run_command_verification
+        execute = runner or _run_parsed_verification
         result = execute(
             command=cmd,
             repo_root=target,
