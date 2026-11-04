@@ -17,7 +17,7 @@ import urllib.request
 from .live_call_guard import live_http_call_blocked
 
 
-DEFAULT_SUB2API_BASE = "https://direct.aiboxz.com/v1"
+DEFAULT_SUB2API_BASE = ""
 DEFAULT_GROK_KEY = ""
 DEFAULT_GROK_MODEL = "grok-latest"
 
@@ -65,6 +65,8 @@ def get_grok_api_base() -> str:
         or DEFAULT_SUB2API_BASE
     )
     base = str(base).rstrip("/")
+    if not base:
+        return ""
     if not base.endswith("/v1"):
         base = f"{base}/v1"
     return base
@@ -93,7 +95,7 @@ def get_grok_model() -> str:
 
 def is_grok_available() -> bool:
     """Check if Grok API key is configured."""
-    return bool(get_grok_api_key())
+    return bool(get_grok_api_key() and get_grok_api_base())
 
 
 def invoke_grok(
@@ -117,8 +119,11 @@ def invoke_grok(
             elapsed_seconds=0.0,
         )
 
+    base = get_grok_api_base()
+    if not base:
+        return GrokResult(False, "", "", error="No Grok API base configured (set PACER_GROK_API_BASE)")
     chosen_model = model or get_grok_model()
-    url = f"{get_grok_api_base()}/chat/completions"
+    url = f"{base}/chat/completions"
 
     messages: list[dict[str, str]] = []
     if system_prompt:

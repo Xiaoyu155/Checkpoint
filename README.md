@@ -92,7 +92,7 @@ pip install -e .
 ```json
 {
   "grok_api_key": "your_sub2api_or_xai_key",
-  "sub2api_base": "https://direct.aiboxz.com/v1",
+  "sub2api_base": "https://your-gateway.example/v1",
   "grok_model": "grok-4.7-latest"
 }
 ```

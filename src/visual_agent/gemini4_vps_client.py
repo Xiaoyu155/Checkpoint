@@ -1,7 +1,6 @@
 """Gemini 4 Overseas VPS Gateway Client (Sub2API-Grade).
 
-Connects to the 8-account Jio 18M Google Gemini 4 reverse proxy pool
-on the remote VPS (192.255.206.89) via secure SSH channel / SOCKS5 proxy.
+Connects to a configured Gemini gateway, optionally via SSH and SOCKS5.
 
 Responsibilities:
 1. Wish Analysis & Architecture Blueprint Generation (许愿开发分析).
@@ -25,18 +24,14 @@ from .live_call_guard import live_http_call_blocked
 
 logger = logging.getLogger("visual_agent.gemini4_vps_client")
 
-VPS_IP = "192.255.206.89"
-VPS_PORT = 22
-VPS_USER = "root"
-KEY_PATH = r"C:/Users/xiaoyu/.ssh/vps-racknerd-192.255.206.89"
-SOCKS_PROXY_HOST = "127.0.0.1"
-SOCKS_PROXY_PORT = 10808
-GATEWAY_URL = "http://127.0.0.1:8999"
+VPS_IP = os.environ.get("PACER_GEMINI4_SSH_HOST", "")
+VPS_PORT = int(os.environ.get("PACER_GEMINI4_SSH_PORT", "22"))
+VPS_USER = os.environ.get("PACER_GEMINI4_SSH_USER", "")
+KEY_PATH = os.environ.get("PACER_GEMINI4_SSH_KEY_PATH", "")
+SOCKS_PROXY_HOST = os.environ.get("PACER_GEMINI4_SOCKS_HOST", "")
+SOCKS_PROXY_PORT = int(os.environ.get("PACER_GEMINI4_SOCKS_PORT", "1080"))
+GATEWAY_URL = os.environ.get("PACER_GEMINI4_SSH_GATEWAY_URL", "")
 GATEWAY_API_KEY = ""
-DIRECT_GATEWAY_URLS = [
-    "https://direct.aiboxz.com/gemini4",
-    "https://vps.aiboxz.com/gemini4",
-]
 
 
 @dataclass
@@ -128,8 +123,9 @@ def gemini4_pool_state(timeout: float = 1.5) -> dict[str, Any]:
     try:
         from concurrent.futures import ThreadPoolExecutor
 
-        with ThreadPoolExecutor(max_workers=len(DIRECT_GATEWAY_URLS)) as pool:
-            probed = list(pool.map(lambda base: _probe_pool(base, timeout), DIRECT_GATEWAY_URLS))
+        urls = [gemini4_settings()["base_url"]] if gemini4_settings()["base_url"] else []
+        with ThreadPoolExecutor(max_workers=max(1, len(urls))) as pool:
+            probed = list(pool.map(lambda base: _probe_pool(base, timeout), urls))
     except Exception:
         probed = []
     for result in probed:
@@ -180,6 +176,8 @@ def _invoke_via_direct_https(
     settings = gemini4_settings()
     if not settings["enabled"]:
         return Gemini4Response(False, "", error="Gemini 4 provider is disabled")
+    if not settings["base_url"] or not settings["api_key"]:
+        return Gemini4Response(False, "", error="Configure PACER_GEMINI4_BASE_URL and PACER_GEMINI4_API_KEY or the Gemini profile")
     payload = {
         "model": settings["model"],
         "messages": [
@@ -192,7 +190,7 @@ def _invoke_via_direct_https(
     data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     deadline = time.monotonic() + timeout_seconds
-    urls = [settings["base_url"]] if settings["base_url"] else DIRECT_GATEWAY_URLS
+    urls = [settings["base_url"]]
     last_error = "Gemini 4 gateway did not return a response"
     for base_url in urls:
         base_url = base_url.rstrip("/")
@@ -309,6 +307,9 @@ def invoke_gemini4_vps(
         return direct_res or Gemini4Response(False, "", error="Live model calls are disabled during pytest.")
     if not gemini4_settings().get("allow_ssh_fallback", False):
         return direct_res or Gemini4Response(False, "", error="Configured Gemini 4 gateway did not return a valid response")
+
+    if not all((VPS_IP, VPS_USER, KEY_PATH, SOCKS_PROXY_HOST, GATEWAY_URL)):
+        return Gemini4Response(False, "", error="SSH fallback requires PACER_GEMINI4_SSH_HOST, SSH_USER, SSH_KEY_PATH, SOCKS_HOST and SSH_GATEWAY_URL")
 
     # 2. Fallback: Secure SSH Tunnel over SOCKS5 proxy
     try:

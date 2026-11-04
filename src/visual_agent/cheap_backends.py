@@ -2,7 +2,7 @@
 
 Extracted from the old goal-intake receptionist when dispatch was removed.
 What survives is the part that is still needed: finding a configured cheap
-model (env var or model_api_keys.txt) so read-heavy checks can run on it
+model (environment variable) so read-heavy checks can run on it
 instead of burning subscription quota.
 """
 
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 import re
-from pathlib import Path
 from typing import Any
 
 
@@ -51,29 +50,8 @@ _INTAKE_BACKENDS = [
 ]
 
 
-def _credential_candidates() -> list[Path]:
-    paths: list[Path] = []
-    override = os.environ.get("CHECKPOINT_MODEL_CREDENTIALS", "").strip()
-    if override:
-        # An explicit override is exclusive: whoever set it (a user pinning
-        # credentials, or a test isolating from the developer's real keys)
-        # does not want fallback files silently picked up.
-        return [Path(override).expanduser()]
-    paths.append(Path.cwd() / "model_api_keys.txt")
-    # The DevPacer install root (…/src/visual_agent/goal_intake.py -> repo root).
-    paths.append(Path(__file__).resolve().parents[2] / "model_api_keys.txt")
-    paths.append(Path.home() / "model_api_keys.txt")
-    seen: set[Path] = set()
-    unique: list[Path] = []
-    for path in paths:
-        if path not in seen:
-            seen.add(path)
-            unique.append(path)
-    return unique
-
-
 def resolve_cheap_backends(order: tuple[str, ...] = ()) -> list[dict[str, Any]]:
-    """All configured cheap backends from the credential file, in rank order.
+    """All configured cheap backends from environment variables, in rank order.
 
     Returning every match (not just the best) lets the caller fail over at
     call time — a configured key can still be an out-of-balance account
@@ -86,7 +64,6 @@ def resolve_cheap_backends(order: tuple[str, ...] = ()) -> list[dict[str, Any]]:
         ),
     )
     resolved: list[dict[str, Any]] = []
-    seen_models: set[str] = set()
     for spec in specs:
         api_key = next(
             (
@@ -98,7 +75,6 @@ def resolve_cheap_backends(order: tuple[str, ...] = ()) -> list[dict[str, Any]]:
         )
         if not api_key or not re.fullmatch(spec["key_re"], api_key):
             continue
-        seen_models.add(spec["model_id"])
         resolved.append({
             "model_id": spec["model_id"],
             "api_key": api_key,
@@ -106,28 +82,6 @@ def resolve_cheap_backends(order: tuple[str, ...] = ()) -> list[dict[str, Any]]:
             "endpoint": spec["endpoint"],
             "max_tokens": spec["max_tokens"],
         })
-    for candidate in _credential_candidates():
-        try:
-            text = candidate.read_text(encoding="utf-8-sig")
-        except OSError:
-            continue
-        for spec in specs:
-            if spec["model_id"] in seen_models:
-                continue
-            for line in text.splitlines():
-                low = line.lower()
-                if any(label in low for label in spec["labels"]):
-                    match = re.search(spec["key_re"], line)
-                    if match:
-                        seen_models.add(spec["model_id"])
-                        resolved.append({
-                            "model_id": spec["model_id"],
-                            "api_key": match.group(0),
-                            "base_url": spec["base_url"],
-                            "endpoint": spec["endpoint"],
-                            "max_tokens": spec["max_tokens"],
-                        })
-                        break
     resolved.sort(key=lambda item: next(
         (idx for idx, spec in enumerate(specs) if spec["model_id"] == item["model_id"]),
         len(specs),

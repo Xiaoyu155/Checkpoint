@@ -1010,14 +1010,16 @@ def run_pacer_gateway(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--port", "-p", type=int, default=8766, help="Port to listen on (default: 8766).")
     parser.add_argument("--host", default="127.0.0.1", help="Host interface to bind (default: 127.0.0.1).")
-    parser.add_argument("--seller-key", default="", help="Optional seller upstream API key to pre-register into pool.")
     parser.add_argument("--seller-url", default="", help="Optional seller upstream base URL (e.g. Sub2API or OpenAI URL).")
     parser.add_argument("--model", default="grok-4.7", help="Model name for pre-registered seller (default: grok-4.7).")
     args = parser.parse_args(argv or [])
 
     app = TokenExchangeServer()
 
-    if args.seller_key and args.seller_url:
+    seller_key = os.environ.get("PACER_SELLER_KEY", "").strip()
+    if bool(seller_key) != bool(args.seller_url):
+        parser.error("PACER_SELLER_KEY and --seller-url must be provided together")
+    if seller_key and args.seller_url:
         now_ts = int(time.time())
         pool_id, ask = app.gateway.register_seller_ask(
             seller_id="cli_seller",
@@ -1025,7 +1027,7 @@ def run_pacer_gateway(argv: list[str] | None = None) -> int:
             token_symbol=args.model.upper(),
             quote_symbol="USDT",
             model=args.model,
-            raw_key=args.seller_key,
+            raw_key=seller_key,
             base_url=args.seller_url,
             quantity_tokens=Decimal("10000000"),
             start_price=Decimal("10.0"),
@@ -1157,7 +1159,6 @@ def build_parser(prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
     gateway_p = subparsers.add_parser("gateway", help="Start Sub2API zero-disk token forwarding & Dutch auction gateway.")
     gateway_p.add_argument("--port", "-p", type=int, default=8766, help="Port to listen on (default: 8766).")
     gateway_p.add_argument("--host", default="127.0.0.1", help="Host interface to bind (default: 127.0.0.1).")
-    gateway_p.add_argument("--seller-key", default="", help="Optional seller upstream API key to pre-register into pool.")
     gateway_p.add_argument("--seller-url", default="", help="Optional seller upstream base URL (e.g. Sub2API or OpenAI URL).")
     gateway_p.add_argument("--model", default="grok-4.7", help="Model name for pre-registered seller (default: grok-4.7).")
 

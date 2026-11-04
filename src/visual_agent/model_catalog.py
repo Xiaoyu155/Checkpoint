@@ -15,8 +15,8 @@ def profiles_path() -> Path:
 
 def load_profiles() -> dict[str, Any]:
     defaults = {"workflow": "balanced", "providers": {"gemini4": {"enabled": True,
-        "base_url": "https://direct.aiboxz.com/gemini4", "model": "gemini-4", "api_key": "",
-        "allow_ssh_fallback": not profiles_path().exists()}}, "checks": {}}
+        "base_url": "", "model": "gemini-4", "api_key": "",
+        "allow_ssh_fallback": False}}, "checks": {}}
     path = profiles_path()
     if path.exists():
         loaded = json.loads(path.read_text(encoding="utf-8"))
@@ -42,9 +42,9 @@ def save_profiles(update: dict[str, Any]) -> dict[str, Any]:
         row["api_key"] = str(provided["api_key"]).strip()
     parsed = urlsplit(str(row["base_url"]).strip())
     local = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
-    if parsed.scheme != "https" and not (parsed.scheme == "http" and local):
+    if row["base_url"] and parsed.scheme != "https" and not (parsed.scheme == "http" and local):
         raise ValueError("Remote model endpoints must use HTTPS")
-    if not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+    if row["base_url"] and (not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment):
         raise ValueError("Use a base URL without credentials, query or fragment")
     row["base_url"] = str(row["base_url"]).strip().rstrip("/")
     if not isinstance(row["model"], str) or not row["model"].strip():
