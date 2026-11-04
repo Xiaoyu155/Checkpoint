@@ -393,7 +393,7 @@ def _python_profiles(root: Path, *, base: str) -> list[dict[str, Any]]:
     has_tests = any((root / name).exists() for name in markers) or any((root / name).is_dir() for name in ("tests", "test"))
     if not has_tests:
         return []
-    python_cmd = prefer_pytest_python(root) or "python"
+    python_cmd = prefer_pytest_python(root) or _format_python_command([sys.executable])
     default_command = f"{python_cmd} -m pytest -q"
     focused = _focused_pytest_profile(root, base=base, python_cmd=python_cmd)
     if focused is not None:
@@ -405,11 +405,12 @@ def _focused_pytest_profile(
     root: Path,
     *,
     base: str,
-    python_cmd: str = "python",
+    python_cmd: str | None = None,
 ) -> dict[str, Any] | None:
     changed = _git_changed_paths(root, base=base)
     if not changed:
         return None
+    python_cmd = python_cmd or _format_python_command([sys.executable])
     selected: list[str] = []
     fallback_to_full = False
     for rel in changed:

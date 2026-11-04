@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shlex
+import subprocess
 import sys
 import traceback
 from typing import Any
@@ -335,7 +337,8 @@ def _handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
                 if re.search(r"\b(pytest|python\s+-m\s+pytest|npm\s+test|cargo\s+test|go\s+test)\b", candidate):
                     cmd = candidate
         if not cmd:
-            cmd = "python -m pytest -q"
+            argv = [sys.executable, "-m", "pytest", "-q"]
+            cmd = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
 
         tampered_tests = changed_test_files(repo_root=cwd)
         tampered_chain = changed_acceptance_chain_files(repo_root=cwd, command=cmd)

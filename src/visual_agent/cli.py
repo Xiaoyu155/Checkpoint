@@ -17,7 +17,8 @@ PACER_CODEX_COMPAT_COMMANDS = {"resume"}
 
 
 def current_cli_name() -> str:
-    stem = Path(sys.argv[0]).stem.lower()
+    from pathlib import PureWindowsPath
+    stem = PureWindowsPath(sys.argv[0]).stem.lower()
     return stem if stem in CLI_ALIASES else DEFAULT_CLI_NAME
 
 
@@ -1002,7 +1003,13 @@ def run_pacer_gateway(argv: list[str] | None = None) -> int:
     """Launch the Pacer Sub2API token exchange and zero-disk forwarding gateway."""
     from decimal import Decimal
     import time
-    from examples.pacer_token_exchange.server import TokenExchangeServer, create_server
+    try:
+        from examples.pacer_token_exchange.server import TokenExchangeServer, create_server
+    except ModuleNotFoundError as exc:
+        if not (exc.name or "").startswith("examples.pacer_token_exchange"):
+            raise
+        print("Pacer gateway is unavailable: the token exchange server is not included in this distribution.")
+        return 1
 
     parser = argparse.ArgumentParser(
         prog="pacer gateway",
@@ -1012,7 +1019,7 @@ def run_pacer_gateway(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1", help="Host interface to bind (default: 127.0.0.1).")
     parser.add_argument("--seller-url", default="", help="Optional seller upstream base URL (e.g. Sub2API or OpenAI URL).")
     parser.add_argument("--model", default="grok-4.7", help="Model name for pre-registered seller (default: grok-4.7).")
-    args = parser.parse_args(argv or [])
+    args = argv if isinstance(argv, argparse.Namespace) else parser.parse_args(argv or [])
 
     app = TokenExchangeServer()
 

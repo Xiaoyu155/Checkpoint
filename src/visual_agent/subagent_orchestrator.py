@@ -68,7 +68,7 @@ from .managed_checkpoint import (
 from .session_projection import SessionProjection
 from .repo_map import build_repo_map, render_repo_map
 from .subprocess_window import hidden_subprocess_kwargs, prepare_subprocess_command, resolve_codex_executable
-from .tamper_guard import TamperGuard
+from .tamper_guard import TamperFatalError, TamperGuard
 from .tiered_router import RoutingDecision, RoutingPath, TieredRouter
 from .verification_profiles import (
     choose_verification_command,
@@ -587,6 +587,8 @@ def restore_workspace_snapshot(
             if path.is_file():
                 path.unlink()
         else:
+            if path.is_file() and path.read_text(encoding="utf-8", errors="replace") == content:
+                continue
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
     for rel in extra_paths or []:
@@ -2753,7 +2755,16 @@ class SubagentOrchestrator:
                 default_target = task.target_files[0] if len(task.target_files) == 1 else ""
                 sr_blocks = parse_search_replace_blocks(run_output, default_file=default_target)
                 if sr_blocks:
-                    patch_res = self._apply_task_patch(task, run_output)
+                    try:
+                        patch_res = self._apply_task_patch(task, run_output)
+                    except TamperFatalError as exc:
+                        revert_attempt()
+                        self.false_greens_caught += 1
+                        task.status = "failed"
+                        task.error = str(exc)
+                        task.elapsed_seconds = time.time() - t0
+                        task.history.append({"category": "tamper_rejection", "error": str(exc)})
+                        return False
                     if patch_res.failed_count > 0 or not patch_res.success:
                         task.patched_files = []
                         setattr(task, "_patch_batch_error", "; ".join(patch_res.errors))

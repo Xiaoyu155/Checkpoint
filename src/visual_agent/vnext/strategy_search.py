@@ -339,7 +339,7 @@ def search_strategies(
     validation_score: float | None = None
     validation_drawdown: float | None = None
     replay_started = time.perf_counter()
-    if eligible and torch is not None:
+    if eligible:
         replayed = _evaluate_python(
             [item.candidate for item in eligible], normalized[1], active_policy
         )
