@@ -13,6 +13,13 @@ from uuid import uuid4
 _LOCK_INITIALIZATION_GRACE_SECONDS = 2.0
 
 
+def _visual_mutex_supported(platform_name: str) -> bool:
+    """Return whether this platform provides the Win32 mutex API."""
+    if type(platform_name) is not str:
+        raise TypeError("platform_name must be a string")
+    return platform_name == "nt"
+
+
 @dataclass(frozen=True)
 class RunLockInfo:
     lock_id: str
@@ -240,10 +247,12 @@ class VisualLock:
         Raises RuntimeError if the OS call fails unexpectedly.
         """
         wait_ms = self.ttl_ms if timeout_ms is None else timeout_ms
+        if not _visual_mutex_supported(os.name):
+            return True  # non-Windows graceful no-op
         try:
             import ctypes
         except ImportError:
-            return True  # non-Windows graceful no-op
+            return True  # ctypes is part of the standard runtime
         handle = ctypes.windll.kernel32.CreateMutexW(None, False, self.name)
         if not handle:
             raise RuntimeError(f"CreateMutexW failed for {self.name!r}")
