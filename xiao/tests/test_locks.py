@@ -1,10 +1,13 @@
 import json
+import os
 import warnings
 from threading import Event, Thread
 from time import time
 from time import sleep as sleep_seconds
 
-from visual_agent.locks import RunLock, RunLockInfo, lock_to_dict, read_lock
+from visual_agent.locks import (
+    RunLock, RunLockInfo, VisualLock, _visual_mutex_supported, lock_to_dict, read_lock,
+)
 
 
 def test_run_lock_blocks_second_owner_until_release(tmp_path) -> None:
@@ -136,3 +139,16 @@ def test_run_lock_does_not_delete_lock_while_first_owner_is_initializing(tmp_pat
     assert acquired.is_set()
     assert read_lock(lock_path).owner == "first"
     first.release()
+
+
+def test_visual_lock_is_noop_on_non_windows() -> None:
+    if os.name == "nt":
+        return
+    lock = VisualLock()
+    assert lock.acquire() is True
+    lock.release()
+
+
+def test_visual_mutex_support_is_platform_specific() -> None:
+    assert _visual_mutex_supported("posix") is False
+    assert _visual_mutex_supported("nt") is True
